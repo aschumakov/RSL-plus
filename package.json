@@ -137,6 +137,11 @@
                ],
                "default": "ДА",
                "description": "Подгружать импортируемые макросы."
+            },
+            "rsl-plus.programmerName": {
+                "type": "string",
+                "default": "RS Programmer",
+                "description": "Имя разработчика для заголовков RSL-файлов"
             }
          }
       }

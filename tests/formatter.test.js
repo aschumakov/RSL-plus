@@ -136,6 +136,107 @@ test("Многострочный вызов выравнивается по ск
     assert.strictEqual(FormatCode(source, 4), expected);
 });
 
+test(
+    "Объявления и строковые конкатенации сохраняют выравнивание",
+    () => {
+        const source = [
+            "private macro Make_Acc_All(objType, objID, curcode, fncash, acc_cat, isresident, isip, legal, sector)",
+            "private var q,",
+            "rs,",
+            "rs1,",
+            "Account,",
+            "ODB,",
+            "creditID,",
+            "duration,",
+            "SysType,",
+            "PayType,",
+            "cmd;",
+            "cmd = RsdCommand();",
+            "",
+            'q = " SELECT t.t_account              "+',
+            '"   FROM RSUSER.DLOANS_ACC_DBT t  "+',
+            '"  WHERE t.t_typeaccred_ref  = :1 "+',
+            '"    AND t.t_curcode         = :2 "+',
+            '"    AND t.t_isnotresident   = :3 "+',
+            '"    AND t.t_fncash          = :4 "+',
+            '"    AND t.t_isip            = :5 "+',
+            '"    AND t.t_legalform       = :6 "+',
+            '"    AND t.t_crd_kind        = decode("+objType+", 6,1,"+objType+")"+ // RSDEV-7122',
+            '"";',
+            "end;"
+        ].join("\n");
+
+        const expected = [
+            "private macro Make_Acc_All(objType, objID, curcode, fncash, acc_cat, isresident, isip, legal, sector)",
+            "    private var q,",
+            "                rs,",
+            "                rs1,",
+            "                Account,",
+            "                ODB,",
+            "                creditID,",
+            "                duration,",
+            "                SysType,",
+            "                PayType,",
+            "                cmd;",
+            "    cmd = RsdCommand();",
+            "",
+            '    q = " SELECT t.t_account              "+',
+            '        "   FROM RSUSER.DLOANS_ACC_DBT t  "+',
+            '        "  WHERE t.t_typeaccred_ref  = :1 "+',
+            '        "    AND t.t_curcode         = :2 "+',
+            '        "    AND t.t_isnotresident   = :3 "+',
+            '        "    AND t.t_fncash          = :4 "+',
+            '        "    AND t.t_isip            = :5 "+',
+            '        "    AND t.t_legalform       = :6 "+',
+            '        "    AND t.t_crd_kind        = decode("+objType+", 6,1,"+objType+")"+ // RSDEV-7122',
+            '        "";',
+            "end;"
+        ].join("\n");
+
+        const formatted = FormatCode(source, 4);
+
+        assert.strictEqual(formatted, expected);
+        assert.strictEqual(
+            FormatCode(formatted, 4),
+            expected
+        );
+    }
+);
+
+test("OnError находится на уровне Macro", () => {
+    const source = [
+        "MACRO Get_Request()",
+        'BegAction(500, "Ожидание ответа на запрос...", false);',
+        "WinHttp.Send(xml);",
+        "EndAction(100);",
+        "return true;",
+        "OnError",
+        "EndAction(100);",
+        "return false;",
+        "END;"
+    ].join("\n");
+
+    const expected = [
+        "MACRO Get_Request()",
+        '    BegAction(500, "Ожидание ответа на запрос...", false);',
+        "    WinHttp.Send(xml);",
+        "    EndAction(100);",
+        "    return true;",
+        "OnError",
+        "    EndAction(100);",
+        "    return false;",
+        "END;"
+    ].join("\n");
+
+    const formatted = FormatCode(source, 4);
+
+    assert.strictEqual(formatted, expected);
+    assert.strictEqual(
+        FormatCode(formatted, 4),
+        expected
+    );
+});
+
 console.log("");
 console.log(`Пройдено: ${passed}`);
 console.log(`Ошибок: ${failed}`);

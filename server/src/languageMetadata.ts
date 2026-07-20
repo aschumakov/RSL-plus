@@ -8,7 +8,8 @@ export const BLOCK_START_KEYWORDS: string[] = [
 
 export const BRANCH_KEYWORDS: string[] = [
     "else",
-    "elif"
+    "elif",
+    "onerror"
 ];
 
 export const END_KEYWORD = "end";

@@ -2,21 +2,20 @@
    "header": {
       "prefix": "head",
       "body": [
-            "// ===========================================================================",
-            "//  System      : ${1:RS-Bank}",
-            "//  File name   : ${TM_FILENAME}",
-            "//  Date        : ${CURRENT_DATE}.${CURRENT_MONTH}.${CURRENT_YEAR}",
-            "//  Description : ${2:Description}",
-            "//  Programmer  : ${3:Programmer}",
-            "//  Remarks     : $0",
-            "// ",
-            "// ==========================================================================="
+         "/*******************************************************************************************************************************",
+         "    Наименование:  ${1:Name}",
+         "    Проект:        ${2:TASK_NAME}",
+         "    Назначение:    ${3:Description}",
+         "    Файл:          ${TM_FILENAME}",
+         "    Автор:         ${4:Programmer}",
+         "    Дата создания: ${CURRENT_DATE}.${CURRENT_MONTH}.${CURRENT_YEAR}",
+         "*******************************************************************************************************************************/"
       ],
       "description": "Macro header"
-    },
-    "macro": {
+   },
+   "macro": {
       "prefix": "macro",
-      "body": [ 
+      "body": [
          "${1:PRIVATE} MACRO ${2:name} (${3:extVar})${4:Return}",
          "\tVar result = null;",
          "\t$0",
@@ -28,24 +27,45 @@
    "sql": {
       "prefix": "sql",
       "body": [
-         "Var cmd = RSDCommand (String (" ,
-         "${1:qiery}" ,
+         "Var cmd = RSDCommand (String (",
+         "${1:qiery}",
          "));"
       ],
       "description": "sql command"
    },
-    "while": {
+
+   "exec_sql_sel": {
+      "prefix": "esqlsel",
+      "body": [
+         "Var rs = ExecSqlSelect ( ${1:sqltext}, MakeArray (SqlParam (\" ${2:id}\", ${3:param})), FALSE);",
+         "while ( rs.MoveNext () )",
+         "   ${4:null};",
+         "end;"
+      ],
+      "description": "sql command"
+   },
+
+   "sql_param": {
+      "prefix": "sqlp",
+      "body": [
+         "SqlParam(\"${1:id}\", ${2:param})"
+      ],
+      "description": "sql command with param"
+   },
+
+   "while": {
       "prefix": "while",
-      "body": [ 
+      "body": [
          "While (${1:expr})",
          "\t$0",
          "End;"
       ],
       "description": "while"
    },
-    "debugbreak": {
+   "debugbreak": {
       "prefix": "db",
-      "body": [ "debugbreak; $0"
+      "body": [
+         "debugbreak; $0"
       ],
       "description": "debugbreak"
    },
@@ -58,7 +78,6 @@
       ],
       "description": "For (Var item, itemlist)"
    },
-    
    "for_iter": {
       "prefix": "for",
       "body": [
@@ -68,7 +87,6 @@
       ],
       "description": "For (Var i, 0, 10, 1)"
    },
-
    "if": {
       "prefix": "if",
       "body": [
@@ -78,7 +96,6 @@
       ],
       "description": "if() End;"
    },
-
    "elif": {
       "prefix": "ife",
       "body": [
@@ -89,7 +106,6 @@
       ],
       "description": "if() elif End;"
    },
-
    "ifelse": {
       "prefix": "ifelse",
       "body": [
@@ -101,7 +117,6 @@
       ],
       "description": "if() elif End;"
    },
-
    "note": {
       "prefix": "note",
       "body": [
@@ -109,7 +124,6 @@
       ],
       "description": "NOTE!"
    },
-
    "todo": {
       "prefix": "todo",
       "body": [
@@ -117,7 +131,6 @@
       ],
       "description": "TODO:"
    },
-
    "fixme": {
       "prefix": "fixme",
       "body": [
@@ -125,13 +138,11 @@
       ],
       "description": "FIXME:"
    },
-
    "tbFile": {
       "prefix": "tbf",
-      "body"  : [
+      "body": [
          "TBFile(\"${1:name}\" , \"${2|R,W|}\", ${3|0,1,2,3,4,5,6,7,8,9|}, \"$1.dbt\" , \"${4:bank}.def\");$0"
       ],
       "description": "Объявление файла TBFile"
    }
-
 }

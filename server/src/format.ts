@@ -10,6 +10,17 @@ import {
     MLC_C
 } from "./enums";
 
+type ContinuationKind = "declaration" | "assignment";
+
+interface IContinuationContext {
+    kind: ContinuationKind;
+
+    /**
+     * Абсолютная колонка, с которой должны начинаться строки продолжения.
+     */
+    indentColumn: number;
+}
+
 /**
  * Форматирует RSL-код.
  *
@@ -36,6 +47,13 @@ export function FormatCode(text: string, tabSize: number = 4): string {
      *                  argument);
      */
     const parenthesisStack: number[] = [];
+
+    /*
+     * Контекст продолжения выражения вне круглых скобок:
+     * - список объявлений после var/const/array/record;
+     * - правая часть присваивания, разбитая оператором +.
+     */
+    let continuationContext: IContinuationContext | undefined;
 
     for (const originalLine of lines) {
         const trimmedOriginalLine = originalLine.trim();
@@ -64,7 +82,8 @@ export function FormatCode(text: string, tabSize: number = 4): string {
                 indentLevel,
                 tabSize,
                 parenthesisStack,
-                trimmedOriginalLine
+                trimmedOriginalLine,
+                continuationContext
             );
 
             formattedLines.push(
@@ -87,7 +106,8 @@ export function FormatCode(text: string, tabSize: number = 4): string {
                 indentLevel,
                 tabSize,
                 parenthesisStack,
-                trimmedOriginalLine
+                trimmedOriginalLine,
+                continuationContext
             );
 
             formattedLines.push(
@@ -153,6 +173,11 @@ export function FormatCode(text: string, tabSize: number = 4): string {
                 indentColumn,
                 continuationColumn
             );
+        } else if (continuationContext !== undefined) {
+            indentColumn = Math.max(
+                indentColumn,
+                continuationContext.indentColumn
+            );
         }
 
         const formattedLine =
@@ -167,6 +192,11 @@ export function FormatCode(text: string, tabSize: number = 4): string {
         updateParenthesisStack(
             formattedLine,
             parenthesisStack
+        );
+
+        continuationContext = getNextContinuationContext(
+            formattedLine,
+            continuationContext
         );
 
         if (hasBlockStart && !hasEnd) {
@@ -186,7 +216,8 @@ function getCurrentIndent(
     indentLevel: number,
     tabSize: number,
     parenthesisStack: number[],
-    trimmedLine: string
+    trimmedLine: string,
+    continuationContext: IContinuationContext | undefined
 ): number {
     let indent = indentLevel * tabSize;
 
@@ -199,9 +230,240 @@ function getCurrentIndent(
             : lastOpenParenthesis + 1;
 
         indent = Math.max(indent, continuationColumn);
+    } else if (continuationContext !== undefined) {
+        indent = Math.max(
+            indent,
+            continuationContext.indentColumn
+        );
     }
 
     return indent;
+}
+
+/**
+ * Вычисляет выравнивание следующей строки.
+ *
+ * Примеры:
+ *
+ *     private var first,
+ *                 second,
+ *                 third;
+ *
+ *     sql = "select ..."+
+ *           "from ..."+
+ *           "where ...";
+ */
+function getNextContinuationContext(
+    line: string,
+    current: IContinuationContext | undefined
+): IContinuationContext | undefined {
+    const code = getCodeBeforeLineComment(line)
+        .replace(/\s+$/g, "");
+
+    if (current !== undefined) {
+        if (current.kind === "declaration") {
+            /*
+             * Объявление может занимать сколько угодно строк.
+             * Заканчивается оно только точкой с запятой вне строки.
+             */
+            return containsCodeCharacter(code, ";")
+                ? undefined
+                : current;
+        }
+
+        /*
+         * Конкатенация продолжается, пока последним значимым
+         * символом строки остаётся +.
+         */
+        return code.endsWith("+")
+            ? current
+            : undefined;
+    }
+
+    /*
+     * Запоминаем колонку первого имени после ключевого слова.
+     * Допускаем private/local и тип/значение после первого имени.
+     */
+    const declarationMatch = code.match(
+        /^(\s*(?:(?:private|local)\s+)?(?:var|const|array|record)\s+)([@A-Za-zА-Яа-яЁё_][@A-Za-zА-Яа-яЁё0-9_]*).*?,\s*$/i
+    );
+
+    if (declarationMatch !== null) {
+        return {
+            kind: "declaration",
+            indentColumn: declarationMatch[1].length
+        };
+    }
+
+    if (!code.endsWith("+")) {
+        return undefined;
+    }
+
+    const assignmentColumn =
+        findAssignmentExpressionColumn(code);
+
+    if (assignmentColumn === undefined) {
+        return undefined;
+    }
+
+    return {
+        kind: "assignment",
+        indentColumn: assignmentColumn
+    };
+}
+
+/**
+ * Возвращает код до //, не принимая // внутри строк за комментарий.
+ */
+function getCodeBeforeLineComment(line: string): string {
+    let quote = "";
+
+    for (let index = 0; index < line.length; index++) {
+        const char = line[index];
+        const nextChar = index + 1 < line.length
+            ? line[index + 1]
+            : "";
+
+        if (quote.length > 0) {
+            if (
+                char === quote &&
+                !isEscapedByBackslashes(line, index)
+            ) {
+                quote = "";
+            }
+
+            continue;
+        }
+
+        if (char === "\"" || char === "'") {
+            quote = char;
+            continue;
+        }
+
+        if (char === "/" && nextChar === "/") {
+            return line.substring(0, index);
+        }
+    }
+
+    return line;
+}
+
+/**
+ * Ищет присваивание и возвращает колонку первого символа
+ * правой части. ==, !=, <= и >= присваиваниями не считаются.
+ */
+function findAssignmentExpressionColumn(
+    line: string
+): number | undefined {
+    let quote = "";
+
+    for (let index = 0; index < line.length; index++) {
+        const char = line[index];
+
+        if (quote.length > 0) {
+            if (
+                char === quote &&
+                !isEscapedByBackslashes(line, index)
+            ) {
+                quote = "";
+            }
+
+            continue;
+        }
+
+        if (char === "\"" || char === "'") {
+            quote = char;
+            continue;
+        }
+
+        if (char !== "=") {
+            continue;
+        }
+
+        const previous = index > 0
+            ? line[index - 1]
+            : "";
+        const next = index + 1 < line.length
+            ? line[index + 1]
+            : "";
+
+        if (
+            previous === "!" ||
+            previous === "<" ||
+            previous === ">" ||
+            previous === "=" ||
+            next === "="
+        ) {
+            continue;
+        }
+
+        let expressionColumn = index + 1;
+
+        while (
+            expressionColumn < line.length &&
+            (
+                line[expressionColumn] === " " ||
+                line[expressionColumn] === "\t"
+            )
+        ) {
+            expressionColumn++;
+        }
+
+        return expressionColumn;
+    }
+
+    return undefined;
+}
+
+/**
+ * Проверяет наличие символа вне строк.
+ */
+function containsCodeCharacter(
+    line: string,
+    expected: string
+): boolean {
+    let quote = "";
+
+    for (let index = 0; index < line.length; index++) {
+        const char = line[index];
+
+        if (quote.length > 0) {
+            if (
+                char === quote &&
+                !isEscapedByBackslashes(line, index)
+            ) {
+                quote = "";
+            }
+
+            continue;
+        }
+
+        if (char === "\"" || char === "'") {
+            quote = char;
+            continue;
+        }
+
+        if (char === expected) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function isEscapedByBackslashes(
+    line: string,
+    position: number
+): boolean {
+    let backslashCount = 0;
+    let index = position - 1;
+
+    while (index >= 0 && line[index] === "\\") {
+        backslashCount++;
+        index--;
+    }
+
+    return backslashCount % 2 === 1;
 }
 
 /**
