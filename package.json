@@ -7,12 +7,11 @@
    "version": "1.0.20",
    "icon": "icon.png",
    "bugs": {
-      "url": "https://github.com/alliluja/RSL/issues",
-      "email": "raven03160@gmail.com"
+      "url": "https://github.com/aschumakov/RSL-plus/issues"
    },
    "repository": {
       "type": "git",
-      "url": "https://github.com/alliluja/RSL.git"
+      "url": "https://github.com/aschumakov/RSL-plus.git"
    },
    "publisher": "AChumakov",
    "categories": [
@@ -26,7 +25,7 @@
       "R-Style"
    ],
    "engines": {
-      "vscode": "^1.30.0"
+      "vscode": "^1.90.0"
    },
    "main": "./client/out/extension",
    "contributes": {
@@ -161,10 +160,5 @@
       "@types/node": "^8.10.59",
       "tslint": "^5.20.1",
       "typescript": "5.9.3"
-   },
-   "__metadata": {
-      "id": "39b89ed8-b498-43ed-8f14-0fc6967594af",
-      "publisherId": "8c7522ab-24a6-400a-8557-79520de0ac17",
-      "publisherDisplayName": "Veniamin Rakov"
    }
 }
