@@ -216,6 +216,12 @@ function updateDecorations(): void {
     }
 
     const editor = activeEditor;
+
+    if (editor.document.languageId !== "rsl") {
+        editor.setDecorations(notUsedVar, []);
+        return;
+    }
+
     const text = editor.document.getText();
 
     const identifierPattern =
@@ -344,6 +350,11 @@ export function activate(context: ExtensionContext): void {
         }
     };
 
+    const macroFileWatcher =
+        workspace.createFileSystemWatcher("**/*.mac");
+
+    context.subscriptions.push(macroFileWatcher);
+
     const clientOptions: LanguageClientOptions = {
         documentSelector: [
             {
@@ -352,10 +363,7 @@ export function activate(context: ExtensionContext): void {
             }
         ],
         synchronize: {
-            fileEvents:
-                workspace.createFileSystemWatcher(
-                    "**/.clientrc"
-                )
+            fileEvents: macroFileWatcher
         }
     };
 
@@ -374,8 +382,17 @@ export function activate(context: ExtensionContext): void {
     registerServerNotifications(context);
 
     client.start().then(
-        () => {
-            return client.sendNotification("clientReady");
+        async () => {
+            const workspaceFiles = await workspace.findFiles(
+                "**/*.mac",
+                "**/{.git,node_modules,out}/**"
+            );
+
+            await client.sendNotification(
+                "workspaceFiles",
+                workspaceFiles.map(uri => uri.toString())
+            );
+            await client.sendNotification("clientReady");
         },
         error => {
             console.error(

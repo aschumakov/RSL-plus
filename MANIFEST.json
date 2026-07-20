@@ -1,0 +1,117 @@
+[
+  {
+    "path": ".github/workflows/ci.yml",
+    "size": 673,
+    "sha256": "3abc8ec8660ec2e5b472259c89a96c1a56bed0b2a446adddf5fac88ebaa559b8"
+  },
+  {
+    "path": ".github/workflows/deploy.yml",
+    "size": 640,
+    "sha256": "cc869066a6d7516d1b9e8da230103e1a897a139880d0e77c3b0c8fdae207a2c4"
+  },
+  {
+    "path": "README-1.1.0.md",
+    "size": 3596,
+    "sha256": "fd171f90d00ea7116fab9947a165bf58ac0e1d8b022b202e5128ef4ac754b772"
+  },
+  {
+    "path": "RELEASE_NOTES_1.1.0.md",
+    "size": 741,
+    "sha256": "4f30fc549b02d82be98cf9d4fddc788e828db0c165935c8a5a9a4411e91b0fba"
+  },
+  {
+    "path": "VERIFY.ps1",
+    "size": 175,
+    "sha256": "f8d13684fa34028e5aa9d5670f34c6e612ace9cb765d59c71f4e703170a0c018"
+  },
+  {
+    "path": "client/src/extension.ts",
+    "size": 18241,
+    "sha256": "c8df62da06890d94d0444160bd68b157032a064f2f0d839569e96addb1d390f4"
+  },
+  {
+    "path": "package.json",
+    "size": 4909,
+    "sha256": "faaf4742e1386b65fd361c93428496e0bee52979841d59a27f8767cda1864254"
+  },
+  {
+    "path": "server/src/common.ts",
+    "size": 49343,
+    "sha256": "dfa2550db976ec9969e735e5b6b293aa395b8fb09df17bdd576213f7d66cb028"
+  },
+  {
+    "path": "server/src/definitionProvider.ts",
+    "size": 16387,
+    "sha256": "aacf7db3bcad8aad5bd8b24ae6fe26bd25691adad6de79032846f8b40033f9c2"
+  },
+  {
+    "path": "server/src/execMacroDefinition.ts",
+    "size": 8139,
+    "sha256": "d8b72a2e1e5a4ef0c72c43e2ac45e1be4fc3cf4c21d62c6818821b55e219a7dc"
+  },
+  {
+    "path": "server/src/folding.ts",
+    "size": 6011,
+    "sha256": "161a7144bd1c1cdb98c1cd0f9c06e9a5953297d40b4f60c3b7382635273bbf79"
+  },
+  {
+    "path": "server/src/format.ts",
+    "size": 10662,
+    "sha256": "ecb637539aba9f9796e3df93731de7e08ed4478849b3ff39d0ae6ca6dfb3dc72"
+  },
+  {
+    "path": "server/src/lexer.ts",
+    "size": 14618,
+    "sha256": "e4423bcd6c8f3955cdccd8157924ce19a2837c17c1051201c7a77f528d98ce3c"
+  },
+  {
+    "path": "server/src/scopeResolver.ts",
+    "size": 13302,
+    "sha256": "a8ceeb26aaefe9cd47f52bc98aaa1f98d39fffc79baab8623a3e0f6d73d635f5"
+  },
+  {
+    "path": "server/src/server.ts",
+    "size": 20384,
+    "sha256": "1c8d4f4925e90042405d7ada787a361c93a86375f4e1c6976a359fbcf83c92b0"
+  },
+  {
+    "path": "server/src/workspaceIndex.ts",
+    "size": 11024,
+    "sha256": "ef2f2edf6f4e40c75745404e9fab3eb3b9a77e933cbe99476aab010721193eda"
+  },
+  {
+    "path": "tests/definition.test.js",
+    "size": 4558,
+    "sha256": "9961ace63ce24836fca41e0c599a4aecc8ca2191d1d26b0c0387e36a4972e793"
+  },
+  {
+    "path": "tests/folding.test.js",
+    "size": 5856,
+    "sha256": "2d2f312ba54291c25c234597cb53371e9a3c5c8ea97e0a8c500adcb156b1abf7"
+  },
+  {
+    "path": "tests/formatter.test.js",
+    "size": 4136,
+    "sha256": "098057fc3157f2b11537a9e203bd01f626d5315cd69fdf7f8ceefe00f0a76e4a"
+  },
+  {
+    "path": "tests/lexer.test.js",
+    "size": 3073,
+    "sha256": "c6e195ab9543954c485e8317180852116dc96c070fa645a64cdf5b748ab6154c"
+  },
+  {
+    "path": "tests/parser-optimized.test.js",
+    "size": 2629,
+    "sha256": "4b6b40482bea92068d0fcec7d6aad8f9d5379c6e9520883268fa1bdd32202e9d"
+  },
+  {
+    "path": "tests/run-all.js",
+    "size": 714,
+    "sha256": "6b8c5b4e1e13b25a834c481f01d302d2f84866bad18506560d5b1812fc2889d5"
+  },
+  {
+    "path": "tests/scope-index.test.js",
+    "size": 6888,
+    "sha256": "91019e55d5e689c20f8a792e20cc894ac28130d75b622e1804c402b1e33c6e73"
+  }
+]

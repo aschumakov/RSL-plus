@@ -5,290 +5,267 @@ import {
 } from "./languageMetadata";
 
 import {
-    STOP_CHARS,
-    MLC_O,
-    MLC_C
-} from "./enums";
-
-type ContinuationKind = "declaration" | "assignment";
+    IRslToken,
+    lexRsl
+} from "./lexer";
 
 interface IContinuationContext {
-    kind: ContinuationKind;
-
-    /**
-     * Абсолютная колонка, с которой должны начинаться строки продолжения.
-     */
+    kind: "declaration" | "assignment";
     indentColumn: number;
 }
 
 /**
- * Форматирует RSL-код.
+ * Безопасный форматтер RSL.
  *
- * Основные правила:
- * - сохраняет исходный регистр идентификаторов и ключевых слов;
- * - форматирует вложенность macro/class/if/for/while/end;
- * - выравнивает продолжения многострочных вызовов по первому символу
- *   после соответствующей открывающей скобки;
- * - не анализирует скобки и операторы внутри строк и комментариев.
+ * Форматтер использует общий lexer и никогда не меняет содержимое строк,
+ * комментариев и квадратных SQL/текстовых блоков. Также сохраняются BOM,
+ * исходный тип перевода строк и наличие финального EOL.
  */
 export function FormatCode(text: string, tabSize: number = 4): string {
-    const lines = text.replace(/\r\n/g, "\n").split("\n");
-    const formattedLines: string[] = [];
-
-    let indentLevel = 0;
-    let isMultilineComment = false;
-
-    /*
-     * Абсолютные позиции незакрытых круглых скобок в уже
-     * отформатированном тексте.
-     *
-     * Например:
-     *     var x = Func(
-     *                  argument);
-     */
+    const source = text || "";
+    const lex = lexRsl(source);
+    const bom = lex.hasBom ? "\uFEFF" : "";
+    const body = lex.hasBom ? source.substring(1) : source;
+    const bodyOffset = lex.hasBom ? 1 : 0;
+    const lines = body.split(/\r\n|\n|\r/);
+    const lineStarts = buildLineStarts(body, lex.eol);
+    const formatted: string[] = [];
     const parenthesisStack: number[] = [];
+    let continuation: IContinuationContext | undefined;
+    let indentLevel = 0;
 
-    /*
-     * Контекст продолжения выражения вне круглых скобок:
-     * - список объявлений после var/const/array/record;
-     * - правая часть присваивания, разбитая оператором +.
-     */
-    let continuationContext: IContinuationContext | undefined;
+    for (let lineNumber = 0; lineNumber < lines.length; lineNumber++) {
+        const originalLine = lines[lineNumber];
+        const absoluteLineStart = bodyOffset + lineStarts[lineNumber];
+        const protectedToken = getMultilineProtectedToken(
+            lex.tokens,
+            lineNumber,
+            bodyOffset
+        );
 
-    for (const originalLine of lines) {
-        const trimmedOriginalLine = originalLine.trim();
-
-        if (trimmedOriginalLine.length === 0) {
-            formattedLines.push("");
+        if (protectedToken) {
+            /*
+             * Многострочный SQL/текст или комментарий сохраняется байт-в-байт
+             * внутри строки. Он не влияет на RSL nesting/parentheses.
+             */
+            formatted.push(originalLine);
             continue;
         }
 
-        /*
-         * Многострочные комментарии сохраняем без изменения содержимого.
-         * Меняем только базовый отступ первой строки комментария.
-         */
-        if (isMultilineComment) {
-            formattedLines.push(originalLine);
-
-            if (trimmedOriginalLine.endsWith(MLC_C)) {
-                isMultilineComment = false;
-            }
-
+        if (originalLine.trim().length === 0) {
+            formatted.push("");
             continue;
         }
 
-        if (trimmedOriginalLine.startsWith(MLC_O)) {
-            const indent = getCurrentIndent(
-                indentLevel,
-                tabSize,
-                parenthesisStack,
-                trimmedOriginalLine,
-                continuationContext
-            );
-
-            formattedLines.push(
-                " ".repeat(indent) + trimmedOriginalLine
-            );
-
-            if (!trimmedOriginalLine.endsWith(MLC_C)) {
-                isMultilineComment = true;
-            }
-
-            continue;
-        }
-
-        /*
-         * Однострочный комментарий форматируется только по отступу.
-         * Его текст не изменяется.
-         */
-        if (trimmedOriginalLine.startsWith("//")) {
-            const indent = getCurrentIndent(
-                indentLevel,
-                tabSize,
-                parenthesisStack,
-                trimmedOriginalLine,
-                continuationContext
-            );
-
-            formattedLines.push(
-                " ".repeat(indent) + trimmedOriginalLine
-            );
-
-            continue;
-        }
-
-        /*
-         * Нормализуем пробелы только вне строк и комментариев.
-         * Регистр намеренно не меняем.
-         */
-        const normalizedLine = normalizeLineSpacing(
-            trimmedOriginalLine
+        const lineTokens = getSingleLineTokens(
+            lex.tokens,
+            lineNumber,
+            absoluteLineStart,
+            originalLine.length
         );
-
-        const wordsInLine = extractWordsBeforeComment(
-            normalizedLine
-        ).map(removeStopChars);
-
-        const lowerWords = wordsInLine.map(word =>
-            word.toLowerCase()
+        const normalizedLine = normalizeLineSafely(
+            originalLine,
+            absoluteLineStart,
+            lineTokens
         );
-
-        const hasBlockStart = lowerWords.some(word =>
-            BLOCK_START_KEYWORDS.indexOf(word) >= 0
-        );
-
-        const hasEnd = lowerWords.some(word =>
-            word === END_KEYWORD
-        );
-
-        const isBranch = lowerWords.some(word =>
-            BRANCH_KEYWORDS.indexOf(word) >= 0
-        );
-
-        /*
-         * Else/ElIf и одиночный End выводятся на один уровень левее.
-         * Сам indentLevel меняется только после формирования строки.
-         */
-        let lineIndentLevel = indentLevel;
-
-        if (isBranch || (hasEnd && !hasBlockStart)) {
-            lineIndentLevel = Math.max(indentLevel - 1, 0);
-        }
+        const structure = analyzeStructure(lineTokens);
+        const isBranch = structure.firstKeyword !== undefined &&
+            BRANCH_KEYWORDS.indexOf(structure.firstKeyword) >= 0;
+        const startsWithEnd = structure.firstKeyword === END_KEYWORD;
+        const lineIndentLevel = isBranch || startsWithEnd
+            ? Math.max(indentLevel - 1, 0)
+            : indentLevel;
 
         let indentColumn = lineIndentLevel * tabSize;
 
-        /*
-         * Если продолжается выражение с незакрытой скобкой,
-         * выравниваем строку по позиции после последней открытой скобки.
-         */
         if (parenthesisStack.length > 0) {
-            const lastOpenParenthesis =
-                parenthesisStack[parenthesisStack.length - 1];
-
-            const continuationColumn = normalizedLine.startsWith(")")
-                ? lastOpenParenthesis
-                : lastOpenParenthesis + 1;
-
+            const lastOpen = parenthesisStack[parenthesisStack.length - 1];
             indentColumn = Math.max(
                 indentColumn,
-                continuationColumn
+                normalizedLine.startsWith(")")
+                    ? lastOpen
+                    : lastOpen + 1
             );
-        } else if (continuationContext !== undefined) {
+        } else if (continuation) {
             indentColumn = Math.max(
                 indentColumn,
-                continuationContext.indentColumn
+                continuation.indentColumn
             );
         }
 
-        const formattedLine =
-            " ".repeat(indentColumn) + normalizedLine;
+        const formattedLine = " ".repeat(indentColumn) + normalizedLine;
+        formatted.push(formattedLine);
 
-        formattedLines.push(formattedLine);
-
-        /*
-         * Обновляем стек уже по строке с окончательным отступом,
-         * чтобы позиции скобок были абсолютными.
-         */
-        updateParenthesisStack(
+        updateParenthesisStack(formattedLine, parenthesisStack);
+        continuation = getNextContinuationContext(
             formattedLine,
-            parenthesisStack
+            continuation
         );
 
-        continuationContext = getNextContinuationContext(
-            formattedLine,
-            continuationContext
+        indentLevel = Math.max(
+            0,
+            indentLevel + structure.blockStarts - structure.blockEnds
         );
+    }
 
-        if (hasBlockStart && !hasEnd) {
-            indentLevel++;
-        } else if (hasEnd && !hasBlockStart) {
-            indentLevel = Math.max(indentLevel - 1, 0);
+    return bom + formatted.join(lex.eol);
+}
+
+interface ILineStructure {
+    firstKeyword?: string;
+    blockStarts: number;
+    blockEnds: number;
+}
+
+function analyzeStructure(tokens: IRslToken[]): ILineStructure {
+    let firstKeyword: string | undefined;
+    let blockStarts = 0;
+    let blockEnds = 0;
+    let canStartStatement = true;
+
+    for (const token of tokens) {
+        if (
+            token.kind === "whitespace" ||
+            token.kind === "comment" ||
+            token.kind === "string" ||
+            token.kind === "square" ||
+            token.kind === "bom"
+        ) {
+            continue;
+        }
+
+        if (token.kind === "symbol") {
+            if (token.raw === ";") {
+                canStartStatement = true;
+            } else if (token.raw !== "(" && token.raw !== ")") {
+                canStartStatement = false;
+            }
+
+            continue;
+        }
+
+        if (token.kind !== "identifier") {
+            canStartStatement = false;
+            continue;
+        }
+
+        const word = token.value.toLowerCase();
+
+        if (!firstKeyword) {
+            firstKeyword = word;
+        }
+
+        if (word === END_KEYWORD) {
+            blockEnds++;
+            canStartStatement = false;
+            continue;
+        }
+
+        if (canStartStatement && isDeclarationModifier(word)) {
+            continue;
+        }
+
+        if (
+            canStartStatement &&
+            BLOCK_START_KEYWORDS.indexOf(word) >= 0
+        ) {
+            blockStarts++;
+        }
+
+        canStartStatement = false;
+    }
+
+    return {
+        firstKeyword,
+        blockStarts,
+        blockEnds
+    };
+}
+
+function normalizeLineSafely(
+    line: string,
+    absoluteStart: number,
+    tokens: IRslToken[]
+): string {
+    const protectedTokens = tokens
+        .filter(token =>
+            token.kind === "string" ||
+            token.kind === "comment" ||
+            token.kind === "square"
+        )
+        .sort((left, right) => left.start - right.start);
+
+    let result = "";
+    let localPosition = 0;
+
+    for (const token of protectedTokens) {
+        const tokenStart = Math.max(0, token.start - absoluteStart);
+        const tokenEnd = Math.min(line.length, token.end - absoluteStart);
+
+        if (tokenStart < localPosition || tokenStart > line.length) {
+            continue;
+        }
+
+        result += normalizeCodeSegment(
+            line.substring(localPosition, tokenStart)
+        );
+        result += line.substring(tokenStart, tokenEnd);
+        localPosition = tokenEnd;
+    }
+
+    result += normalizeCodeSegment(line.substring(localPosition));
+    return result.trim();
+}
+
+function normalizeCodeSegment(segment: string): string {
+    return segment
+        .replace(/[ \t]*(==|!=|<=|>=|>|<)[ \t]*/g, " $1 ")
+        .replace(/[ \t]+/g, " ");
+}
+
+function updateParenthesisStack(
+    line: string,
+    parenthesisStack: number[]
+): void {
+    const tokens = lexRsl(line).tokens;
+
+    for (const token of tokens) {
+        if (token.kind !== "symbol") {
+            continue;
+        }
+
+        if (token.raw === "(") {
+            parenthesisStack.push(token.character);
+        } else if (
+            token.raw === ")" &&
+            parenthesisStack.length > 0
+        ) {
+            parenthesisStack.pop();
         }
     }
-
-    return formattedLines.join("\n").trim();
 }
 
-/**
- * Возвращает отступ для комментариев и служебных строк.
- */
-function getCurrentIndent(
-    indentLevel: number,
-    tabSize: number,
-    parenthesisStack: number[],
-    trimmedLine: string,
-    continuationContext: IContinuationContext | undefined
-): number {
-    let indent = indentLevel * tabSize;
-
-    if (parenthesisStack.length > 0) {
-        const lastOpenParenthesis =
-            parenthesisStack[parenthesisStack.length - 1];
-
-        const continuationColumn = trimmedLine.startsWith(")")
-            ? lastOpenParenthesis
-            : lastOpenParenthesis + 1;
-
-        indent = Math.max(indent, continuationColumn);
-    } else if (continuationContext !== undefined) {
-        indent = Math.max(
-            indent,
-            continuationContext.indentColumn
-        );
-    }
-
-    return indent;
-}
-
-/**
- * Вычисляет выравнивание следующей строки.
- *
- * Примеры:
- *
- *     private var first,
- *                 second,
- *                 third;
- *
- *     sql = "select ..."+
- *           "from ..."+
- *           "where ...";
- */
 function getNextContinuationContext(
     line: string,
     current: IContinuationContext | undefined
 ): IContinuationContext | undefined {
-    const code = getCodeBeforeLineComment(line)
-        .replace(/\s+$/g, "");
+    const code = getCodeBeforeLineComment(line).replace(/\s+$/g, "");
 
-    if (current !== undefined) {
+    if (current) {
         if (current.kind === "declaration") {
-            /*
-             * Объявление может занимать сколько угодно строк.
-             * Заканчивается оно только точкой с запятой вне строки.
-             */
-            return containsCodeCharacter(code, ";")
+            return containsCodeSymbol(code, ";")
                 ? undefined
                 : current;
         }
 
-        /*
-         * Конкатенация продолжается, пока последним значимым
-         * символом строки остаётся +.
-         */
-        return code.endsWith("+")
-            ? current
-            : undefined;
+        return code.endsWith("+") ? current : undefined;
     }
 
-    /*
-     * Запоминаем колонку первого имени после ключевого слова.
-     * Допускаем private/local и тип/значение после первого имени.
-     */
     const declarationMatch = code.match(
-        /^(\s*(?:(?:private|local)\s+)?(?:var|const|array|record)\s+)([@A-Za-zА-Яа-яЁё_][@A-Za-zА-Яа-яЁё0-9_]*).*?,\s*$/i
+        /^(\s*(?:(?:private|local|public)\s+)?(?:var|const|array|record)\s+)([@A-Za-zА-Яа-яЁё_][@A-Za-zА-Яа-яЁё0-9_]*).*?,\s*$/i
     );
 
-    if (declarationMatch !== null) {
+    if (declarationMatch) {
         return {
             kind: "declaration",
             indentColumn: declarationMatch[1].length
@@ -299,359 +276,115 @@ function getNextContinuationContext(
         return undefined;
     }
 
-    const assignmentColumn =
-        findAssignmentExpressionColumn(code);
+    const assignmentColumn = findAssignmentExpressionColumn(code);
 
-    if (assignmentColumn === undefined) {
-        return undefined;
-    }
-
-    return {
-        kind: "assignment",
-        indentColumn: assignmentColumn
-    };
+    return assignmentColumn === undefined
+        ? undefined
+        : {
+            kind: "assignment",
+            indentColumn: assignmentColumn
+        };
 }
 
-/**
- * Возвращает код до //, не принимая // внутри строк за комментарий.
- */
 function getCodeBeforeLineComment(line: string): string {
-    let quote = "";
+    const comment = lexRsl(line).tokens.find(token =>
+        token.kind === "comment" && token.raw.startsWith("//")
+    );
 
-    for (let index = 0; index < line.length; index++) {
-        const char = line[index];
-        const nextChar = index + 1 < line.length
-            ? line[index + 1]
-            : "";
-
-        if (quote.length > 0) {
-            if (
-                char === quote &&
-                !isEscapedByBackslashes(line, index)
-            ) {
-                quote = "";
-            }
-
-            continue;
-        }
-
-        if (char === "\"" || char === "'") {
-            quote = char;
-            continue;
-        }
-
-        if (char === "/" && nextChar === "/") {
-            return line.substring(0, index);
-        }
-    }
-
-    return line;
+    return comment ? line.substring(0, comment.start) : line;
 }
 
-/**
- * Ищет присваивание и возвращает колонку первого символа
- * правой части. ==, !=, <= и >= присваиваниями не считаются.
- */
-function findAssignmentExpressionColumn(
-    line: string
-): number | undefined {
-    let quote = "";
+function findAssignmentExpressionColumn(line: string): number | undefined {
+    const tokens = lexRsl(line).tokens;
 
-    for (let index = 0; index < line.length; index++) {
-        const char = line[index];
+    for (let index = 0; index < tokens.length; index++) {
+        const token = tokens[index];
 
-        if (quote.length > 0) {
-            if (
-                char === quote &&
-                !isEscapedByBackslashes(line, index)
-            ) {
-                quote = "";
-            }
-
+        if (token.kind !== "symbol" || token.raw !== "=") {
             continue;
         }
 
-        if (char === "\"" || char === "'") {
-            quote = char;
-            continue;
-        }
-
-        if (char !== "=") {
-            continue;
-        }
-
-        const previous = index > 0
-            ? line[index - 1]
-            : "";
-        const next = index + 1 < line.length
-            ? line[index + 1]
-            : "";
+        const previous = tokens[index - 1];
+        const next = tokens[index + 1];
 
         if (
-            previous === "!" ||
-            previous === "<" ||
-            previous === ">" ||
-            previous === "=" ||
-            next === "="
+            (previous && previous.kind === "symbol" &&
+                ["!", "<", ">", "="].indexOf(previous.raw) >= 0) ||
+            (next && next.kind === "symbol" && next.raw === "=")
         ) {
             continue;
         }
 
-        let expressionColumn = index + 1;
+        let column = token.character + 1;
 
-        while (
-            expressionColumn < line.length &&
-            (
-                line[expressionColumn] === " " ||
-                line[expressionColumn] === "\t"
-            )
-        ) {
-            expressionColumn++;
+        while (column < line.length && /[ \t]/.test(line.charAt(column))) {
+            column++;
         }
 
-        return expressionColumn;
+        return column;
     }
 
     return undefined;
 }
 
-/**
- * Проверяет наличие символа вне строк.
- */
-function containsCodeCharacter(
-    line: string,
-    expected: string
-): boolean {
-    let quote = "";
+function containsCodeSymbol(line: string, symbol: string): boolean {
+    return lexRsl(line).tokens.some(token =>
+        token.kind === "symbol" && token.raw === symbol
+    );
+}
 
-    for (let index = 0; index < line.length; index++) {
-        const char = line[index];
+function getSingleLineTokens(
+    tokens: IRslToken[],
+    line: number,
+    absoluteStart: number,
+    length: number
+): IRslToken[] {
+    const absoluteEnd = absoluteStart + length;
 
-        if (quote.length > 0) {
-            if (
-                char === quote &&
-                !isEscapedByBackslashes(line, index)
-            ) {
-                quote = "";
+    return tokens.filter(token =>
+        token.line === line &&
+        token.endLine === line &&
+        token.start >= absoluteStart &&
+        token.start <= absoluteEnd
+    );
+}
+
+function getMultilineProtectedToken(
+    tokens: IRslToken[],
+    line: number,
+    _bodyOffset: number
+): IRslToken | undefined {
+    return tokens.find(token =>
+        (token.kind === "square" || token.kind === "comment") &&
+        token.endLine > token.line &&
+        token.line <= line &&
+        line <= token.endLine
+    );
+}
+
+function buildLineStarts(
+    body: string,
+    _eol: string
+): number[] {
+    const result: number[] = [0];
+
+    for (let index = 0; index < body.length; index++) {
+        const current = body.charAt(index);
+
+        if (current === "\r") {
+            if (body.charAt(index + 1) === "\n") {
+                index++;
             }
 
-            continue;
-        }
-
-        if (char === "\"" || char === "'") {
-            quote = char;
-            continue;
-        }
-
-        if (char === expected) {
-            return true;
+            result.push(index + 1);
+        } else if (current === "\n") {
+            result.push(index + 1);
         }
     }
 
-    return false;
+    return result;
 }
 
-function isEscapedByBackslashes(
-    line: string,
-    position: number
-): boolean {
-    let backslashCount = 0;
-    let index = position - 1;
-
-    while (index >= 0 && line[index] === "\\") {
-        backslashCount++;
-        index--;
-    }
-
-    return backslashCount % 2 === 1;
-}
-
-/**
- * Обновляет стек незакрытых круглых скобок.
- *
- * Скобки в строках и после // игнорируются.
- */
-function updateParenthesisStack(
-    line: string,
-    parenthesisStack: number[]
-): void {
-    let inString = false;
-    let escaped = false;
-
-    for (let index = 0; index < line.length; index++) {
-        const char = line[index];
-        const nextChar = index + 1 < line.length
-            ? line[index + 1]
-            : "";
-
-        if (inString) {
-            if (escaped) {
-                escaped = false;
-                continue;
-            }
-
-            if (char === "\\") {
-                escaped = true;
-                continue;
-            }
-
-            if (char === "\"") {
-                inString = false;
-            }
-
-            continue;
-        }
-
-        if (char === "\"") {
-            inString = true;
-            continue;
-        }
-
-        if (char === "/" && nextChar === "/") {
-            break;
-        }
-
-        if (char === "(") {
-            parenthesisStack.push(index);
-            continue;
-        }
-
-        if (char === ")" && parenthesisStack.length > 0) {
-            parenthesisStack.pop();
-        }
-    }
-}
-
-/**
- * Нормализует пробелы вне строковых литералов и комментариев.
- *
- * Сейчас форматируются операторы сравнения:
- * ==, !=, <=, >=, <, >
- *
- * Содержимое SQL-строк не изменяется.
- */
-function normalizeLineSpacing(line: string): string {
-    let result = "";
-    let codeSegment = "";
-    let inString = false;
-    let escaped = false;
-
-    function flushCodeSegment(): void {
-        if (codeSegment.length === 0) {
-            return;
-        }
-
-        result += normalizeCodeSegment(codeSegment);
-        codeSegment = "";
-    }
-
-    for (let index = 0; index < line.length; index++) {
-        const char = line[index];
-        const nextChar = index + 1 < line.length
-            ? line[index + 1]
-            : "";
-
-        if (inString) {
-            result += char;
-
-            if (escaped) {
-                escaped = false;
-                continue;
-            }
-
-            if (char === "\\") {
-                escaped = true;
-                continue;
-            }
-
-            if (char === "\"") {
-                inString = false;
-            }
-
-            continue;
-        }
-
-        if (char === "\"") {
-            flushCodeSegment();
-            result += char;
-            inString = true;
-            continue;
-        }
-
-        if (char === "/" && nextChar === "/") {
-            flushCodeSegment();
-            result += line.substring(index);
-            return result.trim();
-        }
-
-        codeSegment += char;
-    }
-
-    flushCodeSegment();
-
-    return result.trim();
-}
-
-function normalizeCodeSegment(segment: string): string {
-    return segment
-        .replace(/\s*(==|!=|<=|>=|>|<)\s*/g, " $1 ")
-        .replace(/\s+/g, " ");
-}
-
-function removeStopChars(inputString: string): string {
-    const stopCharsArray = Array.from(STOP_CHARS);
-
-    return Array.from(inputString)
-        .filter(char => stopCharsArray.indexOf(char) < 0)
-        .join("");
-}
-
-/**
- * Извлекает слова из кода до однострочного комментария.
- * Строковые литералы игнорируются.
- */
-function extractWordsBeforeComment(input: string): string[] {
-    let code = "";
-    let inString = false;
-    let escaped = false;
-
-    for (let index = 0; index < input.length; index++) {
-        const char = input[index];
-        const nextChar = index + 1 < input.length
-            ? input[index + 1]
-            : "";
-
-        if (inString) {
-            if (escaped) {
-                escaped = false;
-                continue;
-            }
-
-            if (char === "\\") {
-                escaped = true;
-                continue;
-            }
-
-            if (char === "\"") {
-                inString = false;
-            }
-
-            continue;
-        }
-
-        if (char === "\"") {
-            inString = true;
-            continue;
-        }
-
-        if (char === "/" && nextChar === "/") {
-            break;
-        }
-
-        code += char;
-    }
-
-    const matches = code.match(/\b\w+\b/g);
-
-    return matches !== null ? matches : [];
+function isDeclarationModifier(value: string): boolean {
+    return value === "private" || value === "local" || value === "public";
 }

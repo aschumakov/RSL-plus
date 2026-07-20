@@ -4,7 +4,7 @@
    "description": "R-Style Language support +",
    "author": "Veniamin Rakov + AChumakov",
    "license": "SEE LICENSE IN LICENSE",
-   "version": "1.0.20",
+   "version": "1.1.0",
    "icon": "icon.png",
    "bugs": {
       "url": "https://github.com/aschumakov/RSL-plus/issues"
@@ -138,9 +138,9 @@
                "description": "Подгружать импортируемые макросы."
             },
             "rsl-plus.programmerName": {
-                "type": "string",
-                "default": "RS Programmer",
-                "description": "Имя разработчика для заголовков RSL-файлов"
+               "type": "string",
+               "default": "RS Programmer",
+               "description": "Имя разработчика для заголовков RSL-файлов"
             }
          }
       }
@@ -149,11 +149,17 @@
       "onLanguage:rsl"
    ],
    "scripts": {
-      "vscode:prepublish": "npm run compile",
+      "vscode:prepublish": "npm test",
       "compile": "tsc -b",
       "watch": "tsc -b -w",
+      "test:lexer": "npm run compile && node tests/lexer.test.js",
       "test:formatter": "npm run compile && node tests/formatter.test.js",
-      "postinstall": "cd client && npm install && cd ../server && npm install && cd .."
+      "test:folding": "npm run compile && node tests/folding.test.js",
+      "test:definition": "npm run compile && node tests/definition.test.js",
+      "test:parser": "npm run compile && node tests/parser-optimized.test.js",
+      "test:scope": "npm run compile && node tests/scope-index.test.js",
+      "test": "npm run compile && node tests/run-all.js",
+      "postinstall": "npm ci --prefix client && npm ci --prefix server"
    },
    "devDependencies": {
       "@types/mocha": "^5.2.7",

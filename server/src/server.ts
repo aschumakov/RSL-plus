@@ -1,108 +1,59 @@
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from "fs";
+import * as path from "path";
+import { fileURLToPath } from "url";
 
 import {
-    createConnection,
-    TextDocuments,
-    ProposedFeatures,
-    InitializeParams,
-    DidChangeConfigurationNotification,
     CompletionItem,
-    TextDocumentPositionParams,
-    Hover,
     Definition,
     Diagnostic,
     DiagnosticSeverity,
-    TextEdit,
-    TextDocumentSyncKind,
+    DidChangeConfigurationNotification,
+    FileChangeType,
     FormattingOptions,
+    Hover,
+    InitializeParams,
+    ProposedFeatures,
     Range,
-    SymbolInformation
-} from 'vscode-languageserver/node';
+    SymbolInformation,
+    TextDocumentPositionParams,
+    TextDocumentSyncKind,
+    TextEdit,
+    createConnection,
+    TextDocuments
+} from "vscode-languageserver/node";
 
-import { TextDocument } from 'vscode-languageserver-textdocument';
+import { TextDocument } from "vscode-languageserver-textdocument";
 
-import { IFAStruct, IRslSettings, IToken } from './interfaces';
-import { getDefaults, getCIInfoForArray } from './defaults';
-import { CBase } from './common';
-import { getSymbols } from './docsymbols';
-import { FormatCode } from './format';
-import { GetFoldingRanges } from './folding';
-import { RslDefinitionProvider } from './definitionProvider';
+import { CBase } from "./common";
+import { RslDefinitionProvider } from "./definitionProvider";
+import { getCIInfoForArray, getDefaults } from "./defaults";
+import { getSymbols } from "./docsymbols";
+import { GetFoldingRanges } from "./folding";
+import { FormatCode } from "./format";
+import { IFAStruct, IRslSettings, IToken } from "./interfaces";
+import { RslScopeResolver } from "./scopeResolver";
+import { IIndexedModule, WorkspaceIndex } from "./workspaceIndex";
 
 const connection = createConnection(ProposedFeatures.all);
-const documents: TextDocuments<TextDocument> =
-    new TextDocuments(TextDocument);
+const documents = new TextDocuments<TextDocument>(TextDocument);
+const workspaceIndex = new WorkspaceIndex();
+const scopeResolver = new RslScopeResolver(workspaceIndex);
 
-const logFilePath = path.resolve(__dirname, '..', 'rsl-server.log');
+const logFilePath = path.resolve(__dirname, "..", "rsl-server.log");
+const defaultSettings: IRslSettings = { import: "ДА" };
+const documentSettings = new Map<string, Promise<IRslSettings>>();
+const parseGeneration = new Map<string, number>();
+const parsedVersions = new Map<string, number>();
+const parseTimers = new Map<string, NodeJS.Timeout>();
+const pendingImportNames = new Set<string>();
+const requestedImportNames = new Set<string>();
+const PARSE_DEBOUNCE_MS = 200;
 
-function logMessage(message: string): void {
-    const line =
-        `[${new Date().toISOString()}] ` +
-        `PID=${process.pid} ` +
-        `${message}\r\n`;
-
-    try {
-        fs.appendFileSync(logFilePath, line, {
-            encoding: 'utf8'
-        });
-    } catch (_error) {
-        // Ошибка журналирования не должна останавливать language server.
-    }
-}
-
-function errorToString(error: any): string {
-    if (error instanceof Error) {
-        return `${error.name}: ${error.message}\n${error.stack || ''}`;
-    }
-
-    return String(error);
-}
-
-logMessage(`Language server started. Node=${process.version}`);
-
-process.on('unhandledRejection', (reason: any) => {
-    logMessage(
-        `UNHANDLED REJECTION\n${errorToString(reason)}`
-    );
-});
-
-process.on('uncaughtException', (error: Error) => {
-    logMessage(
-        `UNCAUGHT EXCEPTION\n${errorToString(error)}`
-    );
-
-    process.exit(1);
-});
-
-process.on('exit', (code: number) => {
-    logMessage(`Language server exited. Code=${code}`);
-});
-
+let globalSettings: IRslSettings = defaultSettings;
 let hasConfigurationCapability = false;
 let hasWorkspaceFolderCapability = false;
-let hasDiagnosticRelatedInformationCapability = false;
 let workFolderOpened = false;
-
-const defaultSettings: IRslSettings = { import: 'ДА' };
-let globalSettings: IRslSettings = defaultSettings;
-const documentSettings: Map<string, Promise<IRslSettings>> =
-    new Map<string, Promise<IRslSettings>>();
-let Imports: IFAStruct[] = [];
-
 let clientReady = false;
-const pendingImportNames: Set<string> = new Set<string>();
-const requestedImportNames: Set<string> = new Set<string>();
-const parseGeneration: Map<string, number> =
-    new Map<string, number>();
-
-const parsedVersions: Map<string, number> =
-    new Map<string, number>();
-
-const parseTimers: Map<string, NodeJS.Timeout> =
-    new Map<string, NodeJS.Timeout>();
-
-const PARSE_DEBOUNCE_MS = 200;
 
 interface IPositionContext {
     document: TextDocument;
@@ -111,31 +62,37 @@ interface IPositionContext {
     token?: IToken;
 }
 
-interface IFoundObject extends IFAStruct {
-    token: IToken;
+function logMessage(message: string): void {
+    const line =
+        `[${new Date().toISOString()}] ` +
+        `PID=${process.pid} ${message}\r\n`;
+
+    fs.promises.appendFile(logFilePath, line, "utf8")
+        .catch(() => undefined);
 }
 
-function normalizeName(value: string): string {
-    return (value || '').toLowerCase();
+function errorToString(error: unknown): string {
+    if (error instanceof Error) {
+        return `${error.name}: ${error.message}\n${error.stack || ""}`;
+    }
+
+    return String(error);
 }
 
-function namesEqual(
-    left: string,
-    right: string
-): boolean {
-    return normalizeName(left) === normalizeName(right);
-}
+logMessage(`Language server started. Node=${process.version}`);
 
-function isBlockedToken(token?: IToken): boolean {
-    return !!(
-        token &&
-        (
-            token.kind === 'string' ||
-            token.kind === 'square' ||
-            token.kind === 'comment'
-        )
-    );
-}
+process.on("unhandledRejection", reason => {
+    logMessage(`UNHANDLED REJECTION\n${errorToString(reason)}`);
+});
+
+process.on("uncaughtException", error => {
+    /* Ошибка фиксируется, но отдельный запрос не должен убивать сервер. */
+    logMessage(`UNCAUGHT EXCEPTION\n${errorToString(error)}`);
+});
+
+process.on("exit", code => {
+    logMessage(`Language server exited. Code=${code}`);
+});
 
 function sendClientNotification(
     method: string,
@@ -143,103 +100,123 @@ function sendClientNotification(
 ): void {
     connection.sendNotification(method, params).then(
         undefined,
-        error => {
-            logMessage(
-                `Client notification failed: ${method}\n` +
-                errorToString(error)
-            );
-        }
+        error => logMessage(
+            `Client notification failed: ${method}\n` +
+            errorToString(error)
+        )
     );
 }
 
 function notifyClient(method: string, params?: unknown): void {
-    if (!clientReady) {
-        return;
+    if (clientReady) {
+        sendClientNotification(method, params);
     }
-
-    sendClientNotification(method, params);
 }
 
 function flushPendingImports(): void {
-    if (!clientReady) {
+    if (!clientReady || globalSettings.import !== "ДА") {
         return;
     }
 
     pendingImportNames.forEach(name => {
-        if (requestedImportNames.has(name)) {
+        if (
+            requestedImportNames.has(name.toLowerCase()) ||
+            workspaceIndex.findModuleByName(name)
+        ) {
             return;
         }
 
-        requestedImportNames.add(name);
-        notifyClient('getFilebyName', name);
+        const normalizedName = name.toLowerCase();
+        const indexedUri = workspaceIndex.findWorkspaceFileUri(name);
+        requestedImportNames.add(normalizedName);
+
+        if (indexedUri) {
+            loadExternalModule(indexedUri).catch(error => {
+                requestedImportNames.delete(normalizedName);
+                logMessage(
+                    `Pending import load failed: ${indexedUri}\n` +
+                    errorToString(error)
+                );
+            });
+        } else {
+            notifyClient("getFilebyName", name);
+        }
     });
 
     pendingImportNames.clear();
 }
 
-connection.onNotification('clientReady', () => {
-    clientReady = true;
-    logMessage('Client handlers are ready.');
+connection.onNotification("workspaceFiles", (uris: string[]) => {
+    workspaceIndex.registerWorkspaceFiles(Array.isArray(uris) ? uris : []);
+    definitionProvider.clearCaches();
     flushPendingImports();
-    notifyClient('updateStatusBar', Imports.length);
 });
 
-export function GetFileByNameRequest(nameInter: string): void {
+connection.onNotification("clientReady", () => {
+    clientReady = true;
+    flushPendingImports();
+    notifyClient("updateStatusBar", workspaceIndex.size);
+});
+
+export function GetFileByNameRequest(name: string): void {
     if (
         !workFolderOpened ||
-        globalSettings.import !== 'ДА' ||
-        !nameInter
+        globalSettings.import !== "ДА" ||
+        !name ||
+        workspaceIndex.findModuleByName(name)
     ) {
         return;
     }
 
-    pendingImportNames.add(nameInter);
+    const normalizedName = name.toLowerCase();
+    const indexedUri = workspaceIndex.findWorkspaceFileUri(name);
+
+    if (indexedUri && !requestedImportNames.has(normalizedName)) {
+        requestedImportNames.add(normalizedName);
+        loadExternalModule(indexedUri).catch(error => {
+            requestedImportNames.delete(normalizedName);
+            logMessage(
+                `Indexed import load failed: ${indexedUri}\n` +
+                errorToString(error)
+            );
+        });
+        return;
+    }
+
+    pendingImportNames.add(name);
     flushPendingImports();
 }
 
 export function GetFileRequest(filePath: string): void {
-    if (!filePath) {
-        return;
+    if (filePath) {
+        notifyClient("getFile", filePath);
     }
-
-    notifyClient('getFile', filePath);
 }
 
 export function getTree(): IFAStruct[] {
-    return Imports;
+    return workspaceIndex.getModules();
 }
 
 function getCurDoc(uri: string): TextDocument | undefined {
-    /*
-     * Получение документа не должно иметь побочного эффекта.
-     * Раньше каждый hover/completion/Outline отправлял клиенту
-     * запрос на повторное открытие файла и мог вызвать каскад didOpen.
-     */
     return documents.get(uri);
 }
 
 function getCurObj(uri: string): CBase | undefined {
-    const currentImport = Imports.find(m => m.uri === uri);
-    return currentImport ? currentImport.object : undefined;
+    const module = workspaceIndex.getModule(uri);
+    return module ? module.object : undefined;
 }
 
 function getPositionContext(
-    tdpp: TextDocumentPositionParams
+    params: TextDocumentPositionParams
 ): IPositionContext | undefined {
-    const document = getCurDoc(
-        tdpp.textDocument.uri
-    );
-
-    const tree = getCurObj(
-        tdpp.textDocument.uri
-    );
+    const document = getCurDoc(params.textDocument.uri);
+    const tree = getCurObj(params.textDocument.uri);
 
     if (!document || !tree) {
         return undefined;
     }
 
-    const offset =
-        document.offsetAt(tdpp.position);
+    const offset = document.offsetAt(params.position);
 
     return {
         document,
@@ -249,138 +226,27 @@ function getPositionContext(
     };
 }
 
-function FindObject(
-    tdpp: TextDocumentPositionParams,
-    existingContext?: IPositionContext
-): IFoundObject | undefined {
-    const context =
-        existingContext ||
-        getPositionContext(tdpp);
-
-    if (
-        !context ||
-        !context.token ||
-        isBlockedToken(context.token)
-    ) {
-        return undefined;
-    }
-
-    let uri = tdpp.textDocument.uri;
-    let cBaseObject: CBase | undefined;
-
-    const token = context.token;
-    const normalizedToken =
-        normalizeName(token.str);
-
-    const objArr =
-        context.tree.getActualChilds(
-            context.offset
-        );
-
-    const objects: CBase[] = [];
-
-    for (const element of objArr) {
-        if (element.isObject()) {
-            element.getChilds().forEach(child => {
-                if (
-                    namesEqual(
-                        child.Name,
-                        normalizedToken
-                    )
-                ) {
-                    objects.push(child);
-                }
-            });
-        }
-
-        if (
-            namesEqual(
-                element.Name,
-                normalizedToken
-            )
-        ) {
-            objects.push(element);
-        }
-    }
-
-    if (objects.length > 1) {
-        let minDistance =
-            token.range.start;
-
-        for (const iterator of objects) {
-            const currentDistance =
-                token.range.start -
-                iterator.Range.end;
-
-            if (
-                currentDistance >= 0 &&
-                currentDistance < minDistance
-            ) {
-                cBaseObject = iterator;
-                minDistance = currentDistance;
-            }
-        }
-
-        /*
-         * Если все найденные объявления находятся правее
-         * курсора, сохраняем первый best-effort результат.
-         */
-        if (!cBaseObject) {
-            cBaseObject = objects[0];
-        }
-    } else if (objects.length === 1) {
-        cBaseObject = objects[0];
-    }
-
-    if (!cBaseObject) {
-        for (const iterator of Imports) {
-            if (
-                iterator.uri ===
-                tdpp.textDocument.uri
-            ) {
-                continue;
-            }
-
-            const actualChildren =
-                iterator.object.getActualChilds(0);
-
-            for (const element of actualChildren) {
-                if (
-                    namesEqual(
-                        element.Name,
-                        normalizedToken
-                    )
-                ) {
-                    cBaseObject = element;
-                    uri = iterator.uri;
-                    break;
-                }
-            }
-
-            if (cBaseObject) {
-                break;
-            }
-        }
-    }
-
-    if (!cBaseObject) {
-        return undefined;
-    }
-
-    return {
-        object: cBaseObject,
-        uri,
-        token
-    };
+function isBlockedToken(token?: IToken): boolean {
+    return !!token && (
+        token.kind === "string" ||
+        token.kind === "square" ||
+        token.kind === "comment"
+    );
 }
 
 const definitionProvider = new RslDefinitionProvider({
     getOpenDocument: getCurDoc,
     ensureDocumentParsed,
-    getLoadedModules: () => Imports,
+    getLoadedModules: () => workspaceIndex.getModules(),
+    getImportedModules: uri =>
+        workspaceIndex.getImportedModules(uri).map(module => ({
+            uri: module.uri,
+            object: module.object
+        })),
+    findWorkspaceFileUri: name =>
+        workspaceIndex.findWorkspaceFileUri(name),
     log: logMessage
 });
-
 
 connection.onInitialize((params: InitializeParams) => {
     const capabilities = params.capabilities;
@@ -390,29 +256,21 @@ connection.onInitialize((params: InitializeParams) => {
         params.rootUri ||
         params.rootPath
     );
-
     hasConfigurationCapability = !!(
         capabilities.workspace &&
         capabilities.workspace.configuration
     );
-
     hasWorkspaceFolderCapability = !!(
         capabilities.workspace &&
         capabilities.workspace.workspaceFolders
-    );
-
-    hasDiagnosticRelatedInformationCapability = !!(
-        capabilities.textDocument &&
-        capabilities.textDocument.publishDiagnostics &&
-        capabilities.textDocument.publishDiagnostics.relatedInformation
     );
 
     return {
         capabilities: {
             textDocumentSync: TextDocumentSyncKind.Incremental,
             completionProvider: {
-                resolveProvider: true,
-                triggerCharacters: ['.']
+                resolveProvider: false,
+                triggerCharacters: ["."]
             },
             hoverProvider: true,
             definitionProvider: true,
@@ -424,9 +282,8 @@ connection.onInitialize((params: InitializeParams) => {
 });
 
 connection.onInitialized(async () => {
-
     if (!workFolderOpened) {
-        sendClientNotification('noRootFolder');
+        sendClientNotification("noRootFolder");
     }
 
     if (hasConfigurationCapability) {
@@ -437,16 +294,15 @@ connection.onInitialized(async () => {
     }
 
     if (hasWorkspaceFolderCapability) {
-        connection.workspace.onDidChangeWorkspaceFolders(_event => {
-            connection.console.log(
-                'Workspace folder change event received.'
-            );
+        connection.workspace.onDidChangeWorkspaceFolders(() => {
+            definitionProvider.clearCaches();
+            requestedImportNames.clear();
         });
     }
 
-    connection.onRequest('getMacros', () => {
-        return Imports.map(element => element.uri);
-    });
+    connection.onRequest("getMacros", () =>
+        workspaceIndex.getIndexedModules().map(module => module.uri)
+    );
 });
 
 connection.onDidChangeConfiguration(change => {
@@ -454,11 +310,14 @@ connection.onDidChangeConfiguration(change => {
         documentSettings.clear();
     } else {
         globalSettings = <IRslSettings>(
-            (change.settings.RSLanguageServer || defaultSettings)
+            change.settings.RSLanguageServer || defaultSettings
         );
     }
 
-    documents.all().forEach(scheduleValidation);
+    documents.all().forEach(document => {
+        parsedVersions.delete(document.uri);
+        scheduleValidation(document);
+    });
 });
 
 function getDocumentSettings(resource: string): Promise<IRslSettings> {
@@ -471,7 +330,7 @@ function getDocumentSettings(resource: string): Promise<IRslSettings> {
     if (!result) {
         result = connection.workspace.getConfiguration({
             scopeUri: resource,
-            section: 'RSLanguageServer'
+            section: "RSLanguageServer"
         });
         documentSettings.set(resource, result);
     }
@@ -479,24 +338,24 @@ function getDocumentSettings(resource: string): Promise<IRslSettings> {
     return result;
 }
 
+documents.onDidOpen(event => {
+    workspaceIndex.markOpen(event.document.uri);
+    scheduleValidation(event.document);
+});
+
 documents.onDidClose(event => {
     const uri = event.document.uri;
-
     documentSettings.delete(uri);
     parsedVersions.delete(uri);
     cancelScheduledValidation(uri);
+    workspaceIndex.markClosed(uri);
 });
 
 documents.onDidChangeContent(change => {
-    connection.console.log(
-        `Парсинг файла: ${change.document.uri.toString()}`
-    );
     scheduleValidation(change.document);
 });
 
-function cancelScheduledValidation(
-    uri: string
-): void {
+function cancelScheduledValidation(uri: string): void {
     const timer = parseTimers.get(uri);
 
     if (timer) {
@@ -505,40 +364,24 @@ function cancelScheduledValidation(
     }
 }
 
-function scheduleValidation(
-    textDocument: TextDocument
-): void {
-    const uri = textDocument.uri;
-    const expectedVersion =
-        textDocument.version;
-
-    const generation =
-        (parseGeneration.get(uri) || 0) + 1;
-
+function scheduleValidation(document: TextDocument): void {
+    const uri = document.uri;
+    const version = document.version;
+    const generation = (parseGeneration.get(uri) || 0) + 1;
     parseGeneration.set(uri, generation);
     cancelScheduledValidation(uri);
 
     const timer = setTimeout(() => {
         parseTimers.delete(uri);
+        const current = documents.get(uri);
 
-        const currentDocument =
-            documents.get(uri);
-
-        if (
-            !currentDocument ||
-            currentDocument.version !==
-                expectedVersion
-        ) {
+        if (!current || current.version !== version) {
             return;
         }
 
-        validateTextDocument(
-            currentDocument,
-            generation
-        ).then(undefined, error => {
+        validateTextDocument(current, generation).catch(error => {
             logMessage(
-                `Validation failed: ${uri}\n` +
-                errorToString(error)
+                `Validation failed: ${uri}\n${errorToString(error)}`
             );
         });
     }, PARSE_DEBOUNCE_MS);
@@ -547,434 +390,356 @@ function scheduleValidation(
 }
 
 async function validateTextDocument(
-    textDocument: TextDocument,
+    document: TextDocument,
     generation: number
 ): Promise<void> {
-    const uri = textDocument.uri;
-    const version = textDocument.version;
+    const uri = document.uri;
+    const version = document.version;
 
     if (
         parsedVersions.get(uri) === version &&
-        getCurObj(uri)
+        workspaceIndex.getModule(uri)
     ) {
         return;
     }
 
-    try {
-        const settings =
-            await getDocumentSettings(uri);
+    const settings = await getDocumentSettings(uri);
 
-        if (
-            parseGeneration.get(uri) !==
-            generation
-        ) {
-            return;
-        }
-
-        globalSettings =
-            settings || defaultSettings;
-
-        const text =
-            textDocument.getText();
-
-        const parseStartedAt = Date.now();
-        const parsedObject =
-            new CBase(text, 0);
-
-        if (
-            parseGeneration.get(uri) !==
-            generation
-        ) {
-            return;
-        }
-
-        const module =
-            Imports.find(m => m.uri === uri);
-
-        if (module) {
-            module.object = parsedObject;
-        } else {
-            Imports.push({
-                uri,
-                object: parsedObject
-            });
-        }
-
-        parsedVersions.set(
-            uri,
-            version
-        );
-
-        notifyClient(
-            'updateStatusBar',
-            Imports.length
-        );
-
-        const pattern =
-            /\b(record|array)\b/gi;
-
-        let match: RegExpExecArray | null;
-
-        const diagnostics: Diagnostic[] = [];
-
-        while (
-            (match = pattern.exec(text)) !== null
-        ) {
-            diagnostics.push({
-                severity:
-                    DiagnosticSeverity.Information,
-                range: {
-                    start:
-                        textDocument.positionAt(
-                            match.index
-                        ),
-                    end:
-                        textDocument.positionAt(
-                            match.index +
-                            match[0].length
-                        )
-                },
-                message:
-                    `Определение ${match[0].toUpperCase()} устарело, ` +
-                    'от такого надо избавляться по возможности',
-                source: 'RSL parser'
-            });
-        }
-
-        connection.sendDiagnostics({
-            uri,
-            diagnostics
-        });
-
-        logMessage(
-            `Parsed successfully: ${uri}; ` +
-            `version=${version}; ` +
-            `ms=${Date.now() - parseStartedAt}; ` +
-            `symbols=${parsedObject.getChilds().length}`
-        );
-    } catch (error) {
-        const errorText =
-            errorToString(error);
-
-        logMessage(
-            `Parse failed: ${uri}\n${errorText}`
-        );
-
-        connection.console.error(
-            `Ошибка разбора ${uri}: ${errorText}`
-        );
+    if (parseGeneration.get(uri) !== generation) {
+        return;
     }
+
+    globalSettings = settings || defaultSettings;
+    const text = document.getText();
+    const started = Date.now();
+    const wasKnown = !!workspaceIndex.getModule(uri);
+    const parsedObject = new CBase(text, 0);
+
+    if (parseGeneration.get(uri) !== generation) {
+        return;
+    }
+
+    const indexed = workspaceIndex.updateModule(
+        uri,
+        text,
+        parsedObject,
+        version,
+        true
+    );
+    parsedVersions.set(uri, version);
+
+    if (globalSettings.import === "ДА") {
+        indexed.imports.forEach(GetFileByNameRequest);
+    }
+
+    connection.sendDiagnostics({
+        uri,
+        diagnostics: buildDiagnostics(document, indexed)
+    });
+    notifyClient("updateStatusBar", workspaceIndex.size);
+
+    if (!wasKnown) {
+        refreshOpenDependents(uri);
+    }
+
+    logMessage(
+        `Parsed: ${uri}; version=${version}; ` +
+        `ms=${Date.now() - started}; ` +
+        `symbols=${parsedObject.getChilds().length}`
+    );
+}
+
+function buildDiagnostics(
+    document: TextDocument,
+    module: IIndexedModule
+): Diagnostic[] {
+    const diagnostics: Diagnostic[] = [];
+
+    for (const token of module.lex.tokens) {
+        if (token.kind !== "identifier") {
+            continue;
+        }
+
+        const word = token.value.toLowerCase();
+
+        if (word !== "record" && word !== "array") {
+            continue;
+        }
+
+        diagnostics.push({
+            severity: DiagnosticSeverity.Information,
+            range: {
+                start: document.positionAt(token.start),
+                end: document.positionAt(token.end)
+            },
+            message:
+                `Определение ${word.toUpperCase()} устарело, ` +
+                "от него желательно избавляться по возможности",
+            source: "RSL parser"
+        });
+    }
+
+    return diagnostics;
 }
 
 async function ensureDocumentParsed(
-    textDocument: TextDocument
+    document: TextDocument
 ): Promise<CBase | undefined> {
-    const uri = textDocument.uri;
-
     if (
-        parsedVersions.get(uri) ===
-            textDocument.version
+        parsedVersions.get(document.uri) === document.version &&
+        workspaceIndex.getModule(document.uri)
     ) {
-        return getCurObj(uri);
+        return getCurObj(document.uri);
     }
 
-    /*
-     * Outline запросил актуальное дерево раньше debounce.
-     * Отменяем таймер и выполняем ровно один немедленный разбор.
-     */
-    cancelScheduledValidation(uri);
-
-    const generation =
-        (parseGeneration.get(uri) || 0) + 1;
-
-    parseGeneration.set(uri, generation);
-
-    await validateTextDocument(
-        textDocument,
-        generation
-    );
-
-    return getCurObj(uri);
+    cancelScheduledValidation(document.uri);
+    const generation = (parseGeneration.get(document.uri) || 0) + 1;
+    parseGeneration.set(document.uri, generation);
+    await validateTextDocument(document, generation);
+    return getCurObj(document.uri);
 }
 
-connection.onDidChangeWatchedFiles(_change => {
-    definitionProvider.clearCaches();
-    connection.console.log('We received an file change event');
+connection.onDidChangeWatchedFiles(change => {
+    requestedImportNames.clear();
+
+    change.changes.forEach(fileChange => {
+        handleWatchedFileChange(
+            fileChange.uri,
+            fileChange.type
+        ).catch(error => {
+            logMessage(
+                `Watched file processing failed: ${fileChange.uri}\n` +
+                errorToString(error)
+            );
+        });
+    });
 });
 
-connection.onCompletion(
-    (
-        tdpp: TextDocumentPositionParams
-    ): CompletionItem[] => {
-        let completionItems: CompletionItem[] = [];
+async function handleWatchedFileChange(
+    uri: string,
+    type: FileChangeType
+): Promise<void> {
+    definitionProvider.invalidateUri(uri);
+    const dependents = workspaceIndex.getDependents(uri);
 
-        const context =
-            getPositionContext(tdpp);
-
-        if (
-            !context ||
-            isBlockedToken(context.token)
-        ) {
-            return completionItems;
-        }
-
-        const obj =
-            FindObject(tdpp, context);
-
-        if (obj) {
-            if (
-                normalizeName(obj.object.Type) !==
-                'variant'
-            ) {
-                let objClass:
-                    CBase | undefined;
-
-                for (const iterator of Imports) {
-                    const objArr =
-                        iterator.object.getActualChilds(
-                            iterator.uri ===
-                                tdpp.textDocument.uri
-                                ? context.offset
-                                : 0
-                        );
-
-                    for (const objIter of objArr) {
-                        if (
-                            namesEqual(
-                                objIter.Name,
-                                obj.object.Type
-                            )
-                        ) {
-                            objClass = objIter;
-                            break;
-                        }
-                    }
-
-                    if (objClass) {
-                        break;
-                    }
-                }
-
-                if (objClass) {
-                    completionItems =
-                        objClass.ChildsCIInfo(true);
-                }
-            }
-        } else {
-            Imports.forEach(element => {
-                const actualChildren =
-                    element.object.getActualChilds(
-                        element.uri ===
-                            tdpp.textDocument.uri
-                            ? context.offset
-                            : 0
-                    );
-
-                for (
-                    const child of actualChildren
-                ) {
-                    completionItems.push(
-                        child.CIInfo
-                    );
-                }
-            });
-
-            completionItems =
-                completionItems.concat(
-                    getCIInfoForArray(
-                        getDefaults()
-                    )
-                );
-        }
-
-        return completionItems;
+    if (type === FileChangeType.Deleted) {
+        workspaceIndex.unregisterWorkspaceFile(uri);
+        workspaceIndex.removeModule(uri);
+        parsedVersions.delete(uri);
+        dependents.forEach(refreshOpenDocument);
+        notifyClient("updateStatusBar", workspaceIndex.size);
+        return;
     }
-);
 
-connection.onCompletionResolve(
-    (item: CompletionItem): CompletionItem => item
-);
+    workspaceIndex.registerWorkspaceFile(uri);
+    const openDocument = documents.get(uri);
 
-connection.onHover(
-    (
-        tdpp: TextDocumentPositionParams
-    ): Hover | null => {
-        const context =
-            getPositionContext(tdpp);
-
-        if (
-            !context ||
-            !context.token ||
-            isBlockedToken(context.token)
-        ) {
-            return null;
-        }
-
-        const obj =
-            FindObject(tdpp, context);
-
-        if (!obj) {
-            return null;
-        }
-
-        const completionInfo =
-            obj.object.CIInfo;
-
-        const documentation =
-            completionInfo.documentation
-                ? completionInfo.documentation.toString()
-                : '';
-
-        const comment =
-            documentation.length > 0
-                ? ` \n\r${documentation}`
-                : '';
-
-        return {
-            contents:
-                `${completionInfo.detail || ''}` +
-                comment,
-            range: {
-                start:
-                    context.document.positionAt(
-                        obj.token.range.start
-                    ),
-                end:
-                    context.document.positionAt(
-                        obj.token.range.end
-                    )
-            }
-        };
+    if (openDocument) {
+        parsedVersions.delete(uri);
+        scheduleValidation(openDocument);
+    } else {
+        await loadExternalModule(uri);
     }
-);
 
-connection.onDefinition(
-    async (
-        tdpp: TextDocumentPositionParams
-    ): Promise<Definition | null> => {
-        const document = getCurDoc(
-            tdpp.textDocument.uri
+    dependents.forEach(refreshOpenDocument);
+}
+
+async function loadExternalModule(uri: string): Promise<void> {
+    let filePath: string;
+
+    try {
+        filePath = fileURLToPath(uri);
+    } catch (_error) {
+        return;
+    }
+
+    try {
+        const text = await fs.promises.readFile(filePath, "utf8");
+        const stat = await fs.promises.stat(filePath);
+        const tree = new CBase(text, 0);
+        const module = workspaceIndex.updateModule(
+            uri,
+            text,
+            tree,
+            Math.floor(stat.mtimeMs),
+            false
         );
 
-        if (!document) {
-            return null;
-        }
-
-        /*
-         * Definition может прийти раньше отложенного разбора после
-         * редактирования. Всегда используем актуальное дерево.
-         */
-        await ensureDocumentParsed(document);
-
-        const context = getPositionContext(tdpp);
-
-        if (!context) {
-            return null;
-        }
-
-        const dynamicLocation =
-            await definitionProvider.findDynamicDefinition(
-                context
-            );
-
-        if (dynamicLocation) {
-            return dynamicLocation;
-        }
-
-        if (isBlockedToken(context.token)) {
-            return null;
-        }
-
-        const obj = FindObject(tdpp, context);
-
-        if (!obj) {
-            return null;
-        }
-
-        return definitionProvider.createObjectLocationByUri(
-            obj.uri,
-            obj.object
+        module.imports.forEach(GetFileByNameRequest);
+        notifyClient("updateStatusBar", workspaceIndex.size);
+    } catch (error) {
+        logMessage(
+            `External module load failed: ${uri}\n` +
+            errorToString(error)
         );
     }
-);
+}
 
-connection.onDocumentSymbol(
-    async ({ textDocument }) => {
-        const document =
-            getCurDoc(textDocument.uri);
+function refreshOpenDependents(uri: string): void {
+    workspaceIndex.getDependents(uri).forEach(refreshOpenDocument);
+}
 
-        if (!document) {
-            return [];
-        }
+function refreshOpenDocument(uri: string): void {
+    const document = documents.get(uri);
 
-        const tree =
-            await ensureDocumentParsed(
-                document
-            );
-
-        if (!tree) {
-            return [];
-        }
-
-        return getSymbols(
-            document,
-            tree
-        ).filter(
-            (
-                symbol
-            ): symbol is SymbolInformation =>
-                symbol !== undefined
-        );
+    if (!document) {
+        return;
     }
-);
 
-connection.onFoldingRanges(({ textDocument }) => {
+    parsedVersions.delete(uri);
+    scheduleValidation(document);
+}
+
+connection.onCompletion(async params => {
+    const document = getCurDoc(params.textDocument.uri);
+
+    if (!document) {
+        return [];
+    }
+
+    await ensureDocumentParsed(document);
+    const context = getPositionContext(params);
+
+    if (!context || isBlockedToken(context.token)) {
+        return [];
+    }
+
+    return deduplicateCompletionItems([
+        ...scopeResolver.getCompletions(
+            document.uri,
+            context.tree,
+            context.offset
+        ),
+        ...getCIInfoForArray(getDefaults())
+    ]);
+});
+
+connection.onHover(async (
+    params: TextDocumentPositionParams
+): Promise<Hover | null> => {
+    const document = getCurDoc(params.textDocument.uri);
+
+    if (!document) {
+        return null;
+    }
+
+    await ensureDocumentParsed(document);
+    const context = getPositionContext(params);
+
+    if (!context || isBlockedToken(context.token)) {
+        return null;
+    }
+
+    const resolved = scopeResolver.resolveAt(
+        document.uri,
+        context.tree,
+        context.offset
+    );
+
+    if (!resolved) {
+        return null;
+    }
+
+    const info = resolved.object.CIInfo;
+    const documentation = info.documentation
+        ? info.documentation.toString()
+        : "";
+
+    return {
+        contents:
+            `${info.detail || ""}` +
+            (documentation ? `  \n${documentation}` : ""),
+        range: {
+            start: document.positionAt(resolved.token.start),
+            end: document.positionAt(resolved.token.end)
+        }
+    };
+});
+
+connection.onDefinition(async (params): Promise<Definition | null> => {
+    const document = getCurDoc(params.textDocument.uri);
+
+    if (!document) {
+        return null;
+    }
+
+    await ensureDocumentParsed(document);
+    const context = getPositionContext(params);
+
+    if (!context) {
+        return null;
+    }
+
+    const dynamic = await definitionProvider.findDynamicDefinition(context);
+
+    if (dynamic) {
+        return dynamic;
+    }
+
+    if (isBlockedToken(context.token)) {
+        return null;
+    }
+
+    const resolved = scopeResolver.resolveAt(
+        document.uri,
+        context.tree,
+        context.offset
+    );
+
+    return resolved
+        ? definitionProvider.createObjectLocationByUri(
+            resolved.uri,
+            resolved.object
+        )
+        : null;
+});
+
+connection.onDocumentSymbol(async ({ textDocument }) => {
     const document = getCurDoc(textDocument.uri);
 
     if (!document) {
         return [];
     }
 
-    return GetFoldingRanges(document.getText());
+    const tree = await ensureDocumentParsed(document);
+
+    if (!tree) {
+        return [];
+    }
+
+    return getSymbols(document, tree).filter(
+        (symbol): symbol is SymbolInformation => symbol !== undefined
+    );
 });
 
-connection.onDocumentFormatting(formatParams => {
-    const uri = formatParams.textDocument.uri;
-    const document = documents.get(uri);
+connection.onFoldingRanges(({ textDocument }) => {
+    const document = getCurDoc(textDocument.uri);
+    return document ? GetFoldingRanges(document.getText()) : [];
+});
+
+connection.onDocumentFormatting(params => {
+    const document = documents.get(params.textDocument.uri);
 
     if (!document) {
-        logMessage(`Formatting skipped: document not found: ${uri}`);
         return [];
     }
 
     try {
-        logMessage(`Formatting started: ${uri}`);
+        const source = document.getText();
+        const formatted = formattingFunction(source, params.options);
 
-        const text = document.getText();
-        const formattedText = formattingFunction(
-            text,
-            formatParams.options
-        );
-
-        logMessage(`Formatting completed: ${uri}`);
+        if (formatted === source) {
+            return [];
+        }
 
         return [
-            TextEdit.replace(
-                fullDocumentRange(document),
-                formattedText
-            )
+            TextEdit.replace(fullDocumentRange(document), formatted)
         ];
     } catch (error) {
-        const errorText = errorToString(error);
-
         logMessage(
-            `Formatting failed: ${uri}\n${errorText}`
+            `Formatting failed: ${document.uri}\n` +
+            errorToString(error)
         );
-
-        connection.console.error(
-            `Ошибка форматирования ${uri}: ${errorText}`
-        );
-
         return [];
     }
 });
@@ -988,15 +753,29 @@ function formattingFunction(
 
 function fullDocumentRange(document: TextDocument): Range {
     return {
-        start: {
-            line: 0,
-            character: 0
-        },
-        end: {
-            line: document.lineCount,
-            character: 0
-        }
+        start: { line: 0, character: 0 },
+        end: document.positionAt(document.getText().length)
     };
+}
+
+function deduplicateCompletionItems(
+    items: CompletionItem[]
+): CompletionItem[] {
+    const result: CompletionItem[] = [];
+    const seen = new Set<string>();
+
+    for (const item of items) {
+        const key = String(item.label).toLowerCase();
+
+        if (seen.has(key)) {
+            continue;
+        }
+
+        seen.add(key);
+        result.push(item);
+    }
+
+    return result;
 }
 
 documents.listen(connection);

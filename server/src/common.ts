@@ -21,9 +21,12 @@ import {
 } from "./defaults";
 
 import {
-    getTree,
-    GetFileByNameRequest
+    getTree
 } from "./server";
+
+import {
+    lexRsl
+} from "./lexer";
 
 import {
     IFAStruct,
@@ -45,7 +48,7 @@ import {
  * "select ...@" + DBLink + " where ..."
  */
 export const RSL_PARSER_VERSION =
-    "2026-07-17-v4-token-cache";
+    "2026-07-20-v5-shared-lexer";
 
 /**
  * Внутреннее описание токена.
@@ -461,154 +464,26 @@ export class CBase extends CAbstractBase {
      * строится отдельным линейным проходом после создания дерева.
      */
     private buildTokenCache(): IParserToken[] {
-        const result: IParserToken[] =
-            new Array<IParserToken>();
-
-        const savedPosition = this.position;
-        this.position = 0;
-
-        try {
-            while (!this.End) {
-                this.Skip();
-
-                if (this.End) {
-                    break;
-                }
-
-                const start = this.Pos;
-
-                if (this.startsWithAt(OLC, this.Pos)) {
-                    this.position += OLC.length;
-                    this.GetOLC();
-
-                    result.push({
-                        str: this.source.substring(
-                            start,
-                            this.Pos
-                        ),
-                        range: {
-                            start,
-                            end: this.Pos
-                        },
-                        kind: "comment"
-                    });
-
-                    continue;
-                }
-
-                if (this.startsWithAt(MLC_O, this.Pos)) {
-                    this.position += MLC_O.length;
-                    this.GetMLC();
-
-                    result.push({
-                        str: this.source.substring(
-                            start,
-                            this.Pos
-                        ),
-                        range: {
-                            start,
-                            end: this.Pos
-                        },
-                        kind: "comment"
-                    });
-
-                    continue;
-                }
-
-                if (this.CurrentChar === "[") {
-                    this.skipSquareTextBlock();
-
-                    result.push({
-                        str: "[]",
-                        range: {
-                            start,
-                            end: this.Pos
-                        },
-                        kind: "square"
-                    });
-
-                    continue;
-                }
-
-                if (
-                    this.CurrentChar === "\"" ||
-                    this.CurrentChar === "'"
-                ) {
-                    const quote = this.CurrentChar;
-
-                    this.skipQuotedString(
-                        quote,
-                        true,
-                        false
-                    );
-
-                    result.push({
-                        str: this.source.substring(
-                            start,
-                            this.Pos
-                        ),
-                        range: {
-                            start,
-                            end: this.Pos
-                        },
-                        kind: "string"
-                    });
-
-                    continue;
-                }
-
-                if (this.IsStopChar()) {
-                    const value = this.CurrentChar;
-                    this.Next();
-
-                    result.push({
-                        str: value,
-                        range: {
-                            start,
-                            end: this.Pos
-                        },
-                        kind: "code"
-                    });
-
-                    continue;
-                }
-
-                while (
-                    !this.End &&
-                    !this.IsStopChar() &&
-                    this.CurrentChar !== "\"" &&
-                    this.CurrentChar !== "'" &&
-                    !this.startsWithAt(
-                        OLC,
-                        this.Pos
-                    ) &&
-                    !this.startsWithAt(
-                        MLC_O,
-                        this.Pos
-                    )
-                ) {
-                    this.Next();
-                }
-
-                if (this.Pos > start) {
-                    result.push({
-                        str: this.source.substring(
-                            start,
-                            this.Pos
-                        ),
-                        range: {
-                            start,
-                            end: this.Pos
-                        },
-                        kind: "code"
-                    });
-                }
-            }
-        } finally {
-            this.position = savedPosition;
-        }
-
-        return result;
+        return lexRsl(this.source).tokens
+            .filter(token =>
+                token.kind !== "whitespace" &&
+                token.kind !== "newline" &&
+                token.kind !== "bom"
+            )
+            .map(token => ({
+                str: token.kind === "square"
+                    ? "[]"
+                    : token.raw,
+                range: {
+                    start: token.start,
+                    end: token.end
+                },
+                kind: token.kind === "identifier" ||
+                    token.kind === "number" ||
+                    token.kind === "symbol"
+                        ? "code"
+                        : token.kind
+            } as IParserToken));
     }
 
     ChildsCIInfo(
@@ -1498,24 +1373,18 @@ export class CBase extends CAbstractBase {
     }
 
     protected CreateImport(): void {
-        let importText = "";
-
+        /*
+         * Parser только пропускает директиву Import. Извлечение имён,
+         * загрузка файлов и построение графа зависимостей выполняются
+         * WorkspaceIndex в language server.
+         */
         while (!this.End && this.CurrentChar !== ";") {
-            importText += this.CurrentChar;
             this.Next();
         }
 
         if (this.CurrentChar === ";") {
             this.Next();
         }
-
-        processImportNames(importText).forEach(name => {
-            const fileName = name.endsWith(".mac")
-                ? name
-                : `${name}.mac`;
-
-            GetFileByNameRequest(fileName);
-        });
     }
 
     /**

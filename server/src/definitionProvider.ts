@@ -13,8 +13,7 @@ import { TextDocument } from "vscode-languageserver-textdocument";
 import { CBase } from "./common";
 import { IFAStruct } from "./interfaces";
 import {
-    GetDynamicDefinitionTarget,
-    GetImportedMacroFiles
+    GetDynamicDefinitionTarget
 } from "./execMacroDefinition";
 
 export interface IRslDefinitionContext {
@@ -29,6 +28,8 @@ export interface IDefinitionEnvironment {
         document: TextDocument
     ): Promise<CBase | undefined>;
     getLoadedModules(): IFAStruct[];
+    getImportedModules(uri: string): IFAStruct[];
+    findWorkspaceFileUri(moduleName: string): string | undefined;
     log(message: string): void;
 }
 
@@ -72,6 +73,17 @@ export class RslDefinitionProvider {
         this.externalModuleCache.clear();
     }
 
+    invalidateUri(uri: string): void {
+        this.externalModuleCache.delete(uri);
+
+        /*
+         * Отрицательный/положительный поиск мог зависеть от созданного,
+         * удалённого или переименованного файла. Размер кэша небольшой,
+         * поэтому безопаснее сбросить только path cache целиком.
+         */
+        this.workspaceFileCache.clear();
+    }
+
     async findDynamicDefinition(
         context: IRslDefinitionContext
     ): Promise<Location | null> {
@@ -98,18 +110,25 @@ export class RslDefinitionProvider {
                 );
             }
 
-            const imported = await this.findMacroInImports(
-                context.document.getText(),
-                target.macroName,
-                new Set<string>([context.document.uri])
-            );
+            for (const imported of this.environment
+                .getImportedModules(context.document.uri)) {
+                const object = findTopLevelMacro(
+                    imported.object,
+                    target.macroName,
+                    false
+                );
 
-            return imported
-                ? this.createObjectLocation(
-                    imported.module.document,
-                    imported.object
-                )
-                : null;
+                if (!object) {
+                    continue;
+                }
+
+                return this.createObjectLocationByUri(
+                    imported.uri,
+                    object
+                );
+            }
+
+            return null;
         }
 
         if (!target.moduleName) {
@@ -219,54 +238,6 @@ export class RslDefinitionProvider {
         });
     }
 
-    private async findMacroInImports(
-        source: string,
-        macroName: string,
-        visited: Set<string>
-    ): Promise<{
-        module: IDefinitionModule;
-        object: CBase;
-    } | undefined> {
-        const importNames = GetImportedMacroFiles(source);
-
-        for (const importName of importNames) {
-            const module = await this.getModuleByName(
-                importName
-            );
-
-            if (!module || visited.has(module.uri)) {
-                continue;
-            }
-
-            visited.add(module.uri);
-
-            const directObject = findTopLevelMacro(
-                module.object,
-                macroName,
-                false
-            );
-
-            if (directObject) {
-                return {
-                    module,
-                    object: directObject
-                };
-            }
-
-            const nested = await this.findMacroInImports(
-                module.document.getText(),
-                macroName,
-                visited
-            );
-
-            if (nested) {
-                return nested;
-            }
-        }
-
-        return undefined;
-    }
-
     private async getModuleByName(
         moduleName: string
     ): Promise<IDefinitionModule | undefined> {
@@ -369,6 +340,16 @@ export class RslDefinitionProvider {
     private async findWorkspaceFile(
         moduleName: string
     ): Promise<string | undefined> {
+        const indexedUri = this.environment.findWorkspaceFileUri(moduleName);
+
+        if (indexedUri) {
+            const indexedPath = uriToFilePath(indexedUri);
+
+            if (indexedPath && await isFile(indexedPath)) {
+                return indexedPath;
+            }
+        }
+
         const target = normalizeModuleName(moduleName);
         const cached = this.workspaceFileCache.get(target);
 

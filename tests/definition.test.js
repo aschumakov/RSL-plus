@@ -75,6 +75,23 @@ test("ExecMacro2 поддерживает вложенные выражения 
     );
 });
 
+
+test("Вложенный ExecMacro2 определяется отдельно", () => {
+    const source =
+        'ExecMacro2 ("Outer", ExecMacro2 ("Inner", value));';
+
+    assert.deepStrictEqual(
+        GetDynamicDefinitionTarget(
+            source,
+            inside(source, "Inner")
+        ),
+        {
+            kind: "macro",
+            macroName: "Inner"
+        }
+    );
+});
+
 test("Переменная в первом параметре не перехватывается", () => {
     const source = "ExecMacro (macroName, acc);";
 

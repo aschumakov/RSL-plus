@@ -3,6 +3,12 @@ import {
     END_KEYWORD
 } from "./languageMetadata";
 
+import {
+    IRslToken,
+    isFullLineComment,
+    lexRsl
+} from "./lexer";
+
 export interface IRslFoldingRange {
     startLine: number;
     endLine: number;
@@ -12,17 +18,7 @@ export interface IRslFoldingRange {
 interface IOpenBlock {
     keyword: string;
     startLine: number;
-
-    /*
-     * Для If хранит строку заголовка текущей ветки:
-     * If, Elif или Else.
-     */
     branchStartLine?: number;
-}
-
-interface IScannerPosition {
-    index: number;
-    line: number;
 }
 
 const DECLARATION_MODIFIERS: { [name: string]: boolean } = {
@@ -31,89 +27,48 @@ const DECLARATION_MODIFIERS: { [name: string]: boolean } = {
     public: true
 };
 
-const IF_KEYWORD = "if";
-const ELIF_KEYWORD = "elif";
-const ELSE_KEYWORD = "else";
-
 const BLOCK_START_LOOKUP: { [name: string]: boolean } =
     BLOCK_START_KEYWORDS.reduce(
         (result, keyword) => {
-            result[keyword] = true;
+            result[keyword.toLowerCase()] = true;
             return result;
         },
         Object.create(null)
     );
 
+const IF_KEYWORD = "if";
+const ELIF_KEYWORD = "elif";
+const ELSE_KEYWORD = "else";
+
 /**
- * Строит диапазоны сворачивания по синтаксическим блокам RSL.
- *
- * Отступы не учитываются. Ключевые слова внутри строк,
- * комментариев и квадратных текстовых/SQL-блоков игнорируются.
- *
- * Ветви If сворачиваются независимо:
- *
- * If condition
- *     ...
- * Elif otherCondition
- *     ...
- * Else
- *     ...
- * End;
- *
- * Для такого блока создаются отдельные диапазоны для If,
- * каждого Elif и Else. Закрывающий End остаётся видимым.
+ * Строит folding ranges на общем RSL token stream.
  */
-export function GetFoldingRanges(
-    source: string
-): IRslFoldingRange[] {
+export function GetFoldingRanges(source: string): IRslFoldingRange[] {
     const ranges: IRslFoldingRange[] = [];
     const blocks: IOpenBlock[] = [];
-    const lineCommentLines: number[] = [];
-
-    const position: IScannerPosition = {
-        index: 0,
-        line: 0
-    };
-
+    const fullLineComments: number[] = [];
+    const lex = lexRsl(source || "");
     let canStartBlock = true;
 
-    while (position.index < source.length) {
-        const current = source.charAt(position.index);
-
-        if (current === "\r") {
-            position.index++;
-            continue;
-        }
-
-        if (current === "\n") {
-            position.index++;
-            position.line++;
+    for (const token of lex.tokens) {
+        if (token.kind === "newline") {
             canStartBlock = true;
             continue;
         }
 
-        if (current === " " || current === "\t") {
-            position.index++;
+        if (token.kind === "whitespace" || token.kind === "bom") {
             continue;
         }
 
-        if (startsWithAt(source, "//", position.index)) {
-            if (canStartBlock) {
-                lineCommentLines.push(position.line);
-            }
-
-            skipToLineEnd(source, position);
-            continue;
-        }
-
-        if (startsWithAt(source, "/*", position.index)) {
-            const startLine = position.line;
-            skipBlockComment(source, position);
-
-            if (position.line > startLine) {
+        if (token.kind === "comment") {
+            if (token.raw.startsWith("//")) {
+                if (isFullLineComment(source, token)) {
+                    fullLineComments.push(token.line);
+                }
+            } else if (token.endLine > token.line) {
                 ranges.push({
-                    startLine,
-                    endLine: position.line,
+                    startLine: token.line,
+                    endLine: token.endLine,
                     kind: "comment"
                 });
             }
@@ -121,115 +76,75 @@ export function GetFoldingRanges(
             continue;
         }
 
-        if (current === "\"" || current === "'") {
-            canStartBlock = false;
-            skipRslString(source, position, current);
-            continue;
-        }
-
-        if (current === "[") {
-            const startLine = position.line;
-            canStartBlock = false;
-            skipSquareBlock(source, position);
-
-            if (position.line > startLine) {
+        if (token.kind === "square") {
+            if (token.endLine > token.line) {
                 ranges.push({
-                    startLine,
-                    endLine: position.line
+                    startLine: token.line,
+                    endLine: token.endLine
                 });
             }
 
+            canStartBlock = false;
             continue;
         }
 
-        if (isIdentifierStart(current)) {
-            const word = readIdentifier(source, position)
-                .toLowerCase();
-
-            /*
-             * End завершает текущий блок независимо от позиции
-             * в строке. Это необходимо для однострочных конструкций:
-             *
-             * if (condition) return 1; end;
-             */
-            if (word === END_KEYWORD) {
-                closeCurrentBlock(
-                    blocks,
-                    ranges,
-                    position.line
-                );
-
-                canStartBlock = false;
-                continue;
-            }
-
-            /*
-             * Elif и Else переключают только текущую ветку
-             * верхнего незакрытого If. Вложенные If к этому моменту
-             * уже должны быть закрыты собственным End.
-             */
-            if (
-                canStartBlock &&
-                (
-                    word === ELIF_KEYWORD ||
-                    word === ELSE_KEYWORD
-                )
-            ) {
-                switchIfBranch(
-                    blocks,
-                    ranges,
-                    position.line
-                );
-
-                canStartBlock = false;
-                continue;
-            }
-
-            /*
-             * Начало нового блока распознаём только в допустимой
-             * позиции строки. Иначе обычные вызовы и идентификаторы
-             * внутри выражения могли бы повлиять на структуру.
-             */
-            if (!canStartBlock) {
-                continue;
-            }
-
-            if (DECLARATION_MODIFIERS[word]) {
-                continue;
-            }
-
+        if (token.kind === "string") {
             canStartBlock = false;
+            continue;
+        }
 
-            if (BLOCK_START_LOOKUP[word]) {
-                const block: IOpenBlock = {
-                    keyword: word,
-                    startLine: position.line
-                };
+        if (token.kind !== "identifier") {
+            canStartBlock = false;
+            continue;
+        }
 
-                if (word === IF_KEYWORD) {
-                    block.branchStartLine = position.line;
-                }
+        const word = token.value.toLowerCase();
 
-                blocks.push(block);
-            }
+        /* End распознаётся и в однострочном if ... end. */
+        if (word === END_KEYWORD.toLowerCase()) {
+            closeCurrentBlock(blocks, ranges, token.line);
+            canStartBlock = false;
+            continue;
+        }
 
+        if (
+            canStartBlock &&
+            (word === ELIF_KEYWORD || word === ELSE_KEYWORD)
+        ) {
+            switchIfBranch(blocks, ranges, token.line);
+            canStartBlock = false;
+            continue;
+        }
+
+        if (!canStartBlock) {
+            continue;
+        }
+
+        if (DECLARATION_MODIFIERS[word]) {
             continue;
         }
 
         canStartBlock = false;
-        position.index++;
+
+        if (!BLOCK_START_LOOKUP[word]) {
+            continue;
+        }
+
+        const block: IOpenBlock = {
+            keyword: word,
+            startLine: token.line
+        };
+
+        if (word === IF_KEYWORD) {
+            block.branchStartLine = token.line;
+        }
+
+        blocks.push(block);
     }
 
-    addLineCommentRanges(
-        lineCommentLines,
-        ranges
-    );
+    addLineCommentRanges(fullLineComments, ranges);
 
-    /*
-     * Незакрытые блоки намеренно не сворачиваем до конца файла.
-     * Иначе одна ошибочно распознанная или незавершённая конструкция
-     * внутри класса превращает диапазон класса в Class -> EOF.
-     */
+    /* Незакрытые блоки не растягиваем до EOF. */
     ranges.sort((left, right) => {
         if (left.startLine !== right.startLine) {
             return left.startLine - right.startLine;
@@ -241,9 +156,6 @@ export function GetFoldingRanges(
     return ranges;
 }
 
-/**
- * Завершает предыдущую ветку If и начинает Elif/Else.
- */
 function switchIfBranch(
     blocks: IOpenBlock[],
     ranges: IRslFoldingRange[],
@@ -254,19 +166,14 @@ function switchIfBranch(
         : undefined;
 
     if (
-        block === undefined ||
+        !block ||
         block.keyword !== IF_KEYWORD ||
         block.branchStartLine === undefined
     ) {
         return;
     }
 
-    addIfBranchRange(
-        ranges,
-        block.branchStartLine,
-        branchLine
-    );
-
+    addIfBranchRange(ranges, block.branchStartLine, branchLine);
     block.branchStartLine = branchLine;
 }
 
@@ -277,25 +184,15 @@ function closeCurrentBlock(
 ): void {
     const block = blocks.pop();
 
-    if (block === undefined) {
+    if (!block) {
         return;
     }
 
-    /*
-     * Для If закрываем только последнюю активную ветку.
-     * Полный диапазон If не добавляется, потому что он начинался бы
-     * на той же строке, что и основная ветка. VS Code отбрасывает
-     * второй folding range с той же стартовой строкой.
-     */
     if (
         block.keyword === IF_KEYWORD &&
         block.branchStartLine !== undefined
     ) {
-        addIfBranchRange(
-            ranges,
-            block.branchStartLine,
-            endLine
-        );
+        addIfBranchRange(ranges, block.branchStartLine, endLine);
         return;
     }
 
@@ -309,24 +206,20 @@ function closeCurrentBlock(
     });
 }
 
-/**
- * Добавляет диапазон от заголовка ветки до строки перед
- * Elif, Else или End.
- */
 function addIfBranchRange(
     ranges: IRslFoldingRange[],
     branchStartLine: number,
     boundaryLine: number
 ): void {
-    const branchEndLine = boundaryLine - 1;
+    const endLine = boundaryLine - 1;
 
-    if (branchEndLine <= branchStartLine) {
+    if (endLine <= branchStartLine) {
         return;
     }
 
     ranges.push({
         startLine: branchStartLine,
-        endLine: branchEndLine
+        endLine
     });
 }
 
@@ -338,32 +231,25 @@ function addLineCommentRanges(
         return;
     }
 
-    let startLine = lines[0];
-    let previousLine = lines[0];
+    const unique = Array.from(new Set<number>(lines))
+        .sort((left, right) => left - right);
+    let start = unique[0];
+    let previous = unique[0];
 
-    for (let index = 1; index < lines.length; index++) {
-        const currentLine = lines[index];
+    for (let index = 1; index < unique.length; index++) {
+        const current = unique[index];
 
-        if (currentLine === previousLine + 1) {
-            previousLine = currentLine;
+        if (current === previous + 1) {
+            previous = current;
             continue;
         }
 
-        addLineCommentRange(
-            startLine,
-            previousLine,
-            ranges
-        );
-
-        startLine = currentLine;
-        previousLine = currentLine;
+        addLineCommentRange(start, previous, ranges);
+        start = current;
+        previous = current;
     }
 
-    addLineCommentRange(
-        startLine,
-        previousLine,
-        ranges
-    );
+    addLineCommentRange(start, previous, ranges);
 }
 
 function addLineCommentRange(
@@ -380,206 +266,4 @@ function addLineCommentRange(
         endLine,
         kind: "comment"
     });
-}
-
-function readIdentifier(
-    source: string,
-    position: IScannerPosition
-): string {
-    const start = position.index;
-
-    while (
-        position.index < source.length &&
-        isIdentifierPart(
-            source.charAt(position.index)
-        )
-    ) {
-        position.index++;
-    }
-
-    return source.substring(start, position.index);
-}
-
-function isIdentifierStart(value: string): boolean {
-    return /[A-Za-zА-Яа-яЁё_]/.test(value);
-}
-
-function isIdentifierPart(value: string): boolean {
-    return /[A-Za-zА-Яа-яЁё0-9_]/.test(value);
-}
-
-function skipRslString(
-    source: string,
-    position: IScannerPosition,
-    quote: string
-): void {
-    position.index++;
-
-    while (position.index < source.length) {
-        const current = source.charAt(position.index);
-
-        if (current === "\n") {
-            position.line++;
-            position.index++;
-            continue;
-        }
-
-        if (
-            current === quote &&
-            !isEscapedByBackslashes(
-                source,
-                position.index
-            )
-        ) {
-            position.index++;
-            return;
-        }
-
-        position.index++;
-    }
-}
-
-function skipSqlString(
-    source: string,
-    position: IScannerPosition,
-    quote: string
-): void {
-    position.index++;
-
-    while (position.index < source.length) {
-        const current = source.charAt(position.index);
-
-        if (current === "\n") {
-            position.line++;
-            position.index++;
-            continue;
-        }
-
-        if (current !== quote) {
-            position.index++;
-            continue;
-        }
-
-        if (
-            source.charAt(position.index + 1) === quote
-        ) {
-            position.index += 2;
-            continue;
-        }
-
-        position.index++;
-        return;
-    }
-}
-
-function skipSquareBlock(
-    source: string,
-    position: IScannerPosition
-): void {
-    let depth = 1;
-    position.index++;
-
-    while (
-        position.index < source.length &&
-        depth > 0
-    ) {
-        const current = source.charAt(position.index);
-
-        if (current === "\n") {
-            position.line++;
-            position.index++;
-            continue;
-        }
-
-        if (
-            startsWithAt(source, "--", position.index) ||
-            startsWithAt(source, "//", position.index)
-        ) {
-            skipToLineEnd(source, position);
-            continue;
-        }
-
-        if (startsWithAt(source, "/*", position.index)) {
-            skipBlockComment(source, position);
-            continue;
-        }
-
-        if (current === "\"" || current === "'") {
-            skipSqlString(source, position, current);
-            continue;
-        }
-
-        if (current === "[") {
-            depth++;
-            position.index++;
-            continue;
-        }
-
-        if (current === "]") {
-            depth--;
-            position.index++;
-            continue;
-        }
-
-        position.index++;
-    }
-}
-
-function skipBlockComment(
-    source: string,
-    position: IScannerPosition
-): void {
-    position.index += 2;
-
-    while (position.index < source.length) {
-        if (startsWithAt(source, "*/", position.index)) {
-            position.index += 2;
-            return;
-        }
-
-        if (source.charAt(position.index) === "\n") {
-            position.line++;
-        }
-
-        position.index++;
-    }
-}
-
-function skipToLineEnd(
-    source: string,
-    position: IScannerPosition
-): void {
-    while (
-        position.index < source.length &&
-        source.charAt(position.index) !== "\r" &&
-        source.charAt(position.index) !== "\n"
-    ) {
-        position.index++;
-    }
-}
-
-function startsWithAt(
-    source: string,
-    value: string,
-    index: number
-): boolean {
-    return source.substr(index, value.length) === value;
-}
-
-function isEscapedByBackslashes(
-    source: string,
-    index: number
-): boolean {
-    let backslashCount = 0;
-    let current = index - 1;
-
-    while (
-        current >= 0 &&
-        source.charAt(current) === "\\"
-    ) {
-        backslashCount++;
-        current--;
-    }
-
-    return backslashCount % 2 === 1;
 }

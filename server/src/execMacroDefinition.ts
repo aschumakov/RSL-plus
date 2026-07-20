@@ -1,7 +1,13 @@
+import {
+    IRslToken,
+    lexRsl,
+    significantTokens
+} from "./lexer";
+
 export type DynamicDefinitionKind =
-    "macro" |
-    "fileMacro" |
-    "file";
+    | "macro"
+    | "fileMacro"
+    | "file";
 
 export interface IDynamicDefinitionTarget {
     kind: DynamicDefinitionKind;
@@ -9,22 +15,16 @@ export interface IDynamicDefinitionTarget {
     moduleName?: string;
 }
 
-interface IToken {
-    kind: "identifier" | "string" | "symbol";
-    raw: string;
-    value: string;
-    start: number;
-    end: number;
-}
-
 interface ICallArgument {
-    tokens: IToken[];
-    stringToken?: IToken;
+    tokens: IRslToken[];
+    stringToken?: IRslToken;
 }
 
-interface ICallInfo {
+interface IParsedCall {
     name: string;
     arguments: ICallArgument[];
+    openIndex: number;
+    closeIndex: number;
 }
 
 const DYNAMIC_CALLS: { [name: string]: boolean } = {
@@ -36,16 +36,21 @@ const DYNAMIC_CALLS: { [name: string]: boolean } = {
 /**
  * Определяет цель перехода для строковых параметров ExecMacro,
  * ExecMacro2 и ExecMacroFile.
- *
- * Если параметр задан переменной или выражением, специальный переход
- * не создаётся: language server продолжает обычный поиск определения.
  */
 export function GetDynamicDefinitionTarget(
     source: string,
     offset: number
 ): IDynamicDefinitionTarget | undefined {
-    const tokens = tokenize(source || "");
+    const tokens = significantTokens(lexRsl(source || "").tokens);
     const calls = findDynamicCalls(tokens);
+
+    /*
+     * Для вложенных вызовов сначала проверяем самый узкий диапазон.
+     */
+    calls.sort((left, right) =>
+        (left.closeIndex - left.openIndex) -
+        (right.closeIndex - right.openIndex)
+    );
 
     for (const call of calls) {
         const selectedArgument = findSelectedStringArgument(
@@ -65,55 +70,39 @@ export function GetDynamicDefinitionTarget(
                 continue;
             }
 
-            const macroName = getStringArgument(
-                call.arguments,
-                0
-            );
+            const macroName = getStringArgument(call.arguments, 0);
 
-            if (macroName.length === 0) {
-                return undefined;
-            }
-
-            return {
-                kind: "macro",
-                macroName
-            };
+            return macroName
+                ? {
+                    kind: "macro",
+                    macroName
+                }
+                : undefined;
         }
 
         if (call.name === "execmacrofile") {
-            if (
-                selectedArgument !== 0 &&
-                selectedArgument !== 1
-            ) {
+            if (selectedArgument !== 0 && selectedArgument !== 1) {
                 continue;
             }
 
-            const moduleName = getStringArgument(
-                call.arguments,
-                0
-            );
+            const moduleName = getStringArgument(call.arguments, 0);
 
-            if (moduleName.length === 0) {
+            if (!moduleName) {
                 return undefined;
             }
 
-            const macroName = getStringArgument(
-                call.arguments,
-                1
-            );
+            const macroName = getStringArgument(call.arguments, 1);
 
-            if (macroName.length === 0) {
-                return {
+            return macroName
+                ? {
+                    kind: "fileMacro",
+                    moduleName,
+                    macroName
+                }
+                : {
                     kind: "file",
                     moduleName
                 };
-            }
-
-            return {
-                kind: "fileMacro",
-                moduleName,
-                macroName
-            };
         }
     }
 
@@ -121,13 +110,19 @@ export function GetDynamicDefinitionTarget(
 }
 
 /**
- * Возвращает имена файлов, перечисленные в директивах Import.
- * Комментарии, строки вне Import и квадратные SQL-блоки игнорируются.
+ * Возвращает имена файлов из директив Import.
  */
 export function GetImportedMacroFiles(source: string): string[] {
-    const tokens = tokenize(source || "");
+    const tokens = lexRsl(source || "").tokens.filter(token =>
+        token.kind !== "whitespace" &&
+        token.kind !== "newline" &&
+        token.kind !== "comment" &&
+        token.kind !== "square" &&
+        token.kind !== "bom"
+    );
+
     const result: string[] = [];
-    const seen: { [name: string]: boolean } = Object.create(null);
+    const seen = new Set<string>();
 
     for (let index = 0; index < tokens.length; index++) {
         const token = tokens[index];
@@ -139,28 +134,27 @@ export function GetImportedMacroFiles(source: string): string[] {
             continue;
         }
 
-        let segmentStart = token.end;
+        let current: IRslToken[] = [];
 
         for (let cursor = index + 1; cursor < tokens.length; cursor++) {
-            const current = tokens[cursor];
+            const part = tokens[cursor];
 
             if (
-                current.kind === "symbol" &&
-                (current.raw === "," || current.raw === ";")
+                part.kind === "symbol" &&
+                (part.raw === "," || part.raw === ";")
             ) {
-                addImportName(
-                    source.substring(segmentStart, current.start),
-                    result,
-                    seen
-                );
+                addImportName(current, result, seen);
+                current = [];
 
-                segmentStart = current.end;
-
-                if (current.raw === ";") {
+                if (part.raw === ";") {
                     index = cursor;
                     break;
                 }
+
+                continue;
             }
+
+            current.push(part);
         }
     }
 
@@ -168,25 +162,23 @@ export function GetImportedMacroFiles(source: string): string[] {
 }
 
 function addImportName(
-    rawValue: string,
+    tokens: IRslToken[],
     result: string[],
-    seen: { [name: string]: boolean }
+    seen: Set<string>
 ): void {
-    let value = rawValue.trim();
-
-    if (value.length >= 2) {
-        const first = value.charAt(0);
-        const last = value.charAt(value.length - 1);
-
-        if (
-            (first === "\"" && last === "\"") ||
-            (first === "'" && last === "'")
-        ) {
-            value = decodeString(value);
-        }
+    if (tokens.length === 0) {
+        return;
     }
 
-    if (value.length === 0) {
+    let value: string;
+
+    if (tokens.length === 1 && tokens[0].kind === "string") {
+        value = tokens[0].value.trim();
+    } else {
+        value = tokens.map(token => token.raw).join("").trim();
+    }
+
+    if (!value) {
         return;
     }
 
@@ -194,54 +186,18 @@ function addImportName(
         value += ".mac";
     }
 
-    const normalized = value
-        .replace(/\\/g, "/")
-        .toLowerCase();
+    const normalized = value.replace(/\\/g, "/").toLowerCase();
 
-    if (seen[normalized]) {
+    if (seen.has(normalized)) {
         return;
     }
 
-    seen[normalized] = true;
+    seen.add(normalized);
     result.push(value);
 }
 
-function findSelectedStringArgument(
-    args: ICallArgument[],
-    offset: number
-): number {
-    for (let index = 0; index < args.length; index++) {
-        const stringToken = args[index].stringToken;
-
-        if (
-            stringToken !== undefined &&
-            stringToken.start <= offset &&
-            offset <= stringToken.end
-        ) {
-            return index;
-        }
-    }
-
-    return -1;
-}
-
-function getStringArgument(
-    args: ICallArgument[],
-    index: number
-): string {
-    if (
-        index < 0 ||
-        index >= args.length ||
-        args[index].stringToken === undefined
-    ) {
-        return "";
-    }
-
-    return args[index].stringToken!.value.trim();
-}
-
-function findDynamicCalls(tokens: IToken[]): ICallInfo[] {
-    const result: ICallInfo[] = [];
+function findDynamicCalls(tokens: IRslToken[]): IParsedCall[] {
+    const result: IParsedCall[] = [];
 
     for (let index = 0; index < tokens.length - 1; index++) {
         const nameToken = tokens[index];
@@ -263,64 +219,79 @@ function findDynamicCalls(tokens: IToken[]): ICallInfo[] {
 
         const parsed = parseCallArguments(tokens, index + 1);
 
-        if (parsed === undefined) {
+        if (!parsed) {
             continue;
         }
 
         result.push({
             name,
-            arguments: parsed.arguments
+            arguments: parsed.arguments,
+            openIndex: openToken.start,
+            closeIndex: tokens[parsed.closeIndex].end
         });
-
-        index = parsed.closeIndex;
     }
 
     return result;
 }
 
 function parseCallArguments(
-    tokens: IToken[],
+    tokens: IRslToken[],
     openIndex: number
 ): { arguments: ICallArgument[]; closeIndex: number } | undefined {
     const result: ICallArgument[] = [];
-    let current: IToken[] = [];
-    let depth = 1;
+    let current: IRslToken[] = [];
+    let parenthesisDepth = 1;
+    let braceDepth = 0;
 
     for (let index = openIndex + 1; index < tokens.length; index++) {
         const token = tokens[index];
 
-        if (token.kind === "symbol" && token.raw === "(") {
-            depth++;
-            current.push(token);
-            continue;
-        }
-
-        if (token.kind === "symbol" && token.raw === ")") {
-            depth--;
-
-            if (depth === 0) {
-                if (current.length > 0 || result.length > 0) {
-                    result.push(createArgument(current));
-                }
-
-                return {
-                    arguments: result,
-                    closeIndex: index
-                };
+        if (token.kind === "symbol") {
+            if (token.raw === "(") {
+                parenthesisDepth++;
+                current.push(token);
+                continue;
             }
 
-            current.push(token);
-            continue;
-        }
+            if (token.raw === ")") {
+                parenthesisDepth--;
 
-        if (
-            token.kind === "symbol" &&
-            token.raw === "," &&
-            depth === 1
-        ) {
-            result.push(createArgument(current));
-            current = [];
-            continue;
+                if (parenthesisDepth === 0) {
+                    if (current.length > 0 || result.length > 0) {
+                        result.push(createArgument(current));
+                    }
+
+                    return {
+                        arguments: result,
+                        closeIndex: index
+                    };
+                }
+
+                current.push(token);
+                continue;
+            }
+
+            if (token.raw === "{") {
+                braceDepth++;
+                current.push(token);
+                continue;
+            }
+
+            if (token.raw === "}" && braceDepth > 0) {
+                braceDepth--;
+                current.push(token);
+                continue;
+            }
+
+            if (
+                token.raw === "," &&
+                parenthesisDepth === 1 &&
+                braceDepth === 0
+            ) {
+                result.push(createArgument(current));
+                current = [];
+                continue;
+            }
         }
 
         current.push(token);
@@ -329,251 +300,46 @@ function parseCallArguments(
     return undefined;
 }
 
-function createArgument(tokens: IToken[]): ICallArgument {
-    const meaningful = tokens.filter(token =>
-        token.kind !== "symbol" ||
-        token.raw.trim().length > 0
-    );
-
+function createArgument(tokens: IRslToken[]): ICallArgument {
     return {
         tokens,
         stringToken:
-            meaningful.length === 1 &&
-            meaningful[0].kind === "string"
-                ? meaningful[0]
+            tokens.length === 1 && tokens[0].kind === "string"
+                ? tokens[0]
                 : undefined
     };
 }
 
-function tokenize(source: string): IToken[] {
-    const result: IToken[] = [];
-    let index = 0;
-
-    while (index < source.length) {
-        const current = source.charAt(index);
-
-        if (/\s/.test(current)) {
-            index++;
-            continue;
-        }
-
-        if (startsWithAt(source, "//", index)) {
-            index = skipToLineEnd(source, index + 2);
-            continue;
-        }
-
-        if (startsWithAt(source, "/*", index)) {
-            index = skipBlockComment(source, index + 2);
-            continue;
-        }
-
-        if (current === "[") {
-            index = skipSquareBlock(source, index);
-            continue;
-        }
-
-        if (current === "\"" || current === "'") {
-            const start = index;
-            index = skipQuotedString(source, index, current, true);
-            const raw = source.substring(start, index);
-
-            result.push({
-                kind: "string",
-                raw,
-                value: decodeString(raw),
-                start,
-                end: index
-            });
-
-            continue;
-        }
-
-        if (isIdentifierStart(current)) {
-            const start = index;
-            index++;
-
-            while (
-                index < source.length &&
-                isIdentifierPart(source.charAt(index))
-            ) {
-                index++;
-            }
-
-            const raw = source.substring(start, index);
-
-            result.push({
-                kind: "identifier",
-                raw,
-                value: raw,
-                start,
-                end: index
-            });
-
-            continue;
-        }
-
-        result.push({
-            kind: "symbol",
-            raw: current,
-            value: current,
-            start: index,
-            end: index + 1
-        });
-
-        index++;
-    }
-
-    return result;
-}
-
-function decodeString(raw: string): string {
-    if (raw.length < 2) {
-        return raw;
-    }
-
-    const quote = raw.charAt(0);
-    const end = raw.charAt(raw.length - 1) === quote
-        ? raw.length - 1
-        : raw.length;
-
-    let result = "";
-
-    for (let index = 1; index < end; index++) {
-        const current = raw.charAt(index);
-
-        if (current === "\\" && index + 1 < end) {
-            result += raw.charAt(index + 1);
-            index++;
-            continue;
-        }
-
-        result += current;
-    }
-
-    return result;
-}
-
-function skipSquareBlock(source: string, start: number): number {
-    let index = start + 1;
-    let depth = 1;
-
-    while (index < source.length && depth > 0) {
-        if (startsWithAt(source, "--", index)) {
-            index = skipToLineEnd(source, index + 2);
-            continue;
-        }
-
-        if (startsWithAt(source, "//", index)) {
-            index = skipToLineEnd(source, index + 2);
-            continue;
-        }
-
-        if (startsWithAt(source, "/*", index)) {
-            index = skipBlockComment(source, index + 2);
-            continue;
-        }
-
-        const current = source.charAt(index);
-
-        if (current === "\"" || current === "'") {
-            index = skipQuotedString(source, index, current, false);
-            continue;
-        }
-
-        if (current === "[") {
-            depth++;
-        } else if (current === "]") {
-            depth--;
-        }
-
-        index++;
-    }
-
-    return index;
-}
-
-function skipQuotedString(
-    source: string,
-    start: number,
-    quote: string,
-    backslashEscapes: boolean
+function findSelectedStringArgument(
+    argumentsList: ICallArgument[],
+    offset: number
 ): number {
-    let index = start + 1;
-
-    while (index < source.length) {
-        if (source.charAt(index) !== quote) {
-            index++;
-            continue;
-        }
+    for (let index = 0; index < argumentsList.length; index++) {
+        const token = argumentsList[index].stringToken;
 
         if (
-            backslashEscapes &&
-            isEscapedByBackslashes(source, index)
+            token &&
+            token.start <= offset &&
+            offset <= token.end
         ) {
-            index++;
-            continue;
+            return index;
         }
-
-        if (
-            !backslashEscapes &&
-            source.charAt(index + 1) === quote
-        ) {
-            index += 2;
-            continue;
-        }
-
-        return index + 1;
     }
 
-    return index;
+    return -1;
 }
 
-function isEscapedByBackslashes(
-    source: string,
-    position: number
-): boolean {
-    let count = 0;
-    let index = position - 1;
-
-    while (index >= 0 && source.charAt(index) === "\\") {
-        count++;
-        index--;
-    }
-
-    return count % 2 === 1;
-}
-
-function skipBlockComment(source: string, start: number): number {
-    const close = source.indexOf("*/", start);
-    return close < 0 ? source.length : close + 2;
-}
-
-function skipToLineEnd(source: string, start: number): number {
-    let index = start;
-
-    while (
-        index < source.length &&
-        source.charAt(index) !== "\r" &&
-        source.charAt(index) !== "\n"
+function getStringArgument(
+    argumentsList: ICallArgument[],
+    index: number
+): string {
+    if (
+        index < 0 ||
+        index >= argumentsList.length ||
+        !argumentsList[index].stringToken
     ) {
-        index++;
+        return "";
     }
 
-    return index;
-}
-
-function startsWithAt(
-    source: string,
-    value: string,
-    position: number
-): boolean {
-    return source.substr(position, value.length) === value;
-}
-
-function isIdentifierStart(value: string): boolean {
-    return /^[@A-Za-zА-Яа-яЁё_]$/.test(value);
-}
-
-function isIdentifierPart(value: string): boolean {
-    return /^[@A-Za-zА-Яа-яЁё0-9_]$/.test(value);
+    return argumentsList[index].stringToken!.value.trim();
 }
