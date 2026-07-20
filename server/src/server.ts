@@ -29,6 +29,7 @@ import { getDefaults, getCIInfoForArray } from './defaults';
 import { CBase } from './common';
 import { getSymbols } from './docsymbols';
 import { FormatCode } from './format';
+import { GetFoldingRanges } from './folding';
 
 const connection = createConnection(ProposedFeatures.all);
 const documents: TextDocuments<TextDocument> =
@@ -408,7 +409,8 @@ connection.onInitialize((params: InitializeParams) => {
             hoverProvider: true,
             definitionProvider: true,
             documentSymbolProvider: true,
-            documentFormattingProvider: true
+            documentFormattingProvider: true,
+            foldingRangeProvider: true
         }
     };
 });
@@ -912,6 +914,16 @@ connection.onDocumentSymbol(
         );
     }
 );
+
+connection.onFoldingRanges(({ textDocument }) => {
+    const document = getCurDoc(textDocument.uri);
+
+    if (!document) {
+        return [];
+    }
+
+    return GetFoldingRanges(document.getText());
+});
 
 connection.onDocumentFormatting(formatParams => {
     const uri = formatParams.textDocument.uri;
