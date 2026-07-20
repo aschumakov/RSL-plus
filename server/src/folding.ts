@@ -12,6 +12,12 @@ export interface IRslFoldingRange {
 interface IOpenBlock {
     keyword: string;
     startLine: number;
+
+    /*
+     * Для If хранит строку заголовка текущей ветки:
+     * If, Elif или Else.
+     */
+    branchStartLine?: number;
 }
 
 interface IScannerPosition {
@@ -24,6 +30,10 @@ const DECLARATION_MODIFIERS: { [name: string]: boolean } = {
     local: true,
     public: true
 };
+
+const IF_KEYWORD = "if";
+const ELIF_KEYWORD = "elif";
+const ELSE_KEYWORD = "else";
 
 const BLOCK_START_LOOKUP: { [name: string]: boolean } =
     BLOCK_START_KEYWORDS.reduce(
@@ -39,6 +49,19 @@ const BLOCK_START_LOOKUP: { [name: string]: boolean } =
  *
  * Отступы не учитываются. Ключевые слова внутри строк,
  * комментариев и квадратных текстовых/SQL-блоков игнорируются.
+ *
+ * Ветви If сворачиваются независимо:
+ *
+ * If condition
+ *     ...
+ * Elif otherCondition
+ *     ...
+ * Else
+ *     ...
+ * End;
+ *
+ * Для такого блока создаются отдельные диапазоны для If,
+ * каждого Elif и Else. Закрывающий End остаётся видимым.
  */
 export function GetFoldingRanges(
     source: string
@@ -119,51 +142,79 @@ export function GetFoldingRanges(
             continue;
         }
 
-    if (isIdentifierStart(current)) {
-        const word = readIdentifier(source, position)
-            .toLowerCase();
+        if (isIdentifierStart(current)) {
+            const word = readIdentifier(source, position)
+                .toLowerCase();
 
-        /*
-        * End завершает текущий блок независимо от позиции
-        * в строке. Это необходимо для однострочных конструкций:
-        *
-        * if (condition) return 1; end;
-        */
-        if (word === END_KEYWORD) {
-            closeCurrentBlock(
-                blocks,
-                ranges,
-                position.line
-            );
+            /*
+             * End завершает текущий блок независимо от позиции
+             * в строке. Это необходимо для однострочных конструкций:
+             *
+             * if (condition) return 1; end;
+             */
+            if (word === END_KEYWORD) {
+                closeCurrentBlock(
+                    blocks,
+                    ranges,
+                    position.line
+                );
+
+                canStartBlock = false;
+                continue;
+            }
+
+            /*
+             * Elif и Else переключают только текущую ветку
+             * верхнего незакрытого If. Вложенные If к этому моменту
+             * уже должны быть закрыты собственным End.
+             */
+            if (
+                canStartBlock &&
+                (
+                    word === ELIF_KEYWORD ||
+                    word === ELSE_KEYWORD
+                )
+            ) {
+                switchIfBranch(
+                    blocks,
+                    ranges,
+                    position.line
+                );
+
+                canStartBlock = false;
+                continue;
+            }
+
+            /*
+             * Начало нового блока распознаём только в допустимой
+             * позиции строки. Иначе обычные вызовы и идентификаторы
+             * внутри выражения могли бы повлиять на структуру.
+             */
+            if (!canStartBlock) {
+                continue;
+            }
+
+            if (DECLARATION_MODIFIERS[word]) {
+                continue;
+            }
 
             canStartBlock = false;
+
+            if (BLOCK_START_LOOKUP[word]) {
+                const block: IOpenBlock = {
+                    keyword: word,
+                    startLine: position.line
+                };
+
+                if (word === IF_KEYWORD) {
+                    block.branchStartLine = position.line;
+                }
+
+                blocks.push(block);
+            }
+
             continue;
         }
-
-        /*
-        * Начало нового блока распознаём только в допустимой
-        * позиции строки. Иначе, например, имя функции
-        * ifThenElse могло бы повлиять на структуру.
-        */
-        if (!canStartBlock) {
-            continue;
-        }
-
-        if (DECLARATION_MODIFIERS[word]) {
-            continue;
-        }
-
-        canStartBlock = false;
-
-        if (BLOCK_START_LOOKUP[word]) {
-            blocks.push({
-                keyword: word,
-                startLine: position.line
-            });
-        }
-
-        continue;
-    }
 
         canStartBlock = false;
         position.index++;
@@ -179,7 +230,6 @@ export function GetFoldingRanges(
      * Иначе одна ошибочно распознанная или незавершённая конструкция
      * внутри класса превращает диапазон класса в Class -> EOF.
      */
-
     ranges.sort((left, right) => {
         if (left.startLine !== right.startLine) {
             return left.startLine - right.startLine;
@@ -191,6 +241,35 @@ export function GetFoldingRanges(
     return ranges;
 }
 
+/**
+ * Завершает предыдущую ветку If и начинает Elif/Else.
+ */
+function switchIfBranch(
+    blocks: IOpenBlock[],
+    ranges: IRslFoldingRange[],
+    branchLine: number
+): void {
+    const block = blocks.length > 0
+        ? blocks[blocks.length - 1]
+        : undefined;
+
+    if (
+        block === undefined ||
+        block.keyword !== IF_KEYWORD ||
+        block.branchStartLine === undefined
+    ) {
+        return;
+    }
+
+    addIfBranchRange(
+        ranges,
+        block.branchStartLine,
+        branchLine
+    );
+
+    block.branchStartLine = branchLine;
+}
+
 function closeCurrentBlock(
     blocks: IOpenBlock[],
     ranges: IRslFoldingRange[],
@@ -198,16 +277,56 @@ function closeCurrentBlock(
 ): void {
     const block = blocks.pop();
 
+    if (block === undefined) {
+        return;
+    }
+
+    /*
+     * Для If закрываем только последнюю активную ветку.
+     * Полный диапазон If не добавляется, потому что он начинался бы
+     * на той же строке, что и основная ветка. VS Code отбрасывает
+     * второй folding range с той же стартовой строкой.
+     */
     if (
-        block === undefined ||
-        endLine <= block.startLine
+        block.keyword === IF_KEYWORD &&
+        block.branchStartLine !== undefined
     ) {
+        addIfBranchRange(
+            ranges,
+            block.branchStartLine,
+            endLine
+        );
+        return;
+    }
+
+    if (endLine <= block.startLine) {
         return;
     }
 
     ranges.push({
         startLine: block.startLine,
         endLine
+    });
+}
+
+/**
+ * Добавляет диапазон от заголовка ветки до строки перед
+ * Elif, Else или End.
+ */
+function addIfBranchRange(
+    ranges: IRslFoldingRange[],
+    branchStartLine: number,
+    boundaryLine: number
+): void {
+    const branchEndLine = boundaryLine - 1;
+
+    if (branchEndLine <= branchStartLine) {
+        return;
+    }
+
+    ranges.push({
+        startLine: branchStartLine,
+        endLine: branchEndLine
     });
 }
 

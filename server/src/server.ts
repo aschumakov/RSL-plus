@@ -10,9 +10,7 @@ import {
     CompletionItem,
     TextDocumentPositionParams,
     Hover,
-    Location,
     Definition,
-    Position,
     Diagnostic,
     DiagnosticSeverity,
     TextEdit,
@@ -30,6 +28,7 @@ import { CBase } from './common';
 import { getSymbols } from './docsymbols';
 import { FormatCode } from './format';
 import { GetFoldingRanges } from './folding';
+import { RslDefinitionProvider } from './definitionProvider';
 
 const connection = createConnection(ProposedFeatures.all);
 const documents: TextDocuments<TextDocument> =
@@ -375,8 +374,17 @@ function FindObject(
     };
 }
 
+const definitionProvider = new RslDefinitionProvider({
+    getOpenDocument: getCurDoc,
+    ensureDocumentParsed,
+    getLoadedModules: () => Imports,
+    log: logMessage
+});
+
+
 connection.onInitialize((params: InitializeParams) => {
     const capabilities = params.capabilities;
+    definitionProvider.configureWorkspace(params);
     workFolderOpened = !!(
         (params.workspaceFolders && params.workspaceFolders.length > 0) ||
         params.rootUri ||
@@ -690,6 +698,7 @@ async function ensureDocumentParsed(
 }
 
 connection.onDidChangeWatchedFiles(_change => {
+    definitionProvider.clearCaches();
     connection.console.log('We received an file change event');
 });
 
@@ -840,48 +849,52 @@ connection.onHover(
 );
 
 connection.onDefinition(
-    (
+    async (
         tdpp: TextDocumentPositionParams
-    ): Definition | null => {
-        const context =
-            getPositionContext(tdpp);
-
-        if (
-            !context ||
-            isBlockedToken(context.token)
-        ) {
-            return null;
-        }
-
-        const obj =
-            FindObject(tdpp, context);
-
-        if (!obj) {
-            return null;
-        }
-
-        const document =
-            getCurDoc(obj.uri);
+    ): Promise<Definition | null> => {
+        const document = getCurDoc(
+            tdpp.textDocument.uri
+        );
 
         if (!document) {
             return null;
         }
 
-        const range = obj.object.Range;
+        /*
+         * Definition может прийти раньше отложенного разбора после
+         * редактирования. Всегда используем актуальное дерево.
+         */
+        await ensureDocumentParsed(document);
 
-        const startPos: Position =
-            document.positionAt(range.start);
+        const context = getPositionContext(tdpp);
 
-        const endPos: Position =
-            document.positionAt(
-                range.start +
-                obj.object.Name.length
+        if (!context) {
+            return null;
+        }
+
+        const dynamicLocation =
+            await definitionProvider.findDynamicDefinition(
+                context
             );
 
-        return Location.create(obj.uri, {
-            start: startPos,
-            end: endPos
-        });
+        if (dynamicLocation) {
+            return dynamicLocation;
+        }
+
+        if (isBlockedToken(context.token)) {
+            return null;
+        }
+
+        const obj = FindObject(tdpp, context);
+
+        if (!obj) {
+            return null;
+        }
+
+        return definitionProvider.createObjectLocationByUri(
+            obj.uri,
+            obj.object
+        );
     }
 );
 
