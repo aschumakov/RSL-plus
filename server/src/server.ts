@@ -4,7 +4,6 @@ import * as path from 'path';
 import {
     createConnection,
     TextDocuments,
-    TextDocument,
     ProposedFeatures,
     InitializeParams,
     DidChangeConfigurationNotification,
@@ -17,10 +16,13 @@ import {
     Diagnostic,
     DiagnosticSeverity,
     TextEdit,
+    TextDocumentSyncKind,
     FormattingOptions,
     Range,
     SymbolInformation
-} from 'vscode-languageserver';
+} from 'vscode-languageserver/node';
+
+import { TextDocument } from 'vscode-languageserver-textdocument';
 
 import { IFAStruct, IRslSettings, IToken } from './interfaces';
 import { getDefaults, getCIInfoForArray } from './defaults';
@@ -29,7 +31,8 @@ import { getSymbols } from './docsymbols';
 import { FormatCode } from './format';
 
 const connection = createConnection(ProposedFeatures.all);
-const documents: TextDocuments = new TextDocuments();
+const documents: TextDocuments<TextDocument> =
+    new TextDocuments(TextDocument);
 
 const logFilePath = path.resolve(__dirname, '..', 'rsl-server.log');
 
@@ -83,7 +86,8 @@ let workFolderOpened = false;
 
 const defaultSettings: IRslSettings = { import: 'ДА' };
 let globalSettings: IRslSettings = defaultSettings;
-const documentSettings: Map<string, Thenable<IRslSettings>> = new Map();
+const documentSettings: Map<string, Promise<IRslSettings>> =
+    new Map<string, Promise<IRslSettings>>();
 let Imports: IFAStruct[] = [];
 
 let clientReady = false;
@@ -95,8 +99,8 @@ const parseGeneration: Map<string, number> =
 const parsedVersions: Map<string, number> =
     new Map<string, number>();
 
-const parseTimers: Map<string, NodeJS.Timer> =
-    new Map<string, NodeJS.Timer>();
+const parseTimers: Map<string, NodeJS.Timeout> =
+    new Map<string, NodeJS.Timeout>();
 
 const PARSE_DEBOUNCE_MS = 200;
 
@@ -133,19 +137,27 @@ function isBlockedToken(token?: IToken): boolean {
     );
 }
 
-function notifyClient(method: string, params?: any): void {
+function sendClientNotification(
+    method: string,
+    params?: unknown
+): void {
+    connection.sendNotification(method, params).then(
+        undefined,
+        error => {
+            logMessage(
+                `Client notification failed: ${method}\n` +
+                errorToString(error)
+            );
+        }
+    );
+}
+
+function notifyClient(method: string, params?: unknown): void {
     if (!clientReady) {
         return;
     }
 
-    try {
-        connection.sendNotification(method, params);
-    } catch (error) {
-        logMessage(
-            `Client notification failed: ${method}\n` +
-            errorToString(error)
-        );
-    }
+    sendClientNotification(method, params);
 }
 
 function flushPendingImports(): void {
@@ -364,7 +376,11 @@ function FindObject(
 
 connection.onInitialize((params: InitializeParams) => {
     const capabilities = params.capabilities;
-    workFolderOpened = params.rootPath != null;
+    workFolderOpened = !!(
+        (params.workspaceFolders && params.workspaceFolders.length > 0) ||
+        params.rootUri ||
+        params.rootPath
+    );
 
     hasConfigurationCapability = !!(
         capabilities.workspace &&
@@ -384,7 +400,7 @@ connection.onInitialize((params: InitializeParams) => {
 
     return {
         capabilities: {
-            textDocumentSync: documents.syncKind,
+            textDocumentSync: TextDocumentSyncKind.Incremental,
             completionProvider: {
                 resolveProvider: true,
                 triggerCharacters: ['.']
@@ -397,14 +413,14 @@ connection.onInitialize((params: InitializeParams) => {
     };
 });
 
-connection.onInitialized(() => {
+connection.onInitialized(async () => {
 
     if (!workFolderOpened) {
-        connection.sendNotification('noRootFolder');
+        sendClientNotification('noRootFolder');
     }
 
     if (hasConfigurationCapability) {
-        connection.client.register(
+        await connection.client.register(
             DidChangeConfigurationNotification.type,
             undefined
         );
@@ -435,7 +451,7 @@ connection.onDidChangeConfiguration(change => {
     documents.all().forEach(scheduleValidation);
 });
 
-function getDocumentSettings(resource: string): Thenable<IRslSettings> {
+function getDocumentSettings(resource: string): Promise<IRslSettings> {
     if (!hasConfigurationCapability) {
         return Promise.resolve(globalSettings);
     }

@@ -1,12 +1,13 @@
 const assert = require("assert");
 
 /*
- * common.js импортирует server.js для функций getTree()
- * и GetFileByNameRequest().
+ * common.js импортирует ./server для getTree() и
+ * GetFileByNameRequest(). При обычном require это запускает
+ * настоящий language server и createConnection(), которому
+ * нужны --node-ipc / --stdio.
  *
- * При обычном require server.js запускает createConnection(),
- * которому нужны параметры --node-ipc или --stdio.
- * Для unit-теста подменяем server.js заглушкой.
+ * В unit-тесте подменяем сервер минимальной заглушкой до
+ * загрузки common.js.
  */
 const serverModulePath = require.resolve(
     "../server/out/server"
@@ -17,13 +18,8 @@ require.cache[serverModulePath] = {
     filename: serverModulePath,
     loaded: true,
     exports: {
-        getTree: function () {
-            return [];
-        },
-
-        GetFileByNameRequest: function () {
-            return undefined;
-        }
+        getTree: () => [],
+        GetFileByNameRequest: () => undefined
     }
 };
 

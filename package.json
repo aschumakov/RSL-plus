@@ -4,7 +4,7 @@
    "description": "R-Style Language support +",
    "author": "Veniamin Rakov + AChumakov",
    "license": "SEE LICENSE IN LICENSE",
-   "version": "1.0.18",
+   "version": "1.0.20",
    "icon": "icon.png",
    "bugs": {
       "url": "https://github.com/alliluja/RSL/issues",
@@ -155,7 +155,7 @@
       "@types/mocha": "^5.2.7",
       "@types/node": "^8.10.59",
       "tslint": "^5.20.1",
-      "typescript": "^3.7.5"
+      "typescript": "5.9.3"
    },
    "__metadata": {
       "id": "39b89ed8-b498-43ed-8f14-0fc6967594af",

@@ -20,11 +20,11 @@ import {
     LanguageClientOptions,
     ServerOptions,
     TransportKind
-} from "vscode-languageclient";
+} from "vscode-languageclient/node";
 
 
 let client: LanguageClient;
-let timeout: NodeJS.Timer | undefined;
+let timeout: NodeJS.Timeout | undefined;
 let activeEditor: TextEditor | undefined = window.activeTextEditor;
 let myStatusBarItem: StatusBarItem;
 
@@ -367,22 +367,15 @@ export function activate(context: ExtensionContext): void {
     );
 
     /*
-     * LanguageClient запускается первым.
-     *
-     * Сервер не должен отправлять пользовательские notifications
-     * до получения clientReady.
+     * Начиная с vscode-languageclient 8.x обработчики можно и нужно
+     * регистрировать до запуска клиента. Это исключает потерю ранних
+     * сообщений от language server.
      */
-    client.start();
+    registerServerNotifications(context);
 
-    client.onReady().then(
+    client.start().then(
         () => {
-            registerServerNotifications();
-
-            /*
-             * Явно сообщаем серверу, что обработчики клиента
-             * уже зарегистрированы.
-             */
-            client.sendNotification("clientReady");
+            return client.sendNotification("clientReady");
         },
         error => {
             console.error(
@@ -393,6 +386,16 @@ export function activate(context: ExtensionContext): void {
             window.showErrorMessage(
                 "Не удалось запустить RSL language server. " +
                 "Смотри Output → R-Style Language Server."
+            );
+
+            return undefined;
+        }
+    ).then(
+        undefined,
+        error => {
+            console.error(
+                "RSL clientReady notification failed",
+                error
             );
         }
     );
@@ -560,59 +563,60 @@ export function activate(context: ExtensionContext): void {
 /**
  * Регистрирует сообщения, которые сервер отправляет клиенту.
  *
- * Односторонние действия оформлены как notifications:
- * они не создают Promise на стороне сервера и не способны
- * породить необработанный rejection при старте/остановке.
+ * Обработчики регистрируются до client.start(), поэтому сервер не
+ * может прислать раннее сообщение до появления соответствующего
+ * обработчика на стороне расширения.
  */
-function registerServerNotifications(): void {
-    client.onNotification(
-        "getFilebyName",
-        (name: string) => {
-            getFilebyName(name).then(
-                undefined,
-                error => {
-                    console.error(
-                        "RSL: getFilebyName failed",
-                        name,
-                        error
-                    );
-                }
-            );
-        }
-    );
-
-    client.onNotification(
-        "getFile",
-        (filePath: string) => {
-            getFile(filePath).then(
-                undefined,
-                error => {
-                    console.error(
-                        "RSL: getFile failed",
-                        filePath,
-                        error
-                    );
-                }
-            );
-        }
-    );
-
-    client.onNotification(
-        "updateStatusBar",
-        (value: number) => {
-            updateStatusBarItem(value);
-        }
-    );
-
-    client.onNotification(
-        "noRootFolder",
-        () => {
-            window.showErrorMessage(
-                "Импорт макросов недоступен. " +
-                "Для полноценной работы необходимо " +
-                "открыть папку или рабочую область."
-            );
-        }
+function registerServerNotifications(
+    context: ExtensionContext
+): void {
+    context.subscriptions.push(
+        client.onNotification(
+            "getFilebyName",
+            (name: string) => {
+                getFilebyName(name).then(
+                    undefined,
+                    error => {
+                        console.error(
+                            "RSL: getFilebyName failed",
+                            name,
+                            error
+                        );
+                    }
+                );
+            }
+        ),
+        client.onNotification(
+            "getFile",
+            (filePath: string) => {
+                getFile(filePath).then(
+                    undefined,
+                    error => {
+                        console.error(
+                            "RSL: getFile failed",
+                            filePath,
+                            error
+                        );
+                    }
+                );
+            }
+        ),
+        client.onNotification(
+            "updateStatusBar",
+            (value: number) => {
+                updateStatusBarItem(value);
+            }
+        ),
+        client.onNotification(
+            "noRootFolder",
+            () => {
+                window.showErrorMessage(
+                    "Импорт макросов недоступен. " +
+                    "Для полноценной работы необходимо " +
+                    "открыть папку или рабочую область."
+                );
+            }
+        )
     );
 }
 
@@ -669,7 +673,7 @@ async function getFilebyName(
 
 
 export function deactivate():
-    Thenable<void> | undefined {
+    Promise<void> | undefined {
     if (client === undefined) {
         return undefined;
     }
