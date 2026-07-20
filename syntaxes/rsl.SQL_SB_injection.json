@@ -1,37 +1,93 @@
 {
-	"scopeName": "SQLSquareBrackets.injection",
-	"injectionSelector": "L:string.quoted.single.rsl",
-	"patterns": [
-		{
-			"include": "#sqlKeywords"
-		},
-		{
-			"include": "#sqlFuncs"
-		},
-		{
-			"include": "#sqlComment"
-		},
-		{
-			"include": "#sqlStrings"
-		}
-
-	],
-	"repository": {
-		"sqlKeywords": {
-			"match": "(?i)\\b(partition|connect|on|dual|if|else|then|end|from|select|insert|into|with|case|when|as|group|by|and|or|not|union|all|in|order|where|update|outer|inner|left|right|join|truncate|table|set|delete)\\b",
-			"name": "storage.type.rsl"
-		},
-		"sqlFuncs": {
-			"match": "(?i)\\b(nvl|sum|count|decode|min|max|avg|chr)\\b",
-			"name": "entity.name.function.rsl"
-		},
-		"sqlComment": {
-			"match": "(?i)(--\\s*[\\s\\w\\.\\,\\-;:~`!@#$%^&*\\(\\)\\+=\\\\/{}]+)(?=\"|\\n|\\])",
-			"name": "comment.line.double-slash.rsl"
-		},
-		"sqlStrings": {
-			"match": "'[\\s\\S]+?'",
-			"name": "comment.line.double-slash.rsl"
-		}
-	}
+   "scopeName": "SQLSquareBrackets.injection",
+   "injectionSelector": "L:source.mac",
+   "patterns": [
+      {
+         "begin": "^\\s*(\\[)\\s*$",
+         "beginCaptures": {
+            "1": {
+               "name": "punctuation.section.embedded.begin.rsl"
+            }
+         },
+         "end": "^\\s*(\\])\\s*;?\\s*$",
+         "endCaptures": {
+            "1": {
+               "name": "punctuation.section.embedded.end.rsl"
+            }
+         },
+         "name": "meta.embedded.block.sql.rsl",
+         "contentName": "meta.embedded.block.sql.rsl",
+         "patterns": [
+            {
+               "include": "#sqlBlockComment"
+            },
+            {
+               "include": "#sqlLineComment"
+            },
+            {
+               "include": "#sqlSingleQuotedString"
+            },
+            {
+               "include": "#sqlDoubleQuotedIdentifier"
+            },
+            {
+               "include": "#sqlKeywords"
+            },
+            {
+               "include": "#sqlFuncs"
+            },
+            {
+               "include": "#sqlNumbers"
+            }
+         ]
+      }
+   ],
+   "repository": {
+      "sqlBlockComment": {
+         "begin": "/\\*",
+         "end": "\\*/",
+         "name": "comment.block.sql"
+      },
+      "sqlLineComment": {
+         "begin": "--",
+         "end": "$",
+         "name": "comment.line.double-dash.sql"
+      },
+      "sqlSingleQuotedString": {
+         "begin": "'",
+         "end": "'",
+         "applyEndPatternLast": true,
+         "name": "string.quoted.single.sql",
+         "patterns": [
+            {
+               "match": "''",
+               "name": "constant.character.escape.sql"
+            }
+         ]
+      },
+      "sqlDoubleQuotedIdentifier": {
+         "begin": "\\\"",
+         "end": "\\\"",
+         "applyEndPatternLast": true,
+         "name": "string.quoted.double.sql",
+         "patterns": [
+            {
+               "match": "\\\"\\\"",
+               "name": "constant.character.escape.sql"
+            }
+         ]
+      },
+      "sqlKeywords": {
+         "match": "(?i)\\b(declare|begin|exception|when|then|loop|function|procedure|return|pragma|partition|connect|on|dual|if|elsif|else|end|from|select|insert|into|values|with|case|as|group|having|by|and|or|not|union|all|in|is|null|order|where|update|outer|inner|left|right|full|join|truncate|table|set|delete|merge|using|exists|goto)\\b",
+         "name": "keyword.control.sql"
+      },
+      "sqlFuncs": {
+         "match": "(?i)\\b(nvl|sum|count|decode|min|max|avg|chr|substr|instr|replace|regexp_replace|regexp_substr|to_char|to_date|to_number|lpad|rpad|trim|upper|lower|round|abs|power|length|row_number)\\b",
+         "name": "support.function.sql"
+      },
+      "sqlNumbers": {
+         "match": "(?<![A-Za-zА-Яа-яЁё_])(?:\\d+(?:\\.\\d+)?)",
+         "name": "constant.numeric.sql"
+      }
+   }
 }

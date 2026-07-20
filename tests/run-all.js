@@ -5,6 +5,8 @@ const { spawnSync } = require("child_process");
 
 const tests = [
     "lexer.test.js",
+    "syntax.test.js",
+    "large-sql-macro.test.js",
     "formatter.test.js",
     "folding.test.js",
     "definition.test.js",

@@ -28,6 +28,14 @@ let timeout: NodeJS.Timeout | undefined;
 let activeEditor: TextEditor | undefined = window.activeTextEditor;
 let myStatusBarItem: StatusBarItem;
 
+/*
+ * Старый анализ неиспользуемых переменных выполняется в extension host.
+ * На больших файлах с крупными SQL-блоками он создавал лишнюю нагрузку
+ * одновременно с TextMate-токенизацией и разбором language server.
+ */
+const UNUSED_ANALYSIS_MAX_DOCUMENT_LENGTH = 50000;
+const UNUSED_ANALYSIS_MAX_DECORATIONS = 300;
+
 
 /**
  * Элемент списка открытых/загруженных макросов.
@@ -224,6 +232,16 @@ function updateDecorations(): void {
 
     const text = editor.document.getText();
 
+    /*
+     * Для крупных макросов анализ временно отключаем. Сам анализ является
+     * вспомогательной функцией и не должен влиять на устойчивость редактора.
+     * В дальнейшем его следует перенести в language server и выполнять по AST.
+     */
+    if (text.length > UNUSED_ANALYSIS_MAX_DOCUMENT_LENGTH) {
+        editor.setDecorations(notUsedVar, []);
+        return;
+    }
+
     const identifierPattern =
         /[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё0-9_]*/g;
 
@@ -289,6 +307,10 @@ function updateDecorations(): void {
         if (
             identifierCount[declaration.name] !== 1
         ) {
+            return;
+        }
+
+        if (decorationArr.length >= UNUSED_ANALYSIS_MAX_DECORATIONS) {
             return;
         }
 
