@@ -2,8 +2,16 @@
 	"version": "2.0.0",
 	"tasks": [
 		{
-			"type": "npm",
-			"script": "compile",
+			"label": "RSL compile",
+			"type": "shell",
+			"command": "D:\\Achumakov\\app\\node-v22.23.1-win-x64\\npm.cmd",
+			"args": [
+				"run",
+				"compile"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
 			"group": "build",
 			"presentation": {
 				"panel": "dedicated",
@@ -14,8 +22,19 @@
 			]
 		},
 		{
-			"type": "npm",
-			"script": "watch",
+			"label": "RSL watch",
+			"type": "shell",
+			"command": "D:\\Achumakov\\app\\node-v22.23.1-win-x64\\npm.cmd",
+			"args": [
+				"run",
+				"watch"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}",
+				"env": {
+					"PATH": "D:\\Achumakov\\app\\node-v22.23.1-win-x64;${env:PATH}"
+				}
+			},
 			"isBackground": true,
 			"group": {
 				"kind": "build",
@@ -23,7 +42,7 @@
 			},
 			"presentation": {
 				"panel": "dedicated",
-				"reveal": "never"
+				"reveal": "always"
 			},
 			"problemMatcher": [
 				"$tsc-watch"

@@ -1,140 +1,342 @@
-import * as path from 'path';
+import * as path from "path";
+
 import {
-    workspace, ExtensionContext, window, DecorationOptions,
-    Range, commands, StatusBarItem, StatusBarAlignment,
-    QuickPickItem, Uri, env
-} from 'vscode';
+    workspace,
+    ExtensionContext,
+    window,
+    DecorationOptions,
+    Range,
+    commands,
+    StatusBarItem,
+    StatusBarAlignment,
+    QuickPickItem,
+    Uri,
+    env,
+    TextEditor
+} from "vscode";
 
 import {
     LanguageClient,
     LanguageClientOptions,
     ServerOptions,
     TransportKind
-} from 'vscode-languageclient';
+} from "vscode-languageclient";
+
 
 let client: LanguageClient;
-let timeout: NodeJS.Timer | undefined = undefined;
-let activeEditor = window.activeTextEditor;
+let timeout: NodeJS.Timer | undefined;
+let activeEditor: TextEditor | undefined = window.activeTextEditor;
 let myStatusBarItem: StatusBarItem;
 
-class FileItem implements QuickPickItem {
 
+/**
+ * Элемент списка открытых/загруженных макросов.
+ */
+class FileItem implements QuickPickItem {
     label: string;
     description: string;
-    // detail:string;
     public isThatDoc: boolean;
 
     constructor(public MacUri: string) {
-        this.isThatDoc = activeEditor.document.uri.toString() == MacUri;
-        this.label = '$(file) ' + path.basename(MacUri);
-        // this.detail = ""; //вместо дескрипшн, выводится под лейблом
-        this.description = this.isThatDoc
-            ? 'Текущий файл'
-            : path.dirname(path.relative(workspace.workspaceFolders[0].uri.toString(), MacUri));
-    }
-}
+        const activeUri = activeEditor !== undefined
+            ? activeEditor.document.uri.toString()
+            : "";
 
-async function quickOpen(uri: string) {
-    if (uri) {
-        uri = uri.replace("file:///", "");
-        uri = uri.replace("%3A", ":");
-        workspace.openTextDocument(uri);
-        for (const curDoc of workspace.textDocuments) {
-            var findedUri = curDoc.uri.toString();
-            findedUri = findedUri.replace("file:///", "");
-            findedUri = findedUri.replace("%3A", ":");
-            if (findedUri == uri) {
-                await window.showTextDocument(curDoc);
-                break;
-            }
+        this.isThatDoc = activeUri === MacUri;
+        this.label = "$(file) " + path.basename(MacUri);
+
+        const workspaceFolder =
+            workspace.workspaceFolders !== undefined &&
+            workspace.workspaceFolders.length > 0
+                ? workspace.workspaceFolders[0]
+                : undefined;
+
+        if (this.isThatDoc) {
+            this.description = "Текущий файл";
+        } else if (workspaceFolder !== undefined) {
+            this.description = path.dirname(
+                path.relative(
+                    workspaceFolder.uri.fsPath,
+                    uriFromValue(MacUri).fsPath
+                )
+            );
+        } else {
+            this.description = path.dirname(MacUri);
         }
     }
 }
+
 
 /**
- * Shows a pick list using window.showQuickPick().
+ * Преобразует file URI или обычный путь в Uri.
  */
-async function showQuickPick() {
-    let macros = client.sendRequest("getMacros");
-    const input = window.createQuickPick<FileItem>();
-    input.placeholder = 'Начните вводить имя';
+function uriFromValue(value: string): Uri {
+    if (
+        value.indexOf("file://") === 0 ||
+        value.indexOf("untitled:") === 0
+    ) {
+        return Uri.parse(value);
+    }
 
-    macros.then((value: string[]) => {
-        let qpArr: FileItem[] = [];
-
-        value.forEach(element => {
-            qpArr.push(new FileItem(element));
-        });
-        input.items = qpArr;
-        input.show();
-
-        input.onDidAccept(() => {
-            if (!input.selectedItems[0].isThatDoc) {
-                quickOpen(input.selectedItems[0].MacUri);
-            }
-        });
-    });
+    return Uri.file(value);
 }
 
-// create a decorator type that we use to decorate not used variable and macros
-const notUsedVar = window.createTextEditorDecorationType({
-    opacity: '0.5',
-    fontStyle: 'italic'
-});
 
-function updateDecorations() {
-    if (!activeEditor) {
+/**
+ * Открывает файл и показывает его в редакторе.
+ */
+async function quickOpen(value: string): Promise<void> {
+    if (!value) {
         return;
     }
-    const regEx = /\b(macro|var|const|array|record)\b\s*(\w+)/gi;
-    const text = activeEditor.document.getText();
-    const decorationArr: DecorationOptions[] = [];
-    let match;
-    let counterMatches: number = 0;
 
-    while (match = regEx.exec(text)) {
-        const regEx1 = new RegExp(`\\b${match[2]}\\b`, "gi");
-        const start = activeEditor.document.positionAt(match.index + match[0].length);
-        const end = activeEditor.document.positionAt(text.length);
-        const range = new Range(start, end);
-        while (regEx1.exec(activeEditor.document.getText(range))) {
-            ++counterMatches;//посчитаем сколько раз встречается
-            if (counterMatches > 1) { break; }
-        }
-        if (counterMatches < 1) {
-            const offset = match[0].length - match[2].length;
-            const startPos = activeEditor.document.positionAt(match.index + offset);
-            const endPos = activeEditor.document.positionAt(match.index + offset + match[2].length);
-            const decoration =
-            {
-                range: new Range(startPos, endPos),
-                hoverMessage: 'Объявление **' + match[2] + '**, не было использовано в данном файле'
-            };
-            decorationArr.push(decoration);
-        }
-        counterMatches = 0;
+    try {
+        const document = await workspace.openTextDocument(
+            uriFromValue(value)
+        );
+
+        await window.showTextDocument(document);
+    } catch (error) {
+        console.error("RSL: cannot open file", value, error);
+
+        window.showErrorMessage(
+            "Не удалось открыть файл макроса: " + value
+        );
     }
-
-    activeEditor.setDecorations(notUsedVar, decorationArr);
 }
 
 
+/**
+ * Показывает список файлов, известных language server.
+ */
+async function showQuickPick(): Promise<void> {
+    if (client === undefined) {
+        return;
+    }
 
-export function activate(context: ExtensionContext) {
+    try {
+        const macros = await client.sendRequest<string[]>(
+            "getMacros"
+        );
 
-    // registerCommands();
-    // The server is implemented in node
-    let serverModule = context.asAbsolutePath(
-        path.join('server', 'out', 'server.js')
+        const input = window.createQuickPick<FileItem>();
+
+        input.placeholder = "Начните вводить имя";
+        input.items = macros.map(value => new FileItem(value));
+
+        input.onDidAccept(() => {
+            const selected = input.selectedItems[0];
+
+            if (selected === undefined) {
+                return;
+            }
+
+            input.hide();
+
+            if (!selected.isThatDoc) {
+                quickOpen(selected.MacUri).then(
+                    undefined,
+                    error => {
+                        console.error(
+                            "RSL: quickOpen failed",
+                            error
+                        );
+                    }
+                );
+            }
+        });
+
+        input.onDidHide(() => {
+            input.dispose();
+        });
+
+        input.show();
+    } catch (error) {
+        console.error(
+            "RSL: cannot get macro file list",
+            error
+        );
+
+        window.showErrorMessage(
+            "Не удалось получить список макросов. " +
+            "Смотри Output → R-Style Language Server."
+        );
+    }
+}
+
+
+/**
+ * Декоратор неиспользуемых переменных и макросов.
+ */
+const notUsedVar = window.createTextEditorDecorationType({
+    opacity: "0.5",
+    fontStyle: "italic"
+});
+
+
+function isWhitespaceRange(
+    text: string,
+    start: number,
+    end: number
+): boolean {
+    for (let index = start; index < end; index++) {
+        const char = text.charAt(index);
+
+        if (
+            char !== " " &&
+            char !== "\t" &&
+            char !== "\r" &&
+            char !== "\n"
+        ) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+
+interface IDeclarationInfo {
+    name: string;
+    start: number;
+    end: number;
+}
+
+
+/**
+ * Один линейный проход по идентификаторам:
+ * одновременно считаем частоту имён и запоминаем объявления.
+ *
+ * Раньше для каждого объявления заново сканировался остаток файла,
+ * что давало квадратичную сложность на больших макросах.
+ */
+function updateDecorations(): void {
+    if (activeEditor === undefined) {
+        return;
+    }
+
+    const editor = activeEditor;
+    const text = editor.document.getText();
+
+    const identifierPattern =
+        /[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё0-9_]*/g;
+
+    const declarationKeywords: {
+        [name: string]: boolean
+    } = {
+        /*
+         * Macro не проверяем как локальное неиспользуемое
+         * объявление: макрос может быть точкой входа и вызываться
+         * из другого файла или непосредственно средой RS-Bank.
+         */
+        var: true,
+        const: true,
+        array: true,
+        record: true
+    };
+
+    const identifierCount: {
+        [name: string]: number
+    } = Object.create(null);
+
+    const declarations: IDeclarationInfo[] = [];
+
+    let expectDeclaration = false;
+    let previousTokenEnd = 0;
+    let match: RegExpExecArray | null;
+
+    while (
+        (match = identifierPattern.exec(text)) !== null
+    ) {
+        const name = match[0];
+        const normalizedName =
+            name.toLowerCase();
+
+        identifierCount[normalizedName] =
+            (identifierCount[normalizedName] || 0) + 1;
+
+        if (
+            expectDeclaration &&
+            isWhitespaceRange(
+                text,
+                previousTokenEnd,
+                match.index
+            )
+        ) {
+            declarations.push({
+                name: normalizedName,
+                start: match.index,
+                end: match.index + name.length
+            });
+        }
+
+        expectDeclaration =
+            declarationKeywords[normalizedName] === true;
+
+        previousTokenEnd =
+            match.index + name.length;
+    }
+
+    const decorationArr: DecorationOptions[] = [];
+
+    declarations.forEach(declaration => {
+        if (
+            identifierCount[declaration.name] !== 1
+        ) {
+            return;
+        }
+
+        decorationArr.push({
+            range: new Range(
+                editor.document.positionAt(
+                    declaration.start
+                ),
+                editor.document.positionAt(
+                    declaration.end
+                )
+            ),
+            hoverMessage:
+                "Объявление **" +
+                text.substring(
+                    declaration.start,
+                    declaration.end
+                ) +
+                "** не было использовано в данном файле"
+        });
+    });
+
+    editor.setDecorations(
+        notUsedVar,
+        decorationArr
     );
-    // The debug options for the server
-    // --inspect=6009: runs the server in Node's Inspector mode so VS Code can attach to the server for debugging
-    let debugOptions = { execArgv: ['--nolazy', '--inspect=6009'] };
+}
 
-    // If the extension is launched in debug mode then the debug server options are used
-    // Otherwise the run options are used
-    let serverOptions: ServerOptions = {
-        run: { module: serverModule, transport: TransportKind.ipc },
+
+/**
+ * Точка входа расширения.
+ */
+export function activate(context: ExtensionContext): void {
+    const serverModule = context.asAbsolutePath(
+        path.join("server", "out", "server.js")
+    );
+
+    /*
+     * Для стабильного повседневного запуска не используем
+     * фиксированный --inspect=6009.
+     *
+     * Когда потребуется отладка именно language server,
+     * можно временно вернуть:
+     * execArgv: ["--nolazy", "--inspect=6009"]
+     */
+    const debugOptions = {
+        execArgv: ["--nolazy"]
+    };
+
+    const serverOptions: ServerOptions = {
+        run: {
+            module: serverModule,
+            transport: TransportKind.ipc
+        },
         debug: {
             module: serverModule,
             transport: TransportKind.ipc,
@@ -142,175 +344,348 @@ export function activate(context: ExtensionContext) {
         }
     };
 
-    // Options to control the language client
-    let clientOptions: LanguageClientOptions = {
-        // Register the server for plain text documents
-        documentSelector: [{ scheme: 'file', language: 'rsl' }],
+    const clientOptions: LanguageClientOptions = {
+        documentSelector: [
+            {
+                scheme: "file",
+                language: "rsl"
+            }
+        ],
         synchronize: {
-            // Notify the server about file changes to '.clientrc files contained in the workspace
-            fileEvents: workspace.createFileSystemWatcher('**/.clientrc')
+            fileEvents:
+                workspace.createFileSystemWatcher(
+                    "**/.clientrc"
+                )
         }
     };
 
-    // Create the language client and start the client.
     client = new LanguageClient(
-        'RSTyleLanguage',
-        'R-Style Language Server',
+        "RSTyleLanguage",
+        "R-Style Language Server",
         serverOptions,
         clientOptions
     );
 
-    // Start the client. This will also launch the server
+    /*
+     * LanguageClient запускается первым.
+     *
+     * Сервер не должен отправлять пользовательские notifications
+     * до получения clientReady.
+     */
     client.start();
-    client.onReady().then(() => {
-        client.onRequest("getFilebyName", (name: string) => {
-            getFilebyName(name);
-        });
-        client.onRequest("getFile", (path: string) => {
-            getFile(path);
-        });
 
-        client.onRequest("getActiveTextEditor", async () => {
-            if(activeEditor != null && activeEditor.document != null){
-                try {
-                    return activeEditor.document.uri.toString();
-                } catch {
-                    // Файл не существует
-                    return null;
-                }
-                
-            }
-            else {
-                return null;
-            }
-            
-        });
-        client.onRequest("updateStatusBar", (value) => {
-            updateStatusBarItem(value);
-        });
-        client.onNotification("noRootFolder", () => window.showErrorMessage("Импорт макросов недоступен. Для полноценной работы необходимо открыть папку или рабочую область"));
-    });
+    client.onReady().then(
+        () => {
+            registerServerNotifications();
 
-    if (activeEditor) {
+            /*
+             * Явно сообщаем серверу, что обработчики клиента
+             * уже зарегистрированы.
+             */
+            client.sendNotification("clientReady");
+        },
+        error => {
+            console.error(
+                "RSL language client start failed",
+                error
+            );
+
+            window.showErrorMessage(
+                "Не удалось запустить RSL language server. " +
+                "Смотри Output → R-Style Language Server."
+            );
+        }
+    );
+
+    if (activeEditor !== undefined) {
         triggerUpdateDecorations();
     }
 
-    workspace.onDidChangeTextDocument(event => {
-        if (activeEditor && event.document === activeEditor.document) {
-            triggerUpdateDecorations();
-        }
-    }, null, context.subscriptions);
+    context.subscriptions.push(
+        workspace.onDidChangeTextDocument(event => {
+            if (
+                activeEditor !== undefined &&
+                event.document === activeEditor.document
+            ) {
+                triggerUpdateDecorations();
+            }
+        })
+    );
 
-    window.onDidChangeActiveTextEditor(editor => {
-        activeEditor = editor;
-        if (editor) {
-            triggerUpdateDecorations();
-        }
-    }, null, context.subscriptions);
+    context.subscriptions.push(
+        window.onDidChangeActiveTextEditor(editor => {
+            activeEditor = editor;
 
-    // register a command that is invoked when the status bar
-    // item is selected
-    const myCommandId = 'rsl.showMacroFiles';
-    context.subscriptions.push(commands.registerCommand(myCommandId, () => {
-        showQuickPick();
-    }));
+            if (editor !== undefined) {
+                triggerUpdateDecorations();
+            }
+        })
+    );
 
-    // create a new status bar item that we can now manage
-    myStatusBarItem = window.createStatusBarItem(StatusBarAlignment.Right, 500);
-    myStatusBarItem.command = myCommandId;
-    context.subscriptions.push(myStatusBarItem);
+    const showMacrosCommand = "rsl.showMacroFiles";
+
+    context.subscriptions.push(
+        commands.registerCommand(
+            showMacrosCommand,
+            () => {
+                showQuickPick().then(
+                    undefined,
+                    error => {
+                        console.error(
+                            "RSL: showQuickPick failed",
+                            error
+                        );
+                    }
+                );
+            }
+        )
+    );
+
+    myStatusBarItem =
+        window.createStatusBarItem(
+            StatusBarAlignment.Right,
+            500
+        );
+
+    myStatusBarItem.command = showMacrosCommand;
+
+    context.subscriptions.push(
+        myStatusBarItem
+    );
 
     updateStatusBarItem(0);
 
-    commands.registerCommand('extension.insertQueryFromClipboard', async () => {
-        const clipboardText = await env.clipboard.readText();
-        const editor = window.activeTextEditor;
-        if (editor) {
-            editor.edit(editBuilder => {
+    context.subscriptions.push(
+        commands.registerCommand(
+            "extension.insertQueryFromClipboard",
+            async () => {
+                const clipboardText =
+                    await env.clipboard.readText();
 
-                var str_indent = "";
-                var num_indent = 2;
-                var out = "";
+                const editor =
+                    window.activeTextEditor;
 
-                var arr = clipboardText.split("\r\n");
-
-                for (; num_indent > 0; num_indent--, str_indent += " ");
-
-                out = str_indent + "cmd = RSDCommand (String (" + "\r\n";
-
-                for (var i = 0; i < arr.length; i++) {
-                    if (i > 0) out += " \",\r\n";
-                    out += str_indent + "\" " + arr[i];
+                if (editor === undefined) {
+                    return;
                 }
-                out += " \"\r\n" + str_indent + "));";
 
-                editBuilder.insert(editor.selection.start, out);
-                window.showInformationMessage('Запрос из буфера вставлен');
-            });
-        }
-    });
+                await editor.edit(editBuilder => {
+                    const indent = "  ";
+                    let output =
+                        indent +
+                        "cmd = RSDCommand (String (" +
+                        "\r\n";
 
-    commands.registerCommand('extension.copyQueryToClipboard', async () => {
-        const editor = window.activeTextEditor;
-        if (editor) {
-            const text = editor.document.getText(editor.selection);
+                    const lines =
+                        clipboardText.split(/\r?\n/);
 
-            var str = text;
-            var out = "";
-            var arr;
+                    for (
+                        let index = 0;
+                        index < lines.length;
+                        index++
+                    ) {
+                        if (index > 0) {
+                            output += " \",\r\n";
+                        }
 
-            arr = str.split("\r\n");
+                        output +=
+                            indent +
+                            "\" " +
+                            lines[index];
+                    }
 
-            for (var i = 0; i < arr.length; i++) {
-                str = arr[i];
-                str = str.replace('",', '');
-                str = str.replace(new RegExp('"', 'g'), '');
-                out += str + "\r\n";
+                    output +=
+                        " \"\r\n" +
+                        indent +
+                        "));";
+
+                    editBuilder.insert(
+                        editor.selection.start,
+                        output
+                    );
+                });
+
+                window.showInformationMessage(
+                    "Запрос из буфера вставлен"
+                );
             }
+        )
+    );
 
-            await env.clipboard.writeText(out);
-            window.showInformationMessage('Запрос скопирован в буфер обмена');
-        }
-    });
+    context.subscriptions.push(
+        commands.registerCommand(
+            "extension.copyQueryToClipboard",
+            async () => {
+                const editor =
+                    window.activeTextEditor;
 
+                if (editor === undefined) {
+                    return;
+                }
+
+                const selectedText =
+                    editor.document.getText(
+                        editor.selection
+                    );
+
+                const lines =
+                    selectedText.split(/\r?\n/);
+
+                let output = "";
+
+                for (
+                    let index = 0;
+                    index < lines.length;
+                    index++
+                ) {
+                    let line = lines[index];
+
+                    line = line.replace('",', "");
+                    line = line.replace(/"/g, "");
+
+                    output += line + "\r\n";
+                }
+
+                await env.clipboard.writeText(output);
+
+                window.showInformationMessage(
+                    "Запрос скопирован в буфер обмена"
+                );
+            }
+        )
+    );
 }
 
-function updateStatusBarItem(n: number) {
-    if (n > 0) {
-        myStatusBarItem.text = `$(file) ${n} макросов`; //https://code.visualstudio.com/api/references/icons-in-labels
-        myStatusBarItem.tooltip = "Показать список";
+
+/**
+ * Регистрирует сообщения, которые сервер отправляет клиенту.
+ *
+ * Односторонние действия оформлены как notifications:
+ * они не создают Promise на стороне сервера и не способны
+ * породить необработанный rejection при старте/остановке.
+ */
+function registerServerNotifications(): void {
+    client.onNotification(
+        "getFilebyName",
+        (name: string) => {
+            getFilebyName(name).then(
+                undefined,
+                error => {
+                    console.error(
+                        "RSL: getFilebyName failed",
+                        name,
+                        error
+                    );
+                }
+            );
+        }
+    );
+
+    client.onNotification(
+        "getFile",
+        (filePath: string) => {
+            getFile(filePath).then(
+                undefined,
+                error => {
+                    console.error(
+                        "RSL: getFile failed",
+                        filePath,
+                        error
+                    );
+                }
+            );
+        }
+    );
+
+    client.onNotification(
+        "updateStatusBar",
+        (value: number) => {
+            updateStatusBarItem(value);
+        }
+    );
+
+    client.onNotification(
+        "noRootFolder",
+        () => {
+            window.showErrorMessage(
+                "Импорт макросов недоступен. " +
+                "Для полноценной работы необходимо " +
+                "открыть папку или рабочую область."
+            );
+        }
+    );
+}
+
+
+function updateStatusBarItem(value: number): void {
+    if (myStatusBarItem === undefined) {
+        return;
+    }
+
+    if (value > 0) {
+        myStatusBarItem.text =
+            `$(file) ${value} макросов`;
+
+        myStatusBarItem.tooltip =
+            "Показать список";
+
         myStatusBarItem.show();
     } else {
         myStatusBarItem.hide();
     }
 }
 
-async function getFile(path: string): Promise<void> {
-    path = path.replace("file:///", "");
-    path = path.replace("%3A", ":");
-    workspace.openTextDocument(Uri.file(path));
+
+async function getFile(filePath: string): Promise<void> {
+    if (!filePath) {
+        return;
+    }
+
+    await workspace.openTextDocument(
+        uriFromValue(filePath)
+    );
 }
 
-async function getFilebyName(name: string): Promise<void> {
-    await workspace.findFiles(`**/${name}`, null, 1).then((value) => {
-        if (value.length) {
-            workspace.openTextDocument(value[0]);
-        }
-    });
+
+async function getFilebyName(
+    name: string
+): Promise<void> {
+    if (!name) {
+        return;
+    }
+
+    const files = await workspace.findFiles(
+        `**/${name}`,
+        null,
+        1
+    );
+
+    if (files.length > 0) {
+        await workspace.openTextDocument(
+            files[0]
+        );
+    }
 }
 
-export function deactivate(): Thenable<void> | undefined {
-    if (!client) {
+
+export function deactivate():
+    Thenable<void> | undefined {
+    if (client === undefined) {
         return undefined;
     }
+
     return client.stop();
 }
 
-function triggerUpdateDecorations() {
-    if (timeout) {
+
+function triggerUpdateDecorations(): void {
+    if (timeout !== undefined) {
         clearTimeout(timeout);
         timeout = undefined;
     }
-    timeout = setTimeout(updateDecorations, 500);
-}
 
+    timeout = setTimeout(
+        updateDecorations,
+        500
+    );
+}

@@ -2,105 +2,126 @@
    "$schema": "https://raw.githubusercontent.rslom/martinring/tmlanguage/master/tmlanguage.json",
    "name": "RSL",
    "patterns": [
-            {
-               "include": "#comments"
+      {
+         "include": "#comments"
+      },
+      {
+         "match": "(?i)\\b(macro)\\s+([A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё0-9_]*)",
+         "captures": {
+            "1": {
+               "name": "storage.type.function.rsl"
             },
-            {
-               "include": "#rsl_types"
-            },
-            {
-               "include": "#logical_operations"
-            },
-            {
-               "include": "#storage_types"
-            },
-            {
-               "include": "#operators"
-            },
-            {
-               "include": "#numbers"
-            },
-            {
-               "include": "#strings"
-            },
-            {
-               "match": "(?i)\\b(debugbreak|import|break|continue|do|else|for|if|elif|return|while|exit|end)\\b",
-               "name": "keyword.control.rsl"
-            },
-            {
-               "match": "(?i)\\b(V_GENOBJ|V_DBFFILE|V_TXTFILE|V_ARRAY|V_STRUC|V_FILE|V_UNDEF|V_MONEYL|V_MONEY|V_NUMERIC|V_DECIMAL|V_R2M|V_PROC|V_MEMADDR|V_DTTM|V_TIME|V_DATE|V_BOOL|V_STRING|V_DOUBLEL|V_DOUBLE|V_INTEGER)\\b",
-               "name": "storage.type.rsl"
-            },
-            {
-               "match": "(?i)\\b(class|macro)\\b",
-               "name": "entity.name.type.rsl"
-            },
-            {
-               "include": "#std_functions"
-            },
-            {
-               "include": "#modificators"
-            },
-            {
-               "include": "#variables"
-            },
-            {
-               "include": "#global_variables"
-            },
-            {
-               "include": "#constant_global"
-            },
-            {
-               "include": "#function_call"
-            },
-            {
-               "match": "\\b[\\w]+(?=[\\[])(?=[\\s\\w,\"@:]*)",
-               "name": "variable.language.array.rsl"
-            },
-            {
-               "include": "#output_string"
-            },
-            {
-               "include": "#var_preamb"
-            },
-            {
-               "include": "#logical_types"
-            },
-            {
-               "match": "(?i)([а-яa-z0-9_]*)\\.",
-               "name": "variable.class.object.rsl"
+            "2": {
+               "name": "entity.name.function.rsl"
             }
-         ],
+         }
+      },
+      {
+         "match": "(?i)\\b(class)\\s+([A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё0-9_]*)",
+         "captures": {
+            "1": {
+               "name": "storage.type.class.rsl"
+            },
+            "2": {
+               "name": "entity.name.type.class.rsl"
+            }
+         }
+      },
+      {
+         "include": "#rsl_types"
+      },
+      {
+         "include": "#logical_operations"
+      },
+      {
+         "include": "#storage_types"
+      },
+      {
+         "include": "#operators"
+      },
+      {
+         "include": "#numbers"
+      },
+      {
+         "include": "#strings"
+      },
+      {
+         "match": "(?i)\\b(debugbreak|import|break|continue|do|else|for|if|elif|return|while|exit|end)\\b",
+         "name": "keyword.control.rsl"
+      },
+      {
+         "match": "(?i)\\b(V_GENOBJ|V_DBFFILE|V_TXTFILE|V_ARRAY|V_STRUC|V_FILE|V_UNDEF|V_MONEYL|V_MONEY|V_NUMERIC|V_DECIMAL|V_R2M|V_PROC|V_MEMADDR|V_DTTM|V_TIME|V_DATE|V_BOOL|V_STRING|V_DOUBLEL|V_DOUBLE|V_INTEGER)\\b",
+         "name": "storage.type.rsl"
+      },
+      {
+         "match": "(?i)\\b(class|macro)\\b",
+         "name": "entity.name.type.rsl"
+      },
+      {
+         "include": "#std_functions"
+      },
+      {
+         "include": "#modificators"
+      },
+      {
+         "include": "#variables"
+      },
+      {
+         "include": "#global_variables"
+      },
+      {
+         "include": "#constant_global"
+      },
+      {
+         "include": "#function_call"
+      },
+      {
+         "match": "\\b[\\w]+(?=[\\[])(?=[\\s\\w,\"@:]*)",
+         "name": "variable.language.array.rsl"
+      },
+      {
+         "include": "#output_string"
+      },
+      {
+         "include": "#var_preamb"
+      },
+      {
+         "include": "#logical_types"
+      },
+      {
+         "match": "(?i)([а-яa-z0-9_]*)\\.",
+         "name": "variable.class.object.rsl"
+      }
+   ],
    "repository": {
       "logical_operations": {
          "match": "(?i)\\b(and|or|not)\\b",
          "name": "keyword.operator.logical.rsl"
       },
       "rsl_types": {
-            "match": "[:]\\s*[@]?\\s*[\\w]{2,}",
-            "name": "storage.type.rsl"
+         "match": "[:]\\s*[@]?\\s*[\\w]{2,}",
+         "name": "storage.type.rsl"
       },
       "constant_global": {
          "match": "\\b[_A-ZЙЦУКЕНГШЩЗХФЫВАПРОЛДЖЭЪЯЧСМИТЬБЮ][A-Z_0-9ЙЦУКЕНГШЩЗХФЫВАПРОЛДЖЭЪЯЧСМИТЬБЮ]+\\b",
          "name": "constant.other.rsl"
       },
       "modificators": {
-            "match": "(?i)\\b(const|private|local|key)\\b",
-            "name": "storage.modifier.rsl"
+         "match": "(?i)\\b(const|private|local|key)\\b",
+         "name": "storage.modifier.rsl"
       },
       "function_call": {
          "match": "\\b[\\w]+\\b\\s*(?=[\\(])(?=[\\s\\w,\"@:]*)",
          "name": "entity.name.function.rsl"
       },
       "std_functions": {
-            "name": "storage.modifier.rsl",
-            "patterns": [
-               {
-                  "match": "(СТР_УТВЕРДИЛ|СТР_РУКОВОДИТЕЛЬ|СТР_РЕЗКУРАТОР|СТР_ОТКРЫЛ|СТР_КУРАТОР|ОТЧ_УТВЕРДИЛ|ОТЧ_КУРАТОР|ОТЧ_ОТКРЫЛ|ОТЧ_РЕЗКУРАТОР|ОТЧ_РУКОВОДИТЕЛЬ)",
-                  "name": "entity.name.function.rsl"
-               }
-            ]
-
+         "name": "storage.modifier.rsl",
+         "patterns": [
+            {
+               "match": "(СТР_УТВЕРДИЛ|СТР_РУКОВОДИТЕЛЬ|СТР_РЕЗКУРАТОР|СТР_ОТКРЫЛ|СТР_КУРАТОР|ОТЧ_УТВЕРДИЛ|ОТЧ_КУРАТОР|ОТЧ_ОТКРЫЛ|ОТЧ_РЕЗКУРАТОР|ОТЧ_РУКОВОДИТЕЛЬ)",
+               "name": "entity.name.function.rsl"
+            }
+         ]
       },
       "output_string": {
          "patterns": [
@@ -331,7 +352,7 @@
                      "name": "punctuation.definition.string.begin.rsl"
                   }
                },
-               "end": "\"",
+               "end": "(?<!\\\\)(?:\\\\\\\\)*\"",
                "endCaptures": {
                   "0": {
                      "name": "punctuation.definition.string.end.rsl"

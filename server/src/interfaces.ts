@@ -1,157 +1,158 @@
-import { CompletionItemKind, InsertTextFormat, CompletionItem, Location } from 'vscode-languageserver';
-import { varType } from './enums';
-import { CBase } from './common';
+import {
+    CompletionItemKind,
+    InsertTextFormat,
+    CompletionItem,
+    Location
+} from "vscode-languageserver";
+
+import { varType } from "./enums";
+import { CBase } from "./common";
+
+
 /**
- * Интерфейс для массива с импортированными модулями
+ * Интерфейс для массива с импортированными модулями.
  */
 export interface IFAStruct {
-    uri     : string;
-    object  : CBase;
+    uri: string;
+    object: CBase;
 }
 
+
 /**
- * Интерфейс для кортежей
+ * Универсальная пара значений.
  */
 export interface If_s<T> {
-    first   : boolean;
-    second  : T;
+    first: boolean;
+    second: T;
 }
 
+
 /**
- * Интерфейс запроса на показ местоположения в файле
+ * Запрос на открытие позиции в файле.
  */
 export interface IReqOpenLocation {
-    uri         : string;
-    location    : Location;
-    range       : IRange;
+    uri: string;
+    location: Location;
+    range: IRange;
 }
 
+
 /**
- * Интерфейс для NextToken
+ * Тип лексического токена.
+ *
+ * code    — обычный RSL-код;
+ * string  — строковый литерал;
+ * square  — многострочный блок [ ... ];
+ * comment — однострочный или блочный комментарий.
+ */
+export type TokenKind =
+    "code" |
+    "string" |
+    "square" |
+    "comment";
+
+
+/**
+ * Токен исходного текста.
  */
 export interface IToken {
-    str     : string;
-    range   : IRange;
+    str: string;
+    range: IRange;
+    kind?: TokenKind;
 }
 
+
 /**
- * Интерфейс для настроек сервера
+ * Настройки language server.
  */
 export interface IRslSettings {
-	import: string;
+    import: string;
 }
 
+
 /**
- * Интерфейс для диапазона
+ * Диапазон в абсолютных смещениях документа.
  */
 export interface IRange {
-    start   :number;
-    end     :number;
+    start: number;
+    end: number;
 }
 
 
-
 /**
- * Интерфейс для Массивов со строками
+ * Массив строковых значений.
  */
 export interface IArray {
-    _it:Array<string>;
-    is(it:string):If_s<number>;
-    str(num:varType): string
+    _it: Array<string>;
+    is(it: string): If_s<number>;
+    str(num: varType | number): string;
 }
 
+
 /**
- * Абстрактный базовый класс, отсюда будем танцевать при парсинге
+ * Базовый класс элемента синтаксического дерева.
  */
 export abstract class CAbstractBase {
-/**
- * Имя переменной, макроса или класса
- */
-    protected name            : string;
-/**
- * Флаг приватности
- */
-    protected private_        : boolean;
-/**
- * Начало и конец блока
- */
-    protected range           : IRange;
-/**
- * Тип Объекта, перечисление CompletionItemKind
- */
-    protected objKind         : CompletionItemKind;
-/**
- * Тип переменной или возвращаемое значение
- */
-    protected varType_        : string;
-/**
- * Описание для автодополнения
- */
-    protected description     : string;
-/**
- * Верхняя строка описания для автодополнения
- */
-    protected detail          : string;
-/**
- * Вставляемый текст
- */
-    protected insertedText    : string;
+    protected name: string;
+    protected private_: boolean;
+    protected range: IRange;
+    protected objKind: CompletionItemKind;
+    protected varType_: string;
+    protected description: string;
+    protected detail: string;
+    protected insertedText: string;
 
-/**
- * Конструктор
- */
     constructor() {
-        this.name            = "";
-        this.private_        = false;
-        this.range           = {start: 0, end: 0};
-        this.objKind         = CompletionItemKind.Unit;
-        this.varType_        = "variant";
-        this.description     = "";
-        this.detail          = "";
-        this.insertedText    = "";
+        this.name = "";
+        this.private_ = false;
+        this.range = {
+            start: 0,
+            end: 0
+        };
+        this.objKind = CompletionItemKind.Unit;
+        this.varType_ = "variant";
+        this.description = "";
+        this.detail = "";
+        this.insertedText = "";
     }
 
-/**
- * возвращает флаг приватности
- */
-    get Private() : boolean{ return this.private_ }
-/**
- * Устанавливает флаг приватности
- */
-    set Private(flag: boolean) {this.private_ = flag}
-/**
- * Возвращает имя
- */
-    get Name(): string {return this.name}
-/**
- * Возвращает тип значения переменной или возвращаемый тип для макроса
- */
-    get Type(): string {return this.varType_}
-/**
- * Устанавливает тип переменной
- */
-    setType(type: string) {this.varType_ = type}
-/**
- * Возвращает диапазон блока
- */
-    get Range(): IRange {return this.range}
-/**
- * Устанавливает диапазон блока
- */
-    setRange(range:IRange) {this.range = range}
-/**
- * Возвращает тип объекта
- */
-    get ObjKind(): CompletionItemKind {return this.objKind}
-/**
- * Возвращает инфо объекта для автодополнения
- */
-    abstract updateCIInfo();
-/**
- * Возвращает инфо объекта для автодополнения
- */
+    get Private(): boolean {
+        return this.private_;
+    }
+
+    set Private(flag: boolean) {
+        this.private_ = flag;
+    }
+
+    get Name(): string {
+        return this.name;
+    }
+
+    get Type(): string {
+        return this.varType_;
+    }
+
+    setType(type: string): void {
+        this.varType_ = type;
+    }
+
+    get Range(): IRange {
+        return this.range;
+    }
+
+    setRange(range: IRange): void {
+        this.range = range;
+    }
+
+    get ObjKind(): CompletionItemKind {
+        return this.objKind;
+    }
+
+    abstract updateCIInfo(): void;
+
     get CIInfo(): CompletionItem {
         this.updateCIInfo();
+
         return {
             label: this.name,
             documentation: this.description,
@@ -159,27 +160,29 @@ export abstract class CAbstractBase {
             kind: this.objKind,
             detail: this.detail,
             insertText: this.insertedText
-        }
+        };
     }
-/**
- * Возвращает является ли данный элемент функцией, методом или классом
- */
-    isObject():boolean
-    {
-        return this.objKind === CompletionItemKind.Class || this.objKind === CompletionItemKind.Function || this.objKind === CompletionItemKind.Method;
-    }
-/**
- * Возвращает актуален ли объект для позиции в документе
- */
-    abstract isActual(pos: number): boolean;
-/**
- * Устанавливает описание для автодополнения
- */
-    Description(desc: string) {this.description = desc}
-/**
- * Рекурсивный поиск внутри объекта
- */
-    RecursiveFind(name: string): CAbstractBase {return undefined}
 
-	abstract reParsing():void;
+    isObject(): boolean {
+        return (
+            this.objKind === CompletionItemKind.Class ||
+            this.objKind === CompletionItemKind.Function ||
+            this.objKind === CompletionItemKind.Method
+        );
+    }
+
+    abstract isActual(pos: number): boolean;
+
+    Description(desc: string): void {
+        this.description = desc;
+    }
+
+    /**
+     * Объект может отсутствовать — это нормальный результат поиска.
+     */
+    RecursiveFind(_name: string): CAbstractBase | undefined {
+        return undefined;
+    }
+
+    abstract reParsing(): void;
 }

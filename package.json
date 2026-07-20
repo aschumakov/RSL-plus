@@ -1,9 +1,9 @@
 {
-   "name": "rsl",
-   "displayName": "RSL",
-   "description": "R-Style Language support",
-   "author": "Veniamin Rakov",
-   "license": "SEE LICENSE IN 'LICENSE' file",
+   "name": "rsl-plus",
+   "displayName": "RSL-plus",
+   "description": "R-Style Language support +",
+   "author": "Veniamin Rakov + AChumakov",
+   "license": "SEE LICENSE IN LICENSE",
    "version": "1.0.18",
    "icon": "icon.png",
    "bugs": {
@@ -14,7 +14,7 @@
       "type": "git",
       "url": "https://github.com/alliluja/RSL.git"
    },
-   "publisher": "VeniaminRakov",
+   "publisher": "AChumakov",
    "categories": [
       "Programming Languages",
       "Snippets"
@@ -145,9 +145,10 @@
       "onLanguage:rsl"
    ],
    "scripts": {
-      "vscode:prepublish": "cd client && npm run update-vscode && cd .. && npm run compile",
+      "vscode:prepublish": "npm run compile",
       "compile": "tsc -b",
       "watch": "tsc -b -w",
+      "test:formatter": "npm run compile && node tests/formatter.test.js",
       "postinstall": "cd client && npm install && cd ../server && npm install && cd .."
    },
    "devDependencies": {

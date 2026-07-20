@@ -1,5 +1,6 @@
-node_modules
+﻿node_modules
 server/out/
 server/node_modules
 client/out/
 client/node_modules
+server/rsl-server.log

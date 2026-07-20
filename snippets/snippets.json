@@ -3,9 +3,6 @@
       "prefix": "head",
       "body": [
             "// ===========================================================================",
-            "//            Copyright (c) 1993 - ${CURRENT_YEAR} R-Style Softlab ",
-            "//                      All Rights Reserved. ",
-            "// ",
             "//  System      : ${1:RS-Bank}",
             "//  File name   : ${TM_FILENAME}",
             "//  Date        : ${CURRENT_DATE}.${CURRENT_MONTH}.${CURRENT_YEAR}",

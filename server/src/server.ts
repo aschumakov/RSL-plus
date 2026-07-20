@@ -1,3 +1,6 @@
+import * as fs from 'fs';
+import * as path from 'path';
+
 import {
     createConnection,
     TextDocuments,
@@ -7,168 +10,416 @@ import {
     DidChangeConfigurationNotification,
     CompletionItem,
     TextDocumentPositionParams,
-    TextDocumentIdentifier,
     Hover,
     Location,
     Definition,
     Position,
     Diagnostic,
     DiagnosticSeverity,
-    TextEdit
+    TextEdit,
+    FormattingOptions,
+    Range,
+    SymbolInformation
 } from 'vscode-languageserver';
 
 import { IFAStruct, IRslSettings, IToken } from './interfaces';
 import { getDefaults, getCIInfoForArray } from './defaults';
-
 import { CBase } from './common';
 import { getSymbols } from './docsymbols';
-import { start } from 'repl';
 import { FormatCode } from './format';
 
-let connection = createConnection(ProposedFeatures.all);
-let documents: TextDocuments = new TextDocuments();
-let hasConfigurationCapability: boolean = false;
-let hasWorkspaceFolderCapability: boolean = false;
+const connection = createConnection(ProposedFeatures.all);
+const documents: TextDocuments = new TextDocuments();
+
+const logFilePath = path.resolve(__dirname, '..', 'rsl-server.log');
+
+function logMessage(message: string): void {
+    const line =
+        `[${new Date().toISOString()}] ` +
+        `PID=${process.pid} ` +
+        `${message}\r\n`;
+
+    try {
+        fs.appendFileSync(logFilePath, line, {
+            encoding: 'utf8'
+        });
+    } catch (_error) {
+        // Ошибка журналирования не должна останавливать language server.
+    }
+}
+
+function errorToString(error: any): string {
+    if (error instanceof Error) {
+        return `${error.name}: ${error.message}\n${error.stack || ''}`;
+    }
+
+    return String(error);
+}
+
+logMessage(`Language server started. Node=${process.version}`);
+
+process.on('unhandledRejection', (reason: any) => {
+    logMessage(
+        `UNHANDLED REJECTION\n${errorToString(reason)}`
+    );
+});
+
+process.on('uncaughtException', (error: Error) => {
+    logMessage(
+        `UNCAUGHT EXCEPTION\n${errorToString(error)}`
+    );
+
+    process.exit(1);
+});
+
+process.on('exit', (code: number) => {
+    logMessage(`Language server exited. Code=${code}`);
+});
+
+let hasConfigurationCapability = false;
+let hasWorkspaceFolderCapability = false;
 let hasDiagnosticRelatedInformationCapability = false;
-let workFolderOpened: boolean = false;
-const defaultSettings: IRslSettings = { import: "ДА" };
+let workFolderOpened = false;
+
+const defaultSettings: IRslSettings = { import: 'ДА' };
 let globalSettings: IRslSettings = defaultSettings;
-let documentSettings: Map<string, Thenable<IRslSettings>> = new Map();
-let Imports: Array<IFAStruct>;
+const documentSettings: Map<string, Thenable<IRslSettings>> = new Map();
+let Imports: IFAStruct[] = [];
 
-export function GetFileByNameRequest(nameInter: string) {
-    if (workFolderOpened && globalSettings.import == "ДА")
-        connection.sendRequest("getFilebyName", nameInter);
+let clientReady = false;
+const pendingImportNames: Set<string> = new Set<string>();
+const requestedImportNames: Set<string> = new Set<string>();
+const parseGeneration: Map<string, number> =
+    new Map<string, number>();
+
+const parsedVersions: Map<string, number> =
+    new Map<string, number>();
+
+const parseTimers: Map<string, NodeJS.Timer> =
+    new Map<string, NodeJS.Timer>();
+
+const PARSE_DEBOUNCE_MS = 200;
+
+interface IPositionContext {
+    document: TextDocument;
+    tree: CBase;
+    offset: number;
+    token?: IToken;
 }
 
-export function GetFileRequest(filePath: string) {
-    connection.sendRequest("getFile", filePath);
+interface IFoundObject extends IFAStruct {
+    token: IToken;
 }
 
-export function getTree(): Array<IFAStruct> { return Imports }
+function normalizeName(value: string): string {
+    return (value || '').toLowerCase();
+}
 
-function getCurDoc(uri: string): TextDocument {
-    GetFileRequest(uri);
-    let curDocArr = documents.all().filter((value) => {
-        return value.uri == uri;
+function namesEqual(
+    left: string,
+    right: string
+): boolean {
+    return normalizeName(left) === normalizeName(right);
+}
+
+function isBlockedToken(token?: IToken): boolean {
+    return !!(
+        token &&
+        (
+            token.kind === 'string' ||
+            token.kind === 'square' ||
+            token.kind === 'comment'
+        )
+    );
+}
+
+function notifyClient(method: string, params?: any): void {
+    if (!clientReady) {
+        return;
+    }
+
+    try {
+        connection.sendNotification(method, params);
+    } catch (error) {
+        logMessage(
+            `Client notification failed: ${method}\n` +
+            errorToString(error)
+        );
+    }
+}
+
+function flushPendingImports(): void {
+    if (!clientReady) {
+        return;
+    }
+
+    pendingImportNames.forEach(name => {
+        if (requestedImportNames.has(name)) {
+            return;
+        }
+
+        requestedImportNames.add(name);
+        notifyClient('getFilebyName', name);
     });
-    return curDocArr.pop();
+
+    pendingImportNames.clear();
 }
 
-function getCurObj(uri: string): CBase {
-    return Imports.find(m => m.uri === uri)?.object;
+connection.onNotification('clientReady', () => {
+    clientReady = true;
+    logMessage('Client handlers are ready.');
+    flushPendingImports();
+    notifyClient('updateStatusBar', Imports.length);
+});
+
+export function GetFileByNameRequest(nameInter: string): void {
+    if (
+        !workFolderOpened ||
+        globalSettings.import !== 'ДА' ||
+        !nameInter
+    ) {
+        return;
+    }
+
+    pendingImportNames.add(nameInter);
+    flushPendingImports();
 }
 
-function FindObject(tdpp: TextDocumentPositionParams): IFAStruct {
+export function GetFileRequest(filePath: string): void {
+    if (!filePath) {
+        return;
+    }
+
+    notifyClient('getFile', filePath);
+}
+
+export function getTree(): IFAStruct[] {
+    return Imports;
+}
+
+function getCurDoc(uri: string): TextDocument | undefined {
+    /*
+     * Получение документа не должно иметь побочного эффекта.
+     * Раньше каждый hover/completion/Outline отправлял клиенту
+     * запрос на повторное открытие файла и мог вызвать каскад didOpen.
+     */
+    return documents.get(uri);
+}
+
+function getCurObj(uri: string): CBase | undefined {
+    const currentImport = Imports.find(m => m.uri === uri);
+    return currentImport ? currentImport.object : undefined;
+}
+
+function getPositionContext(
+    tdpp: TextDocumentPositionParams
+): IPositionContext | undefined {
+    const document = getCurDoc(
+        tdpp.textDocument.uri
+    );
+
+    const tree = getCurObj(
+        tdpp.textDocument.uri
+    );
+
+    if (!document || !tree) {
+        return undefined;
+    }
+
+    const offset =
+        document.offsetAt(tdpp.position);
+
+    return {
+        document,
+        tree,
+        offset,
+        token: tree.getCurrentToken(offset)
+    };
+}
+
+function FindObject(
+    tdpp: TextDocumentPositionParams,
+    existingContext?: IPositionContext
+): IFoundObject | undefined {
+    const context =
+        existingContext ||
+        getPositionContext(tdpp);
+
+    if (
+        !context ||
+        !context.token ||
+        isBlockedToken(context.token)
+    ) {
+        return undefined;
+    }
+
     let uri = tdpp.textDocument.uri;
-    let CBaseObject: CBase = undefined;
-    let findObject: IFAStruct = undefined;
-    let token: IToken = undefined;
-    let document: TextDocument = getCurDoc(tdpp.textDocument.uri);
-    let tree: CBase = getCurObj(tdpp.textDocument.uri);
-    if (tree != undefined) {
-        let curPos = document.offsetAt(tdpp.position);
-        token = tree.getCurrentToken(curPos);
-        if (token !== undefined) {
-            let objArr = tree.getActualChilds(curPos);
-            let objects: Array<CBase> = new Array();
-            for (const element of objArr) {
-                if (element.isObject()) {
-                    element.getChilds().forEach(child => {
-                        if (child.Name === token.str) objects.push(child);
-                    });
+    let cBaseObject: CBase | undefined;
+
+    const token = context.token;
+    const normalizedToken =
+        normalizeName(token.str);
+
+    const objArr =
+        context.tree.getActualChilds(
+            context.offset
+        );
+
+    const objects: CBase[] = [];
+
+    for (const element of objArr) {
+        if (element.isObject()) {
+            element.getChilds().forEach(child => {
+                if (
+                    namesEqual(
+                        child.Name,
+                        normalizedToken
+                    )
+                ) {
+                    objects.push(child);
                 }
-                if (element.Name.toLowerCase() === token.str.toLowerCase()) {
-                    objects.push(element);
-                }
+            });
+        }
+
+        if (
+            namesEqual(
+                element.Name,
+                normalizedToken
+            )
+        ) {
+            objects.push(element);
+        }
+    }
+
+    if (objects.length > 1) {
+        let minDistance =
+            token.range.start;
+
+        for (const iterator of objects) {
+            const currentDistance =
+                token.range.start -
+                iterator.Range.end;
+
+            if (
+                currentDistance >= 0 &&
+                currentDistance < minDistance
+            ) {
+                cBaseObject = iterator;
+                minDistance = currentDistance;
             }
-            if (objects.length > 1) {
-                let minDistanse: number = token.range.start;
-                for (const iterator of objects) {
-                    let curDistanse: number = token.range.start - iterator.Range.end;
-                    if (curDistanse < minDistanse) {
-                        CBaseObject = iterator;
-                        minDistanse = curDistanse;
-                    }
+        }
+
+        /*
+         * Если все найденные объявления находятся правее
+         * курсора, сохраняем первый best-effort результат.
+         */
+        if (!cBaseObject) {
+            cBaseObject = objects[0];
+        }
+    } else if (objects.length === 1) {
+        cBaseObject = objects[0];
+    }
+
+    if (!cBaseObject) {
+        for (const iterator of Imports) {
+            if (
+                iterator.uri ===
+                tdpp.textDocument.uri
+            ) {
+                continue;
+            }
+
+            const actualChildren =
+                iterator.object.getActualChilds(0);
+
+            for (const element of actualChildren) {
+                if (
+                    namesEqual(
+                        element.Name,
+                        normalizedToken
+                    )
+                ) {
+                    cBaseObject = element;
+                    uri = iterator.uri;
+                    break;
                 }
             }
 
-            else if (objects.length == 1) {
-                CBaseObject = objects.pop();
-            }
-
-            if (CBaseObject == undefined) {
-                for (const iterator of Imports) {
-                    if (iterator.uri != tdpp.textDocument.uri) {
-                        let objArr = iterator.object.getActualChilds(0);
-                        for (const element of objArr) {
-                            if (element.Name === token.str) {
-                                CBaseObject = element;
-                                uri = iterator.uri;
-                                break;
-                            }
-                        }
-                    }
-                    if (CBaseObject != undefined) break;
-                }
+            if (cBaseObject) {
+                break;
             }
         }
     }
-    findObject = (CBaseObject != undefined) ? { object: CBaseObject, uri: uri } : undefined;
-    return findObject;
+
+    if (!cBaseObject) {
+        return undefined;
+    }
+
+    return {
+        object: cBaseObject,
+        uri,
+        token
+    };
 }
 
 connection.onInitialize((params: InitializeParams) => {
-    let capabilities = params.capabilities;
-    workFolderOpened = (params.rootPath != null) ? true : false;
+    const capabilities = params.capabilities;
+    workFolderOpened = params.rootPath != null;
 
-    hasConfigurationCapability = !!(capabilities.workspace && !!capabilities.workspace.configuration);
-    hasWorkspaceFolderCapability = !!(capabilities.workspace && !!capabilities.workspace.workspaceFolders);
-    hasDiagnosticRelatedInformationCapability =
-        !!(capabilities.textDocument &&
-            capabilities.textDocument.publishDiagnostics &&
-            capabilities.textDocument.publishDiagnostics.relatedInformation);
+    hasConfigurationCapability = !!(
+        capabilities.workspace &&
+        capabilities.workspace.configuration
+    );
+
+    hasWorkspaceFolderCapability = !!(
+        capabilities.workspace &&
+        capabilities.workspace.workspaceFolders
+    );
+
+    hasDiagnosticRelatedInformationCapability = !!(
+        capabilities.textDocument &&
+        capabilities.textDocument.publishDiagnostics &&
+        capabilities.textDocument.publishDiagnostics.relatedInformation
+    );
+
     return {
         capabilities: {
             textDocumentSync: documents.syncKind,
-            // Включим поддержку автодополнения
             completionProvider: {
                 resolveProvider: true,
-                "triggerCharacters": ['.']
+                triggerCharacters: ['.']
             },
-            // Включим поддержку подсказок при наведении
             hoverProvider: true,
-            // Включим поддержку перехода к определению (F12)
             definitionProvider: true,
             documentSymbolProvider: true,
-            // Объявления поддержки функции форматирования
             documentFormattingProvider: true
         }
     };
 });
 
 connection.onInitialized(() => {
-    Imports = new Array();
 
-    if (!workFolderOpened) connection.sendNotification("noRootFolder"); //не открыта папка, надо ругнуться
+    if (!workFolderOpened) {
+        connection.sendNotification('noRootFolder');
+    }
+
     if (hasConfigurationCapability) {
         connection.client.register(
             DidChangeConfigurationNotification.type,
             undefined
         );
     }
+
     if (hasWorkspaceFolderCapability) {
         connection.workspace.onDidChangeWorkspaceFolders(_event => {
-            connection.console.log('Workspace folder change event received.');
+            connection.console.log(
+                'Workspace folder change event received.'
+            );
         });
     }
 
-    connection.onRequest("getMacros", () => {
-        let result: string[] = [];
-        Imports.forEach(element => {
-            result.push(element.uri);
-        });
-        return result;
+    connection.onRequest('getMacros', () => {
+        return Imports.map(element => element.uri);
     });
 });
 
@@ -181,14 +432,16 @@ connection.onDidChangeConfiguration(change => {
         );
     }
 
-    documents.all().forEach(validateTextDocument);
+    documents.all().forEach(scheduleValidation);
 });
 
 function getDocumentSettings(resource: string): Thenable<IRslSettings> {
     if (!hasConfigurationCapability) {
         return Promise.resolve(globalSettings);
     }
+
     let result = documentSettings.get(resource);
+
     if (!result) {
         result = connection.workspace.getConfiguration({
             scopeUri: resource,
@@ -196,232 +449,514 @@ function getDocumentSettings(resource: string): Thenable<IRslSettings> {
         });
         documentSettings.set(resource, result);
     }
+
     return result;
 }
 
-documents.onDidClose(e => {
-    documentSettings.delete(e.document.uri);
+documents.onDidClose(event => {
+    const uri = event.document.uri;
+
+    documentSettings.delete(uri);
+    parsedVersions.delete(uri);
+    cancelScheduledValidation(uri);
 });
 
 documents.onDidChangeContent(change => {
-    connection.console.log(`Парсинг файла: ${change.document.uri.toString()}`);
-    validateTextDocument(change.document);
+    connection.console.log(
+        `Парсинг файла: ${change.document.uri.toString()}`
+    );
+    scheduleValidation(change.document);
 });
 
-async function validateTextDocument(textDocument: TextDocument): Promise<void> {
-    globalSettings = await getDocumentSettings(textDocument.uri);
-    let text = textDocument.getText();
+function cancelScheduledValidation(
+    uri: string
+): void {
+    const timer = parseTimers.get(uri);
 
-    const module = Imports.find(m => m.uri === textDocument.uri);
-    if (module) {
-        module.object = new CBase(text, 0);
-    } else {
-        Imports.push({ uri: textDocument.uri, object: new CBase(text, 0) });
+    if (timer) {
+        clearTimeout(timer);
+        parseTimers.delete(uri);
     }
+}
 
-    connection.sendRequest("updateStatusBar", Imports.length); //обновим статус строку
+function scheduleValidation(
+    textDocument: TextDocument
+): void {
+    const uri = textDocument.uri;
+    const expectedVersion =
+        textDocument.version;
 
-    let currentEditor = connection.sendRequest("getActiveTextEditor");
-    if (currentEditor != null) {
-        currentEditor.then((value: string) => {
-            if (value == textDocument.uri) {
-                let pattern = /\b(record|array)\b/gi;
-                let m: RegExpExecArray | null;
+    const generation =
+        (parseGeneration.get(uri) || 0) + 1;
 
-                let diagnostics: Diagnostic[] = [];
-                while (m = pattern.exec(text)) {
-                    let diagnostic: Diagnostic = {
-                        severity: DiagnosticSeverity.Information,
-                        range: {
-                            start: textDocument.positionAt(m.index),
-                            end: textDocument.positionAt(m.index + m[0].length)
-                        },
-                        message: `Определение ${m[0].toUpperCase()} устарело, от такого надо избавляться по возможности`,
-                        source: 'RSL parser'
-                    };
-                    /*
-                    //добавляет дополнительную информацию к выводу проблемы
-                    if (hasDiagnosticRelatedInformationCapability) {
-                        diagnostic.relatedInformation = [
-                            {
-                                location: {
-                                    uri: textDocument.uri,
-                                    range: Object.assign({}, diagnostic.range)
-                                },
-                                message: 'непонятная надпись'
-                            }
-                        ];
-                    }*/
-                    diagnostics.push(diagnostic);
-                }
+    parseGeneration.set(uri, generation);
+    cancelScheduledValidation(uri);
 
-                // Send the computed diagnostics to VSCode.
-                connection.sendDiagnostics({ uri: textDocument.uri, diagnostics });
-            }
+    const timer = setTimeout(() => {
+        parseTimers.delete(uri);
+
+        const currentDocument =
+            documents.get(uri);
+
+        if (
+            !currentDocument ||
+            currentDocument.version !==
+                expectedVersion
+        ) {
+            return;
+        }
+
+        validateTextDocument(
+            currentDocument,
+            generation
+        ).then(undefined, error => {
+            logMessage(
+                `Validation failed: ${uri}\n` +
+                errorToString(error)
+            );
         });
+    }, PARSE_DEBOUNCE_MS);
+
+    parseTimers.set(uri, timer);
+}
+
+async function validateTextDocument(
+    textDocument: TextDocument,
+    generation: number
+): Promise<void> {
+    const uri = textDocument.uri;
+    const version = textDocument.version;
+
+    if (
+        parsedVersions.get(uri) === version &&
+        getCurObj(uri)
+    ) {
+        return;
     }
 
+    try {
+        const settings =
+            await getDocumentSettings(uri);
+
+        if (
+            parseGeneration.get(uri) !==
+            generation
+        ) {
+            return;
+        }
+
+        globalSettings =
+            settings || defaultSettings;
+
+        const text =
+            textDocument.getText();
+
+        const parseStartedAt = Date.now();
+        const parsedObject =
+            new CBase(text, 0);
+
+        if (
+            parseGeneration.get(uri) !==
+            generation
+        ) {
+            return;
+        }
+
+        const module =
+            Imports.find(m => m.uri === uri);
+
+        if (module) {
+            module.object = parsedObject;
+        } else {
+            Imports.push({
+                uri,
+                object: parsedObject
+            });
+        }
+
+        parsedVersions.set(
+            uri,
+            version
+        );
+
+        notifyClient(
+            'updateStatusBar',
+            Imports.length
+        );
+
+        const pattern =
+            /\b(record|array)\b/gi;
+
+        let match: RegExpExecArray | null;
+
+        const diagnostics: Diagnostic[] = [];
+
+        while (
+            (match = pattern.exec(text)) !== null
+        ) {
+            diagnostics.push({
+                severity:
+                    DiagnosticSeverity.Information,
+                range: {
+                    start:
+                        textDocument.positionAt(
+                            match.index
+                        ),
+                    end:
+                        textDocument.positionAt(
+                            match.index +
+                            match[0].length
+                        )
+                },
+                message:
+                    `Определение ${match[0].toUpperCase()} устарело, ` +
+                    'от такого надо избавляться по возможности',
+                source: 'RSL parser'
+            });
+        }
+
+        connection.sendDiagnostics({
+            uri,
+            diagnostics
+        });
+
+        logMessage(
+            `Parsed successfully: ${uri}; ` +
+            `version=${version}; ` +
+            `ms=${Date.now() - parseStartedAt}; ` +
+            `symbols=${parsedObject.getChilds().length}`
+        );
+    } catch (error) {
+        const errorText =
+            errorToString(error);
+
+        logMessage(
+            `Parse failed: ${uri}\n${errorText}`
+        );
+
+        connection.console.error(
+            `Ошибка разбора ${uri}: ${errorText}`
+        );
+    }
+}
+
+async function ensureDocumentParsed(
+    textDocument: TextDocument
+): Promise<CBase | undefined> {
+    const uri = textDocument.uri;
+
+    if (
+        parsedVersions.get(uri) ===
+            textDocument.version
+    ) {
+        return getCurObj(uri);
+    }
+
+    /*
+     * Outline запросил актуальное дерево раньше debounce.
+     * Отменяем таймер и выполняем ровно один немедленный разбор.
+     */
+    cancelScheduledValidation(uri);
+
+    const generation =
+        (parseGeneration.get(uri) || 0) + 1;
+
+    parseGeneration.set(uri, generation);
+
+    await validateTextDocument(
+        textDocument,
+        generation
+    );
+
+    return getCurObj(uri);
 }
 
 connection.onDidChangeWatchedFiles(_change => {
     connection.console.log('We received an file change event');
 });
 
-function isNotCommentOrString(tdpp: TextDocumentPositionParams): boolean {
-    let document: TextDocument = getCurDoc(tdpp.textDocument.uri);
-    let text: string = document.getText();
-    let isNotInPattern: boolean = true;
-    let patterns = [];
-    patterns.push(/(\/\/)(.+?)(?=[\n\r])/g);//однострочный комментарий
-    patterns.push(/\*[^*]*\*+(?:[^/*][^*]*\*+)*/g); //многострочный комментарий
-    patterns.push(/\"(\\.|[^\"])*\"/g); //строка
-    // patterns.push(/\'(\\.|[^\'])*\'/g); //строка //хз, с этим зависает
+connection.onCompletion(
+    (
+        tdpp: TextDocumentPositionParams
+    ): CompletionItem[] => {
+        let completionItems: CompletionItem[] = [];
 
-    let m: RegExpExecArray | null;
+        const context =
+            getPositionContext(tdpp);
 
-    for (const pattern of patterns) {
-        if (!isNotInPattern) break;
-
-        while ((m = pattern.exec(text)) && isNotInPattern) {
-            let offset = document.offsetAt(tdpp.position);
-            if (offset >= m.index && offset <= m.index + m[0].length) {
-                isNotInPattern = false;
-            }
+        if (
+            !context ||
+            isBlockedToken(context.token)
+        ) {
+            return completionItems;
         }
-    }
-    return isNotInPattern;
-}
 
-connection.onCompletion((tdpp: TextDocumentPositionParams): CompletionItem[] => {
-    let CompletionItemArray: Array<CompletionItem> = new Array();
-    let document: TextDocument = getCurDoc(tdpp.textDocument.uri);
-    let obj: IFAStruct = FindObject(tdpp);
-    let curPos = document.offsetAt(tdpp.position);
+        const obj =
+            FindObject(tdpp, context);
 
-    if (isNotCommentOrString(tdpp)) {
-        if (obj != undefined) {     //нашли эту переменную
-            if (obj.object.Type !== "variant") {
-                let objClass: CBase;
+        if (obj) {
+            if (
+                normalizeName(obj.object.Type) !==
+                'variant'
+            ) {
+                let objClass:
+                    CBase | undefined;
+
                 for (const iterator of Imports) {
-                    let objArr = iterator.object.getActualChilds(iterator.uri == tdpp.textDocument.uri ? curPos : 0);
+                    const objArr =
+                        iterator.object.getActualChilds(
+                            iterator.uri ===
+                                tdpp.textDocument.uri
+                                ? context.offset
+                                : 0
+                        );
+
                     for (const objIter of objArr) {
-                        if (objIter.Name == obj.object.Type) {
+                        if (
+                            namesEqual(
+                                objIter.Name,
+                                obj.object.Type
+                            )
+                        ) {
                             objClass = objIter;
                             break;
                         }
                     }
-                    if (objClass != undefined) break;
+
+                    if (objClass) {
+                        break;
+                    }
                 }
-                if (objClass != undefined) {
-                    CompletionItemArray = objClass.ChildsCIInfo(true); //получим всю информацию о детях
+
+                if (objClass) {
+                    completionItems =
+                        objClass.ChildsCIInfo(true);
                 }
             }
-        }
-        else {
+        } else {
             Imports.forEach(element => {
-                let actualChilds = element.object.getActualChilds(element.uri == tdpp.textDocument.uri ? curPos : 0);
-                for (const child of actualChilds) {
-                    CompletionItemArray.push(child.CIInfo);
+                const actualChildren =
+                    element.object.getActualChilds(
+                        element.uri ===
+                            tdpp.textDocument.uri
+                            ? context.offset
+                            : 0
+                    );
+
+                for (
+                    const child of actualChildren
+                ) {
+                    completionItems.push(
+                        child.CIInfo
+                    );
                 }
             });
-            CompletionItemArray = CompletionItemArray.concat(getCIInfoForArray(getDefaults())); //все дефолтные классы, функции и переменные
+
+            completionItems =
+                completionItems.concat(
+                    getCIInfoForArray(
+                        getDefaults()
+                    )
+                );
         }
+
+        return completionItems;
     }
-    return CompletionItemArray;
-});
+);
 
-connection.onCompletionResolve((item: CompletionItem): CompletionItem => { return item; });
+connection.onCompletionResolve(
+    (item: CompletionItem): CompletionItem => item
+);
 
-connection.onHover((tdpp: TextDocumentPositionParams): Hover => {
-    let hover: Hover = undefined;
-    if (isNotCommentOrString(tdpp)) {
-        let document: TextDocument = getCurDoc(tdpp.textDocument.uri);
-        let obj: IFAStruct = FindObject(tdpp);
-        let token: IToken = getCurObj(tdpp.textDocument.uri).getCurrentToken(document.offsetAt(tdpp.position));
-        if (obj != undefined) {
-            let CIInfo = obj.object.CIInfo;
-            let comment: string = (CIInfo.documentation.toString().length > 0) ? ` \n\r${CIInfo.documentation.toString()}` : "";
-            hover = {
-                contents: `${CIInfo.detail}${comment}`,
-                range: {
-                    start: document.positionAt(token.range.start),
-                    end: document.positionAt(token.range.end)
-                }
+connection.onHover(
+    (
+        tdpp: TextDocumentPositionParams
+    ): Hover | null => {
+        const context =
+            getPositionContext(tdpp);
+
+        if (
+            !context ||
+            !context.token ||
+            isBlockedToken(context.token)
+        ) {
+            return null;
+        }
+
+        const obj =
+            FindObject(tdpp, context);
+
+        if (!obj) {
+            return null;
+        }
+
+        const completionInfo =
+            obj.object.CIInfo;
+
+        const documentation =
+            completionInfo.documentation
+                ? completionInfo.documentation.toString()
+                : '';
+
+        const comment =
+            documentation.length > 0
+                ? ` \n\r${documentation}`
+                : '';
+
+        return {
+            contents:
+                `${completionInfo.detail || ''}` +
+                comment,
+            range: {
+                start:
+                    context.document.positionAt(
+                        obj.token.range.start
+                    ),
+                end:
+                    context.document.positionAt(
+                        obj.token.range.end
+                    )
             }
+        };
+    }
+);
+
+connection.onDefinition(
+    (
+        tdpp: TextDocumentPositionParams
+    ): Definition | null => {
+        const context =
+            getPositionContext(tdpp);
+
+        if (
+            !context ||
+            isBlockedToken(context.token)
+        ) {
+            return null;
         }
+
+        const obj =
+            FindObject(tdpp, context);
+
+        if (!obj) {
+            return null;
+        }
+
+        const document =
+            getCurDoc(obj.uri);
+
+        if (!document) {
+            return null;
+        }
+
+        const range = obj.object.Range;
+
+        const startPos: Position =
+            document.positionAt(range.start);
+
+        const endPos: Position =
+            document.positionAt(
+                range.start +
+                obj.object.Name.length
+            );
+
+        return Location.create(obj.uri, {
+            start: startPos,
+            end: endPos
+        });
+    }
+);
+
+connection.onDocumentSymbol(
+    async ({ textDocument }) => {
+        const document =
+            getCurDoc(textDocument.uri);
+
+        if (!document) {
+            return [];
+        }
+
+        const tree =
+            await ensureDocumentParsed(
+                document
+            );
+
+        if (!tree) {
+            return [];
+        }
+
+        return getSymbols(
+            document,
+            tree
+        ).filter(
+            (
+                symbol
+            ): symbol is SymbolInformation =>
+                symbol !== undefined
+        );
+    }
+);
+
+connection.onDocumentFormatting(formatParams => {
+    const uri = formatParams.textDocument.uri;
+    const document = documents.get(uri);
+
+    if (!document) {
+        logMessage(`Formatting skipped: document not found: ${uri}`);
+        return [];
     }
 
-    return hover != undefined ? hover : null;
+    try {
+        logMessage(`Formatting started: ${uri}`);
+
+        const text = document.getText();
+        const formattedText = formattingFunction(
+            text,
+            formatParams.options
+        );
+
+        logMessage(`Formatting completed: ${uri}`);
+
+        return [
+            TextEdit.replace(
+                fullDocumentRange(document),
+                formattedText
+            )
+        ];
+    } catch (error) {
+        const errorText = errorToString(error);
+
+        logMessage(
+            `Formatting failed: ${uri}\n${errorText}`
+        );
+
+        connection.console.error(
+            `Ошибка форматирования ${uri}: ${errorText}`
+        );
+
+        return [];
+    }
 });
 
-
-connection.onDefinition((tdpp: TextDocumentPositionParams) => {
-    let obj: IFAStruct = FindObject(tdpp);
-    let result: Definition = undefined;
-    if (isNotCommentOrString(tdpp)) {
-        if (obj != undefined) {
-            let document: TextDocument = getCurDoc(obj.uri);
-            let range = obj.object.Range;
-            let startPos: Position = document.positionAt(range.start);
-            let endPos: Position = document.positionAt(range.start + obj.object.Name.length);
-            result = Location.create(obj.uri, {
-                start: startPos,
-                end: endPos
-            })
-        }
-    }
-    return (result !== undefined) ? result : null;
-});
-
-function refreshModule(textDocument: TextDocument) {
-    const text = textDocument.getText();
-    const { uri } = textDocument;
-    const object = new CBase(text, 0);
-
-    const module = Imports.find(m => m.uri === uri);
-    if (module) {
-        module.object = object;
-    } else {
-        Imports.push({ uri, object });
-    }
+function formattingFunction(
+    text: string,
+    options: FormattingOptions
+): string {
+    return FormatCode(text, options.tabSize);
 }
 
-connection.onDocumentSymbol(async ({ textDocument }, token) => {
-    const document = getCurDoc(textDocument.uri);
-    refreshModule(document);
-
-    const tree = getCurObj(textDocument.uri);
-    const ret = getSymbols(document, tree).filter(n => n);
-
-    return ret;
-});
-
-connection.onDocumentFormatting((formatParams) => {
-    let document = documents.get(formatParams.textDocument.uri);
-    let text = document.getText();
-
-    // Реализация логики форматирования
-    let formattedText = formattingFunction(text, formatParams.options);
-
-    // Возвращение результата в виде изменений текста
-    return [
-        TextEdit.replace(fullDocumentRange(document), formattedText)
-    ]
-});
-
-function formattingFunction(text, options) {
-    //Логика форматирования
-    return FormatCode(text, options.tabSize);
-};
-
-// Вспомогательная функция для получения диапазона всего документа
-function fullDocumentRange(document) {
+function fullDocumentRange(document: TextDocument): Range {
     return {
-        start: { line: 0, character: 0 },
-        end: { line: document.lineCount, character: 0 }
-    }
-};
+        start: {
+            line: 0,
+            character: 0
+        },
+        end: {
+            line: document.lineCount,
+            character: 0
+        }
+    };
+}
 
 documents.listen(connection);
-
 connection.listen();
