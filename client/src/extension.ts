@@ -4,8 +4,6 @@ import {
     workspace,
     ExtensionContext,
     window,
-    DecorationOptions,
-    Range,
     commands,
     StatusBarItem,
     StatusBarAlignment,
@@ -24,18 +22,8 @@ import {
 
 
 let client: LanguageClient;
-let timeout: NodeJS.Timeout | undefined;
 let activeEditor: TextEditor | undefined = window.activeTextEditor;
 let myStatusBarItem: StatusBarItem;
-
-/*
- * Старый анализ неиспользуемых переменных выполняется в extension host.
- * На больших файлах с крупными SQL-блоками он создавал лишнюю нагрузку
- * одновременно с TextMate-токенизацией и разбором language server.
- */
-const UNUSED_ANALYSIS_MAX_DOCUMENT_LENGTH = 50000;
-const UNUSED_ANALYSIS_MAX_DECORATIONS = 300;
-
 
 /**
  * Элемент списка открытых/загруженных макросов.
@@ -174,173 +162,6 @@ async function showQuickPick(): Promise<void> {
 
 
 /**
- * Декоратор неиспользуемых переменных и макросов.
- */
-const notUsedVar = window.createTextEditorDecorationType({
-    opacity: "0.5",
-    fontStyle: "italic"
-});
-
-
-function isWhitespaceRange(
-    text: string,
-    start: number,
-    end: number
-): boolean {
-    for (let index = start; index < end; index++) {
-        const char = text.charAt(index);
-
-        if (
-            char !== " " &&
-            char !== "\t" &&
-            char !== "\r" &&
-            char !== "\n"
-        ) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-
-interface IDeclarationInfo {
-    name: string;
-    start: number;
-    end: number;
-}
-
-
-/**
- * Один линейный проход по идентификаторам:
- * одновременно считаем частоту имён и запоминаем объявления.
- *
- * Раньше для каждого объявления заново сканировался остаток файла,
- * что давало квадратичную сложность на больших макросах.
- */
-function updateDecorations(): void {
-    if (activeEditor === undefined) {
-        return;
-    }
-
-    const editor = activeEditor;
-
-    if (editor.document.languageId !== "rsl") {
-        editor.setDecorations(notUsedVar, []);
-        return;
-    }
-
-    const text = editor.document.getText();
-
-    /*
-     * Для крупных макросов анализ временно отключаем. Сам анализ является
-     * вспомогательной функцией и не должен влиять на устойчивость редактора.
-     * В дальнейшем его следует перенести в language server и выполнять по AST.
-     */
-    if (text.length > UNUSED_ANALYSIS_MAX_DOCUMENT_LENGTH) {
-        editor.setDecorations(notUsedVar, []);
-        return;
-    }
-
-    const identifierPattern =
-        /[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё0-9_]*/g;
-
-    const declarationKeywords: {
-        [name: string]: boolean
-    } = {
-        /*
-         * Macro не проверяем как локальное неиспользуемое
-         * объявление: макрос может быть точкой входа и вызываться
-         * из другого файла или непосредственно средой RS-Bank.
-         */
-        var: true,
-        const: true,
-        array: true,
-        record: true
-    };
-
-    const identifierCount: {
-        [name: string]: number
-    } = Object.create(null);
-
-    const declarations: IDeclarationInfo[] = [];
-
-    let expectDeclaration = false;
-    let previousTokenEnd = 0;
-    let match: RegExpExecArray | null;
-
-    while (
-        (match = identifierPattern.exec(text)) !== null
-    ) {
-        const name = match[0];
-        const normalizedName =
-            name.toLowerCase();
-
-        identifierCount[normalizedName] =
-            (identifierCount[normalizedName] || 0) + 1;
-
-        if (
-            expectDeclaration &&
-            isWhitespaceRange(
-                text,
-                previousTokenEnd,
-                match.index
-            )
-        ) {
-            declarations.push({
-                name: normalizedName,
-                start: match.index,
-                end: match.index + name.length
-            });
-        }
-
-        expectDeclaration =
-            declarationKeywords[normalizedName] === true;
-
-        previousTokenEnd =
-            match.index + name.length;
-    }
-
-    const decorationArr: DecorationOptions[] = [];
-
-    declarations.forEach(declaration => {
-        if (
-            identifierCount[declaration.name] !== 1
-        ) {
-            return;
-        }
-
-        if (decorationArr.length >= UNUSED_ANALYSIS_MAX_DECORATIONS) {
-            return;
-        }
-
-        decorationArr.push({
-            range: new Range(
-                editor.document.positionAt(
-                    declaration.start
-                ),
-                editor.document.positionAt(
-                    declaration.end
-                )
-            ),
-            hoverMessage:
-                "Объявление **" +
-                text.substring(
-                    declaration.start,
-                    declaration.end
-                ) +
-                "** не было использовано в данном файле"
-        });
-    });
-
-    editor.setDecorations(
-        notUsedVar,
-        decorationArr
-    );
-}
-
-
-/**
  * Точка входа расширения.
  */
 export function activate(context: ExtensionContext): void {
@@ -439,28 +260,13 @@ export function activate(context: ExtensionContext): void {
         }
     );
 
-    if (activeEditor !== undefined) {
-        triggerUpdateDecorations();
-    }
-
-    context.subscriptions.push(
-        workspace.onDidChangeTextDocument(event => {
-            if (
-                activeEditor !== undefined &&
-                event.document === activeEditor.document
-            ) {
-                triggerUpdateDecorations();
-            }
-        })
-    );
-
+    /*
+     * Неиспользуемые объявления теперь рассчитываются language server
+     * и выводятся как Diagnostics в панели Problems.
+     */
     context.subscriptions.push(
         window.onDidChangeActiveTextEditor(editor => {
             activeEditor = editor;
-
-            if (editor !== undefined) {
-                triggerUpdateDecorations();
-            }
         })
     );
 
@@ -718,17 +524,4 @@ export function deactivate():
     }
 
     return client.stop();
-}
-
-
-function triggerUpdateDecorations(): void {
-    if (timeout !== undefined) {
-        clearTimeout(timeout);
-        timeout = undefined;
-    }
-
-    timeout = setTimeout(
-        updateDecorations,
-        500
-    );
 }

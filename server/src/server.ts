@@ -5,8 +5,6 @@ import { fileURLToPath } from "url";
 import {
     CompletionItem,
     Definition,
-    Diagnostic,
-    DiagnosticSeverity,
     DidChangeConfigurationNotification,
     FileChangeType,
     FormattingOptions,
@@ -26,6 +24,7 @@ import { TextDocument } from "vscode-languageserver-textdocument";
 
 import { CBase } from "./common";
 import { RslDefinitionProvider } from "./definitionProvider";
+import { buildRslDiagnostics } from "./diagnostics";
 import { getCIInfoForArray, getDefaults } from "./defaults";
 import { getSymbols } from "./docsymbols";
 import { GetFoldingRanges } from "./folding";
@@ -150,6 +149,11 @@ connection.onNotification("workspaceFiles", (uris: string[]) => {
     workspaceIndex.registerWorkspaceFiles(Array.isArray(uris) ? uris : []);
     definitionProvider.clearCaches();
     flushPendingImports();
+
+    documents.all().forEach(document => {
+        parsedVersions.delete(document.uri);
+        scheduleValidation(document);
+    });
 });
 
 connection.onNotification("clientReady", () => {
@@ -434,7 +438,7 @@ async function validateTextDocument(
 
     connection.sendDiagnostics({
         uri,
-        diagnostics: buildDiagnostics(document, indexed)
+        diagnostics: buildRslDiagnostics(indexed, workspaceIndex)
     });
     notifyClient("updateStatusBar", workspaceIndex.size);
 
@@ -447,39 +451,6 @@ async function validateTextDocument(
         `ms=${Date.now() - started}; ` +
         `symbols=${parsedObject.getChilds().length}`
     );
-}
-
-function buildDiagnostics(
-    document: TextDocument,
-    module: IIndexedModule
-): Diagnostic[] {
-    const diagnostics: Diagnostic[] = [];
-
-    for (const token of module.lex.tokens) {
-        if (token.kind !== "identifier") {
-            continue;
-        }
-
-        const word = token.value.toLowerCase();
-
-        if (word !== "record" && word !== "array") {
-            continue;
-        }
-
-        diagnostics.push({
-            severity: DiagnosticSeverity.Information,
-            range: {
-                start: document.positionAt(token.start),
-                end: document.positionAt(token.end)
-            },
-            message:
-                `Определение ${word.toUpperCase()} устарело, ` +
-                "от него желательно избавляться по возможности",
-            source: "RSL parser"
-        });
-    }
-
-    return diagnostics;
 }
 
 async function ensureDocumentParsed(
@@ -566,6 +537,7 @@ async function loadExternalModule(uri: string): Promise<void> {
         );
 
         module.imports.forEach(GetFileByNameRequest);
+        refreshOpenDependents(uri);
         notifyClient("updateStatusBar", workspaceIndex.size);
     } catch (error) {
         logMessage(
@@ -668,6 +640,13 @@ connection.onDefinition(async (params): Promise<Definition | null> => {
 
     if (!context) {
         return null;
+    }
+
+    const importedFile = await definitionProvider
+        .findImportDefinition(context);
+
+    if (importedFile) {
+        return importedFile;
     }
 
     const dynamic = await definitionProvider.findDynamicDefinition(context);

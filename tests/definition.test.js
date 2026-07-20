@@ -13,6 +13,7 @@ const modulePath = path.join(
 
 const {
     GetDynamicDefinitionTarget,
+    GetImportDefinitionTarget,
     GetImportedMacroFiles
 } = require(modulePath);
 
@@ -159,6 +160,112 @@ test("Ложные вызовы внутри комментариев и SQL и�
         GetDynamicDefinitionTarget(
             source,
             inside(source, "Fake1")
+        ),
+        undefined
+    );
+});
+
+
+test("Import переходит по каждому имени в списке", () => {
+    const source =
+        "import globals, utils, Oratools, strcupt;";
+
+    for (const name of [
+        "globals",
+        "utils",
+        "Oratools",
+        "strcupt"
+    ]) {
+        const target = GetImportDefinitionTarget(
+            source,
+            inside(source, name)
+        );
+
+        assert.ok(target);
+        assert.strictEqual(
+            target.moduleName,
+            name + ".mac"
+        );
+    }
+});
+
+test("Import поддерживает кавычки и относительный путь", () => {
+    const source = [
+        'Import "cards.mac";',
+        "Import folder\\payments;"
+    ].join("\n");
+
+    assert.deepStrictEqual(
+        GetImportDefinitionTarget(
+            source,
+            inside(source, "cards.mac")
+        ),
+        {
+            moduleName: "cards.mac",
+            start: source.indexOf('"cards.mac"'),
+            end:
+                source.indexOf('"cards.mac"') +
+                '"cards.mac"'.length
+        }
+    );
+
+    const relative = GetImportDefinitionTarget(
+        source,
+        inside(source, "payments")
+    );
+
+    assert.ok(relative);
+    assert.strictEqual(
+        relative.moduleName,
+        "folder\\payments.mac"
+    );
+});
+
+test("Клик по ключевому слову Import и разделителям не перехватывается", () => {
+    const source = "Import globals, utils;";
+
+    assert.strictEqual(
+        GetImportDefinitionTarget(
+            source,
+            inside(source, "Import")
+        ),
+        undefined
+    );
+
+    assert.strictEqual(
+        GetImportDefinitionTarget(
+            source,
+            source.indexOf(",")
+        ),
+        undefined
+    );
+});
+
+test("Import внутри комментария и SQL не создаёт переход", () => {
+    const source = [
+        "// Import ignored;",
+        "[Import sql_fake;]",
+        "/* Import hidden; */"
+    ].join("\n");
+
+    assert.strictEqual(
+        GetImportDefinitionTarget(
+            source,
+            inside(source, "ignored")
+        ),
+        undefined
+    );
+    assert.strictEqual(
+        GetImportDefinitionTarget(
+            source,
+            inside(source, "sql_fake")
+        ),
+        undefined
+    );
+    assert.strictEqual(
+        GetImportDefinitionTarget(
+            source,
+            inside(source, "hidden")
         ),
         undefined
     );

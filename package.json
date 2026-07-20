@@ -3,8 +3,8 @@
    "displayName": "RSL-plus",
    "description": "R-Style Language support +",
    "author": "Veniamin Rakov + AChumakov",
-   "license": "SEE LICENSE IN LICENSE",
-   "version": "1.1.0",
+   "license": "SEE LICENSE IN LICENSE.txt",
+   "version": "1.1.3",
    "icon": "icon.png",
    "bugs": {
       "url": "https://github.com/aschumakov/RSL-plus/issues"
@@ -159,7 +159,8 @@
       "test:parser": "npm run compile && node tests/parser-optimized.test.js",
       "test:scope": "npm run compile && node tests/scope-index.test.js",
       "test": "npm run compile && node tests/run-all.js",
-      "postinstall": "npm ci --prefix client && npm ci --prefix server"
+      "postinstall": "npm ci --prefix client && npm ci --prefix server",
+      "test:diagnostics": "npm run compile && node tests/diagnostics.test.js"
    },
    "devDependencies": {
       "@types/mocha": "^5.2.7",

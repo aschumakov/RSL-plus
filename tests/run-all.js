@@ -11,7 +11,8 @@ const tests = [
     "folding.test.js",
     "definition.test.js",
     "parser-optimized.test.js",
-    "scope-index.test.js"
+    "scope-index.test.js",
+    "diagnostics.test.js"
 ];
 
 let failed = false;

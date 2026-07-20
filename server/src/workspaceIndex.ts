@@ -5,7 +5,7 @@ import { CompletionItem } from "vscode-languageserver";
 
 import { CBase } from "./common";
 import { IFAStruct } from "./interfaces";
-import { GetImportedMacroFiles } from "./execMacroDefinition";
+import { GetImportedMacroFilesFromTokens } from "./execMacroDefinition";
 import { IRslLexResult, lexRsl } from "./lexer";
 
 export interface IIndexedModule extends IFAStruct {
@@ -39,6 +39,7 @@ export class WorkspaceIndex {
         new Map<string, Set<string>>();
 
     private workspaceFiles: Set<string> = new Set<string>();
+    private workspaceFilesInitialized: boolean = false;
 
     updateModule(
         uri: string,
@@ -49,14 +50,15 @@ export class WorkspaceIndex {
     ): IIndexedModule {
         this.removeModuleFromIndexes(uri);
 
+        const lex = lexRsl(source);
         const module: IIndexedModule = {
             uri,
             source,
             object,
             version,
-            imports: GetImportedMacroFiles(source),
+            imports: GetImportedMacroFilesFromTokens(lex.tokens),
             isOpen,
-            lex: lexRsl(source)
+            lex
         };
 
         this.modules.set(uri, module);
@@ -91,9 +93,11 @@ export class WorkspaceIndex {
         this.symbolsByName.clear();
         this.reverseImports.clear();
         this.workspaceFiles.clear();
+        this.workspaceFilesInitialized = false;
     }
 
     registerWorkspaceFiles(uris: string[]): void {
+        this.workspaceFilesInitialized = true;
         uris.forEach(uri => {
             if (uri) {
                 this.workspaceFiles.add(uri);
@@ -281,6 +285,10 @@ export class WorkspaceIndex {
 
         result.delete(uri);
         return Array.from(result.values());
+    }
+
+    get workspaceFilesReady(): boolean {
+        return this.workspaceFilesInitialized;
     }
 
     get size(): number {

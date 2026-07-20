@@ -13,7 +13,8 @@ import { TextDocument } from "vscode-languageserver-textdocument";
 import { CBase } from "./common";
 import { IFAStruct } from "./interfaces";
 import {
-    GetDynamicDefinitionTarget
+    GetDynamicDefinitionTarget,
+    GetImportDefinitionTarget
 } from "./execMacroDefinition";
 
 export interface IRslDefinitionContext {
@@ -82,6 +83,39 @@ export class RslDefinitionProvider {
          * поэтому безопаснее сбросить только path cache целиком.
          */
         this.workspaceFileCache.clear();
+    }
+
+    /**
+     * Переходит к файлу, указанному в директиве Import.
+     * Целью является начало подключаемого макромодуля.
+     */
+    async findImportDefinition(
+        context: IRslDefinitionContext
+    ): Promise<Location | null> {
+        const target = GetImportDefinitionTarget(
+            context.document.getText(),
+            context.offset
+        );
+
+        if (!target) {
+            return null;
+        }
+
+        const filePath = await this.findWorkspaceFile(
+            target.moduleName
+        );
+
+        if (!filePath) {
+            return null;
+        }
+
+        return Location.create(
+            pathToFileURL(filePath).toString(),
+            {
+                start: { line: 0, character: 0 },
+                end: { line: 0, character: 0 }
+            }
+        );
     }
 
     async findDynamicDefinition(
@@ -363,7 +397,10 @@ export class RslDefinitionProvider {
                 target.replace(/\//g, path.sep)
             );
 
-            if (await isFile(directPath)) {
+            if (
+                isPathInsideRoot(root, directPath) &&
+                await isFile(directPath)
+            ) {
                 this.workspaceFileCache.set(target, directPath);
                 return directPath;
             }
@@ -545,6 +582,26 @@ function findObjectNameOffsets(
         start: range.start,
         end: range.start + name.length
     };
+}
+
+function isPathInsideRoot(
+    root: string,
+    candidate: string
+): boolean {
+    const relative = path.relative(
+        path.resolve(root),
+        path.resolve(candidate)
+    );
+
+    return (
+        relative.length === 0 ||
+        (
+            relative !== ".." &&
+            !relative.startsWith(".." + path.sep) &&
+            relative.charAt(0) !== path.sep &&
+            !/^[A-Za-z]:[\\/]/.test(relative)
+        )
+    );
 }
 
 async function isFile(filePath: string): Promise<boolean> {

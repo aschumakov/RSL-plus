@@ -15,6 +15,15 @@ export interface IDynamicDefinitionTarget {
     moduleName?: string;
 }
 
+/**
+ * Упоминание подключаемого модуля в директиве Import.
+ */
+export interface IImportDefinitionTarget {
+    moduleName: string;
+    start: number;
+    end: number;
+}
+
 interface ICallArgument {
     tokens: IRslToken[];
     stringToken?: IRslToken;
@@ -110,10 +119,114 @@ export function GetDynamicDefinitionTarget(
 }
 
 /**
+ * Определяет модуль Import, на имени которого находится курсор.
+ *
+ * Поддерживаются:
+ *
+ *     Import common, utils;
+ *     Import "cards.mac";
+ *     Import folder\payments;
+ */
+export function GetImportDefinitionTarget(
+    source: string,
+    offset: number
+): IImportDefinitionTarget | undefined {
+    return getImportReferences(source).find(reference =>
+        reference.start <= offset &&
+        offset < reference.end
+    );
+}
+
+/**
+ * Возвращает имена файлов из директив Import.
+ */
+
+/**
+ * Возвращает строковые имена Macro из ExecMacro/ExecMacro2.
+ * Используется диагностикой неиспользуемых Import.
+ */
+export function GetDynamicMacroReferences(source: string): string[] {
+    return GetDynamicMacroReferencesFromTokens(
+        lexRsl(source || "").tokens
+    );
+}
+
+export function GetDynamicMacroReferencesFromTokens(
+    sourceTokens: IRslToken[]
+): string[] {
+    const tokens = significantTokens(sourceTokens);
+    const result: string[] = [];
+
+    for (const call of findDynamicCalls(tokens)) {
+        if (call.name !== "execmacro" && call.name !== "execmacro2") {
+            continue;
+        }
+
+        const name = getStringArgument(call.arguments, 0);
+
+        if (name) {
+            result.push(name);
+        }
+    }
+
+    return result;
+}
+
+export function GetImportDefinitionTargets(
+    source: string
+): IImportDefinitionTarget[] {
+    return GetImportDefinitionTargetsFromTokens(
+        lexRsl(source || "").tokens
+    );
+}
+
+export function GetImportDefinitionTargetsFromTokens(
+    sourceTokens: IRslToken[]
+): IImportDefinitionTarget[] {
+    return getImportReferencesFromTokens(sourceTokens);
+}
+
+/**
  * Возвращает имена файлов из директив Import.
  */
 export function GetImportedMacroFiles(source: string): string[] {
-    const tokens = lexRsl(source || "").tokens.filter(token =>
+    return GetImportedMacroFilesFromTokens(
+        lexRsl(source || "").tokens
+    );
+}
+
+export function GetImportedMacroFilesFromTokens(
+    sourceTokens: IRslToken[]
+): string[] {
+    const result: string[] = [];
+    const seen = new Set<string>();
+
+    for (const reference of getImportReferencesFromTokens(sourceTokens)) {
+        const normalized = reference.moduleName
+            .replace(/\\/g, "/")
+            .toLowerCase();
+
+        if (seen.has(normalized)) {
+            continue;
+        }
+
+        seen.add(normalized);
+        result.push(reference.moduleName);
+    }
+
+    return result;
+}
+
+function getImportReferences(
+    source: string
+): IImportDefinitionTarget[] {
+    return getImportReferencesFromTokens(lexRsl(source || "").tokens);
+}
+
+function getImportReferencesFromTokens(
+    sourceTokens: IRslToken[]
+): IImportDefinitionTarget[] {
+    const tokens = sourceTokens.filter(token =>
         token.kind !== "whitespace" &&
         token.kind !== "newline" &&
         token.kind !== "comment" &&
@@ -121,8 +234,7 @@ export function GetImportedMacroFiles(source: string): string[] {
         token.kind !== "bom"
     );
 
-    const result: string[] = [];
-    const seen = new Set<string>();
+    const result: IImportDefinitionTarget[] = [];
 
     for (let index = 0; index < tokens.length; index++) {
         const token = tokens[index];
@@ -135,6 +247,7 @@ export function GetImportedMacroFiles(source: string): string[] {
         }
 
         let current: IRslToken[] = [];
+        let directiveFinished = false;
 
         for (let cursor = index + 1; cursor < tokens.length; cursor++) {
             const part = tokens[cursor];
@@ -143,28 +256,48 @@ export function GetImportedMacroFiles(source: string): string[] {
                 part.kind === "symbol" &&
                 (part.raw === "," || part.raw === ";")
             ) {
-                addImportName(current, result, seen);
+                addImportReference(current, result);
                 current = [];
 
                 if (part.raw === ";") {
                     index = cursor;
+                    directiveFinished = true;
                     break;
                 }
 
                 continue;
             }
 
+            /*
+             * В повреждённом коде без ; не захватываем следующую
+             * директиву Import как часть имени предыдущего файла.
+             */
+            if (
+                current.length > 0 &&
+                part.kind === "identifier" &&
+                part.value.toLowerCase() === "import"
+            ) {
+                addImportReference(current, result);
+                index = cursor - 1;
+                directiveFinished = true;
+                break;
+            }
+
             current.push(part);
+        }
+
+        if (!directiveFinished) {
+            addImportReference(current, result);
+            break;
         }
     }
 
     return result;
 }
 
-function addImportName(
+function addImportReference(
     tokens: IRslToken[],
-    result: string[],
-    seen: Set<string>
+    result: IImportDefinitionTarget[]
 ): void {
     if (tokens.length === 0) {
         return;
@@ -186,14 +319,11 @@ function addImportName(
         value += ".mac";
     }
 
-    const normalized = value.replace(/\\/g, "/").toLowerCase();
-
-    if (seen.has(normalized)) {
-        return;
-    }
-
-    seen.add(normalized);
-    result.push(value);
+    result.push({
+        moduleName: value,
+        start: tokens[0].start,
+        end: tokens[tokens.length - 1].end
+    });
 }
 
 function findDynamicCalls(tokens: IRslToken[]): IParsedCall[] {
