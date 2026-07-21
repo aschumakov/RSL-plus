@@ -12,15 +12,17 @@ import { TextDocument } from "vscode-languageserver-textdocument";
 
 import { CBase } from "./common";
 import { IFAStruct } from "./interfaces";
+import { IRslToken } from "./lexer";
 import {
-    GetDynamicDefinitionTarget,
-    GetImportDefinitionTarget
+    GetDynamicDefinitionTargetFromTokens,
+    GetImportDefinitionTargetFromTokens
 } from "./execMacroDefinition";
 
 export interface IRslDefinitionContext {
     document: TextDocument;
     tree: CBase;
     offset: number;
+    tokens: IRslToken[];
 }
 
 export interface IDefinitionEnvironment {
@@ -92,8 +94,8 @@ export class RslDefinitionProvider {
     async findImportDefinition(
         context: IRslDefinitionContext
     ): Promise<Location | null> {
-        const target = GetImportDefinitionTarget(
-            context.document.getText(),
+        const target = GetImportDefinitionTargetFromTokens(
+            context.tokens,
             context.offset
         );
 
@@ -121,8 +123,8 @@ export class RslDefinitionProvider {
     async findDynamicDefinition(
         context: IRslDefinitionContext
     ): Promise<Location | null> {
-        const target = GetDynamicDefinitionTarget(
-            context.document.getText(),
+        const target = GetDynamicDefinitionTargetFromTokens(
+            context.tokens,
             context.offset
         );
 
@@ -351,7 +353,7 @@ export class RslDefinitionProvider {
             );
             const module: IDefinitionModule = {
                 uri,
-                object: new CBase(text, 0),
+                object: CBase.forExternalModule(text),
                 document
             };
 

@@ -127,14 +127,26 @@ export function lexRsl(
 
         if (startsWithAt(text, "/*", position.index)) {
             const start = snapshot(position);
-            advanceCharacter(position, "/");
-            advanceCharacter(position, "*");
+            let commentDepth = 0;
 
             while (position.index < text.length) {
+                if (startsWithAt(text, "/*", position.index)) {
+                    commentDepth++;
+                    advanceCharacter(position, "/");
+                    advanceCharacter(position, "*");
+                    continue;
+                }
+
                 if (startsWithAt(text, "*/", position.index)) {
+                    commentDepth--;
                     advanceCharacter(position, "*");
                     advanceCharacter(position, "/");
-                    break;
+
+                    if (commentDepth === 0) {
+                        break;
+                    }
+
+                    continue;
                 }
 
                 advanceWithLine(text, position, lineStarts);

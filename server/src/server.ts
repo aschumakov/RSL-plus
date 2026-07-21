@@ -36,6 +36,7 @@ import { getSymbols } from "./docsymbols";
 import { GetFoldingRanges } from "./folding";
 import { FormatCode } from "./format";
 import { IFAStruct, IRslSettings, IToken } from "./interfaces";
+import { IRslToken } from "./lexer";
 import { findRslReferences } from "./references";
 import { RslScopeResolver } from "./scopeResolver";
 import {
@@ -93,6 +94,7 @@ const VERY_LARGE_DIAGNOSTICS_DEBOUNCE_MS = 800;
 const DEPENDENT_DIAGNOSTICS_DEBOUNCE_MS = 650;
 const SLOW_PARSE_LOG_MS = 75;
 const SLOW_DIAGNOSTICS_LOG_MS = 100;
+const DIAGNOSTICS_INTERACTIVE_RETRY_MS = 120;
 
 let globalSettings: IRslSettings = defaultSettings;
 let hasConfigurationCapability = false;
@@ -108,6 +110,7 @@ interface IPositionContext {
     tree: CBase;
     offset: number;
     token?: IToken;
+    tokens: IRslToken[];
 }
 
 function logMessage(message: string): void {
@@ -383,9 +386,10 @@ function getPositionContext(
     params: TextDocumentPositionParams
 ): IPositionContext | undefined {
     const document = getCurDoc(params.textDocument.uri);
-    const tree = getCurObj(params.textDocument.uri);
+    const module = workspaceIndex.getModule(params.textDocument.uri);
+    const tree = module && module.object;
 
-    if (!document || !tree) {
+    if (!document || !module || !tree) {
         return undefined;
     }
 
@@ -395,7 +399,8 @@ function getPositionContext(
         document,
         tree,
         offset,
-        token: tree.getCurrentToken(offset)
+        token: tree.getCurrentToken(offset),
+        tokens: module.lex.tokens
     };
 }
 
@@ -616,7 +621,7 @@ function publishDiagnostics(uri: string, diagnostics: Diagnostic[]): void {
 
 function getDiagnosticsDelay(uri: string): number {
     const module = workspaceIndex.getModule(uri);
-    const length = module ? module.source.length : 0;
+    const length = module ? module.sourceLength : 0;
 
     if (length >= 250000) {
         return VERY_LARGE_DIAGNOSTICS_DEBOUNCE_MS;
@@ -627,6 +632,10 @@ function getDiagnosticsDelay(uri: string): number {
     }
 
     return DIAGNOSTICS_DEBOUNCE_MS;
+}
+
+function yieldToInteractiveRequests(): Promise<void> {
+    return new Promise(resolve => setImmediate(resolve));
 }
 
 function scheduleDiagnostics(
@@ -652,6 +661,17 @@ function scheduleDiagnostics(
 }
 
 async function runDiagnostics(uri: string): Promise<void> {
+    await yieldToInteractiveRequests();
+
+    /*
+     * Если пользователь продолжает ввод или VS Code ждёт актуальное дерево,
+     * структура получает приоритет, а Problems переносится на следующую паузу.
+     */
+    if (parseTimers.size > 0) {
+        scheduleDiagnostics(uri, DIAGNOSTICS_INTERACTIVE_RETRY_MS);
+        return;
+    }
+
     const document = documents.get(uri);
     const module = workspaceIndex.getModule(uri);
 
@@ -995,7 +1015,14 @@ connection.onDefinition(async (params): Promise<Definition | null> => {
     await ensureDocumentParsed(document);
     const context = getPositionContext(params);
 
-    if (!context) {
+    if (!context || !context.token) {
+        return null;
+    }
+
+    if (
+        context.token.kind === "comment" ||
+        context.token.kind === "square"
+    ) {
         return null;
     }
 
@@ -1006,10 +1033,13 @@ connection.onDefinition(async (params): Promise<Definition | null> => {
         return importedFile;
     }
 
-    const dynamic = await definitionProvider.findDynamicDefinition(context);
+    if (context.token.kind === "string") {
+        const dynamic = await definitionProvider
+            .findDynamicDefinition(context);
 
-    if (dynamic) {
-        return dynamic;
+        if (dynamic) {
+            return dynamic;
+        }
     }
 
     if (isBlockedToken(context.token)) {
@@ -1079,7 +1109,11 @@ connection.languages.semanticTokens.on(async params => {
         return cached.value;
     }
 
-    const value = buildRslSemanticTokens(module, workspaceIndex);
+    const value = buildRslSemanticTokens(
+        module,
+        workspaceIndex,
+        scopeResolver
+    );
     semanticTokensCache.set(document.uri, {
         version: module.version,
         value

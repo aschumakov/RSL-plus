@@ -59,9 +59,10 @@ interface IObjectInfo {
  */
 export function buildRslSemanticTokens(
     module: IIndexedModule,
-    index: WorkspaceIndex
+    index: WorkspaceIndex,
+    sharedResolver?: RslScopeResolver
 ): SemanticTokens {
-    const resolver = new RslScopeResolver(index);
+    const resolver = sharedResolver || new RslScopeResolver(index);
     const tokens = module.syntax.tokens;
     const objects = collectObjects(module, tokens);
     const objectInfoByObject = new Map<CBase, IObjectInfo>();

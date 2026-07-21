@@ -62,7 +62,14 @@
          {
             "language": "rsl",
             "scopeName": "source.mac",
-            "path": "./syntaxes/rsl.tmLanguage.json"
+            "path": "./syntaxes/rsl.tmLanguage.json",
+            "balancedBracketScopes": [
+               "*"
+            ],
+            "unbalancedBracketScopes": [
+               "comment.block.rsl",
+               "comment.line.double-slash.rsl"
+            ]
          },
          {
             "scopeName": "OLcomment.injection",

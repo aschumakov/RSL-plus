@@ -86,6 +86,26 @@ test("Комментарии не выпускают ложные ключевы
     assert.deepStrictEqual(identifiers, ["Macro", "Real", "End"]);
 });
 
+
+test("Вложенный блочный комментарий остаётся единым token", () => {
+    const source = [
+        "/* outer /* inner */",
+        "if (FakeCall()) return 1; end;",
+        "*/",
+        "Macro Real()",
+        "End;"
+    ].join("\n");
+    const result = lexRsl(source);
+    const comments = result.tokens.filter(token => token.kind === "comment");
+    const identifiers = result.tokens
+        .filter(token => token.kind === "identifier")
+        .map(token => token.value);
+
+    assert.strictEqual(comments.length, 1);
+    assert.ok(comments[0].raw.includes("FakeCall()"));
+    assert.deepStrictEqual(identifiers, ["Macro", "Real", "End"]);
+});
+
 test("tokenAtOffset на начале имени возвращает само имя", () => {
     const source = "  SomeName();";
     const result = lexRsl(source);

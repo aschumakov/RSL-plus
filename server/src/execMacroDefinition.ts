@@ -50,7 +50,18 @@ export function GetDynamicDefinitionTarget(
     source: string,
     offset: number
 ): IDynamicDefinitionTarget | undefined {
-    const tokens = significantTokens(lexRsl(source || "").tokens);
+    return GetDynamicDefinitionTargetFromTokens(
+        lexRsl(source || "").tokens,
+        offset
+    );
+}
+
+/** Использует уже готовый lexer-поток и не сканирует документ повторно. */
+export function GetDynamicDefinitionTargetFromTokens(
+    sourceTokens: IRslToken[],
+    offset: number
+): IDynamicDefinitionTarget | undefined {
+    const tokens = significantTokens(sourceTokens);
     const calls = findDynamicCalls(tokens);
 
     /*
@@ -131,7 +142,18 @@ export function GetImportDefinitionTarget(
     source: string,
     offset: number
 ): IImportDefinitionTarget | undefined {
-    return getImportReferences(source).find(reference =>
+    return GetImportDefinitionTargetFromTokens(
+        lexRsl(source || "").tokens,
+        offset
+    );
+}
+
+/** Использует уже готовый lexer-поток и не сканирует документ повторно. */
+export function GetImportDefinitionTargetFromTokens(
+    sourceTokens: IRslToken[],
+    offset: number
+): IImportDefinitionTarget | undefined {
+    return getImportReferencesFromTokens(sourceTokens).find(reference =>
         reference.start <= offset &&
         offset < reference.end
     );

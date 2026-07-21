@@ -295,22 +295,27 @@ export class CBase extends CAbstractBase {
      * пробелы/переводы строк в token cache и подробное дерево выражений.
      */
     static forExternalModule(source: string, offset: number = 0): CBase {
-        return CBase.fromSyntax(
+        const root = CBase.fromSyntax(
             source,
             offset,
             parseRslSyntax(source, undefined, {
                 buildExpressionTree: false,
                 includeTrivia: false
             }),
-            false
+            false,
+            true
         );
+        root.compactExternalSyntaxResult();
+        root.releaseSourceTree();
+        return root;
     }
 
     static fromSyntax(
         source: string,
         offset: number,
         syntax: IRslParseResult,
-        buildTokenCache: boolean = true
+        buildTokenCache: boolean = true,
+        externalSymbolsOnly: boolean = false
     ): CBase {
         const root = new CBase(
             source,
@@ -318,7 +323,11 @@ export class CBase extends CAbstractBase {
             CompletionItemKind.Unit,
             false
         );
-        root.applySyntax(syntax, buildTokenCache);
+        root.applySyntax(
+            syntax,
+            buildTokenCache,
+            externalSymbolsOnly
+        );
         return root;
     }
 
@@ -486,7 +495,8 @@ export class CBase extends CAbstractBase {
 
     private applySyntax(
         result: IRslParseResult,
-        buildTokenCache: boolean = true
+        buildTokenCache: boolean = true,
+        externalSymbolsOnly: boolean = false
     ): void {
         this.syntaxResult = result;
         this.childs = [];
@@ -500,9 +510,48 @@ export class CBase extends CAbstractBase {
 
         const adapter = new LegacySymbolTreeAdapter(
             this.source,
-            this.offset
+            this.offset,
+            externalSymbolsOnly
         );
         adapter.populate(this, result.root);
+    }
+
+    /** Импортированный модуль не удерживает полное statement AST. */
+    private compactExternalSyntaxResult(): void {
+        const syntax = this.syntaxResult;
+
+        if (!syntax) {
+            return;
+        }
+
+        this.syntaxResult = {
+            root: {
+                ...syntax.root,
+                children: syntax.root.children.filter(child =>
+                    child.kind === "ImportDeclaration"
+                ),
+                tokens: []
+            },
+            diagnostics: [],
+            tokens: syntax.tokens,
+            lex: syntax.lex
+        };
+    }
+
+    /** Импортированный модуль не удерживает полный исходник в каждом CBase. */
+    private releaseSourceTree(): void {
+        this.source = "";
+
+        /*
+         * В childs исторически хранятся и CBase, и CVar: переменные
+         * добавляются через приведение типа для совместимости старого API.
+         * Поэтому рекурсивная очистка допустима только для реальных CBase.
+         */
+        this.childs.forEach(child => {
+            if (child instanceof CBase) {
+                child.releaseSourceTree();
+            }
+        });
     }
 
     private buildTokenCache(tokens: IRslToken[]): IParserToken[] {
@@ -543,7 +592,8 @@ export class CBase extends CAbstractBase {
 class LegacySymbolTreeAdapter {
     constructor(
         private source: string,
-        private offset: number
+        private offset: number,
+        private externalSymbolsOnly: boolean = false
     ) {}
 
     populate(scope: CBase, root: IRslSyntaxNode): void {
@@ -554,19 +604,37 @@ class LegacySymbolTreeAdapter {
         switch (node.kind) {
             case "VariableDeclaration":
             case "ArrayDeclaration":
+                /*
+                 * Во внешнем модуле сохраняем только доступные объявления.
+                 * Локальные переменные внутри Macro остаются в компактном
+                 * symbol tree для RecursiveFind/навигации, но их выражения и
+                 * операторы в дерево не попадают.
+                 */
+                if (this.externalSymbolsOnly && !!node.modifier) {
+                    return;
+                }
                 this.addVariableDeclaration(scope, node);
                 return;
 
             case "FileDeclaration":
             case "RecordDeclaration":
+                if (this.externalSymbolsOnly && !!node.modifier) {
+                    return;
+                }
                 this.addObjectDeclaration(scope, node);
                 return;
 
             case "MacroDeclaration":
+                if (this.externalSymbolsOnly && !!node.modifier) {
+                    return;
+                }
                 this.addMacro(scope, node);
                 return;
 
             case "ClassDeclaration":
+                if (this.externalSymbolsOnly && !!node.modifier) {
+                    return;
+                }
                 this.addClass(scope, node);
                 return;
 
@@ -584,7 +652,9 @@ class LegacySymbolTreeAdapter {
                 return;
 
             default:
-                node.children.forEach(child => this.visit(scope, child));
+                if (!this.externalSymbolsOnly) {
+                    node.children.forEach(child => this.visit(scope, child));
+                }
         }
     }
 
@@ -655,9 +725,41 @@ class LegacySymbolTreeAdapter {
                 false
             ));
 
-        node.children
-            .filter(child => child.kind !== "Parameter")
-            .forEach(child => this.visit(macro, child));
+        const bodyChildren = node.children
+            .filter(child => child.kind !== "Parameter");
+
+        if (this.externalSymbolsOnly) {
+            bodyChildren.forEach(child =>
+                this.visitExternalDeclarations(macro, child)
+            );
+        } else {
+            bodyChildren.forEach(child => this.visit(macro, child));
+        }
+    }
+
+    /**
+     * Обходит только контейнеры syntax tree и извлекает объявления.
+     * Statement/expression-узлы сами в legacy symbol tree не создаются.
+     */
+    private visitExternalDeclarations(
+        scope: CBase,
+        node: IRslSyntaxNode
+    ): void {
+        switch (node.kind) {
+            case "VariableDeclaration":
+            case "ArrayDeclaration":
+            case "FileDeclaration":
+            case "RecordDeclaration":
+            case "MacroDeclaration":
+            case "ClassDeclaration":
+                this.visit(scope, node);
+                return;
+
+            default:
+                node.children.forEach(child =>
+                    this.visitExternalDeclarations(scope, child)
+                );
+        }
     }
 
     private addClass(scope: CBase, node: IRslSyntaxNode): void {

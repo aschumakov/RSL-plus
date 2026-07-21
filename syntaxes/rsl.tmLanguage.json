@@ -158,19 +158,7 @@
                "name": "comment.block.rsl"
             },
             {
-               "begin": "/\\*",
-               "beginCaptures": {
-                  "0": {
-                     "name": "punctuation.definition.comment.begin.rsl"
-                  }
-               },
-               "end": "\\*/",
-               "endCaptures": {
-                  "0": {
-                     "name": "punctuation.definition.comment.end.rsl"
-                  }
-               },
-               "name": "comment.block.rsl"
+               "include": "#block_comment"
             },
             {
                "match": "\\*/.*\\n",
@@ -445,6 +433,27 @@
             {
                "match": "(?i)\\b(var)\\b",
                "name": "storage.type.rsl"
+            }
+         ]
+      },
+      "block_comment": {
+         "begin": "/\\*",
+         "beginCaptures": {
+            "0": {
+               "name": "punctuation.definition.comment.begin.rsl"
+            }
+         },
+         "end": "\\*/",
+         "endCaptures": {
+            "0": {
+               "name": "punctuation.definition.comment.end.rsl"
+            }
+         },
+         "name": "comment.block.rsl",
+         "contentName": "comment.block.rsl",
+         "patterns": [
+            {
+               "include": "#block_comment"
             }
          ]
       }

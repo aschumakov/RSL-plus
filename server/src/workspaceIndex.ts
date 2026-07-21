@@ -14,6 +14,7 @@ import {
 
 export interface IIndexedModule extends IFAStruct {
     source: string;
+    sourceLength: number;
     version: number;
     imports: string[];
     isOpen: boolean;
@@ -52,6 +53,9 @@ export class WorkspaceIndex {
         new Map<string, IIndexedModule[]>();
     private importedCompletionCache: Map<string, CompletionItem[]> =
         new Map<string, CompletionItem[]>();
+    private importedSymbolsByNameCache:
+        Map<string, Map<string, IIndexedSymbol[]>> =
+            new Map<string, Map<string, IIndexedSymbol[]>>();
     private workspaceFilesInitialized: boolean = false;
 
     updateModule(
@@ -63,14 +67,20 @@ export class WorkspaceIndex {
     ): IIndexedModule {
         this.removeModuleFromIndexes(uri);
 
-        const syntax = object.getSyntaxResult() || parseRslSyntax(source);
+        const parsedSyntax =
+            object.getSyntaxResult() || parseRslSyntax(source);
+        const imports = getImportNamesFromSyntax(parsedSyntax.root);
+        const syntax = isOpen
+            ? parsedSyntax
+            : compactExternalSyntax(parsedSyntax);
         const lex = syntax.lex;
         const module: IIndexedModule = {
             uri,
-            source,
+            source: isOpen ? source : "",
+            sourceLength: source.length,
             object,
             version,
-            imports: getImportNamesFromSyntax(syntax.root),
+            imports,
             isOpen,
             lex,
             syntax
@@ -267,23 +277,43 @@ export class WorkspaceIndex {
         fromUri: string,
         name: string
     ): IIndexedSymbol[] {
-        const normalized = normalizeName(name);
-        const result: IIndexedSymbol[] = [];
+        const byName = this.getImportedSymbolsByName(fromUri);
+        return (byName.get(normalizeName(name)) || []).slice();
+    }
+
+    private getImportedSymbolsByName(
+        fromUri: string
+    ): Map<string, IIndexedSymbol[]> {
+        const cached = this.importedSymbolsByNameCache.get(fromUri);
+
+        if (cached) {
+            return cached;
+        }
+
+        const result = new Map<string, IIndexedSymbol[]>();
 
         for (const module of this.getImportedModules(fromUri)) {
             for (const child of module.object.getChilds()) {
-                if (
-                    !child.Private &&
-                    normalizeName(child.Name) === normalized
-                ) {
-                    result.push({
-                        uri: module.uri,
-                        object: child
-                    });
+                if (child.Private) {
+                    continue;
                 }
+
+                const key = normalizeName(child.Name);
+                let symbols = result.get(key);
+
+                if (!symbols) {
+                    symbols = [];
+                    result.set(key, symbols);
+                }
+
+                symbols.push({
+                    uri: module.uri,
+                    object: child
+                });
             }
         }
 
+        this.importedSymbolsByNameCache.set(fromUri, result);
         return result;
     }
 
@@ -390,6 +420,7 @@ export class WorkspaceIndex {
     private invalidateImportCaches(): void {
         this.importedModulesCache.clear();
         this.importedCompletionCache.clear();
+        this.importedSymbolsByNameCache.clear();
     }
 
     private removeModuleFromIndexes(uri: string): void {
@@ -440,6 +471,27 @@ export class WorkspaceIndex {
             });
         }
     }
+}
+
+/**
+ * Для закрытого импортируемого модуля сохраняются lexer tokens и Import,
+ * но не полное statement-дерево и parser diagnostics.
+ */
+function compactExternalSyntax(
+    syntax: IRslParseResult
+): IRslParseResult {
+    return {
+        root: {
+            ...syntax.root,
+            children: syntax.root.children.filter(child =>
+                child.kind === "ImportDeclaration"
+            ),
+            tokens: []
+        },
+        diagnostics: [],
+        tokens: syntax.tokens,
+        lex: syntax.lex
+    };
 }
 
 function addUriAlias(
