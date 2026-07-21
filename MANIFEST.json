@@ -1,56 +1,40 @@
 {
-  "version": "1.1.3",
-  "description": "Hotfix: multiline expression boundary and legacy symbol tree adapter",
+  "base_commit": "199b0de64b000c0a7919ef0b81536740245fef73",
   "files": [
     {
-      "path": "CHANGELOG.md",
-      "sha256": "e4da92316f78297030c1e4c516d093333d4986c0ac33cc6b95a646f216f9b13a",
-      "size": 2965
-    },
-    {
-      "path": "README-SYNTAX-ADAPTER.md",
-      "sha256": "921a85d7dad7bd74da8a626f385ed0370da16d6ca23ab73b63fb74dbe1975045",
-      "size": 1376
+      "path": "README-RSL-DOCUMENTED-CONSTRUCTS.md",
+      "sha256": "2572f8ec1f6b81959671bb354454fb4eb8533dcae90ff936946099905c29ad96",
+      "size": 3195
     },
     {
       "path": "server/src/common.ts",
-      "sha256": "16c599cfd0e310f0a6fb5adb742f0427dcd94f1709802a325ef88b66b7681f6d",
-      "size": 23883
+      "sha256": "14142d2677f7014fe48779f98ee589f2839b33d5854d603239dfd4392897be50",
+      "size": 24710
     },
     {
       "path": "server/src/diagnostics.ts",
-      "sha256": "09da1f72f0a57f37c6017523483ce96a8cdabbb4db6771f229301b9408d67304",
-      "size": 37199
+      "sha256": "2edb9e69e21f68db021e925141833e8f52455a8475e89c3c34bebce51bfab074",
+      "size": 37207
     },
     {
-      "path": "server/src/server.ts",
-      "sha256": "e2b714868f909d8f2667b7619b39a5938b76d55f868e893a96f99167f44bc6d4",
-      "size": 22101
+      "path": "server/src/languageMetadata.ts",
+      "sha256": "72f7916a12df84e60a5c36d9c4fd52fc38ee4f634e3321dabed26ce9859f7366",
+      "size": 242
     },
     {
       "path": "server/src/syntaxParser.ts",
-      "sha256": "83475de4177e88ceab74ffe4a38ca3b2f24bafa45d36aa75500d3fa4997324f8",
-      "size": 36564
-    },
-    {
-      "path": "server/src/workspaceIndex.ts",
-      "sha256": "561b67fc2e42954880cae1b05fe65b49c10a9a831424012f7af53a4c10dcf081",
-      "size": 11451
-    },
-    {
-      "path": "tests/run-all.js",
-      "sha256": "32b9a83529e6a877303a900e7f6dde8cc693ec972a14af6f789fa29cf9006e91",
-      "size": 871
+      "sha256": "9c9d9ccae94e25c32eb060211f2653cb3aefc5c8335393bd3b3eb67cf9639f5e",
+      "size": 62135
     },
     {
       "path": "tests/symbol-tree-adapter.test.js",
-      "sha256": "c41cce9a2968c68ff98b798592bb8aafb8a5aebd1184483682317e2f0f02c15a",
-      "size": 2722
+      "sha256": "7fba1ea9592c394e0f40e67298044a9fc57ab72a14108609ced293b51c413ec8",
+      "size": 4624
     },
     {
       "path": "tests/syntax-parser.test.js",
-      "sha256": "23700e4d0e1f0c442a8e78d69eb6627266e9e00317a55c0f4c986b34be21818e",
-      "size": 1693
+      "sha256": "b68cafa4ca0c0a1baf0697f34cf9a6138922f267e71b9427550609b44e004fc2",
+      "size": 4645
     }
   ]
 }

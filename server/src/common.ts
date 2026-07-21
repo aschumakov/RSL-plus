@@ -33,7 +33,7 @@ import { IRslToken, normalizeIdentifier } from "./lexer";
  * common.ts больше не содержит собственного tokenizer/NextToken.
  */
 export const RSL_PARSER_VERSION =
-    "2026-07-21-v6-syntax-tree-adapter";
+    "2026-07-21-v7-syntax-tree-adapter-rsl-declarations-expressions";
 
 interface IParserToken extends IToken {
     kind: TokenKind;
@@ -93,6 +93,7 @@ class CEnds extends CArray {
         this._it[2] = "if";
         this._it[3] = "for";
         this._it[4] = "while";
+        this._it[5] = "with";
     }
 }
 
@@ -515,7 +516,13 @@ class LegacySymbolTreeAdapter {
     private visit(scope: CBase, node: IRslSyntaxNode): void {
         switch (node.kind) {
             case "VariableDeclaration":
+            case "ArrayDeclaration":
                 this.addVariableDeclaration(scope, node);
+                return;
+
+            case "FileDeclaration":
+            case "RecordDeclaration":
+                this.addObjectDeclaration(scope, node);
                 return;
 
             case "MacroDeclaration":
@@ -550,7 +557,9 @@ class LegacySymbolTreeAdapter {
     ): void {
         const isConstant = declaration.name === "const";
         const privateFlag = declaration.modifier !== undefined;
-        const isProperty = scope.ObjKind === CompletionItemKind.Class;
+        const isProperty =
+            scope.ObjKind === CompletionItemKind.Class &&
+            declaration.modifier !== "local";
 
         declaration.children
             .filter(child => child.kind === "VariableDeclarator")
@@ -563,17 +572,37 @@ class LegacySymbolTreeAdapter {
             ));
     }
 
+    private addObjectDeclaration(
+        scope: CBase,
+        node: IRslSyntaxNode
+    ): void {
+        const privateFlag = node.modifier !== undefined;
+        const isProperty =
+            scope.ObjKind === CompletionItemKind.Class &&
+            node.modifier !== "local";
+        this.addVariable(
+            scope,
+            node,
+            false,
+            privateFlag,
+            isProperty
+        );
+    }
+
     private addMacro(scope: CBase, node: IRslSyntaxNode): void {
         if (!node.name) {
             return;
         }
 
+        const isMethod =
+            scope.ObjKind === CompletionItemKind.Class &&
+            node.modifier !== "local";
         const macro = new CMacro(
             this.source,
             node.name,
             node.modifier !== undefined,
             this.absoluteRange(node),
-            scope.ObjKind === CompletionItemKind.Class,
+            isMethod,
             this.parameterText(node),
             node.typeName || getTypeStr(varType._variant)
         );

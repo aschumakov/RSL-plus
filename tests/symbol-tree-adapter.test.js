@@ -80,3 +80,64 @@ assert.ok(
 );
 
 console.log("[OK] legacy symbol tree построен из нового syntax tree");
+
+const documentedTree = new CBase([
+  "array GlobalArray;",
+  "file GlobalFile(account) write;",
+  "record GlobalRecord(account) mem;",
+  "class Demo",
+  "  array Items;",
+  "  file Accounts(account) write;",
+  "  record Buffer(account) mem;",
+  "  local var constructorOnly;",
+  "  local macro Helper()",
+  "    return constructorOnly;",
+  "  end;",
+  "  macro PublicMethod()",
+  "    return Items(0);",
+  "  end;",
+  "end;"
+].join("\n"), 0);
+
+const documentedRoot = documentedTree.getChilds();
+assert.strictEqual(
+  documentedRoot.find(item => item.Name === "GlobalArray").Type.toLowerCase(),
+  "array"
+);
+assert.strictEqual(
+  documentedRoot.find(item => item.Name === "GlobalFile").Type.toLowerCase(),
+  "file"
+);
+assert.strictEqual(
+  documentedRoot.find(item => item.Name === "GlobalRecord").Type.toLowerCase(),
+  "record"
+);
+
+const documentedClass = documentedRoot.find(item => item.Name === "Demo");
+const documentedMembers = documentedClass.getChilds();
+assert.strictEqual(
+  documentedMembers.find(item => item.Name === "Items").ObjKind,
+  CompletionItemKind.Property
+);
+assert.strictEqual(
+  documentedMembers.find(item => item.Name === "Accounts").Type.toLowerCase(),
+  "file"
+);
+assert.strictEqual(
+  documentedMembers.find(item => item.Name === "Buffer").Type.toLowerCase(),
+  "record"
+);
+assert.strictEqual(
+  documentedMembers.find(item => item.Name === "constructorOnly").ObjKind,
+  CompletionItemKind.Variable
+);
+assert.strictEqual(
+  documentedMembers.find(item => item.Name === "Helper").ObjKind,
+  CompletionItemKind.Function
+);
+assert.strictEqual(
+  documentedMembers.find(item => item.Name === "PublicMethod").ObjKind,
+  CompletionItemKind.Method
+);
+
+console.log("[OK] ARRAY/FILE/RECORD и local-члены перенесены в symbol tree");

@@ -7,12 +7,18 @@ import {
 
 export type RslSyntaxKind =
     | "CompilationUnit" | "ImportDeclaration" | "ImportItem"
-    | "VariableDeclaration" | "VariableDeclarator"
+    | "VariableDeclaration" | "VariableDeclarator" | "ArrayDeclaration"
+    | "FileDeclaration" | "RecordDeclaration"
     | "MacroDeclaration" | "ClassDeclaration" | "Parameter"
     | "IfStatement" | "ElseIfClause" | "ElseClause"
-    | "WhileStatement" | "ForStatement" | "OnErrorClause"
-    | "ReturnStatement" | "BreakStatement" | "ContinueStatement"
-    | "ExpressionStatement" | "EmptyStatement" | "UnknownStatement";
+    | "WhileStatement" | "ForStatement" | "WithStatement"
+    | "OnErrorClause" | "ReturnStatement" | "BreakStatement"
+    | "ContinueStatement" | "ExpressionStatement" | "EmptyStatement"
+    | "NameExpression" | "LiteralExpression" | "ParenthesizedExpression"
+    | "UnaryExpression" | "BinaryExpression" | "AssignmentExpression"
+    | "MemberAccessExpression" | "DefaultPropertyExpression"
+    | "PostfixAccessExpression" | "IndexExpression" | "UnknownExpression"
+    | "UnknownStatement";
 
 export type RslDeclarationModifier = "local" | "private";
 export type RslVariableRole = "variable" | "parameter" | "for" | "onerror";
@@ -39,6 +45,10 @@ export interface IRslSyntaxNode {
     parameterListEnd?: number;
     valueStart?: number;
     valueEnd?: number;
+    operator?: string;
+    objectName?: string;
+    dictionaryName?: string;
+    specifiers?: string[];
     missingSemicolon?: boolean;
 }
 
@@ -66,8 +76,13 @@ const RESERVED = new Set([
 
 const BLOCK_BOUNDARIES = new Set(["end", "elif", "else", "onerror"]);
 const STATEMENT_KEYWORDS = new Set([
-    "import", "var", "const", "macro", "class", "if", "while", "for",
-    "return", "break", "continue", "local", "private"
+    "import", "var", "const", "array", "file", "record", "macro",
+    "class", "if", "while", "for", "with", "return", "break",
+    "continue", "local", "private"
+]);
+const FILE_RECORD_SPECIFIERS = new Set([
+    "sort", "key", "write", "append", "mem", "txt", "dbf", "dialog",
+    "btr"
 ]);
 const WORD_OPERATORS = new Set(["and", "or", "not"]);
 const SYMBOL_OPERATORS = new Set([
@@ -106,6 +121,385 @@ export function getImportNamesFromSyntax(root: IRslSyntaxNode): string[] {
                 .forEach(item => result.push(item.name!));
             return result;
         }, [] as string[]);
+}
+
+const BINARY_PRECEDENCE: { [operator: string]: number } = {
+    "=": 1,
+    "==": 2,
+    "!=": 2,
+    "<": 2,
+    ">": 2,
+    "<=": 2,
+    ">=": 2,
+    ":": 2,
+    "+": 3,
+    "-": 3,
+    "or": 3,
+    "|": 3,
+    "^": 3,
+    "*": 4,
+    "/": 4,
+    "%": 4,
+    "and": 4,
+    "&": 4
+};
+
+/**
+ * Строит best-effort дерево выражения. Круглые скобки после выражения
+ * намеренно называются PostfixAccessExpression: в RSL одна форма обозначает
+ * вызов процедуры, конструктор класса, индекс массива или параметризованное
+ * свойство, и точный смысл определяется только семантической моделью.
+ */
+export function parseRslExpressionTokens(
+    tokens: IRslToken[]
+): IRslSyntaxNode | undefined {
+    if (tokens.length === 0) {
+        return undefined;
+    }
+
+    const parser = new ExpressionParser(tokens);
+    const expression = parser.parseExpression();
+
+    if (!expression) {
+        return undefined;
+    }
+
+    if (!parser.atEnd()) {
+        return createExpressionNode(
+            "UnknownExpression",
+            tokens[0].start,
+            tokens[tokens.length - 1].end,
+            [expression],
+            tokens
+        );
+    }
+
+    return expression;
+}
+
+class ExpressionParser {
+    private index = 0;
+
+    constructor(private tokens: IRslToken[]) {}
+
+    atEnd(): boolean {
+        return this.index >= this.tokens.length;
+    }
+
+    parseExpression(minPrecedence: number = 1): IRslSyntaxNode | undefined {
+        let left = this.parseUnary();
+
+        if (!left) {
+            return undefined;
+        }
+
+        while (!this.atEnd()) {
+            const operatorToken = this.current();
+            const operator = this.operatorOf(operatorToken);
+            const precedence = BINARY_PRECEDENCE[operator];
+
+            if (!precedence || precedence < minPrecedence) {
+                break;
+            }
+
+            this.index++;
+            const rightAssociative = operator === "=";
+            const right = this.parseExpression(
+                rightAssociative ? precedence : precedence + 1
+            );
+
+            if (!right) {
+                break;
+            }
+
+            left = createExpressionNode(
+                operator === "="
+                    ? "AssignmentExpression"
+                    : "BinaryExpression",
+                left.start,
+                right.end,
+                [left, right],
+                [operatorToken],
+                undefined,
+                operator
+            );
+        }
+
+        return left;
+    }
+
+    private parseUnary(): IRslSyntaxNode | undefined {
+        const token = this.current();
+        const operator = this.operatorOf(token);
+
+        if (
+            operator === "+" ||
+            operator === "-" ||
+            operator === "not" ||
+            operator === "@" ||
+            operator === "~"
+        ) {
+            this.index++;
+            const operand = this.parseUnary();
+            return operand
+                ? createExpressionNode(
+                    "UnaryExpression",
+                    token.start,
+                    operand.end,
+                    [operand],
+                    [token],
+                    undefined,
+                    operator
+                )
+                : createExpressionNode(
+                    "UnknownExpression",
+                    token.start,
+                    token.end,
+                    [],
+                    [token],
+                    undefined,
+                    operator
+                );
+        }
+
+        return this.parsePostfix();
+    }
+
+    private parsePostfix(): IRslSyntaxNode | undefined {
+        let expression = this.parsePrimary();
+
+        if (!expression) {
+            return undefined;
+        }
+
+        while (!this.atEnd()) {
+            if (this.isSymbol(".")) {
+                const dot = this.take();
+
+                if (this.isSymbol("(")) {
+                    const list = this.parseDelimitedList("(", ")");
+                    expression = createExpressionNode(
+                        "DefaultPropertyExpression",
+                        expression.start,
+                        list.end,
+                        [expression, ...list.items],
+                        [dot, ...list.tokens],
+                        undefined,
+                        "."
+                    );
+                    continue;
+                }
+
+                const member = this.current();
+
+                if (member && member.kind === "identifier") {
+                    this.index++;
+                    expression = createExpressionNode(
+                        "MemberAccessExpression",
+                        expression.start,
+                        member.end,
+                        [expression],
+                        [dot, member],
+                        member.value,
+                        "."
+                    );
+                    continue;
+                }
+
+                expression = createExpressionNode(
+                    "UnknownExpression",
+                    expression.start,
+                    dot.end,
+                    [expression],
+                    [dot]
+                );
+                continue;
+            }
+
+            if (this.isSymbol("(")) {
+                const list = this.parseDelimitedList("(", ")");
+                expression = createExpressionNode(
+                    "PostfixAccessExpression",
+                    expression.start,
+                    list.end,
+                    [expression, ...list.items],
+                    list.tokens,
+                    undefined,
+                    "()"
+                );
+                continue;
+            }
+
+            if (this.isSymbol("[")) {
+                const list = this.parseDelimitedList("[", "]");
+                expression = createExpressionNode(
+                    "IndexExpression",
+                    expression.start,
+                    list.end,
+                    [expression, ...list.items],
+                    list.tokens,
+                    undefined,
+                    "[]"
+                );
+                continue;
+            }
+
+            break;
+        }
+
+        return expression;
+    }
+
+    private parsePrimary(): IRslSyntaxNode | undefined {
+        if (this.atEnd()) {
+            return undefined;
+        }
+
+        const token = this.take();
+
+        if (token.kind === "identifier") {
+            return createExpressionNode(
+                "NameExpression",
+                token.start,
+                token.end,
+                [],
+                [token],
+                token.value
+            );
+        }
+
+        if (
+            token.kind === "number" ||
+            token.kind === "string" ||
+            token.kind === "square"
+        ) {
+            return createExpressionNode(
+                "LiteralExpression",
+                token.start,
+                token.end,
+                [],
+                [token],
+                token.value
+            );
+        }
+
+        if (token.kind === "symbol" && token.raw === "(") {
+            const innerStart = this.index;
+            const inner = this.parseExpression();
+            let close: IRslToken | undefined;
+
+            if (this.isSymbol(")")) {
+                close = this.take();
+            }
+
+            const consumed = this.tokens.slice(innerStart - 1, this.index);
+            return createExpressionNode(
+                "ParenthesizedExpression",
+                token.start,
+                close ? close.end : inner ? inner.end : token.end,
+                inner ? [inner] : [],
+                consumed
+            );
+        }
+
+        return createExpressionNode(
+            "UnknownExpression",
+            token.start,
+            token.end,
+            [],
+            [token]
+        );
+    }
+
+    private parseDelimitedList(
+        open: string,
+        close: string
+    ): { items: IRslSyntaxNode[]; tokens: IRslToken[]; end: number } {
+        const tokens: IRslToken[] = [];
+        const items: IRslSyntaxNode[] = [];
+        const openToken = this.take();
+        tokens.push(openToken);
+
+        while (!this.atEnd() && !this.isSymbol(close)) {
+            const before = this.index;
+            const item = this.parseExpression();
+
+            if (item) {
+                items.push(item);
+            }
+
+            if (this.index === before) {
+                tokens.push(this.take());
+            }
+
+            if (this.isSymbol(",")) {
+                tokens.push(this.take());
+                continue;
+            }
+
+            break;
+        }
+
+        let end = items.length > 0
+            ? items[items.length - 1].end
+            : openToken.end;
+
+        if (this.isSymbol(close)) {
+            const closeToken = this.take();
+            tokens.push(closeToken);
+            end = closeToken.end;
+        }
+
+        return { items, tokens, end };
+    }
+
+    private operatorOf(token?: IRslToken): string {
+        if (!token) {
+            return "";
+        }
+
+        if (token.kind === "identifier") {
+            const value = normalizeIdentifier(token.value);
+            return value === "and" || value === "or" || value === "not"
+                ? value
+                : "";
+        }
+
+        return token.kind === "symbol" ? token.raw : "";
+    }
+
+    private current(): IRslToken | undefined {
+        return this.tokens[this.index];
+    }
+
+    private take(): IRslToken {
+        return this.tokens[this.index++];
+    }
+
+    private isSymbol(value: string): boolean {
+        const token = this.current();
+        return !!token && token.kind === "symbol" && token.raw === value;
+    }
+}
+
+function createExpressionNode(
+    kind: RslSyntaxKind,
+    start: number,
+    end: number,
+    children: IRslSyntaxNode[],
+    tokens: IRslToken[],
+    name?: string,
+    operator?: string
+): IRslSyntaxNode {
+    return {
+        kind,
+        start,
+        end,
+        children,
+        tokens,
+        name,
+        operator
+    };
 }
 
 class Parser {
@@ -204,6 +598,12 @@ class Parser {
                 return this.parseVariables(modifier, false);
             case "const":
                 return this.parseVariables(modifier, true);
+            case "array":
+                return this.parseArray(modifier);
+            case "file":
+                return this.parseFileRecord(modifier, false);
+            case "record":
+                return this.parseFileRecord(modifier, true);
             case "macro":
                 return this.parseMacro(modifier);
             case "class":
@@ -214,6 +614,8 @@ class Parser {
                 return this.parseWhile();
             case "for":
                 return this.parseFor();
+            case "with":
+                return this.parseWith();
             case "return":
                 return this.parseSimpleKeyword("ReturnStatement");
             case "break":
@@ -224,7 +626,7 @@ class Parser {
                 if (modifier) {
                     this.error(
                         "unexpected-modifier",
-                        `После ${modifier.raw.toUpperCase()} ожидается VAR, CONST, MACRO или CLASS`,
+                        `После ${modifier.raw.toUpperCase()} ожидается VAR, CONST, ARRAY, FILE, RECORD, MACRO или CLASS`,
                         modifier
                     );
                 }
@@ -406,6 +808,7 @@ class Parser {
             let typeName: string | undefined;
             let valueStart: number | undefined;
             let valueEnd: number | undefined;
+            let initializer: IRslSyntaxNode | undefined;
 
             if (this.isSymbol(":")) {
                 declTokens.push(this.take());
@@ -438,6 +841,7 @@ class Parser {
                 if (expression.length > 0) {
                     valueStart = expression[0].start;
                     valueEnd = expression[expression.length - 1].end;
+                    initializer = parseRslExpressionTokens(expression);
                 }
             }
 
@@ -445,7 +849,7 @@ class Parser {
                 "VariableDeclarator",
                 name.start,
                 declTokens[declTokens.length - 1].end,
-                [],
+                initializer ? [initializer] : [],
                 declTokens,
                 name.value
             );
@@ -483,6 +887,204 @@ class Parser {
         );
         node.modifier = this.modifierOf(modifier);
         return node;
+    }
+
+    private parseArray(modifier?: IRslToken): IRslSyntaxNode {
+        const start = modifier ? modifier.start : this.current().start;
+        const used: IRslToken[] = modifier ? [modifier] : [];
+        used.push(this.take());
+        const children: IRslSyntaxNode[] = [];
+
+        while (
+            !this.atEnd() &&
+            !this.isSymbol(";") &&
+            !BLOCK_BOUNDARIES.has(this.word())
+        ) {
+            const name = this.current();
+
+            if (
+                name.kind !== "identifier" ||
+                RESERVED.has(normalizeIdentifier(name.value))
+            ) {
+                this.error(
+                    "expected-array-name",
+                    "Ожидается имя массива",
+                    name
+                );
+                break;
+            }
+
+            this.take();
+            used.push(name);
+            const declarator = this.node(
+                "VariableDeclarator",
+                name.start,
+                name.end,
+                [],
+                [name],
+                name.value
+            );
+            declarator.typeName = "array";
+            declarator.variableRole = "variable";
+            children.push(declarator);
+
+            if (this.isSymbol(",")) {
+                used.push(this.take());
+                continue;
+            }
+
+            if (this.isVariableDeclaratorStart()) {
+                this.missing(
+                    "missing-comma",
+                    "Между объявлениями массивов пропущена ','",
+                    this.current().start
+                );
+                continue;
+            }
+
+            break;
+        }
+
+        const node = this.node(
+            "ArrayDeclaration",
+            start,
+            used[used.length - 1].end,
+            children,
+            used,
+            "array"
+        );
+        node.modifier = this.modifierOf(modifier);
+        return node;
+    }
+
+    private parseFileRecord(
+        modifier: IRslToken | undefined,
+        isRecord: boolean
+    ): IRslSyntaxNode {
+        const start = modifier ? modifier.start : this.current().start;
+        const used: IRslToken[] = modifier ? [modifier] : [];
+        const keyword = this.take();
+        used.push(keyword);
+        const name = this.expectIdentifier(
+            isRecord ? "Ожидается имя RECORD" : "Ожидается имя FILE"
+        );
+
+        if (name) {
+            used.push(name);
+        }
+
+        let objectName: string | undefined;
+        let dictionaryName: string | undefined;
+
+        if (this.isSymbol("(")) {
+            const clause = this.consumeBalanced("(", ")", used);
+            const inner = clause.slice(
+                1,
+                clause.length > 1 ? clause.length - 1 : 1
+            );
+            const parts = this.splitTopLevelList(inner);
+            objectName = this.tokensText(parts[0]);
+            dictionaryName = this.tokensText(parts[1]);
+
+            if (parts.length > 2) {
+                this.error(
+                    "too-many-object-arguments",
+                    `${isRecord ? "RECORD" : "FILE"} допускает не более двух параметров объекта`,
+                    parts[2][0]
+                );
+            }
+
+            if (
+                parts.length === 1 &&
+                this.hasWhitespaceSeparatedNames(parts[0])
+            ) {
+                this.missing(
+                    "missing-comma",
+                    "Между именем объекта и именем словаря пропущена ','",
+                    parts[0][1].start
+                );
+            }
+        } else {
+            this.missing(
+                "missing-opening-parenthesis",
+                `После имени ${isRecord ? "RECORD" : "FILE"} пропущена '('`,
+                this.current().start
+            );
+        }
+
+        const specifiers: string[] = [];
+
+        while (
+            !this.atEnd() &&
+            !this.isSymbol(";") &&
+            this.current().kind === "identifier" &&
+            FILE_RECORD_SPECIFIERS.has(this.word())
+        ) {
+            const specifier = this.take();
+            const specifierName = normalizeIdentifier(specifier.value);
+            used.push(specifier);
+            specifiers.push(specifierName);
+
+            if (specifierName === "sort" || specifierName === "key") {
+                if (this.isSymbol("+") || this.isSymbol("-")) {
+                    used.push(this.take());
+                }
+
+                const number = this.current();
+
+                if (number.kind === "number") {
+                    used.push(this.take());
+                } else {
+                    this.error(
+                        "expected-key-number",
+                        `После ${specifierName.toUpperCase()} ожидается номер ключа`,
+                        number
+                    );
+                }
+            }
+        }
+
+        const typeName = this.fileRecordType(isRecord, specifiers);
+        const node = this.node(
+            isRecord ? "RecordDeclaration" : "FileDeclaration",
+            start,
+            used[used.length - 1].end,
+            [],
+            used,
+            name && name.value
+        );
+        node.modifier = this.modifierOf(modifier);
+        node.typeName = typeName;
+        node.objectName = objectName;
+        node.dictionaryName = dictionaryName;
+        node.specifiers = specifiers;
+        return node;
+    }
+
+    private fileRecordType(
+        isRecord: boolean,
+        specifiers: string[]
+    ): string {
+        if (specifiers.indexOf("txt") >= 0) {
+            return "txtfile";
+        }
+
+        if (specifiers.indexOf("dbf") >= 0) {
+            return "dbffile";
+        }
+
+        if (
+            specifiers.indexOf("mem") >= 0 ||
+            specifiers.indexOf("dialog") >= 0
+        ) {
+            return "record";
+        }
+
+        if (specifiers.indexOf("btr") >= 0) {
+            return "file";
+        }
+
+        return isRecord ? "record" : "file";
     }
 
     private parseMacro(modifier?: IRslToken): IRslSyntaxNode {
@@ -548,9 +1150,31 @@ class Parser {
 
         if (this.isSymbol("(")) {
             const inherited = this.consumeBalanced("(", ")", used);
-            baseClassName = inherited.find(token =>
+            const baseTokens = inherited.filter(token =>
                 token.kind === "identifier"
-            )?.value;
+            );
+            baseClassName = baseTokens[0]?.value;
+
+            if (!baseClassName) {
+                this.error(
+                    "expected-base-class",
+                    "В скобках после CLASS ожидается имя базового класса",
+                    inherited[0]
+                );
+            }
+
+            if (
+                baseTokens.length > 1 ||
+                inherited.some(token =>
+                    token.kind === "symbol" && token.raw === ","
+                )
+            ) {
+                this.error(
+                    "multiple-inheritance-not-supported",
+                    "RSL поддерживает только один базовый класс",
+                    baseTokens[1] || inherited[0]
+                );
+            }
         }
 
         const name = this.expectIdentifier("Ожидается имя CLASS");
@@ -585,15 +1209,24 @@ class Parser {
     private parseIf(): IRslSyntaxNode {
         const keyword = this.take();
         const used = [keyword];
-        this.parseRequiredCondition(used, "IF");
-        const children = this.parseStatementList(
+        const condition = this.parseRequiredCondition(used, "IF");
+        const children: IRslSyntaxNode[] = [];
+
+        if (condition) {
+            children.push(condition);
+        }
+
+        children.push(...this.parseStatementList(
             new Set(["elif", "else", "end"])
-        );
+        ));
 
         while (this.word() === "elif") {
             const start = this.current().start;
             const clauseTokens = [this.take()];
-            this.parseRequiredCondition(clauseTokens, "ELIF");
+            const clauseCondition = this.parseRequiredCondition(
+                clauseTokens,
+                "ELIF"
+            );
             const body = this.parseStatementList(
                 new Set(["elif", "else", "end"])
             );
@@ -601,7 +1234,7 @@ class Parser {
                 "ElseIfClause",
                 start,
                 this.lastEnd(start),
-                body,
+                clauseCondition ? [clauseCondition, ...body] : body,
                 clauseTokens
             ));
         }
@@ -636,7 +1269,7 @@ class Parser {
     private parseWhile(): IRslSyntaxNode {
         const keyword = this.take();
         const used = [keyword];
-        this.parseRequiredCondition(used, "WHILE");
+        const condition = this.parseRequiredCondition(used, "WHILE");
         const body = this.parseStatementList(new Set(["end"]));
         const endToken = this.expectWord("end", "Для WHILE не найден END");
 
@@ -648,7 +1281,7 @@ class Parser {
             "WhileStatement",
             keyword.start,
             endToken ? endToken.end : this.lastEnd(keyword.end),
-            body,
+            condition ? [condition, ...body] : body,
             used
         );
     }
@@ -661,11 +1294,7 @@ class Parser {
         if (this.isSymbol("(")) {
             const header = this.consumeBalanced("(", ")", used);
             this.validateForHeader(header);
-            const forVariable = this.findDeclaredForVariable(header);
-
-            if (forVariable) {
-                headerChildren.push(forVariable);
-            }
+            headerChildren.push(...this.parseForHeaderNodes(header));
         }
 
         const body = this.parseStatementList(new Set(["end"]));
@@ -682,6 +1311,31 @@ class Parser {
             [...headerChildren, ...body],
             used
         );
+    }
+
+    private parseForHeaderNodes(header: IRslToken[]): IRslSyntaxNode[] {
+        const inner = header.slice(
+            1,
+            header.length > 1 ? header.length - 1 : 1
+        );
+        const parts = this.splitTopLevelList(inner);
+        const result: IRslSyntaxNode[] = [];
+        const declared = this.findDeclaredForVariable(header);
+
+        parts.forEach((part, index) => {
+            if (index === 0 && declared) {
+                result.push(declared);
+                return;
+            }
+
+            const expression = parseRslExpressionTokens(part);
+
+            if (expression) {
+                result.push(expression);
+            }
+        });
+
+        return result;
     }
 
     private findDeclaredForVariable(
@@ -749,6 +1403,50 @@ class Parser {
         return node;
     }
 
+    private parseWith(): IRslSyntaxNode {
+        const keyword = this.take();
+        const used = [keyword];
+        let target: IRslSyntaxNode | undefined;
+
+        if (this.isSymbol("(")) {
+            const clause = this.consumeBalanced("(", ")", used);
+            const inner = clause.slice(
+                1,
+                clause.length > 1 ? clause.length - 1 : 1
+            );
+            target = parseRslExpressionTokens(inner);
+
+            if (!target) {
+                this.error(
+                    "expected-with-target",
+                    "В WITH ожидается объект",
+                    clause[0]
+                );
+            }
+        } else {
+            this.missing(
+                "missing-opening-parenthesis",
+                "После WITH пропущена '('",
+                this.current().start
+            );
+        }
+
+        const body = this.parseStatementList(new Set(["end"]));
+        const endToken = this.expectWord("end", "Для WITH не найден END");
+
+        if (endToken) {
+            used.push(endToken);
+        }
+
+        return this.node(
+            "WithStatement",
+            keyword.start,
+            endToken ? endToken.end : this.lastEnd(keyword.end),
+            target ? [target, ...body] : body,
+            used
+        );
+    }
+
     private parseOnError(): IRslSyntaxNode {
         const keyword = this.take();
         const used = [keyword];
@@ -802,18 +1500,22 @@ class Parser {
         const keyword = this.take();
         const used = [keyword];
 
+        let expression: IRslSyntaxNode | undefined;
+
         if (kind === "ReturnStatement") {
-            used.push(...this.consumeExpression(
+            const expressionTokens = this.consumeExpression(
                 new Set([";"]),
                 BLOCK_BOUNDARIES
-            ));
+            );
+            used.push(...expressionTokens);
+            expression = parseRslExpressionTokens(expressionTokens);
         }
 
         return this.node(
             kind,
             keyword.start,
             used[used.length - 1].end,
-            [],
+            expression ? [expression] : [],
             used
         );
     }
@@ -821,20 +1523,22 @@ class Parser {
     private parseExpressionStatement(prefix?: IRslToken): IRslSyntaxNode {
         const used = prefix ? [prefix] : [];
         const start = prefix ? prefix.start : this.current().start;
-        used.push(...this.consumeExpression(
+        const expressionTokens = this.consumeExpression(
             new Set([";"]),
             BLOCK_BOUNDARIES
-        ));
+        );
+        used.push(...expressionTokens);
 
         if (used.length === 0) {
             used.push(this.take());
         }
 
+        const expression = parseRslExpressionTokens(expressionTokens);
         return this.node(
             "ExpressionStatement",
             start,
             used[used.length - 1].end,
-            [],
+            expression ? [expression] : [],
             used
         );
     }
@@ -1092,17 +1796,22 @@ class Parser {
     private parseRequiredCondition(
         used: IRslToken[],
         owner: string
-    ): void {
+    ): IRslSyntaxNode | undefined {
         if (!this.isSymbol("(")) {
             this.missing(
                 "missing-opening-parenthesis",
                 `После ${owner} пропущена '('`,
                 this.current().start
             );
-            return;
+            return undefined;
         }
 
-        this.consumeBalanced("(", ")", used);
+        const clause = this.consumeBalanced("(", ")", used);
+        const inner = clause.slice(
+            1,
+            clause.length > 1 ? clause.length - 1 : 1
+        );
+        return parseRslExpressionTokens(inner);
     }
 
     private consumeBalanced(
@@ -1139,6 +1848,74 @@ class Parser {
             this.lastEnd(0)
         );
         return consumed;
+    }
+
+    private splitTopLevelList(tokens: IRslToken[]): IRslToken[][] {
+        const result: IRslToken[][] = [];
+        let current: IRslToken[] = [];
+        let parenthesisDepth = 0;
+        let bracketDepth = 0;
+
+        for (const token of tokens || []) {
+            if (token.kind === "symbol") {
+                if (token.raw === "(") {
+                    parenthesisDepth++;
+                } else if (token.raw === ")" && parenthesisDepth > 0) {
+                    parenthesisDepth--;
+                } else if (token.raw === "[") {
+                    bracketDepth++;
+                } else if (token.raw === "]" && bracketDepth > 0) {
+                    bracketDepth--;
+                } else if (
+                    token.raw === "," &&
+                    parenthesisDepth === 0 &&
+                    bracketDepth === 0
+                ) {
+                    result.push(current);
+                    current = [];
+                    continue;
+                }
+            }
+
+            current.push(token);
+        }
+
+        if (current.length > 0 || result.length > 0) {
+            result.push(current);
+        }
+
+        return result;
+    }
+
+    private hasWhitespaceSeparatedNames(tokens: IRslToken[]): boolean {
+        for (let index = 1; index < tokens.length; index++) {
+            const left = tokens[index - 1];
+            const right = tokens[index];
+            const leftIsName = left.kind === "identifier" || left.kind === "string";
+            const rightIsName = right.kind === "identifier" || right.kind === "string";
+
+            if (
+                leftIsName &&
+                rightIsName &&
+                this.hasWhitespaceBetween(left, right)
+            ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private tokensText(tokens?: IRslToken[]): string | undefined {
+        if (!tokens || tokens.length === 0) {
+            return undefined;
+        }
+
+        if (tokens.length === 1 && tokens[0].kind === "string") {
+            return tokens[0].value;
+        }
+
+        return tokens.map(token => token.raw).join("").trim() || undefined;
     }
 
     private validateForHeader(tokens: IRslToken[]): void {

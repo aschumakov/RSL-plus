@@ -3,7 +3,8 @@ export const BLOCK_START_KEYWORDS: string[] = [
     "macro",
     "if",
     "for",
-    "while"
+    "while",
+    "with"
 ];
 
 export const BRANCH_KEYWORDS: string[] = [

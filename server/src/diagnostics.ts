@@ -48,7 +48,7 @@ interface IDiagnosticData {
     moduleName?: string;
 }
 
-const BLOCK_START = new Set(["macro", "class", "if", "for", "while"]);
+const BLOCK_START = new Set(["macro", "class", "if", "for", "while", "with"]);
 const END_KEYWORD = "end";
 const MODIFIERS = new Set(["private", "local", "public"]);
 const VARIABLE_KINDS = new Set<number>([
