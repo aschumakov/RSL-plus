@@ -17,7 +17,8 @@ export type RslSyntaxKind =
     | "NameExpression" | "LiteralExpression" | "ParenthesizedExpression"
     | "UnaryExpression" | "BinaryExpression" | "AssignmentExpression"
     | "MemberAccessExpression" | "DefaultPropertyExpression"
-    | "PostfixAccessExpression" | "IndexExpression" | "UnknownExpression"
+    | "PostfixAccessExpression" | "IndexExpression"
+    | "ImplicitStringConcatenationExpression" | "UnknownExpression"
     | "UnknownStatement";
 
 export type RslDeclarationModifier = "local" | "private";
@@ -28,6 +29,7 @@ export interface IRslSyntaxDiagnostic {
     message: string;
     start: number;
     end: number;
+    severity?: "error" | "warning";
 }
 
 export interface IRslSyntaxNode {
@@ -194,6 +196,27 @@ class ExpressionParser {
         }
 
         while (!this.atEnd()) {
+            if (this.isImplicitStringConcatenation(left, minPrecedence)) {
+                const right = this.parseExpression(
+                    BINARY_PRECEDENCE["+"] + 1
+                );
+
+                if (!right) {
+                    break;
+                }
+
+                left = createExpressionNode(
+                    "ImplicitStringConcatenationExpression",
+                    left.start,
+                    right.end,
+                    [left, right],
+                    [],
+                    undefined,
+                    "implicit+"
+                );
+                continue;
+            }
+
             const operatorToken = this.current();
             const operator = this.operatorOf(operatorToken);
             const precedence = BINARY_PRECEDENCE[operator];
@@ -226,6 +249,25 @@ class ExpressionParser {
         }
 
         return left;
+    }
+
+    private isImplicitStringConcatenation(
+        left: IRslSyntaxNode,
+        minPrecedence: number
+    ): boolean {
+        return minPrecedence <= BINARY_PRECEDENCE["+"] &&
+            this.current()?.kind === "string" &&
+            this.isStringExpression(left);
+    }
+
+    private isStringExpression(node: IRslSyntaxNode): boolean {
+        if (node.kind === "ImplicitStringConcatenationExpression") {
+            return true;
+        }
+
+        return node.kind === "LiteralExpression" &&
+            node.tokens.length === 1 &&
+            node.tokens[0].kind === "string";
     }
 
     private parseUnary(): IRslSyntaxNode | undefined {
@@ -1723,7 +1765,29 @@ class Parser {
             result.push(this.take());
         }
 
+        this.addImplicitStringConcatenationDiagnostics(result);
         return result;
+    }
+
+    private addImplicitStringConcatenationDiagnostics(
+        tokens: IRslToken[]
+    ): void {
+        for (let index = 1; index < tokens.length; index++) {
+            const previous = tokens[index - 1];
+            const current = tokens[index];
+
+            if (
+                previous.kind === "string" &&
+                current.kind === "string"
+            ) {
+                this.warning(
+                    "implicit-string-concatenation",
+                    "Строковые литералы объединяются неявно; " +
+                        "рекомендуется добавить '+' для явной конкатенации",
+                    current
+                );
+            }
+        }
     }
 
     /**
@@ -1736,6 +1800,13 @@ class Parser {
         token: IRslToken,
         previous: IRslToken
     ): boolean {
+        if (
+            previous.kind === "string" &&
+            token.kind === "string"
+        ) {
+            return false;
+        }
+
         if (token.line === previous.endLine) {
             return false;
         }
@@ -2025,6 +2096,20 @@ class Parser {
             tokens,
             name
         };
+    }
+
+    private warning(
+        code: string,
+        message: string,
+        token: IRslToken
+    ): void {
+        this.diagnostics.push({
+            code,
+            message,
+            start: token.start,
+            end: Math.max(token.end, token.start + 1),
+            severity: "warning"
+        });
     }
 
     private error(

@@ -161,7 +161,9 @@ function addSyntaxParserDiagnostics(
             module,
             item.start,
             item.end,
-            DiagnosticSeverity.Error,
+            item.severity === "warning"
+                ? DiagnosticSeverity.Warning
+                : DiagnosticSeverity.Error,
             item.message,
             item.code
         ));

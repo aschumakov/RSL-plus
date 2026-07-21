@@ -17,8 +17,12 @@ tslint.json
 package-lock.json
 client/package-lock.json
 server/package-lock.json
-README-1.1.3.md
-README-FOR-FIX.md
-MANIFEST.json
+README-*.md
+MANIFEST*.json
+MIGRATION*.md
+coverage/**
+.nyc_output/**
+*.patch
 *.zip
 *.vsix
+*.tgz

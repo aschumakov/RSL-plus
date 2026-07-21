@@ -1,15 +1,23 @@
-﻿# Node
+# Node
 node_modules/
 
 # Build artifacts
 out/
 dist/
-
-# TypeScript build cache
+coverage/
+.nyc_output/
 *.tsbuildinfo
 
 # VS Code extension packages
 *.vsix
+*.tgz
+
+# Temporary overlays and review artifacts
+*.zip
+*.patch
+/README-*.md
+/MANIFEST*.json
+/MIGRATION*.md
 
 # Logs
 *.log
@@ -17,6 +25,13 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+
+# Local environment and IDE
+.env
+.env.*
+!.env.example
+.idea/
+*.code-workspace
 
 # OS files
 .DS_Store

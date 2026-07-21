@@ -91,6 +91,15 @@ export function buildRslCodeActions(
                 );
                 break;
 
+            case "implicit-string-concatenation":
+                action = createInsertTextAction(
+                    module,
+                    diagnostic,
+                    "Добавить '+' между строками",
+                    "+ "
+                );
+                break;
+
             default:
                 break;
         }
@@ -140,6 +149,25 @@ function createDeleteTokenAction(
         {
             range: offsetRange(module, offsets.start, offsets.end),
             newText: ""
+        }
+    );
+}
+
+function createInsertTextAction(
+    module: IIndexedModule,
+    diagnostic: Diagnostic,
+    title: string,
+    newText: string
+): CodeAction {
+    const offsets = getDiagnosticOffsets(module, diagnostic);
+
+    return createAction(
+        module.uri,
+        diagnostic,
+        title,
+        {
+            range: offsetRange(module, offsets.start, offsets.start),
+            newText
         }
     );
 }

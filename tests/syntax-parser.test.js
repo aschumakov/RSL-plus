@@ -76,6 +76,30 @@ function findNodes(node, kind, result = []) {
   return result;
 }
 
+const implicitStringSource = [
+  'Sql1 = " select v.T_PAYERBANKNAME,v.T_PAYERNAME, "',
+  '       " v.T_RECEIVERINN from dpmrmprop_dbt v "',
+  '       " where v.t_paymentid=:1 ";'
+].join("\n");
+const implicitStringResult = parseRslSyntax(implicitStringSource);
+const implicitStringCodes = implicitStringResult.diagnostics
+  .map(item => item.code);
+
+assert.ok(
+  !implicitStringCodes.includes("missing-semicolon"),
+  "Соседний строковый литерал не должен считаться новой инструкцией"
+);
+const implicitStringWarning = implicitStringResult.diagnostics
+  .find(item => item.code === "implicit-string-concatenation");
+assert.ok(implicitStringWarning);
+assert.strictEqual(implicitStringWarning.severity, "warning");
+assert.ok(
+  findNodes(
+    implicitStringResult.root,
+    "ImplicitStringConcatenationExpression"
+  ).length >= 1
+);
+
 const documentedSyntax = parseRslSyntax([
   "array MyVar, First, Second;",
   "file Accounts(account) sort 0 write;",
