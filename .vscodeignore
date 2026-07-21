@@ -1,38 +1,25 @@
-# Development and CI files
+# Git
+.git/**
 .github/**
-.vscode/**
-tests/**
-.gitignore
-tsconfig.json
-tslint.json
 
-# TypeScript sources and build metadata
+# VS Code
+.vscode/**
+
+# Tests
+tests/**
+
+# Sources
 client/src/**
 server/src/**
-client/tsconfig.json
-server/tsconfig.json
-client/out/**/*.map
-server/out/**/*.map
-client/out/**/*.d.ts
-server/out/**/*.d.ts
-**/*.tsbuildinfo
+**/*.ts
+**/*.map
 
-# Lock files are not needed at runtime
+# Development
+tsconfig*.json
 package-lock.json
-client/package-lock.json
-server/package-lock.json
-**/node_modules/.package-lock.json
+README-1.1.3.md
+README-FOR-FIX.md
+MANIFEST.json
 
-# Nested development-only type packages
-client/node_modules/@types/**
-server/node_modules/@types/**
-client/node_modules/undici-types/**
-server/node_modules/undici-types/**
-
-# Local artifacts and logs
-*.vsix
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
+# Temporary
+*.zip

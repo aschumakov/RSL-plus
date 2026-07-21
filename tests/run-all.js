@@ -12,7 +12,8 @@ const tests = [
     "definition.test.js",
     "parser-optimized.test.js",
     "scope-index.test.js",
-    "diagnostics.test.js"
+    "diagnostics.test.js",
+    "language-features.test.js"
 ];
 
 let failed = false;
@@ -23,9 +24,7 @@ for (const testFile of tests) {
     const result = spawnSync(
         process.execPath,
         [path.join(__dirname, testFile)],
-        {
-            stdio: "inherit"
-        }
+        { stdio: "inherit" }
     );
 
     if (result.status !== 0) {

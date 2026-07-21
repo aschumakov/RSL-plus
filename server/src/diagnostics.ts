@@ -1,3 +1,6 @@
+import * as path from "path";
+import { fileURLToPath } from "url";
+
 import {
     CompletionItemKind,
     Diagnostic,
@@ -5,7 +8,7 @@ import {
     DiagnosticTag
 } from "vscode-languageserver";
 
-import { CBase } from "./common";
+import { CBase, KEYWORDS, TYPES } from "./common";
 import { RslScopeResolver } from "./scopeResolver";
 import {
     GetDynamicMacroReferencesFromTokens,
@@ -13,23 +16,22 @@ import {
     IImportDefinitionTarget
 } from "./execMacroDefinition";
 import {
+    IRslDiagnosticSettings
+} from "./interfaces";
+import {
     IRslToken,
     normalizeIdentifier,
     significantTokens
 } from "./lexer";
 import {
-    BLOCK_START_KEYWORDS,
-    END_KEYWORD
-} from "./languageMetadata";
-import {
     IIndexedModule,
     WorkspaceIndex
 } from "./workspaceIndex";
 
-
 interface IBlockEntry {
     keyword: string;
     token: IRslToken;
+    hasElse: boolean;
 }
 
 interface IDeclarationInfo {
@@ -38,12 +40,62 @@ interface IDeclarationInfo {
     parameter: boolean;
 }
 
-const BLOCK_START = new Set(BLOCK_START_KEYWORDS);
+interface IDiagnosticData {
+    start?: number;
+    end?: number;
+    name?: string;
+    parameter?: boolean;
+    moduleName?: string;
+}
+
+const BLOCK_START = new Set(["macro", "class", "if", "for", "while"]);
+const END_KEYWORD = "end";
 const MODIFIERS = new Set(["private", "local", "public"]);
 const VARIABLE_KINDS = new Set<number>([
     CompletionItemKind.Variable,
     CompletionItemKind.Constant
 ]);
+const RESERVED_IDENTIFIERS = new Set([
+    "true",
+    "false",
+    "null",
+    "undefined",
+    "v_undef"
+]);
+
+export const DEFAULT_DIAGNOSTIC_SETTINGS: Required<IRslDiagnosticSettings> = {
+    enabled: true,
+    deprecatedDeclarations: true,
+    structure: true,
+    unusedVariables: true,
+    unusedImports: true,
+    debugBreak: true,
+    useBeforeDeclaration: true,
+    ambiguousReferences: true,
+    maxProblems: 200
+};
+
+export function normalizeDiagnosticSettings(
+    settings?: IRslDiagnosticSettings
+): Required<IRslDiagnosticSettings> {
+    return {
+        enabled: settings?.enabled !== false,
+        deprecatedDeclarations:
+            settings?.deprecatedDeclarations !== false,
+        structure: settings?.structure !== false,
+        unusedVariables: settings?.unusedVariables !== false,
+        unusedImports: settings?.unusedImports !== false,
+        debugBreak: settings?.debugBreak !== false,
+        useBeforeDeclaration:
+            settings?.useBeforeDeclaration !== false,
+        ambiguousReferences:
+            settings?.ambiguousReferences !== false,
+        maxProblems:
+            typeof settings?.maxProblems === "number"
+                ? Math.max(0, Math.floor(settings.maxProblems))
+                : DEFAULT_DIAGNOSTIC_SETTINGS.maxProblems
+    };
+}
 
 /**
  * Единая точка построения диагностик RSL.
@@ -51,19 +103,50 @@ const VARIABLE_KINDS = new Set<number>([
  */
 export function buildRslDiagnostics(
     module: IIndexedModule,
-    index: WorkspaceIndex
+    index: WorkspaceIndex,
+    settings?: IRslDiagnosticSettings
 ): Diagnostic[] {
+    const options = normalizeDiagnosticSettings(settings);
+
+    if (!options.enabled || options.maxProblems === 0) {
+        return [];
+    }
+
     const result: Diagnostic[] = [];
 
-    addDeprecatedDeclarationDiagnostics(module, result);
-    addUnterminatedTokenDiagnostics(module, result);
-    addBracketDiagnostics(module, result);
-    addEndDiagnostics(module, result);
-    addUnusedDeclarationDiagnostics(module, result);
-    addDuplicateDeclarationDiagnostics(module, result);
-    addImportDiagnostics(module, index, result);
+    if (options.deprecatedDeclarations) {
+        addDeprecatedDeclarationDiagnostics(module, result);
+    }
 
-    return deduplicateDiagnostics(result);
+    if (options.structure) {
+        addUnterminatedTokenDiagnostics(module, result);
+        addBracketDiagnostics(module, result);
+        addEndDiagnostics(module, result);
+        addDuplicateDeclarationDiagnostics(module, result);
+        addBasicImportDiagnostics(module, index, result);
+    }
+
+    if (options.debugBreak) {
+        addDebugBreakDiagnostics(module, result);
+    }
+
+    if (options.unusedVariables) {
+        addUnusedDeclarationDiagnostics(module, index, result);
+    }
+
+    if (options.useBeforeDeclaration) {
+        addUseBeforeDeclarationDiagnostics(module, index, result);
+    }
+
+    if (options.ambiguousReferences) {
+        addAmbiguousReferenceDiagnostics(module, index, result);
+    }
+
+    if (options.unusedImports) {
+        addUnusedImportDiagnostics(module, index, result);
+    }
+
+    return deduplicateDiagnostics(result).slice(0, options.maxProblems);
 }
 
 function addDeprecatedDeclarationDiagnostics(
@@ -87,6 +170,32 @@ function addDeprecatedDeclarationDiagnostics(
             `Определение ${word.toUpperCase()} устарело, ` +
                 "от него желательно избавляться по возможности",
             "deprecated-declaration"
+        ));
+    }
+}
+
+function addDebugBreakDiagnostics(
+    module: IIndexedModule,
+    result: Diagnostic[]
+): void {
+    for (const token of module.lex.tokens) {
+        if (
+            token.kind !== "identifier" ||
+            normalizeIdentifier(token.value) !== "debugbreak"
+        ) {
+            continue;
+        }
+
+        result.push(createTokenDiagnostic(
+            token,
+            DiagnosticSeverity.Warning,
+            "В коде оставлен DEBUGBREAK",
+            "debugbreak",
+            false,
+            {
+                start: token.start,
+                end: token.end
+            }
         ));
     }
 }
@@ -168,7 +277,12 @@ function addBracketDiagnostics(
                 token,
                 DiagnosticSeverity.Error,
                 `Лишняя закрывающая скобка ${token.raw}`,
-                "extra-closing-bracket"
+                "extra-closing-bracket",
+                false,
+                {
+                    start: token.start,
+                    end: token.end
+                }
             ));
         }
     }
@@ -194,9 +308,7 @@ function addEndDiagnostics(
     let canStartBlock = true;
     let currentLine = -1;
 
-    for (let index = 0; index < tokens.length; index++) {
-        const token = tokens[index];
-
+    for (const token of tokens) {
         if (token.line !== currentLine) {
             currentLine = token.line;
             canStartBlock = true;
@@ -219,7 +331,12 @@ function addEndDiagnostics(
                     token,
                     DiagnosticSeverity.Error,
                     "Лишний END: нет открытого блока",
-                    "extra-end"
+                    "extra-end",
+                    false,
+                    {
+                        start: token.start,
+                        end: token.end
+                    }
                 ));
             } else {
                 stack.pop();
@@ -230,12 +347,39 @@ function addEndDiagnostics(
         }
 
         if (canStartBlock && (word === "elif" || word === "else")) {
-            if (stack.length === 0 || stack[stack.length - 1].keyword !== "if") {
+            const currentIf = stack.length > 0
+                ? stack[stack.length - 1]
+                : undefined;
+
+            if (!currentIf || currentIf.keyword !== "if") {
                 result.push(createTokenDiagnostic(
                     token,
                     DiagnosticSeverity.Error,
                     `${word.toUpperCase()} используется без соответствующего IF`,
                     "branch-without-if"
+                ));
+            } else if (word === "else") {
+                if (currentIf.hasElse) {
+                    result.push(createTokenDiagnostic(
+                        token,
+                        DiagnosticSeverity.Error,
+                        "Повторный ELSE в одном блоке IF",
+                        "duplicate-else",
+                        false,
+                        {
+                            start: token.start,
+                            end: token.end
+                        }
+                    ));
+                } else {
+                    currentIf.hasElse = true;
+                }
+            } else if (currentIf.hasElse) {
+                result.push(createTokenDiagnostic(
+                    token,
+                    DiagnosticSeverity.Error,
+                    "ELIF не может располагаться после ELSE",
+                    "elif-after-else"
                 ));
             }
 
@@ -244,7 +388,9 @@ function addEndDiagnostics(
         }
 
         if (canStartBlock && word === "onerror") {
-            if (stack.length === 0 || stack[stack.length - 1].keyword !== "macro") {
+            const insideMacro = stack.some(item => item.keyword === "macro");
+
+            if (!insideMacro) {
                 result.push(createTokenDiagnostic(
                     token,
                     DiagnosticSeverity.Warning,
@@ -268,7 +414,11 @@ function addEndDiagnostics(
         canStartBlock = false;
 
         if (BLOCK_START.has(word)) {
-            stack.push({ keyword: word, token });
+            stack.push({
+                keyword: word,
+                token,
+                hasElse: false
+            });
         }
     }
 
@@ -284,33 +434,14 @@ function addEndDiagnostics(
 
 function addUnusedDeclarationDiagnostics(
     module: IIndexedModule,
+    index: WorkspaceIndex,
     result: Diagnostic[]
 ): void {
     const code = significantTokens(module.lex.tokens);
     const declarations = collectDeclarations(module, code);
-    const identifierIndex = new Map<string, IRslToken[]>();
-    const declarationRanges = new Map<CBase, Map<string, Array<{ start: number; end: number }>>>();
-
-    for (const token of code) {
-        if (token.kind !== "identifier") {
-            continue;
-        }
-
-        const name = normalizeIdentifier(token.value);
-        const list = identifierIndex.get(name) || [];
-        list.push(token);
-        identifierIndex.set(name, list);
-    }
-
-    for (const declaration of declarations) {
-        const scopeMap = declarationRanges.get(declaration.scope) ||
-            new Map<string, Array<{ start: number; end: number }>>();
-        const name = normalizeIdentifier(declaration.object.Name);
-        const ranges = scopeMap.get(name) || [];
-        ranges.push(declaration.object.Range);
-        scopeMap.set(name, ranges);
-        declarationRanges.set(declaration.scope, scopeMap);
-    }
+    const identifierIndex = buildIdentifierIndex(code);
+    const declarationRanges = declarations.map(item => item.object.Range);
+    const resolver = new RslScopeResolver(index);
 
     for (const declaration of declarations) {
         const object = declaration.object;
@@ -321,23 +452,35 @@ function addUnusedDeclarationDiagnostics(
             scope.ObjKind === CompletionItemKind.Unit && object.Private;
 
         /*
-         * Публичные глобальные переменные/константы могут использоваться
-         * внешней средой или импортирующими файлами, поэтому их не помечаем.
-         * Свойства класса также могут вызываться извне.
+         * Публичные глобальные объекты и свойства класса могут использоваться
+         * внешней средой или импортирующими файлами.
          */
         if (!isLocal && !isPrivateModuleDeclaration) {
             continue;
         }
 
         const name = normalizeIdentifier(object.Name);
-        const ranges = declarationRanges.get(scope)?.get(name) || [];
-        const used = (identifierIndex.get(name) || []).some(token =>
-            token.start >= scope.Range.start &&
-            token.end <= scope.Range.end &&
-            !ranges.some(range =>
-                sameRange(token.start, token.end, range.start, range.end)
-            )
-        );
+        const used = (identifierIndex.get(name) || []).some(token => {
+            if (
+                token.start < scope.Range.start ||
+                token.end > scope.Range.end ||
+                declarationRanges.some(range =>
+                    sameRange(token.start, token.end, range.start, range.end)
+                )
+            ) {
+                return false;
+            }
+
+            const resolved = resolver.resolveAt(
+                module.uri,
+                module.object,
+                token.start
+            );
+
+            return !!resolved &&
+                resolved.uri === module.uri &&
+                resolved.object === object;
+        });
 
         if (used) {
             continue;
@@ -349,15 +492,104 @@ function addUnusedDeclarationDiagnostics(
                 ? "Константа"
                 : "Переменная";
         const declared = kind === "Параметр" ? "объявлен" : "объявлена";
+        const range = findObjectNameRange(module, object);
 
         result.push(createOffsetDiagnostic(
             module,
-            object.Range.start,
-            object.Range.end,
-            DiagnosticSeverity.Hint,
+            range.start,
+            range.end,
+            DiagnosticSeverity.Warning,
             `${kind} ${object.Name} ${declared}, но не используется`,
             "unused-declaration",
-            true
+            true,
+            {
+                start: range.start,
+                end: range.end,
+                name: object.Name,
+                parameter: declaration.parameter
+            }
+        ));
+    }
+}
+
+function addUseBeforeDeclarationDiagnostics(
+    module: IIndexedModule,
+    index: WorkspaceIndex,
+    result: Diagnostic[]
+): void {
+    const code = significantTokens(module.lex.tokens);
+    const declarations = collectDeclarations(module, code);
+    const identifierIndex = buildIdentifierIndex(code);
+    const declarationRanges = declarations.map(item => item.object.Range);
+    const resolver = new RslScopeResolver(index);
+
+    for (const declaration of declarations) {
+        const scope = declaration.scope;
+
+        if (
+            declaration.parameter ||
+            (
+                scope.ObjKind !== CompletionItemKind.Function &&
+                scope.ObjKind !== CompletionItemKind.Method
+            )
+        ) {
+            continue;
+        }
+
+        const object = declaration.object;
+
+        /*
+         * Повреждённое или неоднозначное дерево не должно превращать
+         * служебные слова RSL (IF, VAR и т. п.) в объявления переменных.
+         */
+        if (isReservedIdentifier(object.Name)) {
+            continue;
+        }
+
+        const name = normalizeIdentifier(object.Name);
+        const nestedScopes = scope.getChilds()
+            .filter(child => child.isObject());
+        const use = (identifierIndex.get(name) || []).find(token => {
+            if (
+                token.start < scope.Range.start ||
+                token.start >= object.Range.start ||
+                declarationRanges.some(range =>
+                    sameRange(token.start, token.end, range.start, range.end)
+                ) ||
+                isMemberName(code, token) ||
+                nestedScopes.some(child =>
+                    child !== scope &&
+                    child.Range.start <= token.start &&
+                    token.end <= child.Range.end
+                )
+            ) {
+                return false;
+            }
+
+            const resolved = resolver.resolveAt(
+                module.uri,
+                module.object,
+                token.start
+            );
+
+            return !resolved;
+        });
+
+        if (!use) {
+            continue;
+        }
+
+        result.push(createTokenDiagnostic(
+            use,
+            DiagnosticSeverity.Error,
+            `Переменная ${object.Name} используется до объявления`,
+            "use-before-declaration",
+            false,
+            {
+                start: use.start,
+                end: use.end,
+                name: object.Name
+            }
         ));
     }
 }
@@ -401,19 +633,13 @@ function addDuplicateDeclarationDiagnostics(
     });
 }
 
-function addImportDiagnostics(
+function addBasicImportDiagnostics(
     module: IIndexedModule,
     index: WorkspaceIndex,
     result: Diagnostic[]
 ): void {
     const references = GetImportDefinitionTargetsFromTokens(module.lex.tokens);
-    const dynamicMacroNames = GetDynamicMacroReferencesFromTokens(module.lex.tokens);
     const seenImports = new Set<string>();
-    const importInfos: Array<{
-        reference: IImportDefinitionTarget;
-        closureUris: Set<string>;
-        publicNames: Set<string>;
-    }> = [];
 
     for (const reference of references) {
         const normalizedImport = normalizeModuleReference(reference.moduleName);
@@ -425,7 +651,12 @@ function addImportDiagnostics(
                 DiagnosticSeverity.Information,
                 `Модуль ${reference.moduleName} импортирован повторно`,
                 "duplicate-import",
-                true
+                true,
+                {
+                    start: reference.start,
+                    end: reference.end,
+                    moduleName: reference.moduleName
+                }
             ));
         } else {
             seenImports.add(normalizedImport);
@@ -442,10 +673,33 @@ function addImportDiagnostics(
                 `Файл импортирует сам себя: ${reference.moduleName}`,
                 "self-import"
             ));
-            continue;
         }
 
-        if (!imported) {
+        /*
+         * Отсутствие файла в workspace не является ошибкой:
+         * модуль может входить в базовую поставку RS-Bank.
+         */
+    }
+}
+
+function addUnusedImportDiagnostics(
+    module: IIndexedModule,
+    index: WorkspaceIndex,
+    result: Diagnostic[]
+): void {
+    const references = GetImportDefinitionTargetsFromTokens(module.lex.tokens);
+    const dynamicMacroNames = GetDynamicMacroReferencesFromTokens(module.lex.tokens);
+    const importInfos: Array<{
+        reference: IImportDefinitionTarget;
+        closureUris: Set<string>;
+        publicNames: Set<string>;
+    }> = [];
+
+    for (const reference of references) {
+        const imported = index.findModuleByName(reference.moduleName);
+
+        /* Проверяем только модули, известные текущему проекту. */
+        if (!imported || imported.uri === module.uri) {
             continue;
         }
 
@@ -494,6 +748,18 @@ function addImportDiagnostics(
             allPublicNames.has(normalizeIdentifier(token.value))
         )
         .forEach(token => {
+            const candidates = index.findImportedSymbols(
+                module.uri,
+                token.value
+            );
+
+            if (candidates.length > 1) {
+                candidates.forEach(candidate =>
+                    usedImportedUris.add(candidate.uri)
+                );
+                return;
+            }
+
             const resolved = resolver.resolveAt(
                 module.uri,
                 module.object,
@@ -506,11 +772,8 @@ function addImportDiagnostics(
         });
 
     dynamicMacroNames.forEach(name => {
-        const resolved = index.findImportedSymbols(module.uri, name)[0];
-
-        if (resolved) {
-            usedImportedUris.add(resolved.uri);
-        }
+        index.findImportedSymbols(module.uri, name)
+            .forEach(resolved => usedImportedUris.add(resolved.uri));
     });
 
     importInfos.forEach(info => {
@@ -529,14 +792,108 @@ function addImportDiagnostics(
         result.push(createImportDiagnostic(
             module,
             info.reference,
-            DiagnosticSeverity.Hint,
-            `Импорт ${info.reference.moduleName}, возможно, не используется: ` +
-                "в текущем файле не найдено обращений к его публичным " +
-                "переменным, константам, макросам или классам",
+            DiagnosticSeverity.Warning,
+            `Импорт ${info.reference.moduleName}, возможно, не используется`,
             "unused-import",
-            true
+            true,
+            {
+                start: info.reference.start,
+                end: info.reference.end,
+                moduleName: info.reference.moduleName
+            }
         ));
     });
+}
+
+function addAmbiguousReferenceDiagnostics(
+    module: IIndexedModule,
+    index: WorkspaceIndex,
+    result: Diagnostic[]
+): void {
+    const importedModules = index.getImportedModules(module.uri);
+    const byName = new Map<string, Array<{ uri: string; object: CBase }>>();
+
+    importedModules.forEach(imported => {
+        imported.object.getChilds()
+            .filter(child => !child.Private)
+            .forEach(child => {
+                const name = normalizeIdentifier(child.Name);
+                const list = byName.get(name) || [];
+
+                if (!list.some(item =>
+                    item.uri === imported.uri && item.object === child
+                )) {
+                    list.push({
+                        uri: imported.uri,
+                        object: child
+                    });
+                }
+
+                byName.set(name, list);
+            });
+    });
+
+    const ambiguous = new Map<string, Array<{ uri: string; object: CBase }>>();
+    byName.forEach((items, name) => {
+        if (items.length > 1) {
+            ambiguous.set(name, items);
+        }
+    });
+
+    if (ambiguous.size === 0) {
+        return;
+    }
+
+    const code = significantTokens(module.lex.tokens);
+    const resolver = new RslScopeResolver(index);
+    const importReferences = GetImportDefinitionTargetsFromTokens(module.lex.tokens);
+    const declarationRanges = collectAllObjectRanges(module.object);
+
+    for (const token of code) {
+        if (token.kind !== "identifier") {
+            continue;
+        }
+
+        const name = normalizeIdentifier(token.value);
+        const candidates = ambiguous.get(name);
+
+        if (
+            !candidates ||
+            declarationRanges.some(range =>
+                sameRange(token.start, token.end, range.start, range.end)
+            ) ||
+            importReferences.some(reference =>
+                reference.start <= token.start && token.end <= reference.end
+            ) ||
+            isMemberName(code, token) ||
+            resolver.resolveInScopeChain(
+                module.object,
+                token.value,
+                token.start
+            )
+        ) {
+            continue;
+        }
+
+        const moduleNames = candidates
+            .map(candidate => formatModuleName(candidate.uri))
+            .filter((value, position, all) => all.indexOf(value) === position)
+            .sort();
+
+        result.push(createTokenDiagnostic(
+            token,
+            DiagnosticSeverity.Error,
+            `Ссылка ${token.value} неоднозначна: ` +
+                `символ объявлен в ${moduleNames.join(", ")}`,
+            "ambiguous-reference",
+            false,
+            {
+                start: token.start,
+                end: token.end,
+                name: token.value
+            }
+        ));
+    }
 }
 
 function collectDeclarations(
@@ -544,7 +901,10 @@ function collectDeclarations(
     codeTokens: IRslToken[]
 ): IDeclarationInfo[] {
     const result: IDeclarationInfo[] = [];
-    const signatureRanges = new Map<CBase, { start: number; end: number } | undefined>();
+    const signatureRanges = new Map<
+        CBase,
+        { start: number; end: number } | undefined
+    >();
 
     walkScopes(module.object, scope => {
         if (
@@ -558,7 +918,10 @@ function collectDeclarations(
         }
 
         for (const child of scope.getChilds()) {
-            if (!VARIABLE_KINDS.has(child.ObjKind)) {
+            if (
+                !VARIABLE_KINDS.has(child.ObjKind) ||
+                isReservedIdentifier(child.Name)
+            ) {
                 continue;
             }
 
@@ -576,6 +939,43 @@ function collectDeclarations(
 
     return result;
 }
+
+function buildIdentifierIndex(
+    tokens: IRslToken[]
+): Map<string, IRslToken[]> {
+    const result = new Map<string, IRslToken[]>();
+
+    for (const token of tokens) {
+        if (token.kind !== "identifier") {
+            continue;
+        }
+
+        const name = normalizeIdentifier(token.value);
+
+        if (isReservedIdentifier(name)) {
+            continue;
+        }
+
+        const list = result.get(name) || [];
+        list.push(token);
+        result.set(name, list);
+    }
+
+    return result;
+}
+
+function isReservedIdentifier(value: string): boolean {
+    const normalized = normalizeIdentifier(value);
+
+    if (!normalized) {
+        return true;
+    }
+
+    return KEYWORDS.is(normalized).first ||
+        TYPES.is(normalized).first ||
+        RESERVED_IDENTIFIERS.has(normalized);
+}
+
 
 function findSignatureRange(
     tokens: IRslToken[],
@@ -631,6 +1031,31 @@ function walkScopes(root: CBase, action: (scope: CBase) => void): void {
     });
 }
 
+function collectAllObjectRanges(
+    root: CBase
+): Array<{ start: number; end: number }> {
+    const result: Array<{ start: number; end: number }> = [];
+
+    walkScopes(root, scope => {
+        scope.getChilds().forEach(child => {
+            result.push(child.Range);
+        });
+    });
+
+    return result;
+}
+
+function isMemberName(tokens: IRslToken[], token: IRslToken): boolean {
+    const index = tokens.indexOf(token);
+
+    if (index <= 0) {
+        return false;
+    }
+
+    const previous = tokens[index - 1];
+    return previous.kind === "symbol" && previous.raw === ".";
+}
+
 function isClosedSquareBlock(raw: string): boolean {
     let depth = 0;
     let quote = "";
@@ -656,7 +1081,11 @@ function isClosedSquareBlock(raw: string): boolean {
         }
 
         if ((char === "-" && next === "-") || (char === "/" && next === "/")) {
-            while (index < raw.length && raw.charAt(index) !== "\r" && raw.charAt(index) !== "\n") {
+            while (
+                index < raw.length &&
+                raw.charAt(index) !== "\r" &&
+                raw.charAt(index) !== "\n"
+            ) {
                 index++;
             }
             continue;
@@ -664,7 +1093,10 @@ function isClosedSquareBlock(raw: string): boolean {
 
         if (char === "/" && next === "*") {
             index += 2;
-            while (index < raw.length - 1 && !(raw.charAt(index) === "*" && raw.charAt(index + 1) === "/")) {
+            while (
+                index < raw.length - 1 &&
+                !(raw.charAt(index) === "*" && raw.charAt(index + 1) === "/")
+            ) {
                 index++;
             }
             index++;
@@ -691,6 +1123,14 @@ function normalizeModuleReference(value: string): string {
         .toLowerCase();
 }
 
+function formatModuleName(uri: string): string {
+    try {
+        return path.basename(fileURLToPath(uri));
+    } catch (_error) {
+        return path.posix.basename(uri.replace(/\\/g, "/"));
+    }
+}
+
 function isClosedString(raw: string): boolean {
     if (raw.length < 2) {
         return false;
@@ -704,7 +1144,11 @@ function isClosedString(raw: string): boolean {
 
     let backslashes = 0;
 
-    for (let index = raw.length - 2; index >= 0 && raw.charAt(index) === "\\"; index--) {
+    for (
+        let index = raw.length - 2;
+        index >= 0 && raw.charAt(index) === "\\";
+        index--
+    ) {
         backslashes++;
     }
 
@@ -734,7 +1178,8 @@ function createImportDiagnostic(
     severity: DiagnosticSeverity,
     message: string,
     code: string,
-    unnecessary: boolean = false
+    unnecessary: boolean = false,
+    data?: IDiagnosticData
 ): Diagnostic {
     return createOffsetDiagnostic(
         module,
@@ -743,7 +1188,8 @@ function createImportDiagnostic(
         severity,
         message,
         code,
-        unnecessary
+        unnecessary,
+        data
     );
 }
 
@@ -752,7 +1198,8 @@ function createTokenDiagnostic(
     severity: DiagnosticSeverity,
     message: string,
     code: string,
-    unnecessary: boolean = false
+    unnecessary: boolean = false,
+    data?: IDiagnosticData
 ): Diagnostic {
     const diagnostic: Diagnostic = {
         severity,
@@ -768,7 +1215,8 @@ function createTokenDiagnostic(
         },
         message,
         source: "RSL parser",
-        code
+        code,
+        data
     };
 
     if (unnecessary) {
@@ -785,7 +1233,8 @@ function createOffsetDiagnostic(
     severity: DiagnosticSeverity,
     message: string,
     code: string,
-    unnecessary: boolean = false
+    unnecessary: boolean = false,
+    data?: IDiagnosticData
 ): Diagnostic {
     const diagnostic: Diagnostic = {
         severity,
@@ -795,7 +1244,8 @@ function createOffsetDiagnostic(
         },
         message,
         source: "RSL parser",
-        code
+        code,
+        data
     };
 
     if (unnecessary) {

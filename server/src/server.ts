@@ -3,6 +3,7 @@ import * as path from "path";
 import { fileURLToPath } from "url";
 
 import {
+    CodeActionKind,
     CompletionItem,
     Definition,
     DidChangeConfigurationNotification,
@@ -23,14 +24,23 @@ import {
 import { TextDocument } from "vscode-languageserver-textdocument";
 
 import { CBase } from "./common";
+import { buildRslCodeActions } from "./codeActions";
 import { RslDefinitionProvider } from "./definitionProvider";
-import { buildRslDiagnostics } from "./diagnostics";
+import {
+    buildRslDiagnostics,
+    DEFAULT_DIAGNOSTIC_SETTINGS
+} from "./diagnostics";
 import { getCIInfoForArray, getDefaults } from "./defaults";
 import { getSymbols } from "./docsymbols";
 import { GetFoldingRanges } from "./folding";
 import { FormatCode } from "./format";
 import { IFAStruct, IRslSettings, IToken } from "./interfaces";
+import { findRslReferences } from "./references";
 import { RslScopeResolver } from "./scopeResolver";
+import {
+    buildRslSemanticTokens,
+    RSL_SEMANTIC_TOKENS_LEGEND
+} from "./semanticTokens";
 import { IIndexedModule, WorkspaceIndex } from "./workspaceIndex";
 
 const connection = createConnection(ProposedFeatures.all);
@@ -39,13 +49,17 @@ const workspaceIndex = new WorkspaceIndex();
 const scopeResolver = new RslScopeResolver(workspaceIndex);
 
 const logFilePath = path.resolve(__dirname, "..", "rsl-server.log");
-const defaultSettings: IRslSettings = { import: "ДА" };
+const defaultSettings: IRslSettings = {
+    import: "ДА",
+    diagnostics: DEFAULT_DIAGNOSTIC_SETTINGS
+};
 const documentSettings = new Map<string, Promise<IRslSettings>>();
 const parseGeneration = new Map<string, number>();
 const parsedVersions = new Map<string, number>();
 const parseTimers = new Map<string, NodeJS.Timeout>();
 const pendingImportNames = new Set<string>();
 const requestedImportNames = new Set<string>();
+const workspaceFileUris = new Set<string>();
 const PARSE_DEBOUNCE_MS = 200;
 
 let globalSettings: IRslSettings = defaultSettings;
@@ -146,14 +160,12 @@ function flushPendingImports(): void {
 }
 
 connection.onNotification("workspaceFiles", (uris: string[]) => {
-    workspaceIndex.registerWorkspaceFiles(Array.isArray(uris) ? uris : []);
+    const items = Array.isArray(uris) ? uris : [];
+    workspaceFileUris.clear();
+    items.forEach(uri => workspaceFileUris.add(uri));
+    workspaceIndex.registerWorkspaceFiles(items);
     definitionProvider.clearCaches();
     flushPendingImports();
-
-    documents.all().forEach(document => {
-        parsedVersions.delete(document.uri);
-        scheduleValidation(document);
-    });
 });
 
 connection.onNotification("clientReady", () => {
@@ -278,6 +290,14 @@ connection.onInitialize((params: InitializeParams) => {
             },
             hoverProvider: true,
             definitionProvider: true,
+            referencesProvider: true,
+            codeActionProvider: {
+                codeActionKinds: [CodeActionKind.QuickFix]
+            },
+            semanticTokensProvider: {
+                legend: RSL_SEMANTIC_TOKENS_LEGEND,
+                full: true
+            },
             documentSymbolProvider: true,
             documentFormattingProvider: true,
             foldingRangeProvider: true
@@ -351,8 +371,13 @@ documents.onDidClose(event => {
     const uri = event.document.uri;
     documentSettings.delete(uri);
     parsedVersions.delete(uri);
+    parseGeneration.set(uri, (parseGeneration.get(uri) || 0) + 1);
     cancelScheduledValidation(uri);
     workspaceIndex.markClosed(uri);
+    connection.sendDiagnostics({
+        uri,
+        diagnostics: []
+    });
 });
 
 documents.onDidChangeContent(change => {
@@ -438,7 +463,11 @@ async function validateTextDocument(
 
     connection.sendDiagnostics({
         uri,
-        diagnostics: buildRslDiagnostics(indexed, workspaceIndex)
+        diagnostics: buildRslDiagnostics(
+            indexed,
+            workspaceIndex,
+            globalSettings.diagnostics
+        )
     });
     notifyClient("updateStatusBar", workspaceIndex.size);
 
@@ -494,6 +523,7 @@ async function handleWatchedFileChange(
     const dependents = workspaceIndex.getDependents(uri);
 
     if (type === FileChangeType.Deleted) {
+        workspaceFileUris.delete(uri);
         workspaceIndex.unregisterWorkspaceFile(uri);
         workspaceIndex.removeModule(uri);
         parsedVersions.delete(uri);
@@ -502,6 +532,7 @@ async function handleWatchedFileChange(
         return;
     }
 
+    workspaceFileUris.add(uri);
     workspaceIndex.registerWorkspaceFile(uri);
     const openDocument = documents.get(uri);
 
@@ -560,6 +591,14 @@ function refreshOpenDocument(uri: string): void {
 
     parsedVersions.delete(uri);
     scheduleValidation(document);
+}
+
+async function ensureWorkspaceModulesLoaded(): Promise<void> {
+    for (const uri of workspaceFileUris) {
+        if (!workspaceIndex.getModule(uri)) {
+            await loadExternalModule(uri);
+        }
+    }
 }
 
 connection.onCompletion(async params => {
@@ -671,6 +710,50 @@ connection.onDefinition(async (params): Promise<Definition | null> => {
             resolved.object
         )
         : null;
+});
+
+connection.onReferences(async params => {
+    const document = getCurDoc(params.textDocument.uri);
+
+    if (!document) {
+        return [];
+    }
+
+    await ensureDocumentParsed(document);
+    await ensureWorkspaceModulesLoaded();
+    const context = getPositionContext(params);
+
+    if (!context || isBlockedToken(context.token)) {
+        return [];
+    }
+
+    return findRslReferences(
+        workspaceIndex,
+        scopeResolver,
+        document.uri,
+        context.offset,
+        params.context.includeDeclaration
+    );
+});
+
+connection.onCodeAction(params => {
+    const module = workspaceIndex.getModule(params.textDocument.uri);
+    return module ? buildRslCodeActions(module, params) : [];
+});
+
+connection.languages.semanticTokens.on(async params => {
+    const document = getCurDoc(params.textDocument.uri);
+
+    if (!document) {
+        return { data: [] };
+    }
+
+    await ensureDocumentParsed(document);
+    const module = workspaceIndex.getModule(document.uri);
+
+    return module
+        ? buildRslSemanticTokens(module, workspaceIndex)
+        : { data: [] };
 });
 
 connection.onDocumentSymbol(async ({ textDocument }) => {

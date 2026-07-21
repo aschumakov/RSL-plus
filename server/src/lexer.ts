@@ -126,9 +126,25 @@ export function lexRsl(source: string): IRslLexResult {
         }
 
         if (current === "[") {
-            const start = snapshot(position);
-            skipSquareBlock(text, position, lineStarts);
-            pushSnapshotToken(tokens, text, "square", start, position);
+            /*
+             * В RSL квадратные скобки используются и для SQL/текстовых
+             * capture-блоков, и для индексирования массивов.
+             *
+             * После выражения на той же строке это индекс:
+             *     accounts[i]
+             *     BlockSum [BlockSum.Size]
+             *
+             * В остальных случаях сохраняем защищённый square-токен, чтобы
+             * SQL внутри [ ... ] не участвовал в разборе RSL.
+             */
+            if (isArrayIndexStart(tokens, position)) {
+                pushToken(tokens, text, position, "symbol", 1, lineStarts);
+            } else {
+                const start = snapshot(position);
+                skipSquareBlock(text, position, lineStarts);
+                pushSnapshotToken(tokens, text, "square", start, position);
+            }
+
             continue;
         }
 
@@ -304,6 +320,42 @@ function detectEol(text: string): "\r\n" | "\n" | "\r" {
     }
 
     return "\n";
+}
+
+
+function isArrayIndexStart(
+    tokens: IRslToken[],
+    position: IPosition
+): boolean {
+    for (let index = tokens.length - 1; index >= 0; index--) {
+        const token = tokens[index];
+
+        if (token.kind === "whitespace" || token.kind === "bom") {
+            continue;
+        }
+
+        /* Индекс не начинается после перевода строки или комментария. */
+        if (
+            token.kind === "newline" ||
+            token.kind === "comment" ||
+            token.endLine !== position.line
+        ) {
+            return false;
+        }
+
+        if (
+            token.kind === "identifier" ||
+            token.kind === "number" ||
+            token.kind === "string"
+        ) {
+            return true;
+        }
+
+        return token.kind === "symbol" &&
+            (token.raw === ")" || token.raw === "]");
+    }
+
+    return false;
 }
 
 function skipRslString(

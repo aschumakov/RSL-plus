@@ -104,6 +104,39 @@ test("tokenAtOffset работает на правой границе имени
     assert.strictEqual(token.raw, "SomeName");
 });
 
+test("Индекс массива разбирается как RSL-код, а не SQL-блок", () => {
+    const source = "accounts [i].number + BlockSum[BlockSum.Size]";
+    const tokens = lexRsl(source).tokens;
+    const identifiers = tokens
+        .filter(token => token.kind === "identifier")
+        .map(token => token.value);
+
+    assert.deepStrictEqual(identifiers, [
+        "accounts",
+        "i",
+        "number",
+        "BlockSum",
+        "BlockSum",
+        "Size"
+    ]);
+    assert.strictEqual(
+        tokens.filter(token => token.kind === "square").length,
+        0
+    );
+    assert.strictEqual(
+        tokens.filter(token => token.kind === "symbol" && token.raw === "[").length,
+        2
+    );
+});
+
+test("SQL-блок после завершённой инструкции остаётся защищённым", () => {
+    const source = "lStartCapture();\n[\nselect '[^[[:digit:]]]*' from dual\n]";
+    const square = lexRsl(source).tokens.find(token => token.kind === "square");
+
+    assert.ok(square);
+    assert.ok(square.raw.includes("[^[[:digit:]]]*"));
+});
+
 console.log("");
 console.log(`Пройдено: ${passed}`);
 console.log(`Ошибок: ${failed}`);

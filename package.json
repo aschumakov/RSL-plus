@@ -141,7 +141,67 @@
                "type": "string",
                "default": "RS Programmer",
                "description": "Имя разработчика для заголовков RSL-файлов"
+            },
+            "RSLanguageServer.diagnostics.enabled": {
+               "scope": "resource",
+               "type": "boolean",
+               "default": true,
+               "description": "Включить диагностику RSL в панели Problems."
+            },
+            "RSLanguageServer.diagnostics.deprecatedDeclarations": {
+               "scope": "resource",
+               "type": "boolean",
+               "default": true,
+               "description": "Показывать устаревшие объявления RECORD и ARRAY."
+            },
+            "RSLanguageServer.diagnostics.structure": {
+               "scope": "resource",
+               "type": "boolean",
+               "default": true,
+               "description": "Проверять скобки, END, ELSE, повторные объявления и Import."
+            },
+            "RSLanguageServer.diagnostics.unusedVariables": {
+               "scope": "resource",
+               "type": "boolean",
+               "default": true,
+               "description": "Предупреждать о неиспользуемых локальных объявлениях."
+            },
+            "RSLanguageServer.diagnostics.unusedImports": {
+               "scope": "resource",
+               "type": "boolean",
+               "default": true,
+               "description": "Предупреждать о неиспользуемых известных модулях."
+            },
+            "RSLanguageServer.diagnostics.debugBreak": {
+               "scope": "resource",
+               "type": "boolean",
+               "default": true,
+               "description": "Предупреждать об оставленном DEBUGBREAK."
+            },
+            "RSLanguageServer.diagnostics.useBeforeDeclaration": {
+               "scope": "resource",
+               "type": "boolean",
+               "default": true,
+               "description": "Проверять использование локальной переменной до объявления."
+            },
+            "RSLanguageServer.diagnostics.ambiguousReferences": {
+               "scope": "resource",
+               "type": "boolean",
+               "default": true,
+               "description": "Проверять неоднозначные ссылки из импортированных модулей."
+            },
+            "RSLanguageServer.diagnostics.maxProblems": {
+               "scope": "resource",
+               "type": "integer",
+               "minimum": 0,
+               "default": 200,
+               "description": "Максимальное количество сообщений Problems на открытый файл."
             }
+         }
+      },
+      "configurationDefaults": {
+         "[rsl]": {
+            "editor.semanticHighlighting.enabled": true
          }
       }
    },
@@ -160,12 +220,11 @@
       "test:scope": "npm run compile && node tests/scope-index.test.js",
       "test": "npm run compile && node tests/run-all.js",
       "postinstall": "npm ci --prefix client && npm ci --prefix server",
-      "test:diagnostics": "npm run compile && node tests/diagnostics.test.js"
+      "test:diagnostics": "npm run compile && node tests/diagnostics.test.js",
+      "test:features": "npm run compile && node tests/language-features.test.js"
    },
    "devDependencies": {
-      "@types/mocha": "^5.2.7",
-      "@types/node": "^8.10.59",
-      "tslint": "^5.20.1",
+      "@types/node": "22.16.5",
       "typescript": "5.9.3"
    }
 }

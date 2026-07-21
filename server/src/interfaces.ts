@@ -63,10 +63,27 @@ export interface IToken {
 
 
 /**
+ * Настройки диагностик language server.
+ */
+export interface IRslDiagnosticSettings {
+    enabled?: boolean;
+    deprecatedDeclarations?: boolean;
+    structure?: boolean;
+    unusedVariables?: boolean;
+    unusedImports?: boolean;
+    debugBreak?: boolean;
+    useBeforeDeclaration?: boolean;
+    ambiguousReferences?: boolean;
+    maxProblems?: number;
+}
+
+
+/**
  * Настройки language server.
  */
 export interface IRslSettings {
     import: string;
+    diagnostics?: IRslDiagnosticSettings;
 }
 
 

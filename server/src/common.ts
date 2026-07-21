@@ -955,6 +955,45 @@ export class CBase extends CAbstractBase {
     }
 
     /**
+     * Создаёт переменную, объявленную непосредственно в заголовке FOR.
+     *
+     * Поддерживаются обе формы RSL:
+     *
+     *     for (Var i, 0, count - 1, 1)
+     *     for (Var item, items)
+     *
+     * VAR относится только к первому аргументу. Остальные выражения
+     * заголовка цикла не являются объявлениями.
+     */
+    protected CreateForVariable(
+        isPrivate: boolean,
+        offset: number
+    ): void {
+        const nameToken = this.NextToken();
+
+        if (
+            nameToken.kind !== "code" ||
+            !this.isIdentifier(nameToken.str)
+        ) {
+            return;
+        }
+
+        const variable = new CVar(
+            nameToken.str,
+            isPrivate,
+            false,
+            this.ObjKind === CompletionItemKind.Class
+        );
+
+        variable.setRange({
+            start: nameToken.range.start + offset,
+            end: nameToken.range.end + offset
+        });
+
+        this.addChild(variable as unknown as CBase);
+    }
+
+    /**
      * Создаёт переменные из объявления:
      *
      * var a, b: integer;
@@ -1619,6 +1658,9 @@ export class CBase extends CAbstractBase {
 
         this.parseSignature();
 
+        let previousToken = "";
+        let tokenBeforePrevious = "";
+
         while (!this.End) {
             const token = this.NextToken();
 
@@ -1626,9 +1668,23 @@ export class CBase extends CAbstractBase {
                 break;
             }
 
+            const normalizedToken = token.str.toLowerCase();
+            const isForVariable =
+                normalizedToken === "var" &&
+                previousToken === "(" &&
+                tokenBeforePrevious === "for";
             const action = this.getKeywordNum(token.str);
 
             if (!action.first) {
+                tokenBeforePrevious = previousToken;
+                previousToken = normalizedToken;
+                continue;
+            }
+
+            if (isForVariable) {
+                this.CreateForVariable(false, this.offset);
+                tokenBeforePrevious = previousToken;
+                previousToken = normalizedToken;
                 continue;
             }
 
@@ -1640,44 +1696,44 @@ export class CBase extends CAbstractBase {
                 const declaration =
                     this.getKeywordNum(declarationToken.str);
 
-                if (!declaration.first) {
-                    continue;
+                if (declaration.first) {
+                    switch (declaration.second) {
+                        case kwdNum._const:
+                            this.CreateVariable(
+                                true,
+                                this.offset,
+                                true
+                            );
+                            break;
+
+                        case kwdNum._var:
+                            this.CreateVariable(
+                                true,
+                                this.offset
+                            );
+                            break;
+
+                        case kwdNum._macro:
+                            this.CreateMacro(
+                                true,
+                                declarationToken
+                            );
+                            break;
+
+                        case kwdNum._class:
+                            this.CreateClass(
+                                true,
+                                declarationToken
+                            );
+                            break;
+
+                        default:
+                            break;
+                    }
                 }
 
-                switch (declaration.second) {
-                    case kwdNum._const:
-                        this.CreateVariable(
-                            true,
-                            this.offset,
-                            true
-                        );
-                        break;
-
-                    case kwdNum._var:
-                        this.CreateVariable(
-                            true,
-                            this.offset
-                        );
-                        break;
-
-                    case kwdNum._macro:
-                        this.CreateMacro(
-                            true,
-                            declarationToken
-                        );
-                        break;
-
-                    case kwdNum._class:
-                        this.CreateClass(
-                            true,
-                            declarationToken
-                        );
-                        break;
-
-                    default:
-                        break;
-                }
-
+                tokenBeforePrevious = normalizedToken;
+                previousToken = declarationToken.str.toLowerCase();
                 continue;
             }
 
@@ -1712,6 +1768,9 @@ export class CBase extends CAbstractBase {
                 default:
                     break;
             }
+
+            tokenBeforePrevious = previousToken;
+            previousToken = normalizedToken;
         }
     }
 }

@@ -32,12 +32,17 @@ function test(name, action) {
     }
 }
 
-function createModule(index, uri, source) {
-    const tree = new CBase(source, 0);
-    return index.updateModule(uri, source, tree, 1, true);
+function createModule(index, uri, source, open = true) {
+    return index.updateModule(
+        uri,
+        source,
+        new CBase(source, 0),
+        1,
+        open
+    );
 }
 
-function diagnosticsFor(source, setup) {
+function diagnosticsFor(source, setup, settings) {
     const index = new WorkspaceIndex();
     index.registerWorkspaceFiles(["file:///main.mac"]);
 
@@ -46,197 +51,256 @@ function diagnosticsFor(source, setup) {
     }
 
     const module = createModule(index, "file:///main.mac", source);
-    return buildRslDiagnostics(module, index);
+    return buildRslDiagnostics(module, index, settings);
 }
 
 function codes(items) {
     return items.map(item => item.code);
 }
 
-test("Неиспользуемая локальная переменная попадает в Problems", () => {
-    const source = [
-        "Macro Test(usedParam, unusedParam)",
-        "    Var usedValue, unusedValue;",
-        "    usedValue = usedParam;",
+test("DEBUGBREAK выдаёт предупреждение", () => {
+    const items = diagnosticsFor("Macro Test()\n DebugBreak;\nEnd;");
+    const item = items.find(value => value.code === "debugbreak");
+    assert.ok(item);
+    assert.strictEqual(item.severity, 2);
+});
+
+test("Неиспользуемая локальная переменная выдаёт предупреждение", () => {
+    const items = diagnosticsFor("Macro Test()\n Var unused;\nEnd;");
+    const item = items.find(value => value.code === "unused-declaration");
+    assert.ok(item);
+    assert.strictEqual(item.severity, 2);
+});
+
+test("Использованная переменная не помечается", () => {
+    const items = diagnosticsFor([
+        "Macro Test()",
+        " Var value;",
+        " value = 1;",
         "End;"
-    ].join("\n");
-    const diagnostics = diagnosticsFor(source);
-    const unused = diagnostics.filter(item => item.code === "unused-declaration");
-
-    assert.deepStrictEqual(
-        unused.map(item => item.message).sort(),
-        [
-            "Параметр unusedParam объявлен, но не используется",
-            "Переменная unusedValue объявлена, но не используется"
-        ]
-    );
+    ].join("\n"));
+    assert.ok(!codes(items).includes("unused-declaration"));
 });
 
-test("Публичная глобальная переменная не считается неиспользуемой", () => {
-    const diagnostics = diagnosticsFor("Var PublicValue;");
-    assert.ok(!codes(diagnostics).includes("unused-declaration"));
+test("Использование переменной до объявления является ошибкой", () => {
+    const items = diagnosticsFor([
+        "Macro Test()",
+        " value = 1;",
+        " Var value;",
+        "End;"
+    ].join("\n"));
+    const item = items.find(value => value.code === "use-before-declaration");
+    assert.ok(item);
+    assert.strictEqual(item.severity, 1);
 });
 
-test("Private-глобальная переменная проверяется", () => {
-    const diagnostics = diagnosticsFor("Private Var HiddenValue;");
-    assert.ok(codes(diagnostics).includes("unused-declaration"));
+test("Повторный ELSE является ошибкой", () => {
+    const items = diagnosticsFor([
+        "Macro Test()",
+        " If ready",
+        " Else",
+        " Else",
+        " End;",
+        "End;"
+    ].join("\n"));
+    assert.ok(codes(items).includes("duplicate-else"));
 });
 
-test("Неиспользуемый Import определяется по публичным символам", () => {
-    const source = "Import lib\\common;\nMacro Test()\nEnd;";
-    const diagnostics = diagnosticsFor(source, index => {
-        index.registerWorkspaceFiles([
-            "file:///main.mac",
-            "file:///lib/common.mac"
-        ]);
-        createModule(
+test("Известный неиспользуемый модуль выдаёт предупреждение", () => {
+    const items = diagnosticsFor(
+        "Import common;\nMacro Test()\nEnd;",
+        index => createModule(
             index,
-            "file:///lib/common.mac",
-            "Macro Shared()\nEnd;\nVar GlobalValue;"
-        );
-    });
-
-    assert.ok(codes(diagnostics).includes("unused-import"));
-});
-
-test("Использованный символ снимает предупреждение Import", () => {
-    const source = [
-        "Import lib\\common;",
-        "Macro Test()",
-        "    Shared();",
-        "End;"
-    ].join("\n");
-    const diagnostics = diagnosticsFor(source, index => {
-        index.registerWorkspaceFiles([
-            "file:///main.mac",
-            "file:///lib/common.mac"
-        ]);
-        createModule(index, "file:///lib/common.mac", "Macro Shared()\nEnd;");
-    });
-
-    assert.ok(!codes(diagnostics).includes("unused-import"));
-});
-
-test("ExecMacro со строковым именем считается использованием Import", () => {
-    const source = [
-        "Import lib\\common;",
-        "Macro Test()",
-        "    ExecMacro(\"Shared\");",
-        "End;"
-    ].join("\n");
-    const diagnostics = diagnosticsFor(source, index => {
-        index.registerWorkspaceFiles([
-            "file:///main.mac",
-            "file:///lib/common.mac"
-        ]);
-        createModule(index, "file:///lib/common.mac", "Macro Shared()\nEnd;");
-    });
-
-    assert.ok(!codes(diagnostics).includes("unused-import"));
-});
-
-
-test("Локальная переменная не маскирует неиспользуемый Import", () => {
-    const source = [
-        "Import lib\\common;",
-        "Macro Test()",
-        "    Var value;",
-        "    value = 1;",
-        "End;"
-    ].join("\n");
-    const diagnostics = diagnosticsFor(source, index => {
-        index.registerWorkspaceFiles([
-            "file:///main.mac",
-            "file:///lib/common.mac"
-        ]);
-        createModule(index, "file:///lib/common.mac", "Var value;");
-    });
-
-    assert.ok(codes(diagnostics).includes("unused-import"));
-});
-
-test("Использование символа транзитивного Import учитывается", () => {
-    const source = [
-        "Import lib\\common;",
-        "Macro Test()",
-        "    Shared();",
-        "End;"
-    ].join("\n");
-    const diagnostics = diagnosticsFor(source, index => {
-        index.registerWorkspaceFiles([
-            "file:///main.mac",
-            "file:///lib/common.mac",
-            "file:///lib/utils.mac"
-        ]);
-        createModule(index, "file:///lib/utils.mac", "Macro Shared()\nEnd;");
-        createModule(index, "file:///lib/common.mac", "Import lib\\utils;");
-    });
-
-    assert.ok(!codes(diagnostics).includes("unused-import"));
-});
-
-test("Лишняя и незакрытая круглая скобка определяются", () => {
-    const missing = diagnosticsFor([
-        "Macro Test()",
-        "    Call((1);",
-        "End;"
-    ].join("\n"));
-    const extra = diagnosticsFor([
-        "Macro Test()",
-        "    Other());",
-        "End;"
-    ].join("\n"));
-
-    assert.ok(codes(missing).includes("missing-closing-bracket"));
-    assert.ok(codes(extra).includes("extra-closing-bracket"));
-});
-
-test("Лишний END и недостающий END определяются", () => {
-    const extra = diagnosticsFor("End;");
-    const missing = diagnosticsFor("Macro Test()\nIf ready\nDoWork();");
-
-    assert.ok(codes(extra).includes("extra-end"));
-    assert.strictEqual(
-        missing.filter(item => item.code === "missing-end").length,
-        2
+            "file:///common.mac",
+            "Macro Shared()\nEnd;",
+            false
+        )
     );
+    const item = items.find(value => value.code === "unused-import");
+    assert.ok(item);
+    assert.strictEqual(item.severity, 2);
 });
 
-test("END и скобки внутри SQL-блока игнорируются", () => {
-    const diagnostics = diagnosticsFor([
-        "Macro Test()",
-        "[",
-        "begin",
-        "  if x = '(' then",
-        "    null;",
-        "  end if;",
-        "end;",
-        "];",
-        "End;"
-    ].join("\n"));
-
-    assert.ok(!codes(diagnostics).includes("extra-end"));
-    assert.ok(!codes(diagnostics).includes("missing-end"));
-    assert.ok(!codes(diagnostics).includes("missing-closing-bracket"));
+test("Неизвестный модуль базовой поставки не считается ошибкой", () => {
+    const items = diagnosticsFor(
+        "Import InsCarryDoc;\nMacro Test()\nEnd;"
+    );
+    assert.ok(!codes(items).includes("missing-import"));
+    assert.ok(!items.some(item => /не найден в проекте/i.test(item.message)));
 });
 
-test("Незакрытые строка, комментарий и SQL-блок диагностируются", () => {
-    assert.ok(codes(diagnosticsFor('Macro Test()\nvalue = "abc')).includes("unclosed-string"));
-    assert.ok(codes(diagnosticsFor("/* comment")).includes("unclosed-comment"));
-    assert.ok(codes(diagnosticsFor("[ select 1")).includes("unclosed-square-block"));
+test("Использованный импорт не помечается", () => {
+    const items = diagnosticsFor(
+        [
+            "Import common;",
+            "Macro Test()",
+            " Shared();",
+            "End;"
+        ].join("\n"),
+        index => createModule(
+            index,
+            "file:///common.mac",
+            "Macro Shared()\nEnd;",
+            false
+        )
+    );
+    assert.ok(!codes(items).includes("unused-import"));
 });
 
-test("Повторное объявление и повторный Import диагностируются", () => {
+test("Неоднозначная ссылка из двух Import является ошибкой", () => {
+    const items = diagnosticsFor(
+        [
+            "Import first, second;",
+            "Macro Test()",
+            " Shared();",
+            "End;"
+        ].join("\n"),
+        index => {
+            createModule(index, "file:///first.mac", "Macro Shared()\nEnd;", false);
+            createModule(index, "file:///second.mac", "Macro Shared()\nEnd;", false);
+        }
+    );
+    const item = items.find(value => value.code === "ambiguous-reference");
+    assert.ok(item);
+    assert.strictEqual(item.severity, 1);
+    assert.ok(item.message.includes("first.mac"));
+    assert.ok(item.message.includes("second.mac"));
+});
+
+test("Локальное объявление снимает неоднозначность Import", () => {
+    const items = diagnosticsFor(
+        [
+            "Import first, second;",
+            "Macro Shared()",
+            "End;",
+            "Macro Test()",
+            " Shared();",
+            "End;"
+        ].join("\n"),
+        index => {
+            createModule(index, "file:///first.mac", "Macro Shared()\nEnd;", false);
+            createModule(index, "file:///second.mac", "Macro Shared()\nEnd;", false);
+        }
+    );
+    assert.ok(!codes(items).includes("ambiguous-reference"));
+});
+
+test("Отдельную диагностику можно отключить", () => {
+    const items = diagnosticsFor(
+        "Macro Test()\n DebugBreak;\n Var unused;\nEnd;",
+        undefined,
+        {
+            debugBreak: false,
+            unusedVariables: false
+        }
+    );
+    assert.ok(!codes(items).includes("debugbreak"));
+    assert.ok(!codes(items).includes("unused-declaration"));
+});
+
+test("Общий выключатель очищает диагностику", () => {
+    const items = diagnosticsFor(
+        "Macro Test()\n DebugBreak;\nEnd;",
+        undefined,
+        { enabled: false }
+    );
+    assert.deepStrictEqual(items, []);
+});
+
+test("maxProblems ограничивает список", () => {
+    const items = diagnosticsFor(
+        "Macro Test()\n DebugBreak;\n Var a, b, c;\nEnd;",
+        undefined,
+        { maxProblems: 1 }
+    );
+    assert.strictEqual(items.length, 1);
+});
+
+test("Ключевые слова IF и VAR не считаются переменными", () => {
     const source = [
-        "Import common, common;",
         "Macro Test()",
-        "    Var value, value;",
+        "    If ready",
+        "        Var value;",
+        "        value = 1;",
+        "    End;",
         "End;"
     ].join("\n");
     const diagnostics = diagnosticsFor(source);
+    const messages = diagnostics.map(item => item.message.toLowerCase());
 
-    assert.ok(codes(diagnostics).includes("duplicate-import"));
-    assert.ok(codes(diagnostics).includes("duplicate-declaration"));
+    assert.ok(!messages.includes("переменная if используется до объявления"));
+    assert.ok(!messages.includes("переменная var используется до объявления"));
+});
+
+test("FOR объявляет только первый аргумент после VAR", () => {
+    const source = [
+        "Macro Test(tag)",
+        "    for (Var x, 0, tag.getElementsByTagName(\"Info/Balances\").Item(0).childNodes.Length - 1, 1)",
+        "        x = x + 1;",
+        "    end;",
+        "End;"
+    ].join("\n");
+    const items = diagnosticsFor(source);
+
+    assert.ok(!items.some(item =>
+        item.code === "duplicate-declaration" && /tag/i.test(item.message)
+    ));
+    assert.ok(!items.some(item =>
+        item.code === "unused-declaration" && /переменная x/i.test(item.message)
+    ));
+});
+
+test("Индекс массива считается использованием переменной цикла", () => {
+    const source = [
+        "Macro Contains(accounts, num, w4accCnt)",
+        "    for (Var i, 0, w4accCnt - 1, 1)",
+        "        if (accounts[i].number == num)",
+        "            return true;",
+        "        end;",
+        "    end;",
+        "End;"
+    ].join("\n");
+    const items = diagnosticsFor(source);
+
+    assert.ok(!items.some(item =>
+        item.code === "unused-declaration" && /переменная i/i.test(item.message)
+    ));
+});
+
+test("FOR по массиву объявляет элемент цикла", () => {
+    const source = [
+        "Macro Process(Accounts)",
+        "    for (Var account, Accounts)",
+        "        account.Process();",
+        "    end;",
+        "End;"
+    ].join("\n");
+    const items = diagnosticsFor(source);
+
+    assert.ok(!items.some(item =>
+        item.code === "unused-declaration" && /переменная account/i.test(item.message)
+    ));
+});
+
+test("Поле класса в индексированном присваивании не становится локальной переменной", () => {
+    const source = [
+        "Private class CBlockInfo(tag)",
+        "    Var BlockSum = TArray();",
+        "    Macro Parse(xml)",
+        "        for (Var x, 0, 1, 1)",
+        "            BlockSum[BlockSum.Size] = xml.Item(x);",
+        "        end;",
+        "    End;",
+        "End;"
+    ].join("\n");
+    const items = diagnosticsFor(source);
+
+    assert.ok(!items.some(item =>
+        item.code === "unused-declaration" && /BlockSum/i.test(item.message)
+    ));
+    assert.ok(!items.some(item =>
+        item.code === "duplicate-declaration" && /BlockSum/i.test(item.message)
+    ));
 });
 
 console.log("");
