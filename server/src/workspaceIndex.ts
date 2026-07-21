@@ -5,8 +5,12 @@ import { CompletionItem } from "vscode-languageserver";
 
 import { CBase } from "./common";
 import { IFAStruct } from "./interfaces";
-import { GetImportedMacroFilesFromTokens } from "./execMacroDefinition";
-import { IRslLexResult, lexRsl } from "./lexer";
+import { IRslLexResult } from "./lexer";
+import {
+    getImportNamesFromSyntax,
+    IRslParseResult,
+    parseRslSyntax
+} from "./syntaxParser";
 
 export interface IIndexedModule extends IFAStruct {
     source: string;
@@ -14,6 +18,7 @@ export interface IIndexedModule extends IFAStruct {
     imports: string[];
     isOpen: boolean;
     lex: IRslLexResult;
+    syntax: IRslParseResult;
 }
 
 export interface IIndexedSymbol {
@@ -50,15 +55,17 @@ export class WorkspaceIndex {
     ): IIndexedModule {
         this.removeModuleFromIndexes(uri);
 
-        const lex = lexRsl(source);
+        const syntax = object.getSyntaxResult() || parseRslSyntax(source);
+        const lex = syntax.lex;
         const module: IIndexedModule = {
             uri,
             source,
             object,
             version,
-            imports: GetImportedMacroFilesFromTokens(lex.tokens),
+            imports: getImportNamesFromSyntax(syntax.root),
             isOpen,
-            lex
+            lex,
+            syntax
         };
 
         this.modules.set(uri, module);

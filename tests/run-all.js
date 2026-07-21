@@ -12,6 +12,7 @@ const tests = [
     "folding.test.js",
     "definition.test.js",
     "parser-optimized.test.js",
+    "symbol-tree-adapter.test.js",
     "scope-index.test.js",
     "diagnostics.test.js",
     "language-features.test.js"

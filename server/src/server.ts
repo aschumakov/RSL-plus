@@ -23,7 +23,7 @@ import {
 
 import { TextDocument } from "vscode-languageserver-textdocument";
 
-import { CBase } from "./common";
+import { CBase, configureSymbolTreeProvider } from "./common";
 import { buildRslCodeActions } from "./codeActions";
 import { RslDefinitionProvider } from "./definitionProvider";
 import {
@@ -46,6 +46,7 @@ import { IIndexedModule, WorkspaceIndex } from "./workspaceIndex";
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments<TextDocument>(TextDocument);
 const workspaceIndex = new WorkspaceIndex();
+configureSymbolTreeProvider(() => workspaceIndex.getModules());
 const scopeResolver = new RslScopeResolver(workspaceIndex);
 
 const logFilePath = path.resolve(__dirname, "..", "rsl-server.log");

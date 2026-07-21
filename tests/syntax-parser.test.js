@@ -1,5 +1,8 @@
 const assert = require("assert");
-const { parseRslSyntax } = require("../server/out/syntaxParser");
+const {
+  parseRslSyntax,
+  getImportNamesFromSyntax
+} = require("../server/out/syntaxParser");
 
 function codes(source) {
   return parseRslSyntax(source).diagnostics.map(item => item.code);
@@ -32,3 +35,35 @@ assert.ok(codes("if (true)\n a = 1\nelse\n a = 2\nend").length === 0);
 assert.ok(codes("while (true)\n a = 1;").includes("missing-end"));
 
 console.log("[OK] syntax parser tests");
+
+const multilineXml = [
+  'result = "<bis:ViolationDate>" +',
+  '  strsubst(string(substr(p_OffenseDate, 7, 4), "-",',
+  '                   substr(p_OffenseDate, 4, 2), "-",',
+  '                   substr(p_OffenseDate, 1, 2)), " ", "0")',
+  '  + "</bis:ViolationDate>" +',
+  '  "</bis:request>";'
+].join("\n");
+
+assert.ok(
+  !codes(multilineXml).includes("missing-semicolon"),
+  "Вызов после бинарного '+' не должен считаться новой инструкцией"
+);
+
+assert.ok(
+  codes("value = Calculate()\nPrintln(value);").includes("missing-semicolon"),
+  "Две завершённые инструкции без ';' должны диагностироваться"
+);
+
+
+const pathImport = parseRslSyntax("Import lib\\common;");
+assert.deepStrictEqual(
+  getImportNamesFromSyntax(pathImport.root),
+  ["lib\\common"],
+  "Относительный путь IMPORT должен оставаться одним узлом"
+);
+assert.deepStrictEqual(
+  pathImport.diagnostics,
+  [],
+  "Обратная косая черта в IMPORT не является синтаксической ошибкой"
+);

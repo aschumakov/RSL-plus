@@ -1,91 +1,56 @@
 {
   "version": "1.1.3",
-  "description": "Cumulative language features overlay with FOR and array index fix",
+  "description": "Hotfix: multiline expression boundary and legacy symbol tree adapter",
   "files": [
     {
       "path": "CHANGELOG.md",
-      "sha256": "a8a846c4a883e7d148dcc6142ac433eb7a900d1988ac235e9c0360defc2dc131",
-      "size": 1753
+      "sha256": "e4da92316f78297030c1e4c516d093333d4986c0ac33cc6b95a646f216f9b13a",
+      "size": 2965
     },
     {
-      "path": "README-1.1.3.md",
-      "sha256": "0b2faca5bc7bd82c108e871bb1e0f64b2c6452231c41a9f6c870cac68228eb96",
-      "size": 1182
-    },
-    {
-      "path": "README-FOR-FIX.md",
-      "sha256": "e1135fcaed4a1d07c1756ad63f19ddcedbc40d56fc58c535735ee02d28713ca5",
-      "size": 674
-    },
-    {
-      "path": "package-lock.json",
-      "sha256": "ae7703153970611bbbd08bfc52c2159848d655df7c445bf9f5e154c7b00f70a9",
-      "size": 1669
-    },
-    {
-      "path": "package.json",
-      "sha256": "a2b4ac4a324d31bee30c2ae1aedc404e428c3b0f950f3ba23df917c72d81f12c",
-      "size": 7895
-    },
-    {
-      "path": "server/src/codeActions.ts",
-      "sha256": "2ac9ab09c99ac3fe8428426a10aec31ba4d2b8ac8822ba0bd2140e3bb4eb0dc2",
-      "size": 11091
+      "path": "README-SYNTAX-ADAPTER.md",
+      "sha256": "921a85d7dad7bd74da8a626f385ed0370da16d6ca23ab73b63fb74dbe1975045",
+      "size": 1376
     },
     {
       "path": "server/src/common.ts",
-      "sha256": "0bc6e780c35c968bcaad0d5e4455fb0b032623bfc40418f6d906102cfdae7858",
-      "size": 51434
+      "sha256": "16c599cfd0e310f0a6fb5adb742f0427dcd94f1709802a325ef88b66b7681f6d",
+      "size": 23883
     },
     {
       "path": "server/src/diagnostics.ts",
-      "sha256": "0eb9f1b7c605d51c83ab48adb6537a75f048998d7097c997a318a028aa55aa2c",
-      "size": 36782
-    },
-    {
-      "path": "server/src/interfaces.ts",
-      "sha256": "961e4b932007668e1b7d019f2f10dac0a14b38c1d238052cd0fca274538510b1",
-      "size": 4341
-    },
-    {
-      "path": "server/src/lexer.ts",
-      "sha256": "07ed01f841cc079bcaa6fe7e7a563ddf8f3dae6cd34833f8cc9479979498813a",
-      "size": 16354
-    },
-    {
-      "path": "server/src/references.ts",
-      "sha256": "c0a3673c47190973d6db6920fc3a941af54b8ea4086f21658bc0720c9318e8e5",
-      "size": 4102
-    },
-    {
-      "path": "server/src/semanticTokens.ts",
-      "sha256": "ed8d470360191a5639df8a5efa48e28c9d2061ad88ec1137c44fbc134fb6273d",
-      "size": 7771
+      "sha256": "09da1f72f0a57f37c6017523483ce96a8cdabbb4db6771f229301b9408d67304",
+      "size": 37199
     },
     {
       "path": "server/src/server.ts",
-      "sha256": "5aae5f31fa6b6124b13b2e3c057df504dabd48eecf7430c4bd42e7459cbde06f",
-      "size": 22008
+      "sha256": "e2b714868f909d8f2667b7619b39a5938b76d55f868e893a96f99167f44bc6d4",
+      "size": 22101
     },
     {
-      "path": "tests/diagnostics.test.js",
-      "sha256": "2e6a6782aaf1ab41247d2994a76bd47281eea6c5f3d4761ae15e492a477eaf2c",
-      "size": 9816
+      "path": "server/src/syntaxParser.ts",
+      "sha256": "83475de4177e88ceab74ffe4a38ca3b2f24bafa45d36aa75500d3fa4997324f8",
+      "size": 36564
     },
     {
-      "path": "tests/language-features.test.js",
-      "sha256": "bfcd2b97f2d8ac68de62312da583f49afc6a7a9178cddb4cca1f27085c143174",
-      "size": 5404
-    },
-    {
-      "path": "tests/lexer.test.js",
-      "sha256": "bc28c1769179240a89d7605dcaa43160a005abe88ea4c6e61a7f8cbc8f81ed0b",
-      "size": 4172
+      "path": "server/src/workspaceIndex.ts",
+      "sha256": "561b67fc2e42954880cae1b05fe65b49c10a9a831424012f7af53a4c10dcf081",
+      "size": 11451
     },
     {
       "path": "tests/run-all.js",
-      "sha256": "0d5cfa8603d691a4548b50503d7972e41f84c85cd18df6e8f60f448add75b990",
-      "size": 807
+      "sha256": "32b9a83529e6a877303a900e7f6dde8cc693ec972a14af6f789fa29cf9006e91",
+      "size": 871
+    },
+    {
+      "path": "tests/symbol-tree-adapter.test.js",
+      "sha256": "c41cce9a2968c68ff98b798592bb8aafb8a5aebd1184483682317e2f0f02c15a",
+      "size": 2722
+    },
+    {
+      "path": "tests/syntax-parser.test.js",
+      "sha256": "23700e4d0e1f0c442a8e78d69eb6627266e9e00317a55c0f4c986b34be21818e",
+      "size": 1693
     }
   ]
 }

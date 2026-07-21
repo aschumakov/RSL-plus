@@ -27,7 +27,6 @@ import {
     IIndexedModule,
     WorkspaceIndex
 } from "./workspaceIndex";
-import { parseRslSyntax } from "./syntaxParser";
 
 interface IBlockEntry {
     keyword: string;
@@ -157,9 +156,7 @@ function addSyntaxParserDiagnostics(
     module: IIndexedModule,
     result: Diagnostic[]
 ): void {
-    const parsed = parseRslSyntax(module.source);
-
-    parsed.diagnostics.forEach(item => {
+    module.syntax.diagnostics.forEach(item => {
         result.push(createOffsetDiagnostic(
             module,
             item.start,

@@ -4,32 +4,14 @@ import {
 } from "vscode-languageserver";
 
 import {
-    DEFAULT_WHITESPACES,
-    STOP_CHARS,
     varType,
     kwdNum,
-    SkipComment,
     OLC,
     MLC_O,
-    MLC_C,
-    DIGITS
+    MLC_C
 } from "./enums";
 
 import {
-    ArrayClass,
-    getDefaults
-} from "./defaults";
-
-import {
-    getTree
-} from "./server";
-
-import {
-    lexRsl
-} from "./lexer";
-
-import {
-    IFAStruct,
     If_s,
     IArray,
     IRange,
@@ -38,27 +20,40 @@ import {
     TokenKind
 } from "./interfaces";
 
+import {
+    IRslParseResult,
+    IRslSyntaxNode,
+    parseRslSyntax
+} from "./syntaxParser";
+
+import { IRslToken, normalizeIdentifier } from "./lexer";
 
 /**
- * RSL parser revision:
- * 2026-07-17-v3-backslash-parity
- *
- * В этой версии кавычки всегда являются границами токена.
- * Это важно для конструкций вида:
- * "select ...@" + DBLink + " where ..."
+ * Версия нового parser + legacy symbol-tree adapter.
+ * common.ts больше не содержит собственного tokenizer/NextToken.
  */
 export const RSL_PARSER_VERSION =
-    "2026-07-20-v5-shared-lexer";
+    "2026-07-21-v6-syntax-tree-adapter";
 
-/**
- * Внутреннее описание токена.
- *
- * range содержит позиции относительно source текущего CBase.
- */
 interface IParserToken extends IToken {
     kind: TokenKind;
 }
 
+interface ISymbolModule {
+    object: CBase;
+}
+
+let symbolTreeProvider: () => ISymbolModule[] = () => [];
+
+/**
+ * Убирает обратную зависимость common.ts -> server.ts.
+ * Language server подключает workspace index после своей инициализации.
+ */
+export function configureSymbolTreeProvider(
+    provider: () => ISymbolModule[]
+): void {
+    symbolTreeProvider = provider || (() => []);
+}
 
 class CArray implements IArray {
     _it: Array<string>;
@@ -68,7 +63,7 @@ class CArray implements IArray {
     }
 
     is(it: string): If_s<number> {
-        const normalized = (it || "").toLowerCase();
+        const normalized = normalizeIdentifier(it);
         const result = this._it.indexOf(normalized);
 
         return {
@@ -80,13 +75,19 @@ class CArray implements IArray {
     str(num: number): string {
         return this._it[num];
     }
-}
 
+    protected add(value: string): void {
+        const normalized = normalizeIdentifier(value);
+
+        if (this._it.indexOf(normalized) < 0) {
+            this._it.push(normalized);
+        }
+    }
+}
 
 class CEnds extends CArray {
     constructor() {
         super();
-
         this._it[0] = "class";
         this._it[1] = "macro";
         this._it[2] = "if";
@@ -95,11 +96,9 @@ class CEnds extends CArray {
     }
 }
 
-
 class Ctypes extends CArray {
     constructor() {
         super();
-
         this._it[varType._variant] = "variant";
         this._it[varType._integer] = "integer";
         this._it[varType._double] = "double";
@@ -120,11 +119,9 @@ class Ctypes extends CArray {
     }
 }
 
-
 class Ckeywords extends CArray {
     constructor() {
         super();
-
         this._it[kwdNum._array] = "array";
         this._it[kwdNum._end] = "end";
         this._it[kwdNum._or] = "or";
@@ -153,14 +150,17 @@ class Ckeywords extends CArray {
         this._it[kwdNum._olc] = OLC;
         this._it[kwdNum._mlc_o] = MLC_O;
         this._it[kwdNum._mlc_c] = MLC_C;
+
+        /* Слова из официального списка, не имеющие номера в старом enum. */
+        [
+            "and", "this", "true", "false", "null", "for"
+        ].forEach(value => this.add(value));
     }
 }
-
 
 class CstrItemKind extends CArray {
     constructor() {
         super();
-
         this._it[CompletionItemKind.Text] = "Текст";
         this._it[CompletionItemKind.Method] = "Метод";
         this._it[CompletionItemKind.Function] = "Функция";
@@ -189,50 +189,18 @@ class CstrItemKind extends CArray {
     }
 }
 
-
 function getStrItemKind(kind: number): string {
     return STR_ITEM_KIND.str(kind);
 }
-
 
 function getTypeStr(typeNum: varType): string {
     return TYPES.str(typeNum);
 }
 
-
-function processImportNames(value: string): string[] {
-    const names = value.split(",");
-    const result: string[] = [];
-
-    names.forEach(rawName => {
-        let name = rawName.trim();
-
-        if (name.length === 0) {
-            return;
-        }
-
-        if (
-            name.length >= 2 &&
-            name.charAt(0) === "\"" &&
-            name.charAt(name.length - 1) === "\""
-        ) {
-            name = name.substring(1, name.length - 1).trim();
-        }
-
-        if (name.length > 0) {
-            result.push(name);
-        }
-    });
-
-    return result;
-}
-
-
 export const tokensWithEnd: CEnds = new CEnds();
 export const TYPES: Ctypes = new Ctypes();
 export const KEYWORDS: Ckeywords = new Ckeywords();
 export const STR_ITEM_KIND: CstrItemKind = new CstrItemKind();
-
 
 export class CVar extends CAbstractBase {
     private value: string;
@@ -244,17 +212,14 @@ export class CVar extends CAbstractBase {
         isProperty: boolean
     ) {
         super();
-
         this.value = "";
         this.name = name;
         this.private_ = privateFlag;
         this.objKind = isProperty
             ? CompletionItemKind.Property
-            : (
-                isConstant
-                    ? CompletionItemKind.Constant
-                    : CompletionItemKind.Variable
-            );
+            : isConstant
+                ? CompletionItemKind.Constant
+                : CompletionItemKind.Variable;
         this.insertedText = name;
     }
 
@@ -281,48 +246,63 @@ export class CVar extends CAbstractBase {
     }
 
     reParsing(): void {
-        // Для переменной повторный разбор не требуется.
+        // Переменная строится из syntax tree и отдельно не разбирается.
     }
 }
 
-
 /**
- * Базовый объект синтаксического дерева.
- *
- * source — фрагмент исходного файла.
- * offset — абсолютная позиция source[0] в документе.
+ * Совместимое дерево символов для существующих provider-ов расширения.
+ * Оно больше не разбирает исходный текст самостоятельно: все узлы создаёт
+ * LegacySymbolTreeAdapter поверх IRslSyntaxNode.
  */
 export class CBase extends CAbstractBase {
     protected childs: Array<CBase>;
     protected source: string;
     protected paramStr: string;
-    protected position: number;
-    protected savedPos: number;
     protected offset: number;
     private tokenCache: IParserToken[];
+    private syntaxResult?: IRslParseResult;
 
     constructor(
         src: string,
         offset: number,
-        objKind: CompletionItemKind = CompletionItemKind.Unit
+        objKind: CompletionItemKind = CompletionItemKind.Unit,
+        buildFromSyntax: boolean = true
     ) {
         super();
-
         this.childs = new Array<CBase>();
         this.source = src || "";
         this.paramStr = "";
-        this.position = 0;
-        this.savedPos = 0;
-        this.offset = offset;
+        this.offset = offset || 0;
         this.tokenCache = new Array<IParserToken>();
         this.objKind = objKind;
         this.range = {
-            start: offset,
-            end: offset + this.source.length
+            start: this.offset,
+            end: this.offset + this.source.length
         };
 
-        this.parse();
-        this.tokenCache = this.buildTokenCache();
+        if (buildFromSyntax) {
+            this.applySyntax(parseRslSyntax(this.source));
+        }
+    }
+
+    static fromSyntax(
+        source: string,
+        offset: number,
+        syntax: IRslParseResult
+    ): CBase {
+        const root = new CBase(
+            source,
+            offset,
+            CompletionItemKind.Unit,
+            false
+        );
+        root.applySyntax(syntax);
+        return root;
+    }
+
+    getSyntaxResult(): IRslParseResult | undefined {
+        return this.syntaxResult;
     }
 
     updateCIInfo(): void {
@@ -334,11 +314,15 @@ export class CBase extends CAbstractBase {
     }
 
     RecursiveFind(name: string): CBase | undefined {
-        const normalizedName = (name || "").toLowerCase();
+        const normalizedName = normalizeIdentifier(name);
 
         for (const child of this.childs) {
-            if (child.Name.toLowerCase() === normalizedName) {
+            if (normalizeIdentifier(child.Name) === normalizedName) {
                 return child;
+            }
+
+            if (!child.isObject()) {
+                continue;
             }
 
             const nested = child.RecursiveFind(name);
@@ -352,9 +336,7 @@ export class CBase extends CAbstractBase {
     }
 
     reParsing(): void {
-        this.position = 0;
-        this.parse();
-        this.tokenCache = this.buildTokenCache();
+        this.applySyntax(parseRslSyntax(this.source));
     }
 
     getChilds(): Array<CBase> {
@@ -366,7 +348,7 @@ export class CBase extends CAbstractBase {
     }
 
     setType(type: string): void {
-        this.varType_ = type;
+        this.varType_ = type || getTypeStr(varType._variant);
     }
 
     getActualChilds(position: number): Array<CBase> {
@@ -379,9 +361,7 @@ export class CBase extends CAbstractBase {
                 }
 
                 if (parent.isActual(position) && parent.isObject()) {
-                    parent.childs.forEach(child => {
-                        answer.push(child);
-                    });
+                    parent.childs.forEach(child => answer.push(child));
                 }
             });
         } else {
@@ -395,24 +375,11 @@ export class CBase extends CAbstractBase {
         return answer;
     }
 
-    /**
-     * Возвращает токен в заданной абсолютной позиции.
-     *
-     * Токены строятся один раз вместе с деревом. Поиск выполняется
-     * бинарно, поэтому hover/completion не сканируют файл от начала.
-     */
     getCurrentToken(
         absolutePosition: number,
         _savePosition: boolean = true
     ): IToken | undefined {
-        const localPosition =
-            absolutePosition - this.offset;
-
-        if (
-            localPosition < 0 ||
-            localPosition > this.source.length ||
-            this.tokenCache.length === 0
-        ) {
+        if (this.tokenCache.length === 0) {
             return undefined;
         }
 
@@ -420,16 +387,11 @@ export class CBase extends CAbstractBase {
         let right = this.tokenCache.length - 1;
         let candidateIndex = -1;
 
-        /*
-         * Ищем последний токен, начало которого не правее курсора.
-         */
         while (left <= right) {
-            const middle =
-                Math.floor((left + right) / 2);
-
+            const middle = Math.floor((left + right) / 2);
             const token = this.tokenCache[middle];
 
-            if (token.range.start <= localPosition) {
+            if (token.range.start <= absolutePosition) {
                 candidateIndex = middle;
                 left = middle + 1;
             } else {
@@ -441,49 +403,10 @@ export class CBase extends CAbstractBase {
             return undefined;
         }
 
-        const candidate =
-            this.tokenCache[candidateIndex];
-
-        /*
-         * end хранится как позиция сразу после токена. Сохраняем
-         * совместимость со старым поведением: курсор ровно после
-         * идентификатора всё ещё относится к этому идентификатору.
-         */
-        if (localPosition <= candidate.range.end) {
-            return candidate;
-        }
-
-        return undefined;
-    }
-
-    /**
-     * Создаёт полный лексический кэш, включая комментарии,
-     * строки и квадратные текстовые блоки.
-     *
-     * Основной parse() может пропускать комментарии, поэтому кэш
-     * строится отдельным линейным проходом после создания дерева.
-     */
-    private buildTokenCache(): IParserToken[] {
-        return lexRsl(this.source).tokens
-            .filter(token =>
-                token.kind !== "whitespace" &&
-                token.kind !== "newline" &&
-                token.kind !== "bom"
-            )
-            .map(token => ({
-                str: token.kind === "square"
-                    ? "[]"
-                    : token.raw,
-                range: {
-                    start: token.start,
-                    end: token.end
-                },
-                kind: token.kind === "identifier" ||
-                    token.kind === "number" ||
-                    token.kind === "symbol"
-                        ? "code"
-                        : token.kind
-            } as IParserToken));
+        const candidate = this.tokenCache[candidateIndex];
+        return absolutePosition <= candidate.range.end
+            ? candidate
+            : undefined;
     }
 
     ChildsCIInfo(
@@ -491,8 +414,7 @@ export class CBase extends CAbstractBase {
         position: number = 0,
         isCheckActual: boolean = false
     ): Array<CompletionItem> {
-        const answer: Array<CompletionItem> =
-            new Array<CompletionItem>();
+        const answer: Array<CompletionItem> = [];
 
         this.childs.forEach(element => {
             if (isCheckActual) {
@@ -500,12 +422,9 @@ export class CBase extends CAbstractBase {
                     if (!isCheckPrivate || !element.Private) {
                         answer.push(element.CIInfo);
                     }
-                } else if (element.isActual(position)) {
-                    element.ChildsCIInfo().forEach(info => {
-                        answer.push(info);
-                    });
+                } else if (element.isActual(position) && element.isObject()) {
+                    element.ChildsCIInfo().forEach(info => answer.push(info));
                 }
-
                 return;
             }
 
@@ -520,11 +439,8 @@ export class CBase extends CAbstractBase {
             let parent: CBase | undefined;
 
             if (parentName.length > 0) {
-                const tree = getTree() || [];
-
-                for (const module of tree) {
+                for (const module of symbolTreeProvider()) {
                     parent = module.object.RecursiveFind(parentName);
-
                     if (parent !== undefined) {
                         break;
                     }
@@ -532,7 +448,7 @@ export class CBase extends CAbstractBase {
             }
 
             if (parent !== undefined) {
-                parent.childs.forEach(child => {
+                parent.getChilds().forEach(child => {
                     if (!child.Private) {
                         answer.push(child.CIInfo);
                     }
@@ -543,1262 +459,319 @@ export class CBase extends CAbstractBase {
         return answer;
     }
 
-    protected getKeywordNum(token: string): If_s<number> {
-        return KEYWORDS.is((token || "").toLowerCase());
+    private applySyntax(result: IRslParseResult): void {
+        this.syntaxResult = result;
+        this.childs = [];
+        this.range = {
+            start: this.offset,
+            end: this.offset + this.source.length
+        };
+        this.tokenCache = this.buildTokenCache(result.lex.tokens);
+
+        const adapter = new LegacySymbolTreeAdapter(
+            this.source,
+            this.offset
+        );
+        adapter.populate(this, result.root);
     }
 
-    protected CurIndex(index: number): string {
-        if (index < 0 || index >= this.source.length) {
-            return "";
-        }
-
-        return this.source.charAt(index);
-    }
-
-    protected get CurrentChar(): string {
-        return this.CurIndex(this.position);
-    }
-
-    protected get Pos(): number {
-        return this.position;
-    }
-
-    protected get End(): boolean {
-        return this.position >= this.source.length;
-    }
-
-    protected Next(): void {
-        if (!this.End) {
-            this.position++;
-        }
-    }
-
-    protected Skip(): void {
-        while (
-            !this.End &&
-            DEFAULT_WHITESPACES.indexOf(this.CurrentChar) >= 0
-        ) {
-            this.Next();
-        }
-    }
-
-    protected IsStopChar(): boolean {
-        return STOP_CHARS.indexOf(this.CurrentChar) >= 0;
-    }
-
-    protected RestorePos(): void {
-        this.position = this.savedPos;
-    }
-
-    protected SavePos(): void {
-        this.savedPos = this.position;
-    }
-
-    /**
-     * Находит тело macro/class до соответствующего End.
-     *
-     * NextToken возвращает строки и [многострочные блоки] единым
-     * непрозрачным токеном, поэтому End внутри SQL/PLSQL здесь
-     * не влияет на глубину RSL-блоков.
-     */
-    protected getObjectBody(): string {
-        const bodyStart = this.Pos;
-        let openedBlocks = 1;
-        let closedBlocks = 0;
-
-        while (
-            openedBlocks !== closedBlocks &&
-            !this.End
-        ) {
-            const token = this.NextToken();
-            const normalized = token.str.toLowerCase();
-
-            if (token.str.length === 0) {
-                break;
-            }
-
-            if (
-                (token as IParserToken).kind === "string" ||
-                (token as IParserToken).kind === "square"
-            ) {
-                continue;
-            }
-
-            if (tokensWithEnd.is(normalized).first) {
-                openedBlocks++;
-            } else if (normalized === "end") {
-                closedBlocks++;
-            }
-        }
-
-        return this.source.substring(bodyStart, this.Pos);
-    }
-
-    /**
-     * Читает следующий токен.
-     *
-     * Особые области:
-     * - "строка" возвращается одним токеном;
-     * - однострочные и многострочные комментарии пропускаются при SkipComment.yes;
-     * - [ ... ] возвращается одним токеном kind=square;
-     * - End внутри особых областей никогда не становится RSL-токеном.
-     */
-    protected NextToken(
-        skipComment: SkipComment = SkipComment.yes
-    ): IParserToken {
-        while (true) {
-            this.Skip();
-
-            const start = this.Pos;
-
-            if (this.End) {
-                return {
-                    str: "",
-                    range: {
-                        start,
-                        end: start
-                    },
-                    kind: "code"
-                };
-            }
-
-            if (this.startsWithAt(OLC, this.Pos)) {
-                this.position += OLC.length;
-
-                if (skipComment === SkipComment.no) {
-                    return {
-                        str: OLC,
-                        range: {
-                            start,
-                            end: this.Pos
-                        },
-                        kind: "code"
-                    };
-                }
-
-                this.GetOLC();
-                continue;
-            }
-
-            if (this.startsWithAt(MLC_O, this.Pos)) {
-                this.position += MLC_O.length;
-
-                if (skipComment === SkipComment.no) {
-                    return {
-                        str: MLC_O,
-                        range: {
-                            start,
-                            end: this.Pos
-                        },
-                        kind: "code"
-                    };
-                }
-
-                this.GetMLC();
-                continue;
-            }
-
-            if (this.CurrentChar === "[") {
-                this.skipSquareTextBlock();
-
-                return {
-                    str: "[]",
-                    range: {
-                        start,
-                        end: this.Pos
-                    },
-                    kind: "square"
-                };
-            }
-
-            if (
-                this.CurrentChar === "\"" ||
-                this.CurrentChar === "'"
-            ) {
-                const quote = this.CurrentChar;
-
-                /*
-                 * В RSL кавычка экранируется обратной косой чертой.
-                 * Решение о закрытии строки принимается по чётности
-                 * количества подряд идущих \ перед кавычкой.
-                 */
-                this.skipQuotedString(
-                    quote,
-                    true,
-                    false
-                );
-
-                return {
-                    str: this.source.substring(start, this.Pos),
-                    range: {
-                        start,
-                        end: this.Pos
-                    },
-                    kind: "string"
-                };
-            }
-
-            if (this.IsStopChar()) {
-                const value = this.CurrentChar;
-                this.Next();
-
-                return {
-                    str: value,
-                    range: {
-                        start,
-                        end: this.Pos
-                    },
-                    kind: "code"
-                };
-            }
-
-            while (
-                !this.End &&
-                !this.IsStopChar() &&
-                this.CurrentChar !== "\"" &&
-                this.CurrentChar !== "'" &&
-                !this.startsWithAt(OLC, this.Pos) &&
-                !this.startsWithAt(MLC_O, this.Pos)
-            ) {
-                this.Next();
-            }
-
-            return {
-                str: this.source.substring(start, this.Pos),
+    private buildTokenCache(tokens: IRslToken[]): IParserToken[] {
+        return tokens
+            .filter(token =>
+                token.kind !== "whitespace" &&
+                token.kind !== "newline" &&
+                token.kind !== "bom"
+            )
+            .map(token => ({
+                str: token.kind === "square" ? "[]" : token.raw,
                 range: {
-                    start,
-                    end: this.Pos
+                    start: token.start + this.offset,
+                    end: token.end + this.offset
                 },
-                kind: "code"
-            };
-        }
-    }
-
-    protected IsToken(value: string): boolean {
-        if (value.length === 0) {
-            return false;
-        }
-
-        const keyword = KEYWORDS.is(value.toLowerCase());
-
-        if (keyword.first) {
-            return this.IsStopChar();
-        }
-
-        return this.IsStopChar();
-    }
-
-    /**
-     * Проверяет строку без создания временных substring.
-     */
-    private startsWithAt(value: string, position: number): boolean {
-        if (position < 0) {
-            return false;
-        }
-
-        return this.source.substr(position, value.length) === value;
-    }
-
-    /**
-     * Пропускает строковый литерал.
-     *
-     * Правило экранирования RSL:
-     * - \"  — кавычка экранирована;
-     * - \\" — две обратные косые черты, затем конец строки;
-     * - \\\" — кавычка снова экранирована.
-     *
-     * Иными словами, кавычка экранирована только при нечётном
-     * количестве подряд идущих обратных косых черт перед ней.
-     *
-     * doubledQuoteEscapes используется для SQL/PLSQL внутри [ ... ],
-     * где одинарная кавычка обычно экранируется как ''.
-     */
-    private skipQuotedString(
-        quote: string,
-        backslashEscapes: boolean,
-        doubledQuoteEscapes: boolean
-    ): void {
-        if (this.CurrentChar !== quote) {
-            return;
-        }
-
-        this.Next();
-
-        while (!this.End) {
-            if (this.CurrentChar !== quote) {
-                this.Next();
-                continue;
-            }
-
-            if (
-                backslashEscapes &&
-                this.isEscapedByBackslashes(this.Pos)
-            ) {
-                /*
-                 * Кавычка является частью строки.
-                 * Переходим за неё; обратные косые черты уже были
-                 * просмотрены на предыдущих итерациях.
-                 */
-                this.Next();
-                continue;
-            }
-
-            if (
-                doubledQuoteEscapes &&
-                this.CurIndex(this.Pos + 1) === quote
-            ) {
-                this.position += 2;
-                continue;
-            }
-
-            this.Next();
-            return;
-        }
-    }
-
-    /**
-     * Проверяет чётность последовательности обратных косых черт
-     * непосредственно перед символом в position.
-     */
-    private isEscapedByBackslashes(
-        position: number
-    ): boolean {
-        let backslashCount = 0;
-        let index = position - 1;
-
-        while (
-            index >= 0 &&
-            this.CurIndex(index) === "\\"
-        ) {
-            backslashCount++;
-            index--;
-        }
-
-        return backslashCount % 2 === 1;
-    }
-
-    /**
-     * Пропускает [многострочный текст].
-     *
-     * Поддерживает:
-     * - вложенные квадратные скобки;
-     * - одинарные и двойные SQL-строки;
-     * - -- и // однострочные комментарии;
-     * - многострочные SQL-комментарии.
-     *
-     * Поэтому PL/SQL BEGIN/END внутри блока не участвует
-     * в построении структуры RSL.
-     */
-    private skipSquareTextBlock(): void {
-        if (this.CurrentChar !== "[") {
-            return;
-        }
-
-        let depth = 1;
-        this.Next();
-
-        while (!this.End && depth > 0) {
-            const currentChar = this.CurIndex(this.Pos);
-
-            if (this.startsWithAt("--", this.Pos)) {
-                this.position += 2;
-                this.skipToLineEnd();
-                continue;
-            }
-
-            if (this.startsWithAt(OLC, this.Pos)) {
-                this.position += OLC.length;
-                this.skipToLineEnd();
-                continue;
-            }
-
-            if (this.startsWithAt(MLC_O, this.Pos)) {
-                this.position += MLC_O.length;
-                this.GetMLC();
-                continue;
-            }
-
-            if (currentChar === "'") {
-                this.skipQuotedString("'", false, true);
-                continue;
-            }
-
-            if (currentChar === "\"") {
-                this.skipQuotedString("\"", false, true);
-                continue;
-            }
-
-            if (currentChar === "[") {
-                depth++;
-                this.Next();
-                continue;
-            }
-
-            if (currentChar === "]") {
-                depth--;
-                this.Next();
-                continue;
-            }
-
-            this.Next();
-        }
-    }
-
-    private skipToLineEnd(): void {
-        while (
-            !this.End &&
-            this.CurrentChar !== "\r" &&
-            this.CurrentChar !== "\n"
-        ) {
-            this.Next();
-        }
-    }
-
-    /**
-     * Создаёт переменную, объявленную непосредственно в заголовке FOR.
-     *
-     * Поддерживаются обе формы RSL:
-     *
-     *     for (Var i, 0, count - 1, 1)
-     *     for (Var item, items)
-     *
-     * VAR относится только к первому аргументу. Остальные выражения
-     * заголовка цикла не являются объявлениями.
-     */
-    protected CreateForVariable(
-        isPrivate: boolean,
-        offset: number
-    ): void {
-        const nameToken = this.NextToken();
-
-        if (
-            nameToken.kind !== "code" ||
-            !this.isIdentifier(nameToken.str)
-        ) {
-            return;
-        }
-
-        const variable = new CVar(
-            nameToken.str,
-            isPrivate,
-            false,
-            this.ObjKind === CompletionItemKind.Class
-        );
-
-        variable.setRange({
-            start: nameToken.range.start + offset,
-            end: nameToken.range.end + offset
-        });
-
-        this.addChild(variable as unknown as CBase);
-    }
-
-    /**
-     * Создаёт переменные из объявления:
-     *
-     * var a, b: integer;
-     * const c = 10;
-     *
-     * Запятые внутри вызовов функций не разделяют объявления.
-     */
-    protected CreateVariable(
-        isPrivate: boolean,
-        offset: number,
-        isConstant: boolean = false
-    ): void {
-        const declarationTokens: IParserToken[] = [];
-        let parenthesisDepth = 0;
-
-        while (!this.End) {
-            const token = this.NextToken();
-
-            if (token.str.length === 0) {
-                break;
-            }
-
-            if (
-                token.kind === "code" &&
-                token.str === "("
-            ) {
-                parenthesisDepth++;
-            } else if (
-                token.kind === "code" &&
-                token.str === ")" &&
-                parenthesisDepth > 0
-            ) {
-                parenthesisDepth--;
-            }
-
-            if (
-                token.kind === "code" &&
-                token.str === ";" &&
-                parenthesisDepth === 0
-            ) {
-                break;
-            }
-
-            declarationTokens.push(token);
-        }
-
-        const segments: IParserToken[][] = [];
-        let current: IParserToken[] = [];
-        parenthesisDepth = 0;
-
-        declarationTokens.forEach(token => {
-            if (token.kind === "code" && token.str === "(") {
-                parenthesisDepth++;
-            } else if (
-                token.kind === "code" &&
-                token.str === ")" &&
-                parenthesisDepth > 0
-            ) {
-                parenthesisDepth--;
-            }
-
-            if (
-                token.kind === "code" &&
-                token.str === "," &&
-                parenthesisDepth === 0
-            ) {
-                if (current.length > 0) {
-                    segments.push(current);
-                }
-
-                current = [];
-                return;
-            }
-
-            current.push(token);
-        });
-
-        if (current.length > 0) {
-            segments.push(current);
-        }
-
-        segments.forEach(segment => {
-            this.createVariableFromSegment(
-                segment,
-                isPrivate,
-                isConstant,
-                offset
-            );
-        });
-    }
-
-    private createVariableFromSegment(
-        segment: IParserToken[],
-        isPrivate: boolean,
-        isConstant: boolean,
-        offset: number
-    ): void {
-        const nameToken = segment.find(token =>
-            token.kind === "code" &&
-            this.isIdentifier(token.str)
-        );
-
-        if (nameToken === undefined) {
-            return;
-        }
-
-        const variable = new CVar(
-            nameToken.str,
-            isPrivate,
-            isConstant,
-            this.ObjKind === CompletionItemKind.Class
-        );
-
-        variable.setRange({
-            start: nameToken.range.start + offset,
-            end: nameToken.range.end + offset
-        });
-
-        for (let index = 0; index < segment.length; index++) {
-            const token = segment[index];
-
-            if (
-                token.kind !== "code" ||
-                (token.str !== ":" && token.str !== "=")
-            ) {
-                continue;
-            }
-
-            const valueToken = segment[index + 1];
-
-            if (valueToken === undefined) {
-                continue;
-            }
-
-            if (token.str === ":") {
-                variable.setType(
-                    this.GetDataType(valueToken.str).second
-                );
-            } else {
-                let valueText = valueToken.str;
-
-                /*
-                 * После добавления операторов в STOP_CHARS знак
-                 * отрицательного числа является отдельным токеном.
-                 */
-                if (
-                    (valueText === "-" || valueText === "+") &&
-                    segment[index + 2] !== undefined
-                ) {
-                    valueText +=
-                        segment[index + 2].str;
-                }
-
-                variable.setValue(valueText);
-
-                if (
-                    variable.Type ===
-                    getTypeStr(varType._variant)
-                ) {
-                    const detectedType =
-                        this.GetDataType(valueText);
-
-                    if (detectedType.first) {
-                        variable.setType(
-                            detectedType.second
-                        );
-                    }
-                }
-            }
-
-            break;
-        }
-
-        this.addChild(variable as unknown as CBase);
-    }
-
-    private isIdentifier(value: string): boolean {
-        return /^[@A-Za-zА-Яа-яЁё_][@A-Za-zА-Яа-яЁё0-9_]*$/.test(
-            value
-        );
-    }
-
-    /**
-     * Читает однострочный комментарий.
-     *
-     * Исправление: учитываются и CRLF, и LF.
-     */
-    protected GetOLC(): string {
-        let comment = "";
-
-        while (
-            !this.End &&
-            this.CurrentChar !== "\r" &&
-            this.CurrentChar !== "\n"
-        ) {
-            comment += this.CurrentChar;
-            this.Next();
-        }
-
-        return comment;
-    }
-
-    /**
-     * Читает многострочный комментарий и оставляет position
-     * сразу после закрывающего маркера многострочного комментария.
-     */
-    protected GetMLC(): string {
-        let comment = "";
-
-        while (!this.End) {
-            if (this.startsWithAt(MLC_C, this.Pos)) {
-                this.position += MLC_C.length;
-                return comment;
-            }
-
-            comment += this.CurrentChar;
-            this.Next();
-        }
-
-        return comment;
-    }
-
-    /**
-     * Пропускает комментарий без дополнительного смещения.
-     *
-     * В старом коде после GetMLC() выполнялись ещё два Next(),
-     * из-за чего съедались первые два символа следующего токена.
-     */
-    protected SkipToEndComment(
-        isOLC: boolean = false
-    ): void {
-        if (isOLC) {
-            this.GetOLC();
-        } else {
-            this.GetMLC();
-        }
-
-        this.Skip();
-    }
-
-    protected GetDataType(token: string): If_s<string> {
-        const defaultType = getTypeStr(varType._variant);
-        const answer: If_s<string> = {
-            first: false,
-            second: defaultType
-        };
-
-        if (token === undefined || token.length === 0) {
-            return answer;
-        }
-
-        let normalized = token.toLowerCase();
-
-        if (normalized.charAt(0) === "@") {
-            normalized = normalized.substring(1);
-        }
-
-        const standardType = TYPES.is(normalized);
-
-        if (standardType.first) {
-            answer.first = true;
-            answer.second = getTypeStr(
-                standardType.second as varType
-            );
-
-            return answer;
-        }
-
-        if (
-            normalized.charAt(0) === "\"" ||
-            normalized.charAt(0) === "'" ||
-            normalized === "[]"
-        ) {
-            answer.first = true;
-            answer.second = getTypeStr(varType._string);
-
-            return answer;
-        }
-
-        const numericStart =
-            normalized.charAt(0) === "-" ||
-            normalized.charAt(0) === "+"
-                ? normalized.charAt(1)
-                : normalized.charAt(0);
-
-        if (DIGITS.indexOf(numericStart) >= 0) {
-            answer.first = true;
-            answer.second = getTypeStr(varType._integer);
-
-            return answer;
-        }
-
-        if (
-            normalized === "true" ||
-            normalized === "false"
-        ) {
-            answer.first = true;
-            answer.second = getTypeStr(varType._bool);
-
-            return answer;
-        }
-
-        const tree: Array<IFAStruct> = getTree() || [];
-        let foundObject: CAbstractBase | undefined;
-
-        for (const module of tree) {
-            foundObject = module.object.RecursiveFind(normalized);
-
-            if (foundObject !== undefined) {
-                break;
-            }
-        }
-
-        if (foundObject !== undefined) {
-            answer.first = true;
-            answer.second = foundObject.Type;
-
-            return answer;
-        }
-
-        const defaults: ArrayClass = getDefaults();
-        const defaultObject = defaults.find(normalized);
-
-        if (defaultObject !== undefined) {
-            answer.first = true;
-            answer.second = defaultObject.returnType();
-        }
-
-        return answer;
-    }
-
-    protected CreateMacro(
-        isPrivate: boolean,
-        keywordToken: IParserToken
-    ): void {
-        const nameToken = this.NextToken();
-
-        if (
-            nameToken.str.length === 0 ||
-            !this.isIdentifier(nameToken.str)
-        ) {
-            return;
-        }
-
-        const bodyStart = this.Pos;
-        const body = this.getObjectBody();
-        const objectEnd = this.Pos;
-
-        const range: IRange = {
-            start: this.offset + keywordToken.range.start,
-            end: this.offset + objectEnd
-        };
-
-        const macro = new CMacro(
-            body,
-            this.offset + bodyStart,
-            nameToken.str,
-            isPrivate,
-            range,
-            this.ObjKind === CompletionItemKind.Class
-        );
-
-        this.addChild(macro);
-    }
-
-    protected CreateClass(
-        isPrivate: boolean,
-        keywordToken: IParserToken
-    ): void {
-        let parentName = "";
-        let nameToken = this.NextToken();
-
-        /*
-         * Сохраняется поддержка старого синтаксиса:
-         * class (Parent) Child
-         */
-        if (nameToken.str === "(") {
-            const parentToken = this.NextToken();
-            parentName = parentToken.str;
-
-            const closeToken = this.NextToken();
-
-            if (closeToken.str !== ")") {
-                // Неверная сигнатура: продолжаем в режиме best effort.
-            }
-
-            nameToken = this.NextToken();
-        }
-
-        if (
-            nameToken.str.length === 0 ||
-            !this.isIdentifier(nameToken.str)
-        ) {
-            return;
-        }
-
-        const bodyStart = this.Pos;
-        const body = this.getObjectBody();
-        const objectEnd = this.Pos;
-
-        const range: IRange = {
-            start: this.offset + keywordToken.range.start,
-            end: this.offset + objectEnd
-        };
-
-        const classObject = new CClass(
-            body,
-            this.offset + bodyStart,
-            nameToken.str,
-            parentName,
-            isPrivate,
-            range
-        );
-
-        this.addChild(classObject);
-    }
-
-    protected CreateImport(): void {
-        /*
-         * Parser только пропускает директиву Import. Извлечение имён,
-         * загрузка файлов и построение графа зависимостей выполняются
-         * WorkspaceIndex в language server.
-         */
-        while (!this.End && this.CurrentChar !== ";") {
-            this.Next();
-        }
-
-        if (this.CurrentChar === ";") {
-            this.Next();
-        }
-    }
-
-    /**
-     * Разбирает параметры macro из начального блока (...).
-     */
-    private parseSignature(): void {
-        this.Skip();
-
-        if (this.CurrentChar !== "(") {
-            return;
-        }
-
-        const signatureStart = this.Pos;
-        const parametersStart = signatureStart + 1;
-
-        let depth = 0;
-        let closePosition = -1;
-
-        while (!this.End) {
-            const token = this.NextToken(SkipComment.no);
-
-            if (token.str.length === 0) {
-                break;
-            }
-
-            if (token.kind === "code" && token.str === "(") {
-                depth++;
-                continue;
-            }
-
-            if (token.kind === "code" && token.str === ")") {
-                depth--;
-
-                if (depth === 0) {
-                    closePosition = token.range.start;
-                    break;
-                }
-            }
-        }
-
-        if (closePosition < 0) {
-            this.paramStr = this.source.substring(signatureStart);
-            return;
-        }
-
-        this.paramStr = this.source.substring(
-            signatureStart,
-            this.Pos
-        );
-
-        const parametersText = this.source.substring(
-            parametersStart,
-            closePosition
-        );
-
-        this.createParameterVariables(
-            parametersText,
-            this.offset + parametersStart
-        );
-
-        /*
-         * Возвращаемый тип macro:
-         * macro Test(): integer
-         */
-        const afterSignature = this.Pos;
-        const nextToken = this.NextToken(SkipComment.no);
-
-        if (nextToken.str === ":") {
-            const typeToken = this.NextToken();
-
-            if (typeToken.str.length > 0) {
-                this.setType(this.GetDataType(typeToken.str).second);
-            }
-        } else if (
-            nextToken.str === OLC ||
-            nextToken.str === MLC_O
-        ) {
-            const description = nextToken.str === OLC
-                ? this.GetOLC()
-                : this.GetMLC();
-
-            this.Description(description);
-        } else {
-            this.position = afterSignature;
-        }
-    }
-
-    private createParameterVariables(
-        parametersText: string,
-        absoluteOffset: number
-    ): void {
-        const segments = this.splitTopLevelParameters(parametersText);
-        let searchFrom = 0;
-
-        segments.forEach(segment => {
-            const match = segment.match(
-                /[@A-Za-zА-Яа-яЁё_][@A-Za-zА-Яа-яЁё0-9_]*/
-            );
-
-            if (match === null || match.index === undefined) {
-                searchFrom += segment.length + 1;
-                return;
-            }
-
-            const name = match[0];
-            const relativeNamePosition =
-                parametersText.indexOf(name, searchFrom);
-
-            if (relativeNamePosition < 0) {
-                searchFrom += segment.length + 1;
-                return;
-            }
-
-            const variable = new CVar(
-                name,
-                true,
-                false,
-                false
-            );
-
-            variable.setRange({
-                start: absoluteOffset + relativeNamePosition,
-                end:
-                    absoluteOffset +
-                    relativeNamePosition +
-                    name.length
-            });
-
-            const typeMatch = segment.match(
-                /:\s*([@A-Za-zА-Яа-яЁё_][@A-Za-zА-Яа-яЁё0-9_]*)/
-            );
-
-            if (typeMatch !== null) {
-                variable.setType(
-                    this.GetDataType(typeMatch[1]).second
-                );
-            }
-
-            this.addChild(variable as unknown as CBase);
-            searchFrom = relativeNamePosition + name.length;
-        });
-    }
-
-    private splitTopLevelParameters(value: string): string[] {
-        const result: string[] = [];
-        let current = "";
-        let parenthesisDepth = 0;
-        let bracketDepth = 0;
-        let quote = "";
-
-        for (let index = 0; index < value.length; index++) {
-            const char = value.charAt(index);
-            const next = value.charAt(index + 1);
-
-            if (quote.length > 0) {
-                current += char;
-
-                if (char === quote) {
-                    if (next === quote) {
-                        current += next;
-                        index++;
-                    } else {
-                        quote = "";
-                    }
-                } else if (char === "\\" && next !== "") {
-                    current += next;
-                    index++;
-                }
-
-                continue;
-            }
-
-            if (char === "\"" || char === "'") {
-                quote = char;
-                current += char;
-                continue;
-            }
-
-            if (char === "(") {
-                parenthesisDepth++;
-                current += char;
-                continue;
-            }
-
-            if (char === ")" && parenthesisDepth > 0) {
-                parenthesisDepth--;
-                current += char;
-                continue;
-            }
-
-            if (char === "[") {
-                bracketDepth++;
-                current += char;
-                continue;
-            }
-
-            if (char === "]" && bracketDepth > 0) {
-                bracketDepth--;
-                current += char;
-                continue;
-            }
-
-            if (
-                char === "," &&
-                parenthesisDepth === 0 &&
-                bracketDepth === 0
-            ) {
-                result.push(current);
-                current = "";
-                continue;
-            }
-
-            current += char;
-        }
-
-        if (current.length > 0) {
-            result.push(current);
-        }
-
-        return result;
-    }
-
-    /**
-     * Основной разбор scope.
-     *
-     * Все ключевые слова внутри строк, комментариев и [ ... ]
-     * скрыты токенизатором и сюда не попадают.
-     */
-    protected parse(): void {
-        this.childs = new Array<CBase>();
-        this.position = 0;
-
-        this.parseSignature();
-
-        let previousToken = "";
-        let tokenBeforePrevious = "";
-
-        while (!this.End) {
-            const token = this.NextToken();
-
-            if (token.str.length === 0) {
-                break;
-            }
-
-            const normalizedToken = token.str.toLowerCase();
-            const isForVariable =
-                normalizedToken === "var" &&
-                previousToken === "(" &&
-                tokenBeforePrevious === "for";
-            const action = this.getKeywordNum(token.str);
-
-            if (!action.first) {
-                tokenBeforePrevious = previousToken;
-                previousToken = normalizedToken;
-                continue;
-            }
-
-            if (isForVariable) {
-                this.CreateForVariable(false, this.offset);
-                tokenBeforePrevious = previousToken;
-                previousToken = normalizedToken;
-                continue;
-            }
-
-            if (
-                action.second === kwdNum._local ||
-                action.second === kwdNum._private
-            ) {
-                const declarationToken = this.NextToken();
-                const declaration =
-                    this.getKeywordNum(declarationToken.str);
-
-                if (declaration.first) {
-                    switch (declaration.second) {
-                        case kwdNum._const:
-                            this.CreateVariable(
-                                true,
-                                this.offset,
-                                true
-                            );
-                            break;
-
-                        case kwdNum._var:
-                            this.CreateVariable(
-                                true,
-                                this.offset
-                            );
-                            break;
-
-                        case kwdNum._macro:
-                            this.CreateMacro(
-                                true,
-                                declarationToken
-                            );
-                            break;
-
-                        case kwdNum._class:
-                            this.CreateClass(
-                                true,
-                                declarationToken
-                            );
-                            break;
-
-                        default:
-                            break;
-                    }
-                }
-
-                tokenBeforePrevious = normalizedToken;
-                previousToken = declarationToken.str.toLowerCase();
-                continue;
-            }
-
-            switch (action.second) {
-                case kwdNum._const:
-                    this.CreateVariable(
-                        false,
-                        this.offset,
-                        true
-                    );
-                    break;
-
-                case kwdNum._var:
-                    this.CreateVariable(
-                        false,
-                        this.offset
-                    );
-                    break;
-
-                case kwdNum._macro:
-                    this.CreateMacro(false, token);
-                    break;
-
-                case kwdNum._import:
-                    this.CreateImport();
-                    break;
-
-                case kwdNum._class:
-                    this.CreateClass(false, token);
-                    break;
-
-                default:
-                    break;
-            }
-
-            tokenBeforePrevious = previousToken;
-            previousToken = normalizedToken;
-        }
+                kind: token.kind === "identifier" ||
+                    token.kind === "number" ||
+                    token.kind === "symbol"
+                        ? "code"
+                        : token.kind
+            } as IParserToken));
     }
 }
 
-
 /**
- * Макрос или метод класса.
+ * Преобразует новое полное syntax tree в прежнюю модель CBase/CVar.
+ * Блоки IF/FOR/WHILE не создают области видимости в RSL, поэтому объявления
+ * из них добавляются в ближайший модуль, MACRO или конструктор CLASS.
  */
+class LegacySymbolTreeAdapter {
+    constructor(
+        private source: string,
+        private offset: number
+    ) {}
+
+    populate(scope: CBase, root: IRslSyntaxNode): void {
+        root.children.forEach(node => this.visit(scope, node));
+    }
+
+    private visit(scope: CBase, node: IRslSyntaxNode): void {
+        switch (node.kind) {
+            case "VariableDeclaration":
+                this.addVariableDeclaration(scope, node);
+                return;
+
+            case "MacroDeclaration":
+                this.addMacro(scope, node);
+                return;
+
+            case "ClassDeclaration":
+                this.addClass(scope, node);
+                return;
+
+            case "VariableDeclarator":
+                if (node.variableRole === "for") {
+                    this.addVariable(scope, node, false, false, false);
+                } else if (node.variableRole === "onerror") {
+                    this.addVariable(scope, node, false, true, false);
+                }
+                return;
+
+            case "Parameter":
+            case "ImportDeclaration":
+            case "ImportItem":
+                return;
+
+            default:
+                node.children.forEach(child => this.visit(scope, child));
+        }
+    }
+
+    private addVariableDeclaration(
+        scope: CBase,
+        declaration: IRslSyntaxNode
+    ): void {
+        const isConstant = declaration.name === "const";
+        const privateFlag = declaration.modifier !== undefined;
+        const isProperty = scope.ObjKind === CompletionItemKind.Class;
+
+        declaration.children
+            .filter(child => child.kind === "VariableDeclarator")
+            .forEach(child => this.addVariable(
+                scope,
+                child,
+                isConstant,
+                privateFlag,
+                isProperty
+            ));
+    }
+
+    private addMacro(scope: CBase, node: IRslSyntaxNode): void {
+        if (!node.name) {
+            return;
+        }
+
+        const macro = new CMacro(
+            this.source,
+            node.name,
+            node.modifier !== undefined,
+            this.absoluteRange(node),
+            scope.ObjKind === CompletionItemKind.Class,
+            this.parameterText(node),
+            node.typeName || getTypeStr(varType._variant)
+        );
+        scope.addChild(macro);
+
+        node.children
+            .filter(child => child.kind === "Parameter")
+            .forEach(parameter => this.addVariable(
+                macro,
+                parameter,
+                false,
+                true,
+                false
+            ));
+
+        node.children
+            .filter(child => child.kind !== "Parameter")
+            .forEach(child => this.visit(macro, child));
+    }
+
+    private addClass(scope: CBase, node: IRslSyntaxNode): void {
+        if (!node.name) {
+            return;
+        }
+
+        const classObject = new CClass(
+            this.source,
+            node.name,
+            node.baseClassName || "",
+            node.modifier !== undefined,
+            this.absoluteRange(node)
+        );
+        scope.addChild(classObject);
+
+        node.children
+            .filter(child => child.kind === "Parameter")
+            .forEach(parameter => this.addVariable(
+                classObject,
+                parameter,
+                false,
+                true,
+                false
+            ));
+
+        node.children
+            .filter(child => child.kind !== "Parameter")
+            .forEach(child => this.visit(classObject, child));
+    }
+
+    private addVariable(
+        scope: CBase,
+        node: IRslSyntaxNode,
+        isConstant: boolean,
+        privateFlag: boolean,
+        isProperty: boolean
+    ): void {
+        if (!node.name) {
+            return;
+        }
+
+        const variable = new CVar(
+            node.name,
+            privateFlag,
+            isConstant,
+            isProperty
+        );
+        variable.setRange({
+            start: node.start + this.offset,
+            end: this.nameEnd(node) + this.offset
+        });
+
+        if (node.typeName) {
+            variable.setType(this.normalizeType(node.typeName));
+        } else {
+            variable.setType(this.inferInitializerType(node));
+        }
+
+        const value = this.initializerText(node);
+        if (value) {
+            variable.setValue(value);
+        }
+
+        scope.addChild(variable as unknown as CBase);
+    }
+
+    private parameterText(node: IRslSyntaxNode): string {
+        if (
+            node.parameterListStart === undefined ||
+            node.parameterListEnd === undefined
+        ) {
+            return "";
+        }
+
+        return this.source.substring(
+            node.parameterListStart,
+            node.parameterListEnd
+        );
+    }
+
+    private initializerText(node: IRslSyntaxNode): string {
+        if (
+            node.valueStart === undefined ||
+            node.valueEnd === undefined
+        ) {
+            return "";
+        }
+
+        const value = this.source.substring(
+            node.valueStart,
+            node.valueEnd
+        ).replace(/\s+/g, " ").trim();
+
+        return value.length > 120
+            ? value.substring(0, 117) + "..."
+            : value;
+    }
+
+    private inferInitializerType(node: IRslSyntaxNode): string {
+        const valueTokens = node.tokens.filter(token =>
+            node.valueStart !== undefined &&
+            node.valueEnd !== undefined &&
+            token.start >= node.valueStart &&
+            token.end <= node.valueEnd
+        );
+        const first = valueTokens[0];
+
+        if (!first) {
+            return getTypeStr(varType._variant);
+        }
+
+        if (first.kind === "string" || first.kind === "square") {
+            return getTypeStr(varType._string);
+        }
+
+        if (first.kind === "number") {
+            return getTypeStr(varType._integer);
+        }
+
+        if (
+            first.kind === "identifier" &&
+            (normalizeIdentifier(first.value) === "true" ||
+                normalizeIdentifier(first.value) === "false")
+        ) {
+            return getTypeStr(varType._bool);
+        }
+
+        return getTypeStr(varType._variant);
+    }
+
+    private normalizeType(value: string): string {
+        const normalized = normalizeIdentifier(value).replace(/^@/, "");
+        const standard = TYPES.is(normalized);
+        return standard.first
+            ? TYPES.str(standard.second)
+            : value.replace(/^@/, "");
+    }
+
+    private nameEnd(node: IRslSyntaxNode): number {
+        const name = normalizeIdentifier(node.name || "");
+        const token = node.tokens.find(candidate =>
+            candidate.kind === "identifier" &&
+            normalizeIdentifier(candidate.value) === name
+        );
+        return token ? token.end : node.end;
+    }
+
+    private absoluteRange(node: IRslSyntaxNode): IRange {
+        return {
+            start: node.start + this.offset,
+            end: node.end + this.offset
+        };
+    }
+}
+
+/** Макрос или метод класса. */
 class CMacro extends CBase {
     constructor(
-        src: string,
-        sourceOffset: number,
+        source: string,
         name: string,
         privateFlag: boolean,
         range: IRange,
-        isMethod: boolean
+        isMethod: boolean,
+        parameterText: string,
+        returnType: string
     ) {
         super(
-            src,
-            sourceOffset,
+            source,
+            0,
             isMethod
                 ? CompletionItemKind.Method
-                : CompletionItemKind.Function
+                : CompletionItemKind.Function,
+            false
         );
-
         this.name = name;
         this.private_ = privateFlag;
         this.range = range;
+        this.paramStr = parameterText;
+        this.varType_ = returnType || getTypeStr(varType._variant);
         this.insertedText = `${name}()`;
     }
 
@@ -1810,27 +783,23 @@ class CMacro extends CBase {
     }
 }
 
-
-/**
- * Класс RSL.
- */
+/** Класс RSL. */
 class CClass extends CBase {
     private parentName: string;
 
     constructor(
-        src: string,
-        sourceOffset: number,
+        source: string,
         name: string,
         parentName: string,
         privateFlag: boolean,
         range: IRange
     ) {
         super(
-            src,
-            sourceOffset,
-            CompletionItemKind.Class
+            source,
+            0,
+            CompletionItemKind.Class,
+            false
         );
-
         this.name = name;
         this.parentName = parentName;
         this.private_ = privateFlag;
@@ -1844,7 +813,6 @@ class CClass extends CBase {
     }
 
     updateCIInfo(): void {
-        this.detail = `${getStrItemKind(this.objKind)}: `;
-        this.detail += this.name;
+        this.detail = `${getStrItemKind(this.objKind)}: ${this.name}`;
     }
 }
