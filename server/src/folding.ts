@@ -4,6 +4,7 @@ import {
 } from "./languageMetadata";
 
 import {
+    IRslLexResult,
     IRslToken,
     isFullLineComment,
     lexRsl
@@ -40,14 +41,15 @@ const IF_KEYWORD = "if";
 const ELIF_KEYWORD = "elif";
 const ELSE_KEYWORD = "else";
 
-/**
- * Строит folding ranges на общем RSL token stream.
- */
-export function GetFoldingRanges(source: string): IRslFoldingRange[] {
+/** Строит folding ranges на общем RSL token stream. */
+export function GetFoldingRanges(
+    source: string,
+    lexResult?: IRslLexResult
+): IRslFoldingRange[] {
     const ranges: IRslFoldingRange[] = [];
     const blocks: IOpenBlock[] = [];
     const fullLineComments: number[] = [];
-    const lex = lexRsl(source || "");
+    const lex = lexResult || lexRsl(source || "");
     let canStartBlock = true;
 
     for (const token of lex.tokens) {
@@ -100,7 +102,6 @@ export function GetFoldingRanges(source: string): IRslFoldingRange[] {
 
         const word = token.value.toLowerCase();
 
-        /* End распознаётся и в однострочном if ... end. */
         if (word === END_KEYWORD.toLowerCase()) {
             closeCurrentBlock(blocks, ranges, token.line);
             canStartBlock = false;
@@ -143,8 +144,6 @@ export function GetFoldingRanges(source: string): IRslFoldingRange[] {
     }
 
     addLineCommentRanges(fullLineComments, ranges);
-
-    /* Незакрытые блоки не растягиваем до EOF. */
     ranges.sort((left, right) => {
         if (left.startLine !== right.startLine) {
             return left.startLine - right.startLine;
@@ -152,7 +151,6 @@ export function GetFoldingRanges(source: string): IRslFoldingRange[] {
 
         return right.endLine - left.endLine;
     });
-
     return ranges;
 }
 
@@ -200,10 +198,7 @@ function closeCurrentBlock(
         return;
     }
 
-    ranges.push({
-        startLine: block.startLine,
-        endLine
-    });
+    ranges.push({ startLine: block.startLine, endLine });
 }
 
 function addIfBranchRange(
@@ -217,10 +212,7 @@ function addIfBranchRange(
         return;
     }
 
-    ranges.push({
-        startLine: branchStartLine,
-        endLine
-    });
+    ranges.push({ startLine: branchStartLine, endLine });
 }
 
 function addLineCommentRanges(

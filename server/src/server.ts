@@ -61,6 +61,20 @@ const parsedVersions = new Map<string, number>();
 const parseTimers = new Map<string, NodeJS.Timeout>();
 const diagnosticTimers = new Map<string, NodeJS.Timeout>();
 const diagnosticsCache = new Map<string, Diagnostic[]>();
+const publishedDiagnosticSignatures = new Map<string, string>();
+const semanticTokensCache = new Map<string, {
+    version: number;
+    value: ReturnType<typeof buildRslSemanticTokens>;
+}>();
+const foldingRangesCache = new Map<string, {
+    version: number;
+    value: ReturnType<typeof GetFoldingRanges>;
+}>();
+const documentSymbolsCache = new Map<string, {
+    version: number;
+    value: SymbolInformation[];
+}>();
+const defaultCompletionItems = getCIInfoForArray(getDefaults());
 const pendingImportNames = new Set<string>();
 const requestedImportNames = new Set<string>();
 const workspaceFileUris = new Set<string>();
@@ -74,7 +88,11 @@ const queuedExternalModules = new Set<string>();
  */
 const PARSE_DEBOUNCE_MS = 80;
 const DIAGNOSTICS_DEBOUNCE_MS = 300;
-const DEPENDENT_DIAGNOSTICS_DEBOUNCE_MS = 500;
+const LARGE_DIAGNOSTICS_DEBOUNCE_MS = 550;
+const VERY_LARGE_DIAGNOSTICS_DEBOUNCE_MS = 800;
+const DEPENDENT_DIAGNOSTICS_DEBOUNCE_MS = 650;
+const SLOW_PARSE_LOG_MS = 75;
+const SLOW_DIAGNOSTICS_LOG_MS = 100;
 
 let globalSettings: IRslSettings = defaultSettings;
 let hasConfigurationCapability = false;
@@ -83,6 +101,7 @@ let workFolderOpened = false;
 let clientReady = false;
 let externalModuleLoadRunning = false;
 let activeDocumentUri: string | undefined;
+let lastReportedModuleCount = -1;
 
 interface IPositionContext {
     document: TextDocument;
@@ -140,6 +159,49 @@ function notifyClient(method: string, params?: unknown): void {
     if (clientReady) {
         sendClientNotification(method, params);
     }
+}
+
+function notifyModuleCount(force: boolean = false): void {
+    const count = workspaceIndex.size;
+
+    if (!force && count === lastReportedModuleCount) {
+        return;
+    }
+
+    lastReportedModuleCount = count;
+    notifyClient("updateStatusBar", count);
+}
+
+function invalidateProviderCaches(uri: string): void {
+    semanticTokensCache.delete(uri);
+    foldingRangesCache.delete(uri);
+    documentSymbolsCache.delete(uri);
+}
+
+function diagnosticSignature(diagnostics: Diagnostic[]): string {
+    return diagnostics.map(item => [
+        item.code || "",
+        item.severity || "",
+        item.range.start.line,
+        item.range.start.character,
+        item.range.end.line,
+        item.range.end.character,
+        item.message
+    ].join(":")).join("\u0001");
+}
+
+function sendDiagnosticsIfChanged(
+    uri: string,
+    diagnostics: Diagnostic[]
+): void {
+    const signature = diagnosticSignature(diagnostics);
+
+    if (publishedDiagnosticSignatures.get(uri) === signature) {
+        return;
+    }
+
+    publishedDiagnosticSignatures.set(uri, signature);
+    connection.sendDiagnostics({ uri, diagnostics });
 }
 
 /**
@@ -228,7 +290,7 @@ connection.onNotification("workspaceFiles", (uris: string[]) => {
 connection.onNotification("clientReady", () => {
     clientReady = true;
     flushPendingImports();
-    notifyClient("updateStatusBar", workspaceIndex.size);
+    notifyModuleCount(true);
 });
 
 /**
@@ -252,10 +314,7 @@ connection.onNotification(
         activeDocumentUri = nextUri;
 
         if (previousUri && previousUri !== nextUri) {
-            connection.sendDiagnostics({
-                uri: previousUri,
-                diagnostics: []
-            });
+            sendDiagnosticsIfChanged(previousUri, []);
         }
 
         if (activeDocumentUri) {
@@ -473,11 +532,10 @@ documents.onDidClose(event => {
     cancelScheduledValidation(uri);
     cancelScheduledDiagnostics(uri);
     diagnosticsCache.delete(uri);
+    invalidateProviderCaches(uri);
     workspaceIndex.markClosed(uri);
-    connection.sendDiagnostics({
-        uri,
-        diagnostics: []
-    });
+    sendDiagnosticsIfChanged(uri, []);
+    publishedDiagnosticSignatures.delete(uri);
 });
 
 documents.onDidChangeContent(change => {
@@ -507,10 +565,7 @@ function showAllCachedDiagnostics(): void {
         const cached = diagnosticsCache.get(document.uri);
 
         if (cached) {
-            connection.sendDiagnostics({
-                uri: document.uri,
-                diagnostics: cached
-            });
+            sendDiagnosticsIfChanged(document.uri, cached);
         }
     });
 }
@@ -526,21 +581,18 @@ function showActiveDiagnosticsOnly(
      */
     documents.all().forEach(document => {
         if (document.uri !== uri) {
-            connection.sendDiagnostics({
-                uri: document.uri,
-                diagnostics: []
-            });
+            sendDiagnosticsIfChanged(document.uri, []);
         }
     });
 
-    connection.sendDiagnostics({ uri, diagnostics });
+    sendDiagnosticsIfChanged(uri, diagnostics);
 }
 
 function publishDiagnostics(uri: string, diagnostics: Diagnostic[]): void {
     diagnosticsCache.set(uri, diagnostics);
 
     if (!activeDocumentUri) {
-        connection.sendDiagnostics({ uri, diagnostics });
+        sendDiagnosticsIfChanged(uri, diagnostics);
         return;
     }
 
@@ -556,17 +608,36 @@ function publishDiagnostics(uri: string, diagnostics: Diagnostic[]): void {
     const activeDiagnostics = diagnosticsCache.get(activeDocumentUri);
 
     if (activeDiagnostics && activeDiagnostics.length > 0) {
-        connection.sendDiagnostics({ uri, diagnostics: [] });
+        sendDiagnosticsIfChanged(uri, []);
     } else {
-        connection.sendDiagnostics({ uri, diagnostics });
+        sendDiagnosticsIfChanged(uri, diagnostics);
     }
+}
+
+function getDiagnosticsDelay(uri: string): number {
+    const module = workspaceIndex.getModule(uri);
+    const length = module ? module.source.length : 0;
+
+    if (length >= 250000) {
+        return VERY_LARGE_DIAGNOSTICS_DEBOUNCE_MS;
+    }
+
+    if (length >= 100000) {
+        return LARGE_DIAGNOSTICS_DEBOUNCE_MS;
+    }
+
+    return DIAGNOSTICS_DEBOUNCE_MS;
 }
 
 function scheduleDiagnostics(
     uri: string,
-    delay: number = DIAGNOSTICS_DEBOUNCE_MS
+    delay?: number
 ): void {
     cancelScheduledDiagnostics(uri);
+
+    const actualDelay = delay === undefined
+        ? getDiagnosticsDelay(uri)
+        : Math.max(0, delay);
 
     const timer = setTimeout(() => {
         diagnosticTimers.delete(uri);
@@ -575,7 +646,7 @@ function scheduleDiagnostics(
                 `Diagnostics failed: ${uri}\n${errorToString(error)}`
             );
         });
-    }, Math.max(0, delay));
+    }, actualDelay);
 
     diagnosticTimers.set(uri, timer);
 }
@@ -615,10 +686,14 @@ async function runDiagnostics(uri: string): Promise<void> {
         currentModule.imports.forEach(GetFileByNameRequest);
     }
 
-    logMessage(
-        `Diagnostics: ${uri}; version=${currentModule.version}; ` +
-        `ms=${Date.now() - started}; count=${diagnostics.length}`
-    );
+    const elapsed = Date.now() - started;
+
+    if (elapsed >= SLOW_DIAGNOSTICS_LOG_MS) {
+        logMessage(
+            `Slow diagnostics: ${uri}; version=${currentModule.version}; ` +
+            `ms=${elapsed}; count=${diagnostics.length}`
+        );
+    }
 }
 
 function scheduleValidation(document: TextDocument): void {
@@ -678,6 +753,7 @@ async function validateTextDocument(
         true
     );
     parsedVersions.set(uri, version);
+    invalidateProviderCaches(uri);
 
     /*
      * Дерево становится доступно completion/hover сразу. Диагностики и
@@ -685,7 +761,7 @@ async function validateTextDocument(
      * визуальный отклик редактора.
      */
     scheduleDiagnostics(uri);
-    notifyClient("updateStatusBar", workspaceIndex.size);
+    notifyModuleCount();
 
     getDocumentSettings(uri).then(settings => {
         const current = workspaceIndex.getModule(uri);
@@ -713,11 +789,14 @@ async function validateTextDocument(
         refreshOpenDependents(uri);
     }
 
-    logMessage(
-        `Parsed: ${uri}; version=${version}; ` +
-        `ms=${Date.now() - started}; ` +
-        `symbols=${parsedObject.getChilds().length}`
-    );
+    const elapsed = Date.now() - started;
+
+    if (elapsed >= SLOW_PARSE_LOG_MS) {
+        logMessage(
+            `Slow parse: ${uri}; version=${version}; ` +
+            `ms=${elapsed}; symbols=${parsedObject.getChilds().length}`
+        );
+    }
 }
 
 async function ensureDocumentParsed(
@@ -769,7 +848,7 @@ async function handleWatchedFileChange(
         dependents.forEach(uri =>
             scheduleDiagnostics(uri, DEPENDENT_DIAGNOSTICS_DEBOUNCE_MS)
         );
-        notifyClient("updateStatusBar", workspaceIndex.size);
+        notifyModuleCount();
         return;
     }
 
@@ -801,7 +880,7 @@ async function loadExternalModule(uri: string): Promise<void> {
     try {
         const text = await fs.promises.readFile(filePath, "utf8");
         const stat = await fs.promises.stat(filePath);
-        const tree = new CBase(text, 0);
+        const tree = CBase.forExternalModule(text);
         const module = workspaceIndex.updateModule(
             uri,
             text,
@@ -812,7 +891,7 @@ async function loadExternalModule(uri: string): Promise<void> {
 
         module.imports.forEach(GetFileByNameRequest);
         refreshOpenDependents(uri);
-        notifyClient("updateStatusBar", workspaceIndex.size);
+        notifyModuleCount();
     } catch (error) {
         logMessage(
             `External module load failed: ${uri}\n` +
@@ -854,14 +933,14 @@ connection.onCompletion(async params => {
         return [];
     }
 
-    return deduplicateCompletionItems([
-        ...scopeResolver.getCompletions(
+    return deduplicateCompletionItems(
+        scopeResolver.getCompletions(
             document.uri,
             context.tree,
             context.offset
         ),
-        ...getCIInfoForArray(getDefaults())
-    ]);
+        defaultCompletionItems
+    );
 });
 
 connection.onHover(async (
@@ -990,9 +1069,22 @@ connection.languages.semanticTokens.on(async params => {
     await ensureDocumentParsed(document);
     const module = workspaceIndex.getModule(document.uri);
 
-    return module
-        ? buildRslSemanticTokens(module, workspaceIndex)
-        : { data: [] };
+    if (!module) {
+        return { data: [] };
+    }
+
+    const cached = semanticTokensCache.get(document.uri);
+
+    if (cached && cached.version === module.version) {
+        return cached.value;
+    }
+
+    const value = buildRslSemanticTokens(module, workspaceIndex);
+    semanticTokensCache.set(document.uri, {
+        version: module.version,
+        value
+    });
+    return value;
 });
 
 connection.onDocumentSymbol(async ({ textDocument }) => {
@@ -1008,14 +1100,51 @@ connection.onDocumentSymbol(async ({ textDocument }) => {
         return [];
     }
 
-    return getSymbols(document, tree).filter(
+    const module = workspaceIndex.getModule(document.uri);
+
+    if (!module) {
+        return [];
+    }
+
+    const cached = documentSymbolsCache.get(document.uri);
+
+    if (cached && cached.version === module.version) {
+        return cached.value;
+    }
+
+    const value = getSymbols(document, tree).filter(
         (symbol): symbol is SymbolInformation => symbol !== undefined
     );
+    documentSymbolsCache.set(document.uri, {
+        version: module.version,
+        value
+    });
+    return value;
 });
 
 connection.onFoldingRanges(({ textDocument }) => {
     const document = getCurDoc(textDocument.uri);
-    return document ? GetFoldingRanges(document.getText()) : [];
+
+    if (!document) {
+        return [];
+    }
+
+    const cached = foldingRangesCache.get(document.uri);
+
+    if (cached && cached.version === document.version) {
+        return cached.value;
+    }
+
+    const module = workspaceIndex.getModule(document.uri);
+    const lex = module && module.version === document.version
+        ? module.lex
+        : undefined;
+    const value = GetFoldingRanges(document.getText(), lex);
+    foldingRangesCache.set(document.uri, {
+        version: document.version,
+        value
+    });
+    return value;
 });
 
 connection.onDocumentFormatting(params => {
@@ -1060,20 +1189,22 @@ function fullDocumentRange(document: TextDocument): Range {
 }
 
 function deduplicateCompletionItems(
-    items: CompletionItem[]
+    ...groups: CompletionItem[][]
 ): CompletionItem[] {
     const result: CompletionItem[] = [];
     const seen = new Set<string>();
 
-    for (const item of items) {
-        const key = String(item.label).toLowerCase();
+    for (const items of groups) {
+        for (const item of items) {
+            const key = String(item.label).toLowerCase();
 
-        if (seen.has(key)) {
-            continue;
+            if (seen.has(key)) {
+                continue;
+            }
+
+            seen.add(key);
+            result.push(item);
         }
-
-        seen.add(key);
-        result.push(item);
     }
 
     return result;

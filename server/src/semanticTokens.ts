@@ -7,7 +7,7 @@ import {
 import { CBase } from "./common";
 import {
     IRslToken,
-    significantTokens
+    normalizeIdentifier
 } from "./lexer";
 import { RslScopeResolver } from "./scopeResolver";
 import { IIndexedModule, WorkspaceIndex } from "./workspaceIndex";
@@ -26,6 +26,14 @@ const TOKEN_MODIFIERS = [
     "readonly",
     "deprecated"
 ];
+
+const NON_SYMBOL_IDENTIFIERS = new Set([
+    "and", "array", "break", "btr", "class", "const", "continue",
+    "dbf", "dialog", "elif", "else", "end", "false", "file", "for",
+    "if", "import", "key", "local", "macro", "mem", "not", "null",
+    "onerror", "or", "private", "record", "return", "sort", "this",
+    "true", "txt", "var", "while", "with", "write", "append"
+]);
 
 export const RSL_SEMANTIC_TOKENS_LEGEND: SemanticTokensLegend = {
     tokenTypes: TOKEN_TYPES,
@@ -54,11 +62,14 @@ export function buildRslSemanticTokens(
     index: WorkspaceIndex
 ): SemanticTokens {
     const resolver = new RslScopeResolver(index);
-    const objects = collectObjects(module);
+    const tokens = module.syntax.tokens;
+    const objects = collectObjects(module, tokens);
+    const objectInfoByObject = new Map<CBase, IObjectInfo>();
     const declarationByRange = new Map<string, IObjectInfo>();
 
     objects.forEach(info => {
-        const token = findDeclarationToken(module, info.object);
+        objectInfoByObject.set(info.object, info);
+        const token = findDeclarationToken(tokens, info.object);
 
         if (token) {
             declarationByRange.set(
@@ -70,8 +81,11 @@ export function buildRslSemanticTokens(
 
     const entries: ISemanticEntry[] = [];
 
-    for (const token of significantTokens(module.lex.tokens)) {
-        if (token.kind !== "identifier") {
+    for (const token of tokens) {
+        if (
+            token.kind !== "identifier" ||
+            NON_SYMBOL_IDENTIFIERS.has(normalizeIdentifier(token.value))
+        ) {
             continue;
         }
 
@@ -102,9 +116,7 @@ export function buildRslSemanticTokens(
             continue;
         }
 
-        const resolvedInfo = objects.find(info =>
-            info.object === resolved.object
-        );
+        const resolvedInfo = objectInfoByObject.get(resolved.object);
         const encoded = encodeObject(
             resolved.object,
             !!resolvedInfo?.parameter
@@ -121,19 +133,16 @@ export function buildRslSemanticTokens(
         });
     }
 
-    entries.sort((left, right) =>
-        left.token.line - right.token.line ||
-        left.token.character - right.token.character
-    );
-
     return {
         data: encodeDelta(entries)
     };
 }
 
-function collectObjects(module: IIndexedModule): IObjectInfo[] {
+function collectObjects(
+    module: IIndexedModule,
+    code: IRslToken[]
+): IObjectInfo[] {
     const result: IObjectInfo[] = [];
-    const code = significantTokens(module.lex.tokens);
 
     walk(module.object, scope => {
         const signature = isCallable(scope)
@@ -258,11 +267,10 @@ function findSignatureRange(
 ): { start: number; end: number } | undefined {
     let start = -1;
     let depth = 0;
+    const firstIndex = lowerBoundByStart(tokens, scope.Range.start);
 
-    for (const token of tokens) {
-        if (token.start < scope.Range.start) {
-            continue;
-        }
+    for (let index = firstIndex; index < tokens.length; index++) {
+        const token = tokens[index];
 
         if (token.start > scope.Range.end) {
             break;
@@ -297,17 +305,45 @@ function findSignatureRange(
 
 
 function findDeclarationToken(
-    module: IIndexedModule,
+    tokens: IRslToken[],
     object: CBase
 ): IRslToken | undefined {
-    const name = object.Name.toLowerCase();
+    const name = normalizeIdentifier(object.Name);
+    const firstIndex = lowerBoundByStart(tokens, object.Range.start);
 
-    return module.lex.tokens.find(token =>
-        token.kind === "identifier" &&
-        token.start >= object.Range.start &&
-        token.end <= object.Range.end &&
-        token.value.toLowerCase() === name
-    );
+    for (let index = firstIndex; index < tokens.length; index++) {
+        const token = tokens[index];
+
+        if (token.start > object.Range.end) {
+            break;
+        }
+
+        if (
+            token.kind === "identifier" &&
+            normalizeIdentifier(token.value) === name
+        ) {
+            return token;
+        }
+    }
+
+    return undefined;
+}
+
+function lowerBoundByStart(tokens: IRslToken[], offset: number): number {
+    let left = 0;
+    let right = tokens.length;
+
+    while (left < right) {
+        const middle = Math.floor((left + right) / 2);
+
+        if (tokens[middle].start < offset) {
+            left = middle + 1;
+        } else {
+            right = middle;
+        }
+    }
+
+    return left;
 }
 
 function rangeKey(start: number, end: number): string {

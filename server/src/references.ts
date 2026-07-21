@@ -36,11 +36,15 @@ export function findRslReferences(
     }
 
     const targetName = normalizeIdentifier(target.object.Name);
+    const targetModule = index.getModule(target.uri);
+    const declarationToken = targetModule
+        ? findDeclarationToken(targetModule, targetName, target.object)
+        : undefined;
     const result: Location[] = [];
     const seen = new Set<string>();
 
     for (const candidateModule of index.getIndexedModules()) {
-        for (const token of candidateModule.lex.tokens) {
+        for (const token of candidateModule.syntax.tokens) {
             if (
                 token.kind !== "identifier" ||
                 normalizeIdentifier(token.value) !== targetName
@@ -64,14 +68,9 @@ export function findRslReferences(
 
             const declaration =
                 candidateModule.uri === target.uri &&
-                isDeclarationToken(
-                    candidateModule,
-                    target.object.Name,
-                    target.object.Range.start,
-                    target.object.Range.end,
-                    token.start,
-                    token.end
-                );
+                !!declarationToken &&
+                declarationToken.start === token.start &&
+                declarationToken.end === token.end;
 
             if (declaration && !includeDeclaration) {
                 continue;
@@ -111,30 +110,56 @@ export function findRslReferences(
 }
 
 
-function isDeclarationToken(
-    module: { lex: { tokens: Array<{
+function findDeclarationToken(
+    module: { syntax: { tokens: Array<{
         kind: string;
         value: string;
         start: number;
         end: number;
     }> } },
-    name: string,
-    rangeStart: number,
-    rangeEnd: number,
-    tokenStart: number,
-    tokenEnd: number
-): boolean {
-    const normalized = normalizeIdentifier(name);
-    const declaration = module.lex.tokens.find(token =>
-        token.kind === "identifier" &&
-        token.start >= rangeStart &&
-        token.end <= rangeEnd &&
-        normalizeIdentifier(token.value) === normalized
-    );
+    normalizedName: string,
+    object: { Range: { start: number; end: number } }
+): { start: number; end: number } | undefined {
+    const tokens = module.syntax.tokens;
+    let index = lowerBoundByStart(tokens, object.Range.start);
 
-    return !!declaration &&
-        declaration.start === tokenStart &&
-        declaration.end === tokenEnd;
+    while (index < tokens.length) {
+        const token = tokens[index++];
+
+        if (token.start > object.Range.end) {
+            break;
+        }
+
+        if (
+            token.kind === "identifier" &&
+            token.end <= object.Range.end &&
+            normalizeIdentifier(token.value) === normalizedName
+        ) {
+            return token;
+        }
+    }
+
+    return undefined;
+}
+
+function lowerBoundByStart(
+    tokens: Array<{ start: number }>,
+    start: number
+): number {
+    let left = 0;
+    let right = tokens.length;
+
+    while (left < right) {
+        const middle = (left + right) >>> 1;
+
+        if (tokens[middle].start < start) {
+            left = middle + 1;
+        } else {
+            right = middle;
+        }
+    }
+
+    return left;
 }
 
 function compareLocations(left: Location, right: Location): number {

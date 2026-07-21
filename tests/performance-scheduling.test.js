@@ -81,3 +81,17 @@ assert.ok(
 );
 
 console.log("[OK] parse, diagnostics и IMPORT планируются без лишних повторных разборов");
+
+assert.ok(
+  serverSource.includes("notifyModuleCount") &&
+    serverSource.includes("lastReportedModuleCount"),
+  "Status bar не должен обновляться по IPC после каждого parse"
+);
+assert.ok(
+  serverSource.includes("sendDiagnosticsIfChanged"),
+  "Одинаковые diagnostics не должны повторно перерисовывать Problems"
+);
+assert.ok(
+  serverSource.includes("getDiagnosticsDelay"),
+  "Большие документы должны получать адаптивную задержку тяжёлых диагностик"
+);

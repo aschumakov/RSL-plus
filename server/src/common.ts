@@ -33,7 +33,7 @@ import { IRslToken, normalizeIdentifier } from "./lexer";
  * common.ts больше не содержит собственного tokenizer/NextToken.
  */
 export const RSL_PARSER_VERSION =
-    "2026-07-21-v7-syntax-tree-adapter-rsl-declarations-expressions";
+    "2026-07-21-v6-syntax-tree-adapter";
 
 interface IParserToken extends IToken {
     kind: TokenKind;
@@ -93,7 +93,6 @@ class CEnds extends CArray {
         this._it[2] = "if";
         this._it[3] = "for";
         this._it[4] = "while";
-        this._it[5] = "with";
     }
 }
 
@@ -283,14 +282,35 @@ export class CBase extends CAbstractBase {
         };
 
         if (buildFromSyntax) {
-            this.applySyntax(parseRslSyntax(this.source));
+            this.applySyntax(parseRslSyntax(
+                this.source,
+                undefined,
+                { buildExpressionTree: false }
+            ));
         }
+    }
+
+    /**
+     * Облегчённый разбор закрытого импортируемого модуля. Для него не нужны
+     * пробелы/переводы строк в token cache и подробное дерево выражений.
+     */
+    static forExternalModule(source: string, offset: number = 0): CBase {
+        return CBase.fromSyntax(
+            source,
+            offset,
+            parseRslSyntax(source, undefined, {
+                buildExpressionTree: false,
+                includeTrivia: false
+            }),
+            false
+        );
     }
 
     static fromSyntax(
         source: string,
         offset: number,
-        syntax: IRslParseResult
+        syntax: IRslParseResult,
+        buildTokenCache: boolean = true
     ): CBase {
         const root = new CBase(
             source,
@@ -298,7 +318,7 @@ export class CBase extends CAbstractBase {
             CompletionItemKind.Unit,
             false
         );
-        root.applySyntax(syntax);
+        root.applySyntax(syntax, buildTokenCache);
         return root;
     }
 
@@ -337,7 +357,11 @@ export class CBase extends CAbstractBase {
     }
 
     reParsing(): void {
-        this.applySyntax(parseRslSyntax(this.source));
+        this.applySyntax(parseRslSyntax(
+            this.source,
+            undefined,
+            { buildExpressionTree: false }
+        ));
     }
 
     getChilds(): Array<CBase> {
@@ -460,14 +484,19 @@ export class CBase extends CAbstractBase {
         return answer;
     }
 
-    private applySyntax(result: IRslParseResult): void {
+    private applySyntax(
+        result: IRslParseResult,
+        buildTokenCache: boolean = true
+    ): void {
         this.syntaxResult = result;
         this.childs = [];
         this.range = {
             start: this.offset,
             end: this.offset + this.source.length
         };
-        this.tokenCache = this.buildTokenCache(result.lex.tokens);
+        this.tokenCache = buildTokenCache
+            ? this.buildTokenCache(result.lex.tokens)
+            : [];
 
         const adapter = new LegacySymbolTreeAdapter(
             this.source,
@@ -477,13 +506,18 @@ export class CBase extends CAbstractBase {
     }
 
     private buildTokenCache(tokens: IRslToken[]): IParserToken[] {
-        return tokens
-            .filter(token =>
-                token.kind !== "whitespace" &&
-                token.kind !== "newline" &&
-                token.kind !== "bom"
-            )
-            .map(token => ({
+        const result: IParserToken[] = [];
+
+        for (const token of tokens) {
+            if (
+                token.kind === "whitespace" ||
+                token.kind === "newline" ||
+                token.kind === "bom"
+            ) {
+                continue;
+            }
+
+            result.push({
                 str: token.kind === "square" ? "[]" : token.raw,
                 range: {
                     start: token.start + this.offset,
@@ -494,7 +528,10 @@ export class CBase extends CAbstractBase {
                     token.kind === "symbol"
                         ? "code"
                         : token.kind
-            } as IParserToken));
+            } as IParserToken);
+        }
+
+        return result;
     }
 }
 

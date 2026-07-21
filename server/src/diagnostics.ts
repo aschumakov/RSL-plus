@@ -20,8 +20,7 @@ import {
 } from "./interfaces";
 import {
     IRslToken,
-    normalizeIdentifier,
-    significantTokens
+    normalizeIdentifier
 } from "./lexer";
 import {
     IIndexedModule,
@@ -275,7 +274,7 @@ function addBracketDiagnostics(
         "}": "{"
     };
 
-    for (const token of significantTokens(module.lex.tokens)) {
+    for (const token of module.syntax.tokens) {
         if (token.kind !== "symbol") {
             continue;
         }
@@ -324,7 +323,7 @@ function addEndDiagnostics(
     module: IIndexedModule,
     result: Diagnostic[]
 ): void {
-    const tokens = significantTokens(module.lex.tokens);
+    const tokens = module.syntax.tokens;
     const stack: IBlockEntry[] = [];
     let canStartBlock = true;
     let currentLine = -1;
@@ -458,10 +457,15 @@ function addUnusedDeclarationDiagnostics(
     index: WorkspaceIndex,
     result: Diagnostic[]
 ): void {
-    const code = significantTokens(module.lex.tokens);
+    const code = module.syntax.tokens;
     const declarations = collectDeclarations(module, code);
     const identifierIndex = buildIdentifierIndex(code);
-    const declarationRanges = declarations.map(item => item.object.Range);
+    const declarationRangeKeys = new Set(
+        declarations.map(item => offsetRangeKey(
+            item.object.Range.start,
+            item.object.Range.end
+        ))
+    );
     const resolver = new RslScopeResolver(index);
 
     for (const declaration of declarations) {
@@ -485,9 +489,10 @@ function addUnusedDeclarationDiagnostics(
             if (
                 token.start < scope.Range.start ||
                 token.end > scope.Range.end ||
-                declarationRanges.some(range =>
-                    sameRange(token.start, token.end, range.start, range.end)
-                )
+                declarationRangeKeys.has(offsetRangeKey(
+                    token.start,
+                    token.end
+                ))
             ) {
                 return false;
             }
@@ -538,10 +543,17 @@ function addUseBeforeDeclarationDiagnostics(
     index: WorkspaceIndex,
     result: Diagnostic[]
 ): void {
-    const code = significantTokens(module.lex.tokens);
+    const code = module.syntax.tokens;
     const declarations = collectDeclarations(module, code);
     const identifierIndex = buildIdentifierIndex(code);
-    const declarationRanges = declarations.map(item => item.object.Range);
+    const declarationRangeKeys = new Set(
+        declarations.map(item => offsetRangeKey(
+            item.object.Range.start,
+            item.object.Range.end
+        ))
+    );
+    const memberNameStarts = collectMemberNameStarts(code);
+    const nestedScopesByScope = new Map<CBase, CBase[]>();
     const resolver = new RslScopeResolver(index);
 
     for (const declaration of declarations) {
@@ -568,16 +580,23 @@ function addUseBeforeDeclarationDiagnostics(
         }
 
         const name = normalizeIdentifier(object.Name);
-        const nestedScopes = scope.getChilds()
-            .filter(child => child.isObject());
+        let nestedScopes = nestedScopesByScope.get(scope);
+
+        if (!nestedScopes) {
+            nestedScopes = scope.getChilds()
+                .filter(child => child.isObject());
+            nestedScopesByScope.set(scope, nestedScopes);
+        }
+
         const use = (identifierIndex.get(name) || []).find(token => {
             if (
                 token.start < scope.Range.start ||
                 token.start >= object.Range.start ||
-                declarationRanges.some(range =>
-                    sameRange(token.start, token.end, range.start, range.end)
-                ) ||
-                isMemberName(code, token) ||
+                declarationRangeKeys.has(offsetRangeKey(
+                    token.start,
+                    token.end
+                )) ||
+                memberNameStarts.has(token.start) ||
                 nestedScopes.some(child =>
                     child !== scope &&
                     child.Range.start <= token.start &&
@@ -865,10 +884,15 @@ function addAmbiguousReferenceDiagnostics(
         return;
     }
 
-    const code = significantTokens(module.lex.tokens);
+    const code = module.syntax.tokens;
     const resolver = new RslScopeResolver(index);
     const importReferences = GetImportDefinitionTargetsFromTokens(module.lex.tokens);
-    const declarationRanges = collectAllObjectRanges(module.object);
+    const declarationRangeKeys = new Set(
+        collectAllObjectRanges(module.object).map(range =>
+            offsetRangeKey(range.start, range.end)
+        )
+    );
+    const memberNameStarts = collectMemberNameStarts(code);
 
     for (const token of code) {
         if (token.kind !== "identifier") {
@@ -880,13 +904,14 @@ function addAmbiguousReferenceDiagnostics(
 
         if (
             !candidates ||
-            declarationRanges.some(range =>
-                sameRange(token.start, token.end, range.start, range.end)
-            ) ||
+            declarationRangeKeys.has(offsetRangeKey(
+                token.start,
+                token.end
+            )) ||
             importReferences.some(reference =>
                 reference.start <= token.start && token.end <= reference.end
             ) ||
-            isMemberName(code, token) ||
+            memberNameStarts.has(token.start) ||
             resolver.resolveInScopeChain(
                 module.object,
                 token.value,
@@ -1004,11 +1029,10 @@ function findSignatureRange(
 ): { start: number; end: number } | undefined {
     let start = -1;
     let depth = 0;
+    const firstIndex = lowerBoundByStart(tokens, scope.Range.start);
 
-    for (const token of tokens) {
-        if (token.start < scope.Range.start) {
-            continue;
-        }
+    for (let index = firstIndex; index < tokens.length; index++) {
+        const token = tokens[index];
 
         if (token.start > scope.Range.end) {
             break;
@@ -1066,15 +1090,44 @@ function collectAllObjectRanges(
     return result;
 }
 
-function isMemberName(tokens: IRslToken[], token: IRslToken): boolean {
-    const index = tokens.indexOf(token);
+function collectMemberNameStarts(tokens: IRslToken[]): Set<number> {
+    const result = new Set<number>();
 
-    if (index <= 0) {
-        return false;
+    for (let index = 1; index < tokens.length; index++) {
+        const previous = tokens[index - 1];
+        const token = tokens[index];
+
+        if (
+            token.kind === "identifier" &&
+            previous.kind === "symbol" &&
+            previous.raw === "."
+        ) {
+            result.add(token.start);
+        }
     }
 
-    const previous = tokens[index - 1];
-    return previous.kind === "symbol" && previous.raw === ".";
+    return result;
+}
+
+function lowerBoundByStart(tokens: IRslToken[], offset: number): number {
+    let left = 0;
+    let right = tokens.length;
+
+    while (left < right) {
+        const middle = Math.floor((left + right) / 2);
+
+        if (tokens[middle].start < offset) {
+            left = middle + 1;
+        } else {
+            right = middle;
+        }
+    }
+
+    return left;
+}
+
+function offsetRangeKey(start: number, end: number): string {
+    return `${start}:${end}`;
 }
 
 function isClosedSquareBlock(raw: string): boolean {
@@ -1181,16 +1234,25 @@ function findObjectNameRange(
     object: CBase
 ): { start: number; end: number } {
     const normalized = normalizeIdentifier(object.Name);
-    const token = module.lex.tokens.find(candidate =>
-        candidate.kind === "identifier" &&
-        candidate.start >= object.Range.start &&
-        candidate.end <= object.Range.end &&
-        normalizeIdentifier(candidate.value) === normalized
-    );
+    const tokens = module.syntax.tokens;
+    const firstIndex = lowerBoundByStart(tokens, object.Range.start);
 
-    return token
-        ? { start: token.start, end: token.end }
-        : object.Range;
+    for (let index = firstIndex; index < tokens.length; index++) {
+        const token = tokens[index];
+
+        if (token.start > object.Range.end) {
+            break;
+        }
+
+        if (
+            token.kind === "identifier" &&
+            normalizeIdentifier(token.value) === normalized
+        ) {
+            return { start: token.start, end: token.end };
+        }
+    }
+
+    return object.Range;
 }
 
 function createImportDiagnostic(

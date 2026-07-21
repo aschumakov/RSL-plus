@@ -44,6 +44,14 @@ export class WorkspaceIndex {
         new Map<string, Set<string>>();
 
     private workspaceFiles: Set<string> = new Set<string>();
+    private workspaceFilesByBaseName: Map<string, Set<string>> =
+        new Map<string, Set<string>>();
+    private modulesByBaseName: Map<string, Set<string>> =
+        new Map<string, Set<string>>();
+    private importedModulesCache: Map<string, IIndexedModule[]> =
+        new Map<string, IIndexedModule[]>();
+    private importedCompletionCache: Map<string, CompletionItem[]> =
+        new Map<string, CompletionItem[]>();
     private workspaceFilesInitialized: boolean = false;
 
     updateModule(
@@ -69,8 +77,9 @@ export class WorkspaceIndex {
         };
 
         this.modules.set(uri, module);
-        this.workspaceFiles.add(uri);
+        this.registerWorkspaceFile(uri);
         this.addModuleToIndexes(module);
+        this.invalidateImportCaches();
         return module;
     }
 
@@ -93,6 +102,7 @@ export class WorkspaceIndex {
     removeModule(uri: string): void {
         this.removeModuleFromIndexes(uri);
         this.modules.delete(uri);
+        this.invalidateImportCaches();
     }
 
     clear(): void {
@@ -100,34 +110,46 @@ export class WorkspaceIndex {
         this.symbolsByName.clear();
         this.reverseImports.clear();
         this.workspaceFiles.clear();
+        this.workspaceFilesByBaseName.clear();
+        this.modulesByBaseName.clear();
+        this.invalidateImportCaches();
         this.workspaceFilesInitialized = false;
     }
 
     registerWorkspaceFiles(uris: string[]): void {
         this.workspaceFilesInitialized = true;
-        uris.forEach(uri => {
-            if (uri) {
-                this.workspaceFiles.add(uri);
-            }
-        });
+        uris.forEach(uri => this.registerWorkspaceFile(uri));
     }
 
     registerWorkspaceFile(uri: string): void {
-        if (uri) {
-            this.workspaceFiles.add(uri);
+        if (!uri || this.workspaceFiles.has(uri)) {
+            return;
         }
+
+        this.workspaceFiles.add(uri);
+        addUriAlias(this.workspaceFilesByBaseName, uri);
     }
 
     unregisterWorkspaceFile(uri: string): void {
-        this.workspaceFiles.delete(uri);
+        if (!this.workspaceFiles.delete(uri)) {
+            return;
+        }
+
+        removeUriAlias(this.workspaceFilesByBaseName, uri);
     }
 
     findWorkspaceFileUri(moduleName: string): string | undefined {
         const target = normalizeModuleName(moduleName);
         const targetBase = path.posix.basename(target);
+        const candidates = this.workspaceFilesByBaseName.get(targetBase);
+
+        if (!candidates || candidates.size === 0) {
+            return undefined;
+        }
+
         let baseMatch: string | undefined;
 
-        for (const uri of this.workspaceFiles) {
+        for (const uri of candidates) {
             const normalizedPath = normalizeUriPath(uri);
 
             if (
@@ -137,10 +159,7 @@ export class WorkspaceIndex {
                 return uri;
             }
 
-            if (
-                !baseMatch &&
-                path.posix.basename(normalizedPath) === targetBase
-            ) {
+            if (!baseMatch) {
                 baseMatch = uri;
             }
         }
@@ -169,6 +188,12 @@ export class WorkspaceIndex {
     }
 
     getImportedModules(uri: string): IIndexedModule[] {
+        const cached = this.importedModulesCache.get(uri);
+
+        if (cached) {
+            return cached.slice();
+        }
+
         const result: IIndexedModule[] = [];
         const visited = new Set<string>();
         const queue: string[] = [uri];
@@ -195,15 +220,28 @@ export class WorkspaceIndex {
             }
         }
 
+        this.importedModulesCache.set(uri, result.slice());
         return result;
     }
 
     findModuleByName(moduleName: string): IIndexedModule | undefined {
         const target = normalizeModuleName(moduleName);
         const targetBase = path.posix.basename(target);
+        const candidates = this.modulesByBaseName.get(targetBase);
+
+        if (!candidates || candidates.size === 0) {
+            return undefined;
+        }
+
         let baseMatch: IIndexedModule | undefined;
 
-        for (const module of this.modules.values()) {
+        for (const uri of candidates) {
+            const module = this.modules.get(uri);
+
+            if (!module) {
+                continue;
+            }
+
             const modulePath = normalizeUriPath(module.uri);
 
             if (
@@ -213,10 +251,7 @@ export class WorkspaceIndex {
                 return module;
             }
 
-            if (
-                !baseMatch &&
-                path.posix.basename(modulePath) === targetBase
-            ) {
+            if (!baseMatch) {
                 baseMatch = module;
             }
         }
@@ -253,6 +288,12 @@ export class WorkspaceIndex {
     }
 
     getImportedCompletionItems(fromUri: string): CompletionItem[] {
+        const cached = this.importedCompletionCache.get(fromUri);
+
+        if (cached) {
+            return cached.slice();
+        }
+
         const result: CompletionItem[] = [];
         const seen = new Set<string>();
 
@@ -273,6 +314,7 @@ export class WorkspaceIndex {
             }
         }
 
+        this.importedCompletionCache.set(fromUri, result.slice());
         return result;
     }
 
@@ -303,6 +345,8 @@ export class WorkspaceIndex {
     }
 
     private addModuleToIndexes(module: IIndexedModule): void {
+        addUriAlias(this.modulesByBaseName, module.uri);
+
         for (const child of module.object.getChilds()) {
             const name = normalizeName(child.Name);
 
@@ -343,12 +387,19 @@ export class WorkspaceIndex {
         }
     }
 
+    private invalidateImportCaches(): void {
+        this.importedModulesCache.clear();
+        this.importedCompletionCache.clear();
+    }
+
     private removeModuleFromIndexes(uri: string): void {
         const previous = this.modules.get(uri);
 
         if (!previous) {
             return;
         }
+
+        removeUriAlias(this.modulesByBaseName, uri);
 
         for (const child of previous.object.getChilds()) {
             const name = normalizeName(child.Name);
@@ -388,6 +439,39 @@ export class WorkspaceIndex {
                 }
             });
         }
+    }
+}
+
+function addUriAlias(
+    index: Map<string, Set<string>>,
+    uri: string
+): void {
+    const baseName = path.posix.basename(normalizeUriPath(uri));
+    let values = index.get(baseName);
+
+    if (!values) {
+        values = new Set<string>();
+        index.set(baseName, values);
+    }
+
+    values.add(uri);
+}
+
+function removeUriAlias(
+    index: Map<string, Set<string>>,
+    uri: string
+): void {
+    const baseName = path.posix.basename(normalizeUriPath(uri));
+    const values = index.get(baseName);
+
+    if (!values) {
+        return;
+    }
+
+    values.delete(uri);
+
+    if (values.size === 0) {
+        index.delete(baseName);
     }
 }
 

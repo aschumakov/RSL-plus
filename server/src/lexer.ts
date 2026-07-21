@@ -30,6 +30,11 @@ export interface IRslToken {
     endCharacter: number;
 }
 
+export interface IRslLexOptions {
+    /** Не сохранять пробелы, переводы строк и BOM для фоновых модулей. */
+    includeTrivia?: boolean;
+}
+
 export interface IRslLexResult {
     tokens: IRslToken[];
     eol: "\r\n" | "\n" | "\r";
@@ -44,8 +49,12 @@ interface IPosition {
     character: number;
 }
 
-export function lexRsl(source: string): IRslLexResult {
+export function lexRsl(
+    source: string,
+    options?: IRslLexOptions
+): IRslLexResult {
     const text = source || "";
+    const includeTrivia = options?.includeTrivia !== false;
     const tokens: IRslToken[] = [];
     const lineStarts: number[] = [0];
     const position: IPosition = {
@@ -59,7 +68,11 @@ export function lexRsl(source: string): IRslLexResult {
     const hasBom = text.charCodeAt(0) === 0xFEFF;
 
     if (hasBom) {
-        pushToken(tokens, text, position, "bom", 1, lineStarts);
+        if (includeTrivia) {
+            pushToken(tokens, text, position, "bom", 1, lineStarts);
+        } else {
+            advanceWithLine(text, position, lineStarts);
+        }
     }
 
     while (position.index < text.length) {
@@ -68,7 +81,9 @@ export function lexRsl(source: string): IRslLexResult {
         if (current === "\r" || current === "\n") {
             const start = snapshot(position);
             advanceWithLine(text, position, lineStarts);
-            pushSnapshotToken(tokens, text, "newline", start, position);
+            if (includeTrivia) {
+                pushSnapshotToken(tokens, text, "newline", start, position);
+            }
             continue;
         }
 
@@ -82,10 +97,13 @@ export function lexRsl(source: string): IRslLexResult {
                     text.charAt(position.index) === "\t"
                 )
             ) {
-                advanceCharacter(position, text.charAt(position.index));
+                position.index++;
+                position.character++;
             }
 
-            pushExistingToken(tokens, text, "whitespace", start, position);
+            if (includeTrivia) {
+                pushExistingToken(tokens, text, "whitespace", start, position);
+            }
             continue;
         }
 
@@ -99,7 +117,8 @@ export function lexRsl(source: string): IRslLexResult {
                 text.charAt(position.index) !== "\r" &&
                 text.charAt(position.index) !== "\n"
             ) {
-                advanceCharacter(position, text.charAt(position.index));
+                position.index++;
+                position.character++;
             }
 
             pushSnapshotToken(tokens, text, "comment", start, position);
@@ -162,7 +181,8 @@ export function lexRsl(source: string): IRslLexResult {
                 position.index < text.length &&
                 isIdentifierPart(text.charAt(position.index))
             ) {
-                advanceCharacter(position, text.charAt(position.index));
+                position.index++;
+                position.character++;
             }
 
             pushSnapshotToken(tokens, text, "identifier", start, position);
@@ -174,9 +194,10 @@ export function lexRsl(source: string): IRslLexResult {
 
             while (
                 position.index < text.length &&
-                /[0-9A-Za-z_.]/.test(text.charAt(position.index))
+                isNumberPart(text.charAt(position.index))
             ) {
-                advanceCharacter(position, text.charAt(position.index));
+                position.index++;
+                position.character++;
             }
 
             pushSnapshotToken(tokens, text, "number", start, position);
@@ -291,15 +312,44 @@ export function normalizeIdentifier(value: string): string {
 }
 
 export function isIdentifierStart(value: string): boolean {
-    return /^[@A-Za-zА-Яа-яЁё_]$/.test(value);
+    if (!value) {
+        return false;
+    }
+
+    const code = value.charCodeAt(0);
+    return code === 64 || // @
+        code === 95 || // _
+        (code >= 65 && code <= 90) ||
+        (code >= 97 && code <= 122) ||
+        (code >= 0x0410 && code <= 0x044F) ||
+        code === 0x0401 ||
+        code === 0x0451;
 }
 
 export function isIdentifierPart(value: string): boolean {
-    return /^[@A-Za-zА-Яа-яЁё0-9_]$/.test(value);
+    return isIdentifierStart(value) || isDigit(value);
 }
 
 function isDigit(value: string): boolean {
-    return /^[0-9]$/.test(value);
+    if (!value) {
+        return false;
+    }
+
+    const code = value.charCodeAt(0);
+    return code >= 48 && code <= 57;
+}
+
+function isNumberPart(value: string): boolean {
+    if (!value) {
+        return false;
+    }
+
+    const code = value.charCodeAt(0);
+    return isDigit(value) ||
+        code === 46 || // .
+        code === 95 || // _
+        (code >= 65 && code <= 90) ||
+        (code >= 97 && code <= 122);
 }
 
 function detectEol(text: string): "\r\n" | "\n" | "\r" {
@@ -490,7 +540,7 @@ function startsWithAt(
     value: string,
     index: number
 ): boolean {
-    return source.substr(index, value.length) === value;
+    return source.startsWith(value, index);
 }
 
 function snapshot(position: IPosition): IPosition {
@@ -605,13 +655,20 @@ function decodeRslString(raw: string): string {
     const end = raw.charAt(raw.length - 1) === quote
         ? raw.length - 1
         : raw.length;
+    const body = raw.substring(1, end);
+
+    /* Большинство строк не содержит escape-последовательностей. */
+    if (body.indexOf("\\") < 0) {
+        return body;
+    }
+
     let result = "";
 
-    for (let index = 1; index < end; index++) {
-        const current = raw.charAt(index);
+    for (let index = 0; index < body.length; index++) {
+        const current = body.charAt(index);
 
-        if (current === "\\" && index + 1 < end) {
-            result += raw.charAt(index + 1);
+        if (current === "\\" && index + 1 < body.length) {
+            result += body.charAt(index + 1);
             index++;
             continue;
         }

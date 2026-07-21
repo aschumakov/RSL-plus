@@ -54,6 +54,20 @@ export interface IRslSyntaxNode {
     missingSemicolon?: boolean;
 }
 
+export interface IRslParseOptions {
+    /**
+     * Подробное дерево выражений нужно для анализа языка и тестов, но
+     * текущие LSP-provider-ы используют lexer, структуру блоков и symbol tree.
+     * Отключение дерева выражений уменьшает число объектов на горячем пути.
+     */
+    buildExpressionTree?: boolean;
+    /**
+     * Фоновые импортированные модули не требуют layout-токенов.
+     * Комментарии всё равно сохраняются, чтобы не менять разбор квадратных блоков.
+     */
+    includeTrivia?: boolean;
+}
+
 export interface IRslParseResult {
     root: IRslSyntaxNode;
     diagnostics: IRslSyntaxDiagnostic[];
@@ -99,17 +113,25 @@ const SYMBOL_OPERATORS = new Set([
  */
 export function parseRslSyntax(
     source: string,
-    lexResult?: IRslLexResult
+    lexResult?: IRslLexResult,
+    options?: IRslParseOptions
 ): IRslParseResult {
     const text = source || "";
-    const lex = lexResult || lexRsl(text);
+    const lex = lexResult || lexRsl(text, {
+        includeTrivia: options?.includeTrivia !== false
+    });
     const tokens = lex.tokens.filter(token =>
         token.kind !== "whitespace" &&
         token.kind !== "newline" &&
         token.kind !== "comment" &&
         token.kind !== "bom"
     );
-    const parser = new Parser(tokens, text, lex);
+    const parser = new Parser(
+        tokens,
+        text,
+        lex,
+        options?.buildExpressionTree !== false
+    );
     return parser.parse();
 }
 
@@ -551,7 +573,8 @@ class Parser {
     constructor(
         private tokens: IRslToken[],
         private source: string,
-        private lex: IRslLexResult
+        private lex: IRslLexResult,
+        private buildExpressionTree: boolean
     ) {}
 
     parse(): IRslParseResult {
@@ -612,7 +635,13 @@ class Parser {
 
             const before = this.index;
             const statement = this.parseStatement();
-            result.push(statement);
+
+            if (
+                this.buildExpressionTree ||
+                this.shouldRetainCompactStatement(statement)
+            ) {
+                result.push(statement);
+            }
 
             if (this.index === before) {
                 this.index++;
@@ -622,6 +651,28 @@ class Parser {
         }
 
         return result;
+    }
+
+    private shouldRetainCompactStatement(
+        statement: IRslSyntaxNode
+    ): boolean {
+        switch (statement.kind) {
+            case "ImportDeclaration":
+            case "VariableDeclaration":
+            case "ArrayDeclaration":
+            case "FileDeclaration":
+            case "RecordDeclaration":
+            case "MacroDeclaration":
+            case "ClassDeclaration":
+            case "IfStatement":
+            case "WhileStatement":
+            case "ForStatement":
+            case "WithStatement":
+            case "OnErrorClause":
+                return true;
+            default:
+                return false;
+        }
     }
 
     private parseStatement(): IRslSyntaxNode {
@@ -883,7 +934,7 @@ class Parser {
                 if (expression.length > 0) {
                     valueStart = expression[0].start;
                     valueEnd = expression[expression.length - 1].end;
-                    initializer = parseRslExpressionTokens(expression);
+                    initializer = this.parseExpression(expression);
                 }
             }
 
@@ -1370,7 +1421,7 @@ class Parser {
                 return;
             }
 
-            const expression = parseRslExpressionTokens(part);
+            const expression = this.parseExpression(part);
 
             if (expression) {
                 result.push(expression);
@@ -1456,7 +1507,7 @@ class Parser {
                 1,
                 clause.length > 1 ? clause.length - 1 : 1
             );
-            target = parseRslExpressionTokens(inner);
+            target = this.parseExpression(inner);
 
             if (!target) {
                 this.error(
@@ -1550,7 +1601,7 @@ class Parser {
                 BLOCK_BOUNDARIES
             );
             used.push(...expressionTokens);
-            expression = parseRslExpressionTokens(expressionTokens);
+            expression = this.parseExpression(expressionTokens);
         }
 
         return this.node(
@@ -1575,13 +1626,13 @@ class Parser {
             used.push(this.take());
         }
 
-        const expression = parseRslExpressionTokens(expressionTokens);
+        const expression = this.parseExpression(expressionTokens);
         return this.node(
             "ExpressionStatement",
             start,
             used[used.length - 1].end,
             expression ? [expression] : [],
-            used
+            this.buildExpressionTree ? used : []
         );
     }
 
@@ -1864,6 +1915,14 @@ class Parser {
         return !WORD_OPERATORS.has(word) || STATEMENT_KEYWORDS.has(word);
     }
 
+    private parseExpression(
+        tokens: IRslToken[]
+    ): IRslSyntaxNode | undefined {
+        return this.buildExpressionTree
+            ? parseRslExpressionTokens(tokens)
+            : undefined;
+    }
+
     private parseRequiredCondition(
         used: IRslToken[],
         owner: string
@@ -1882,7 +1941,7 @@ class Parser {
             1,
             clause.length > 1 ? clause.length - 1 : 1
         );
-        return parseRslExpressionTokens(inner);
+        return this.parseExpression(inner);
     }
 
     private consumeBalanced(

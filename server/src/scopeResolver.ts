@@ -6,7 +6,6 @@ import {
 import { CBase } from "./common";
 import {
     IRslToken,
-    significantTokens,
     tokenAtOffset,
     normalizeIdentifier
 } from "./lexer";
@@ -22,16 +21,23 @@ export interface IResolvedSymbol {
     token: IRslToken;
 }
 
+/*
+ * CBase после построения syntax tree фактически неизменяем. Кэши WeakMap
+ * не удерживают старые деревья после обновления документа.
+ */
+const objectChildrenCache = new WeakMap<CBase, CBase[]>();
+const childrenByNameCache = new WeakMap<CBase, Map<string, CBase[]>>();
+
 /**
  * Разрешает имена с учётом областей видимости RSL.
  *
- * Порядок поиска:
- * 1. локальные объявления текущего macro/method;
- * 2. члены текущего class;
- * 3. глобальные объявления текущего модуля;
- * 4. публичные объявления прямых и транзитивных Import.
+ * Горячий путь используется semantic tokens для каждого идентификатора,
+ * поэтому здесь нельзя заново фильтровать весь token stream или линейно
+ * перебирать все объявления scope при каждом вызове.
  */
 export class RslScopeResolver {
+    private tokensByModule = new WeakMap<IIndexedModule, IRslToken[]>();
+
     constructor(private index: WorkspaceIndex) {}
 
     resolveAt(
@@ -45,14 +51,15 @@ export class RslScopeResolver {
             return undefined;
         }
 
-        const tokens = significantTokens(module.lex.tokens);
+        const tokens = this.getTokens(module);
         const token = tokenAtOffset(tokens, offset, true);
 
         if (!token || token.kind !== "identifier") {
             return undefined;
         }
 
-        const receiver = this.getReceiverToken(tokens, token);
+        const tokenIndex = findTokenIndex(tokens, token);
+        const receiver = this.getReceiverToken(tokens, tokenIndex);
 
         if (receiver) {
             const member = this.resolveMember(
@@ -79,11 +86,7 @@ export class RslScopeResolver {
         );
 
         if (local) {
-            return {
-                uri,
-                object: local,
-                token
-            };
+            return { uri, object: local, token };
         }
 
         const imported = this.index.findImportedSymbols(
@@ -111,11 +114,11 @@ export class RslScopeResolver {
             return [];
         }
 
-        const tokens = significantTokens(module.lex.tokens);
-        const dot = this.getDotBeforeOffset(tokens, offset);
+        const tokens = this.getTokens(module);
+        const dotIndex = this.getDotIndexBeforeOffset(tokens, offset);
 
-        if (dot) {
-            const receiver = this.getPreviousIdentifier(tokens, dot);
+        if (dotIndex >= 0) {
+            const receiver = this.getPreviousIdentifier(tokens, dotIndex);
 
             if (receiver) {
                 const classObject = this.resolveReceiverClass(
@@ -150,14 +153,11 @@ export class RslScopeResolver {
 
         for (const scope of scopes) {
             for (const child of scope.getChilds()) {
-                if (
-                    child.Private &&
-                    scope === tree
-                ) {
+                if (child.Private && scope === tree) {
                     continue;
                 }
 
-                if (!isVisibleAt(child, offset, scope === tree)) {
+                if (!isVisibleAt(child, offset)) {
                     continue;
                 }
 
@@ -178,14 +178,13 @@ export class RslScopeResolver {
         const scopes = getScopeChain(tree, offset).reverse();
 
         for (const scope of scopes) {
-            const candidates = scope
-                .getChilds()
-                .filter(child =>
-                    normalizeIdentifier(child.Name) === normalized &&
-                    isVisibleAt(child, offset, scope === tree)
-                );
+            const candidates = getChildrenByName(scope).get(normalized);
 
-            const selected = selectBestCandidate(candidates, offset);
+            if (!candidates || candidates.length === 0) {
+                continue;
+            }
+
+            const selected = selectBestVisibleCandidate(candidates, offset);
 
             if (selected) {
                 return selected;
@@ -193,6 +192,20 @@ export class RslScopeResolver {
         }
 
         return undefined;
+    }
+
+    private getTokens(module: IIndexedModule): IRslToken[] {
+        let result = this.tokensByModule.get(module);
+
+        if (!result) {
+            /* syntax.tokens уже не содержит trivia/comments. */
+            result = module.syntax.tokens.filter(token =>
+                token.kind !== "square"
+            );
+            this.tokensByModule.set(module, result);
+        }
+
+        return result;
     }
 
     private resolveMember(
@@ -213,25 +226,21 @@ export class RslScopeResolver {
             return undefined;
         }
 
-        const normalized = normalizeIdentifier(memberName);
         const allowPrivate = this.canAccessPrivateMembers(
             uri,
             tree,
             offset,
             classSymbol
         );
-        const member = classSymbol.object
-            .getChilds()
-            .find(child =>
-                normalizeIdentifier(child.Name) === normalized &&
-                (allowPrivate || !child.Private)
-            );
+        const candidates = getChildrenByName(classSymbol.object).get(
+            normalizeIdentifier(memberName)
+        );
+        const member = candidates
+            ? candidates.find(child => allowPrivate || !child.Private)
+            : undefined;
 
         return member
-            ? {
-                uri: classSymbol.uri,
-                object: member
-            }
+            ? { uri: classSymbol.uri, object: member }
             : undefined;
     }
 
@@ -251,10 +260,7 @@ export class RslScopeResolver {
                 );
 
             return currentClass
-                ? {
-                    uri,
-                    object: currentClass
-                }
+                ? { uri, object: currentClass }
                 : undefined;
         }
 
@@ -273,10 +279,7 @@ export class RslScopeResolver {
         if (!typeName || typeName === "variant") {
             const module = this.index.getModule(uri);
             typeName = module
-                ? inferDeclaredType(
-                    significantTokens(module.lex.tokens),
-                    receiverObject
-                )
+                ? inferDeclaredType(this.getTokens(module), receiverObject)
                 : "";
         }
 
@@ -284,16 +287,13 @@ export class RslScopeResolver {
             return undefined;
         }
 
-        const localClass = tree.getChilds().find(child =>
-            child.ObjKind === CompletionItemKind.Class &&
-            normalizeIdentifier(child.Name) === typeName
-        );
+        const localClass = (getChildrenByName(tree).get(typeName) || [])
+            .find(child =>
+                child.ObjKind === CompletionItemKind.Class
+            );
 
         if (localClass) {
-            return {
-                uri,
-                object: localClass
-            };
+            return { uri, object: localClass };
         }
 
         const imported = this.index.findImportedSymbols(uri, typeName)
@@ -332,10 +332,8 @@ export class RslScopeResolver {
 
     private getReceiverToken(
         tokens: IRslToken[],
-        token: IRslToken
+        tokenIndex: number
     ): IRslToken | undefined {
-        const tokenIndex = tokens.indexOf(token);
-
         if (tokenIndex < 2) {
             return undefined;
         }
@@ -346,59 +344,46 @@ export class RslScopeResolver {
         return dot.kind === "symbol" &&
             dot.raw === "." &&
             receiver.kind === "identifier"
-            ? receiver
-            : undefined;
+                ? receiver
+                : undefined;
     }
 
-    private getDotBeforeOffset(
+    private getDotIndexBeforeOffset(
         tokens: IRslToken[],
         offset: number
-    ): IRslToken | undefined {
-        let candidateIndex = -1;
-
-        for (let index = 0; index < tokens.length; index++) {
-            if (tokens[index].start > offset) {
-                break;
-            }
-
-            candidateIndex = index;
-        }
+    ): number {
+        let candidateIndex = upperBoundByStart(tokens, offset) - 1;
 
         if (candidateIndex < 0) {
-            return undefined;
+            return -1;
         }
 
         const candidate = tokens[candidateIndex];
 
         if (candidate.kind === "symbol" && candidate.raw === ".") {
-            return candidate;
+            return candidateIndex;
         }
 
-        if (
-            candidate.kind === "identifier" &&
-            candidateIndex > 0
-        ) {
+        if (candidate.kind === "identifier" && candidateIndex > 0) {
             const previous = tokens[candidateIndex - 1];
 
             if (previous.kind === "symbol" && previous.raw === ".") {
-                return previous;
+                return candidateIndex - 1;
             }
         }
 
-        return undefined;
+        return -1;
     }
 
     private getPreviousIdentifier(
         tokens: IRslToken[],
-        token: IRslToken
+        tokenIndex: number
     ): IRslToken | undefined {
-        const index = tokens.indexOf(token);
-
-        if (index <= 0) {
+        if (tokenIndex <= 0) {
             return undefined;
         }
 
-        const previous = tokens[index - 1];
+        const previous = tokens[tokenIndex - 1];
         return previous.kind === "identifier"
             ? previous
             : undefined;
@@ -413,10 +398,9 @@ export function getScopeChain(
     let current = root;
 
     while (true) {
-        const nested = current.getChilds().find(child =>
-            child.isObject() &&
-            child.Range.start <= offset &&
-            offset <= child.Range.end
+        const nested = findContainingObject(
+            getObjectChildren(current),
+            offset
         );
 
         if (!nested) {
@@ -430,17 +414,83 @@ export function getScopeChain(
     return result;
 }
 
+function getObjectChildren(scope: CBase): CBase[] {
+    let result = objectChildrenCache.get(scope);
+
+    if (!result) {
+        result = scope.getChilds()
+            .filter(child => child.isObject())
+            .sort((left, right) =>
+                left.Range.start - right.Range.start
+            );
+        objectChildrenCache.set(scope, result);
+    }
+
+    return result;
+}
+
+
+function findContainingObject(
+    objects: CBase[],
+    offset: number
+): CBase | undefined {
+    let left = 0;
+    let right = objects.length - 1;
+    let candidate = -1;
+
+    while (left <= right) {
+        const middle = (left + right) >>> 1;
+
+        if (objects[middle].Range.start <= offset) {
+            candidate = middle;
+            left = middle + 1;
+        } else {
+            right = middle - 1;
+        }
+    }
+
+    if (candidate < 0) {
+        return undefined;
+    }
+
+    const object = objects[candidate];
+    return offset <= object.Range.end ? object : undefined;
+}
+
+function getChildrenByName(scope: CBase): Map<string, CBase[]> {
+    let result = childrenByNameCache.get(scope);
+
+    if (!result) {
+        result = new Map<string, CBase[]>();
+
+        for (const child of scope.getChilds()) {
+            const name = normalizeIdentifier(child.Name);
+            let values = result.get(name);
+
+            if (!values) {
+                values = [];
+                result.set(name, values);
+            }
+
+            values.push(child);
+        }
+
+        childrenByNameCache.set(scope, result);
+    }
+
+    return result;
+}
 
 function inferDeclaredType(
     tokens: IRslToken[],
     object: CBase
 ): string {
-    const nameIndex = tokens.findIndex(token =>
-        token.kind === "identifier" &&
-        token.start === object.Range.start
-    );
+    const nameIndex = lowerBoundByStart(tokens, object.Range.start);
 
-    if (nameIndex < 0) {
+    if (
+        nameIndex >= tokens.length ||
+        tokens[nameIndex].start !== object.Range.start
+    ) {
         return "";
     }
 
@@ -449,39 +499,36 @@ function inferDeclaredType(
     for (let index = nameIndex + 1; index < tokens.length; index++) {
         const token = tokens[index];
 
-        if (token.kind === "symbol") {
-            if (token.raw === "(") {
-                depth++;
-                continue;
-            }
+        if (token.kind !== "symbol") {
+            continue;
+        }
 
-            if (token.raw === ")" && depth > 0) {
-                depth--;
-                continue;
-            }
+        if (token.raw === "(") {
+            depth++;
+            continue;
+        }
 
-            if (depth === 0 && (token.raw === ";" || token.raw === ",")) {
-                break;
-            }
+        if (token.raw === ")" && depth > 0) {
+            depth--;
+            continue;
+        }
 
-            if (depth === 0 && (token.raw === ":" || token.raw === "=")) {
-                const typeToken = tokens[index + 1];
+        if (depth === 0 && (token.raw === ";" || token.raw === ",")) {
+            break;
+        }
 
-                return typeToken && typeToken.kind === "identifier"
-                    ? normalizeIdentifier(typeToken.value)
-                    : "";
-            }
+        if (depth === 0 && (token.raw === ":" || token.raw === "=")) {
+            const typeToken = tokens[index + 1];
+            return typeToken && typeToken.kind === "identifier"
+                ? normalizeIdentifier(typeToken.value)
+                : "";
         }
     }
 
     return "";
 }
 
-function isVisibleAt(
-    object: CBase,
-    offset: number,
-    _isModuleScope: boolean
-): boolean {
+function isVisibleAt(object: CBase, offset: number): boolean {
     if (
         object.ObjKind === CompletionItemKind.Variable ||
         object.ObjKind === CompletionItemKind.Constant ||
@@ -491,25 +538,92 @@ function isVisibleAt(
         return object.Range.start <= offset;
     }
 
-    /* Macro/Class/Method разрешаются независимо от порядка объявления. */
     return true;
 }
 
-function selectBestCandidate(
+function selectBestVisibleCandidate(
     candidates: CBase[],
     offset: number
 ): CBase | undefined {
-    if (candidates.length === 0) {
-        return undefined;
+    let firstVisible: CBase | undefined;
+    let nearestPreceding: CBase | undefined;
+
+    for (const candidate of candidates) {
+        if (!isVisibleAt(candidate, offset)) {
+            continue;
+        }
+
+        if (!firstVisible) {
+            firstVisible = candidate;
+        }
+
+        if (
+            candidate.Range.start <= offset &&
+            (
+                !nearestPreceding ||
+                candidate.Range.start > nearestPreceding.Range.start
+            )
+        ) {
+            nearestPreceding = candidate;
+        }
     }
 
-    const preceding = candidates
-        .filter(candidate => candidate.Range.start <= offset)
-        .sort((left, right) =>
-            right.Range.start - left.Range.start
-        );
+    return nearestPreceding || firstVisible;
+}
 
-    return preceding[0] || candidates[0];
+function findTokenIndex(
+    tokens: IRslToken[],
+    token: IRslToken
+): number {
+    const index = lowerBoundByStart(tokens, token.start);
+
+    for (let current = index; current < tokens.length; current++) {
+        const candidate = tokens[current];
+
+        if (candidate.start !== token.start) {
+            break;
+        }
+
+        if (candidate === token || candidate.end === token.end) {
+            return current;
+        }
+    }
+
+    return -1;
+}
+
+function lowerBoundByStart(tokens: IRslToken[], start: number): number {
+    let left = 0;
+    let right = tokens.length;
+
+    while (left < right) {
+        const middle = (left + right) >>> 1;
+
+        if (tokens[middle].start < start) {
+            left = middle + 1;
+        } else {
+            right = middle;
+        }
+    }
+
+    return left;
+}
+
+function upperBoundByStart(tokens: IRslToken[], start: number): number {
+    let left = 0;
+    let right = tokens.length;
+
+    while (left < right) {
+        const middle = (left + right) >>> 1;
+
+        if (tokens[middle].start <= start) {
+            left = middle + 1;
+        } else {
+            right = middle;
+        }
+    }
+
+    return left;
 }
 
 function deduplicateCompletionItems(
