@@ -27,6 +27,7 @@ import {
     IIndexedModule,
     WorkspaceIndex
 } from "./workspaceIndex";
+import { parseRslSyntax } from "./syntaxParser";
 
 interface IBlockEntry {
     keyword: string;
@@ -114,6 +115,8 @@ export function buildRslDiagnostics(
 
     const result: Diagnostic[] = [];
 
+    addSyntaxParserDiagnostics(module, result);
+
     if (options.deprecatedDeclarations) {
         addDeprecatedDeclarationDiagnostics(module, result);
     }
@@ -147,6 +150,25 @@ export function buildRslDiagnostics(
     }
 
     return deduplicateDiagnostics(result).slice(0, options.maxProblems);
+}
+
+
+function addSyntaxParserDiagnostics(
+    module: IIndexedModule,
+    result: Diagnostic[]
+): void {
+    const parsed = parseRslSyntax(module.source);
+
+    parsed.diagnostics.forEach(item => {
+        result.push(createOffsetDiagnostic(
+            module,
+            item.start,
+            item.end,
+            DiagnosticSeverity.Error,
+            item.message,
+            item.code
+        ));
+    });
 }
 
 function addDeprecatedDeclarationDiagnostics(

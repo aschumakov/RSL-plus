@@ -1,25 +1,24 @@
-# Git
 .git/**
 .github/**
-
-# VS Code
 .vscode/**
-
-# Tests
+.gitignore
 tests/**
-
-# Sources
 client/src/**
 server/src/**
 **/*.ts
 **/*.map
-
-# Development
+/node_modules/**
+client/node_modules/@types/**
+client/node_modules/undici-types/**
+server/node_modules/@types/**
+server/node_modules/undici-types/**
 tsconfig*.json
+tslint.json
 package-lock.json
+client/package-lock.json
+server/package-lock.json
 README-1.1.3.md
 README-FOR-FIX.md
 MANIFEST.json
-
-# Temporary
 *.zip
+*.vsix
