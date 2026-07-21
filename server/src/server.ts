@@ -6,6 +6,7 @@ import {
     CodeActionKind,
     CompletionItem,
     Definition,
+    Diagnostic,
     DidChangeConfigurationNotification,
     FileChangeType,
     FormattingOptions,
@@ -58,16 +59,30 @@ const documentSettings = new Map<string, Promise<IRslSettings>>();
 const parseGeneration = new Map<string, number>();
 const parsedVersions = new Map<string, number>();
 const parseTimers = new Map<string, NodeJS.Timeout>();
+const diagnosticTimers = new Map<string, NodeJS.Timeout>();
+const diagnosticsCache = new Map<string, Diagnostic[]>();
 const pendingImportNames = new Set<string>();
 const requestedImportNames = new Set<string>();
 const workspaceFileUris = new Set<string>();
-const PARSE_DEBOUNCE_MS = 200;
+const externalModuleQueue: string[] = [];
+const queuedExternalModules = new Set<string>();
+
+/*
+ * Разбор открытого документа выполняется быстро после паузы ввода.
+ * Более тяжёлые семантические диагностики запускаются отдельно, когда
+ * пользователь уже закончил короткую серию нажатий.
+ */
+const PARSE_DEBOUNCE_MS = 80;
+const DIAGNOSTICS_DEBOUNCE_MS = 300;
+const DEPENDENT_DIAGNOSTICS_DEBOUNCE_MS = 500;
 
 let globalSettings: IRslSettings = defaultSettings;
 let hasConfigurationCapability = false;
 let hasWorkspaceFolderCapability = false;
 let workFolderOpened = false;
 let clientReady = false;
+let externalModuleLoadRunning = false;
+let activeDocumentUri: string | undefined;
 
 interface IPositionContext {
     document: TextDocument;
@@ -127,6 +142,53 @@ function notifyClient(method: string, params?: unknown): void {
     }
 }
 
+/**
+ * Импортируемые модули разбираются последовательно в фоне. Это не даёт
+ * большой цепочке IMPORT занять event loop и задержать подсказки активного
+ * редактора.
+ */
+function enqueueExternalModuleLoad(uri: string): void {
+    if (
+        !uri ||
+        workspaceIndex.getModule(uri) ||
+        queuedExternalModules.has(uri)
+    ) {
+        return;
+    }
+
+    queuedExternalModules.add(uri);
+    externalModuleQueue.push(uri);
+    processExternalModuleQueue();
+}
+
+function processExternalModuleQueue(): void {
+    if (externalModuleLoadRunning) {
+        return;
+    }
+
+    const uri = externalModuleQueue.shift();
+
+    if (!uri) {
+        return;
+    }
+
+    externalModuleLoadRunning = true;
+
+    setTimeout(() => {
+        loadExternalModule(uri).then(
+            undefined,
+            error => logMessage(
+                `Background import load failed: ${uri}\n` +
+                errorToString(error)
+            )
+        ).finally(() => {
+            queuedExternalModules.delete(uri);
+            externalModuleLoadRunning = false;
+            processExternalModuleQueue();
+        });
+    }, 0);
+}
+
 function flushPendingImports(): void {
     if (!clientReady || globalSettings.import !== "ДА") {
         return;
@@ -145,13 +207,7 @@ function flushPendingImports(): void {
         requestedImportNames.add(normalizedName);
 
         if (indexedUri) {
-            loadExternalModule(indexedUri).catch(error => {
-                requestedImportNames.delete(normalizedName);
-                logMessage(
-                    `Pending import load failed: ${indexedUri}\n` +
-                    errorToString(error)
-                );
-            });
+            enqueueExternalModuleLoad(indexedUri);
         } else {
             notifyClient("getFilebyName", name);
         }
@@ -175,6 +231,53 @@ connection.onNotification("clientReady", () => {
     notifyClient("updateStatusBar", workspaceIndex.size);
 });
 
+/**
+ * VS Code сортирует группы Problems по важности и пути файла и не даёт
+ * расширению поставить активный URI первым. Поэтому при активном RSL-файле
+ * публикуем в Problems только его диагностики. При переходе в другой тип
+ * файла снова показываются диагностики всех открытых RSL-документов.
+ */
+connection.onNotification(
+    "activeDocumentChanged",
+    (uri: string | null | undefined) => {
+        const nextUri = typeof uri === "string" && uri.length > 0
+            ? uri
+            : undefined;
+        const previousUri = activeDocumentUri;
+
+        if (previousUri === nextUri) {
+            return;
+        }
+
+        activeDocumentUri = nextUri;
+
+        if (previousUri && previousUri !== nextUri) {
+            connection.sendDiagnostics({
+                uri: previousUri,
+                diagnostics: []
+            });
+        }
+
+        if (activeDocumentUri) {
+            const cached = diagnosticsCache.get(activeDocumentUri);
+
+            if (cached) {
+                if (cached.length > 0) {
+                    showActiveDiagnosticsOnly(activeDocumentUri, cached);
+                } else {
+                    showAllCachedDiagnostics();
+                }
+            } else {
+                /* Старый список остаётся видимым, пока активный файл считается. */
+                scheduleDiagnostics(activeDocumentUri, 0);
+            }
+            return;
+        }
+
+        showAllCachedDiagnostics();
+    }
+);
+
 export function GetFileByNameRequest(name: string): void {
     if (
         !workFolderOpened ||
@@ -190,13 +293,7 @@ export function GetFileByNameRequest(name: string): void {
 
     if (indexedUri && !requestedImportNames.has(normalizedName)) {
         requestedImportNames.add(normalizedName);
-        loadExternalModule(indexedUri).catch(error => {
-            requestedImportNames.delete(normalizedName);
-            logMessage(
-                `Indexed import load failed: ${indexedUri}\n` +
-                errorToString(error)
-            );
-        });
+        enqueueExternalModuleLoad(indexedUri);
         return;
     }
 
@@ -339,9 +436,9 @@ connection.onDidChangeConfiguration(change => {
         );
     }
 
+    /* Настройки диагностик не требуют повторного синтаксического разбора. */
     documents.all().forEach(document => {
-        parsedVersions.delete(document.uri);
-        scheduleValidation(document);
+        scheduleDiagnostics(document.uri, 0);
     });
 });
 
@@ -374,6 +471,8 @@ documents.onDidClose(event => {
     parsedVersions.delete(uri);
     parseGeneration.set(uri, (parseGeneration.get(uri) || 0) + 1);
     cancelScheduledValidation(uri);
+    cancelScheduledDiagnostics(uri);
+    diagnosticsCache.delete(uri);
     workspaceIndex.markClosed(uri);
     connection.sendDiagnostics({
         uri,
@@ -394,12 +493,141 @@ function cancelScheduledValidation(uri: string): void {
     }
 }
 
+function cancelScheduledDiagnostics(uri: string): void {
+    const timer = diagnosticTimers.get(uri);
+
+    if (timer) {
+        clearTimeout(timer);
+        diagnosticTimers.delete(uri);
+    }
+}
+
+function showAllCachedDiagnostics(): void {
+    documents.all().forEach(document => {
+        const cached = diagnosticsCache.get(document.uri);
+
+        if (cached) {
+            connection.sendDiagnostics({
+                uri: document.uri,
+                diagnostics: cached
+            });
+        }
+    });
+}
+
+function showActiveDiagnosticsOnly(
+    uri: string,
+    diagnostics: Diagnostic[]
+): void {
+    /*
+     * У Problems нет API пользовательской сортировки ресурсов. Если в
+     * активном файле есть проблемы, временно скрываем остальные группы,
+     * сохраняя их в кэше для мгновенного переключения.
+     */
+    documents.all().forEach(document => {
+        if (document.uri !== uri) {
+            connection.sendDiagnostics({
+                uri: document.uri,
+                diagnostics: []
+            });
+        }
+    });
+
+    connection.sendDiagnostics({ uri, diagnostics });
+}
+
+function publishDiagnostics(uri: string, diagnostics: Diagnostic[]): void {
+    diagnosticsCache.set(uri, diagnostics);
+
+    if (!activeDocumentUri) {
+        connection.sendDiagnostics({ uri, diagnostics });
+        return;
+    }
+
+    if (activeDocumentUri === uri) {
+        if (diagnostics.length > 0) {
+            showActiveDiagnosticsOnly(uri, diagnostics);
+        } else {
+            showAllCachedDiagnostics();
+        }
+        return;
+    }
+
+    const activeDiagnostics = diagnosticsCache.get(activeDocumentUri);
+
+    if (activeDiagnostics && activeDiagnostics.length > 0) {
+        connection.sendDiagnostics({ uri, diagnostics: [] });
+    } else {
+        connection.sendDiagnostics({ uri, diagnostics });
+    }
+}
+
+function scheduleDiagnostics(
+    uri: string,
+    delay: number = DIAGNOSTICS_DEBOUNCE_MS
+): void {
+    cancelScheduledDiagnostics(uri);
+
+    const timer = setTimeout(() => {
+        diagnosticTimers.delete(uri);
+        runDiagnostics(uri).catch(error => {
+            logMessage(
+                `Diagnostics failed: ${uri}\n${errorToString(error)}`
+            );
+        });
+    }, Math.max(0, delay));
+
+    diagnosticTimers.set(uri, timer);
+}
+
+async function runDiagnostics(uri: string): Promise<void> {
+    const document = documents.get(uri);
+    const module = workspaceIndex.getModule(uri);
+
+    if (!document || !module || module.version !== document.version) {
+        return;
+    }
+
+    const settings = await getDocumentSettings(uri);
+    const currentDocument = documents.get(uri);
+    const currentModule = workspaceIndex.getModule(uri);
+
+    if (
+        !currentDocument ||
+        !currentModule ||
+        currentDocument.version !== module.version ||
+        currentModule.version !== module.version
+    ) {
+        return;
+    }
+
+    globalSettings = settings || defaultSettings;
+    const started = Date.now();
+    const diagnostics = buildRslDiagnostics(
+        currentModule,
+        workspaceIndex,
+        globalSettings.diagnostics
+    );
+
+    publishDiagnostics(uri, diagnostics);
+
+    if (globalSettings.import === "ДА") {
+        currentModule.imports.forEach(GetFileByNameRequest);
+    }
+
+    logMessage(
+        `Diagnostics: ${uri}; version=${currentModule.version}; ` +
+        `ms=${Date.now() - started}; count=${diagnostics.length}`
+    );
+}
+
 function scheduleValidation(document: TextDocument): void {
     const uri = document.uri;
     const version = document.version;
     const generation = (parseGeneration.get(uri) || 0) + 1;
     parseGeneration.set(uri, generation);
     cancelScheduledValidation(uri);
+    cancelScheduledDiagnostics(uri);
 
     const timer = setTimeout(() => {
         parseTimers.delete(uri);
@@ -433,13 +661,6 @@ async function validateTextDocument(
         return;
     }
 
-    const settings = await getDocumentSettings(uri);
-
-    if (parseGeneration.get(uri) !== generation) {
-        return;
-    }
-
-    globalSettings = settings || defaultSettings;
     const text = document.getText();
     const started = Date.now();
     const wasKnown = !!workspaceIndex.getModule(uri);
@@ -458,19 +679,35 @@ async function validateTextDocument(
     );
     parsedVersions.set(uri, version);
 
-    if (globalSettings.import === "ДА") {
-        indexed.imports.forEach(GetFileByNameRequest);
-    }
-
-    connection.sendDiagnostics({
-        uri,
-        diagnostics: buildRslDiagnostics(
-            indexed,
-            workspaceIndex,
-            globalSettings.diagnostics
-        )
-    });
+    /*
+     * Дерево становится доступно completion/hover сразу. Диагностики и
+     * разрешение IMPORT выполняются после отдельной паузы и не задерживают
+     * визуальный отклик редактора.
+     */
+    scheduleDiagnostics(uri);
     notifyClient("updateStatusBar", workspaceIndex.size);
+
+    getDocumentSettings(uri).then(settings => {
+        const current = workspaceIndex.getModule(uri);
+
+        if (
+            !current ||
+            current.version !== version ||
+            parseGeneration.get(uri) !== generation
+        ) {
+            return;
+        }
+
+        globalSettings = settings || defaultSettings;
+
+        if (globalSettings.import === "ДА") {
+            indexed.imports.forEach(GetFileByNameRequest);
+        }
+    }).catch(error => {
+        logMessage(
+            `Settings read failed: ${uri}\n${errorToString(error)}`
+        );
+    });
 
     if (!wasKnown) {
         refreshOpenDependents(uri);
@@ -494,6 +731,7 @@ async function ensureDocumentParsed(
     }
 
     cancelScheduledValidation(document.uri);
+    cancelScheduledDiagnostics(document.uri);
     const generation = (parseGeneration.get(document.uri) || 0) + 1;
     parseGeneration.set(document.uri, generation);
     await validateTextDocument(document, generation);
@@ -528,7 +766,9 @@ async function handleWatchedFileChange(
         workspaceIndex.unregisterWorkspaceFile(uri);
         workspaceIndex.removeModule(uri);
         parsedVersions.delete(uri);
-        dependents.forEach(refreshOpenDocument);
+        dependents.forEach(uri =>
+            scheduleDiagnostics(uri, DEPENDENT_DIAGNOSTICS_DEBOUNCE_MS)
+        );
         notifyClient("updateStatusBar", workspaceIndex.size);
         return;
     }
@@ -544,7 +784,9 @@ async function handleWatchedFileChange(
         await loadExternalModule(uri);
     }
 
-    dependents.forEach(refreshOpenDocument);
+    dependents.forEach(uri =>
+        scheduleDiagnostics(uri, DEPENDENT_DIAGNOSTICS_DEBOUNCE_MS)
+    );
 }
 
 async function loadExternalModule(uri: string): Promise<void> {
@@ -580,18 +822,14 @@ async function loadExternalModule(uri: string): Promise<void> {
 }
 
 function refreshOpenDependents(uri: string): void {
-    workspaceIndex.getDependents(uri).forEach(refreshOpenDocument);
-}
-
-function refreshOpenDocument(uri: string): void {
-    const document = documents.get(uri);
-
-    if (!document) {
-        return;
-    }
-
-    parsedVersions.delete(uri);
-    scheduleValidation(document);
+    workspaceIndex.getDependents(uri).forEach(dependentUri => {
+        if (documents.get(dependentUri)) {
+            scheduleDiagnostics(
+                dependentUri,
+                DEPENDENT_DIAGNOSTICS_DEBOUNCE_MS
+            );
+        }
+    });
 }
 
 async function ensureWorkspaceModulesLoaded(): Promise<void> {

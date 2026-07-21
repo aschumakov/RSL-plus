@@ -22,6 +22,7 @@ import {
 
 
 let client: LanguageClient;
+let languageClientStarted = false;
 let activeEditor: TextEditor | undefined = window.activeTextEditor;
 let myStatusBarItem: StatusBarItem;
 
@@ -105,6 +106,34 @@ async function quickOpen(value: string): Promise<void> {
 /**
  * Показывает список файлов, известных language server.
  */
+function activeRslDocumentUri(): string | null {
+    if (
+        activeEditor === undefined ||
+        activeEditor.document.languageId !== "rsl"
+    ) {
+        return null;
+    }
+
+    return activeEditor.document.uri.toString();
+}
+
+
+/**
+ * Language server использует активный URI, чтобы Problems не терял текущий
+ * файл среди групп, которые VS Code сортирует самостоятельно.
+ */
+async function notifyActiveDocument(): Promise<void> {
+    if (!languageClientStarted || client === undefined) {
+        return;
+    }
+
+    await client.sendNotification(
+        "activeDocumentChanged",
+        activeRslDocumentUri()
+    );
+}
+
+
 async function showQuickPick(): Promise<void> {
     if (client === undefined) {
         return;
@@ -226,6 +255,11 @@ export function activate(context: ExtensionContext): void {
 
     client.start().then(
         async () => {
+            languageClientStarted = true;
+
+            /* Активный файл известен серверу до фонового обхода workspace. */
+            await notifyActiveDocument();
+
             const workspaceFiles = await workspace.findFiles(
                 "**/*.mac",
                 "**/{.git,node_modules,out}/**"
@@ -267,6 +301,13 @@ export function activate(context: ExtensionContext): void {
     context.subscriptions.push(
         window.onDidChangeActiveTextEditor(editor => {
             activeEditor = editor;
+            notifyActiveDocument().then(
+                undefined,
+                error => console.error(
+                    "RSL: active document notification failed",
+                    error
+                )
+            );
         })
     );
 
@@ -519,6 +560,8 @@ async function getFilebyName(
 
 export function deactivate():
     Promise<void> | undefined {
+    languageClientStarted = false;
+
     if (client === undefined) {
         return undefined;
     }
