@@ -10,18 +10,19 @@ import { WorkspaceIndex } from "./workspaceIndex";
 
 /**
  * Поиск ссылок по уже загруженному workspace index.
- * Перед вызовом server.ts при необходимости лениво индексирует остальные .mac.
+ * Фоновый WorkspaceModuleLoader наполняет индекс независимо от запроса.
  */
 export function findRslReferences(
     index: WorkspaceIndex,
     resolver: RslScopeResolver,
     uri: string,
     offset: number,
-    includeDeclaration: boolean
+    includeDeclaration: boolean,
+    isCancelled: () => boolean = () => false
 ): Location[] {
     const module = index.getModule(uri);
 
-    if (!module) {
+    if (!module || isCancelled()) {
         return [];
     }
 
@@ -31,7 +32,7 @@ export function findRslReferences(
         offset
     );
 
-    if (!target) {
+    if (!target || isCancelled()) {
         return [];
     }
 
@@ -44,7 +45,15 @@ export function findRslReferences(
     const seen = new Set<string>();
 
     for (const candidateModule of index.getIndexedModules()) {
+        if (isCancelled()) {
+            return [];
+        }
+
         for (const token of candidateModule.syntax.tokens) {
+            if (isCancelled()) {
+                return [];
+            }
+
             if (
                 token.kind !== "identifier" ||
                 normalizeIdentifier(token.value) !== targetName
@@ -108,7 +117,6 @@ export function findRslReferences(
 
     return result.sort(compareLocations);
 }
-
 
 function findDeclarationToken(
     module: { syntax: { tokens: Array<{

@@ -10,6 +10,7 @@ import {
 } from "vscode-languageserver";
 
 import { buildRslCodeActions } from "./codeActions";
+import { RslQuickFixRegistry } from "./quickFixRegistry";
 import type { IRslSyntaxNode } from "./syntaxParser";
 import type { IIndexedModule } from "./workspaceIndex";
 
@@ -27,44 +28,32 @@ interface IVariableDeclarationMatch {
 }
 
 /**
- * Дополняет базовые Quick Fixes безопасным удалением переменной из составного
- * объявления и удалением одиночного многострочного объявления целиком.
+ * Единый реестр Quick Fix. Legacy-провайдер остаётся fallback, а новые
+ * исправления регистрируются по diagnostic.code без второго switch.
  */
+const quickFixRegistry = new RslQuickFixRegistry();
+quickFixRegistry.register(
+    "unused-declaration",
+    (module, diagnostic) => createRemoveUnusedDeclarationAction(
+        module,
+        diagnostic
+    )
+);
+quickFixRegistry.setFallback((module, diagnostic, params) =>
+    buildRslCodeActions(module, {
+        ...params,
+        context: {
+            ...params.context,
+            diagnostics: [diagnostic]
+        }
+    })
+);
+
 export function buildEnhancedRslCodeActions(
     module: IIndexedModule,
     params: CodeActionParams
 ): CodeAction[] {
-    const baseActions = buildRslCodeActions(module, params);
-    const replacements = new Map<string, CodeAction>();
-
-    for (const diagnostic of params.context.diagnostics) {
-        const action = createRemoveUnusedDeclarationAction(
-            module,
-            diagnostic
-        );
-
-        if (action) {
-            replacements.set(diagnosticKey(diagnostic), action);
-        }
-    }
-
-    if (replacements.size === 0) {
-        return baseActions;
-    }
-
-    const result = Array.from(replacements.values());
-
-    baseActions.forEach(action => {
-        const replacesBaseAction = (action.diagnostics || []).some(diagnostic =>
-            replacements.has(diagnosticKey(diagnostic))
-        );
-
-        if (!replacesBaseAction) {
-            result.push(action);
-        }
-    });
-
-    return result;
+    return quickFixRegistry.build(module, params);
 }
 
 function createRemoveUnusedDeclarationAction(
@@ -285,16 +274,6 @@ function includeFollowingNewline(source: string, end: number): number {
     }
 
     return end;
-}
-
-function diagnosticKey(diagnostic: Diagnostic): string {
-    return [
-        diagnostic.code || "",
-        diagnostic.range.start.line,
-        diagnostic.range.start.character,
-        diagnostic.range.end.line,
-        diagnostic.range.end.character
-    ].join(":");
 }
 
 function offsetRange(

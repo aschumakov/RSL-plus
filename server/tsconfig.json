@@ -12,6 +12,9 @@
         "composite": true,
         "skipLibCheck": true,
         "strict": false,
+        "strictFunctionTypes": true,
+        "noFallthroughCasesInSwitch": true,
+        "forceConsistentCasingInFileNames": true,
         "types": [
             "node"
         ]

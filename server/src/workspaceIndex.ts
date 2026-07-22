@@ -5,22 +5,19 @@ import { CompletionItem } from "vscode-languageserver";
 
 import { CBase } from "./common";
 import { IFAStruct } from "./interfaces";
-import { IRslLexResult } from "./lexer";
-import {
-    getImportNamesFromSyntax,
-    IRslParseResult,
-    parseRslSyntax
-} from "./syntaxParser";
+import { createRslModuleModel, IRslModuleModel } from "./moduleModel";
 
-export interface IIndexedModule extends IFAStruct {
-    source: string;
-    sourceLength: number;
+export interface IIndexedModule extends IFAStruct, IRslModuleModel {
+    /** Compatibility alias while provider-ы переходят с CBase на syntax model. */
+    object: CBase;
     version: number;
-    imports: string[];
     isOpen: boolean;
-    lex: IRslLexResult;
-    syntax: IRslParseResult;
 }
+
+export type ModuleResolution<T> =
+    | { kind: "resolved"; value: T }
+    | { kind: "ambiguous"; candidates: T[] }
+    | { kind: "missing" };
 
 export interface IIndexedSymbol {
     uri: string;
@@ -57,6 +54,7 @@ export class WorkspaceIndex {
         Map<string, Map<string, IIndexedSymbol[]>> =
             new Map<string, Map<string, IIndexedSymbol[]>>();
     private workspaceFilesInitialized: boolean = false;
+    private importsEnabled: boolean = true;
 
     updateModule(
         uri: string,
@@ -67,23 +65,13 @@ export class WorkspaceIndex {
     ): IIndexedModule {
         this.removeModuleFromIndexes(uri);
 
-        const parsedSyntax =
-            object.getSyntaxResult() || parseRslSyntax(source);
-        const imports = getImportNamesFromSyntax(parsedSyntax.root);
-        const syntax = isOpen
-            ? parsedSyntax
-            : compactExternalSyntax(parsedSyntax);
-        const lex = syntax.lex;
+        const model = createRslModuleModel(source, object, isOpen);
         const module: IIndexedModule = {
             uri,
-            source: isOpen ? source : "",
-            sourceLength: source.length,
-            object,
+            ...model,
+            object: model.symbolTree,
             version,
-            imports,
-            isOpen,
-            lex,
-            syntax
+            isOpen
         };
 
         this.modules.set(uri, module);
@@ -148,33 +136,19 @@ export class WorkspaceIndex {
         removeUriAlias(this.workspaceFilesByBaseName, uri);
     }
 
+    resolveWorkspaceFile(moduleName: string): ModuleResolution<string> {
+        return resolveByModuleName(
+            moduleName,
+            this.workspaceFilesByBaseName,
+            uri => uri
+        );
+    }
+
     findWorkspaceFileUri(moduleName: string): string | undefined {
-        const target = normalizeModuleName(moduleName);
-        const targetBase = path.posix.basename(target);
-        const candidates = this.workspaceFilesByBaseName.get(targetBase);
-
-        if (!candidates || candidates.size === 0) {
-            return undefined;
-        }
-
-        let baseMatch: string | undefined;
-
-        for (const uri of candidates) {
-            const normalizedPath = normalizeUriPath(uri);
-
-            if (
-                normalizedPath === target ||
-                normalizedPath.endsWith("/" + target)
-            ) {
-                return uri;
-            }
-
-            if (!baseMatch) {
-                baseMatch = uri;
-            }
-        }
-
-        return baseMatch;
+        const resolution = this.resolveWorkspaceFile(moduleName);
+        return resolution.kind === "resolved"
+            ? resolution.value
+            : undefined;
     }
 
     getModule(uri: string): IIndexedModule | undefined {
@@ -198,6 +172,10 @@ export class WorkspaceIndex {
     }
 
     getImportedModules(uri: string): IIndexedModule[] {
+        if (!this.importsEnabled) {
+            return [];
+        }
+
         const cached = this.importedModulesCache.get(uri);
 
         if (cached) {
@@ -234,39 +212,19 @@ export class WorkspaceIndex {
         return result;
     }
 
+    resolveModule(moduleName: string): ModuleResolution<IIndexedModule> {
+        return resolveByModuleName(
+            moduleName,
+            this.modulesByBaseName,
+            uri => this.modules.get(uri)
+        );
+    }
+
     findModuleByName(moduleName: string): IIndexedModule | undefined {
-        const target = normalizeModuleName(moduleName);
-        const targetBase = path.posix.basename(target);
-        const candidates = this.modulesByBaseName.get(targetBase);
-
-        if (!candidates || candidates.size === 0) {
-            return undefined;
-        }
-
-        let baseMatch: IIndexedModule | undefined;
-
-        for (const uri of candidates) {
-            const module = this.modules.get(uri);
-
-            if (!module) {
-                continue;
-            }
-
-            const modulePath = normalizeUriPath(module.uri);
-
-            if (
-                modulePath === target ||
-                modulePath.endsWith("/" + target)
-            ) {
-                return module;
-            }
-
-            if (!baseMatch) {
-                baseMatch = module;
-            }
-        }
-
-        return baseMatch;
+        const resolution = this.resolveModule(moduleName);
+        return resolution.kind === "resolved"
+            ? resolution.value
+            : undefined;
     }
 
     findSymbols(name: string): IIndexedSymbol[] {
@@ -364,6 +322,19 @@ export class WorkspaceIndex {
 
         result.delete(uri);
         return Array.from(result.values());
+    }
+
+    setImportsEnabled(enabled: boolean): void {
+        if (this.importsEnabled === enabled) {
+            return;
+        }
+
+        this.importsEnabled = enabled;
+        this.invalidateImportCaches();
+    }
+
+    get areImportsEnabled(): boolean {
+        return this.importsEnabled;
     }
 
     get workspaceFilesReady(): boolean {
@@ -473,25 +444,52 @@ export class WorkspaceIndex {
     }
 }
 
-/**
- * Для закрытого импортируемого модуля сохраняются lexer tokens и Import,
- * но не полное statement-дерево и parser diagnostics.
- */
-function compactExternalSyntax(
-    syntax: IRslParseResult
-): IRslParseResult {
-    return {
-        root: {
-            ...syntax.root,
-            children: syntax.root.children.filter(child =>
-                child.kind === "ImportDeclaration"
-            ),
-            tokens: []
-        },
-        diagnostics: [],
-        tokens: syntax.tokens,
-        lex: syntax.lex
-    };
+function resolveByModuleName<T>(
+    moduleName: string,
+    index: Map<string, Set<string>>,
+    getValue: (uri: string) => T | undefined
+): ModuleResolution<T> {
+    const target = normalizeModuleName(moduleName);
+    const targetBase = path.posix.basename(target);
+    const uris = index.get(targetBase);
+
+    if (!uris || uris.size === 0) {
+        return { kind: "missing" };
+    }
+
+    const exact: T[] = [];
+    const fallback: T[] = [];
+
+    for (const uri of uris) {
+        const value = getValue(uri);
+
+        if (value === undefined) {
+            continue;
+        }
+
+        const normalizedPath = normalizeUriPath(uri);
+
+        if (
+            normalizedPath === target ||
+            normalizedPath.endsWith("/" + target)
+        ) {
+            exact.push(value);
+        } else {
+            fallback.push(value);
+        }
+    }
+
+    const candidates = exact.length > 0 ? exact : fallback;
+
+    if (candidates.length === 0) {
+        return { kind: "missing" };
+    }
+
+    if (candidates.length === 1) {
+        return { kind: "resolved", value: candidates[0] };
+    }
+
+    return { kind: "ambiguous", candidates };
 }
 
 function addUriAlias(

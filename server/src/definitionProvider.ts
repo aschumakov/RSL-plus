@@ -12,6 +12,7 @@ import { TextDocument } from "vscode-languageserver-textdocument";
 
 import { CBase } from "./common";
 import { IFAStruct } from "./interfaces";
+import type { ModuleResolution } from "./workspaceIndex";
 import { IRslToken } from "./lexer";
 import {
     GetDynamicDefinitionTargetFromTokens,
@@ -33,6 +34,7 @@ export interface IDefinitionEnvironment {
     getLoadedModules(): IFAStruct[];
     getImportedModules(uri: string): IFAStruct[];
     findWorkspaceFileUri(moduleName: string): string | undefined;
+    resolveWorkspaceFileUri?(moduleName: string): ModuleResolution<string>;
     log(message: string): void;
 }
 
@@ -376,7 +378,21 @@ export class RslDefinitionProvider {
     private async findWorkspaceFile(
         moduleName: string
     ): Promise<string | undefined> {
-        const indexedUri = this.environment.findWorkspaceFileUri(moduleName);
+        const indexedResolution = this.environment.resolveWorkspaceFileUri
+            ? this.environment.resolveWorkspaceFileUri(moduleName)
+            : undefined;
+
+        if (indexedResolution?.kind === "ambiguous") {
+            this.environment.log(
+                `Ambiguous Import ${moduleName}: ` +
+                indexedResolution.candidates.join(", ")
+            );
+            return undefined;
+        }
+
+        const indexedUri = indexedResolution?.kind === "resolved"
+            ? indexedResolution.value
+            : this.environment.findWorkspaceFileUri(moduleName);
 
         if (indexedUri) {
             const indexedPath = uriToFilePath(indexedUri);
