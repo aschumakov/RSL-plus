@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("assert");
-const { RslQuickFixRegistry } = require("../server/out/quickFixRegistry");
+const { RslQuickFixRegistry } = require("../server/out/features/quickFixRegistry");
 
 const diagnostic = {
   code: "unused-declaration",

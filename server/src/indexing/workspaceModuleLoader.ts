@@ -1,10 +1,10 @@
 import * as fs from "fs";
 import { fileURLToPath } from "url";
 
-import { CBase } from "./common";
-import type { IIndexedModule, WorkspaceIndex } from "./workspaceIndex";
+import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 
 export type ModuleLoadPriority = "interactive" | "background";
+export type WorkspaceIndexingMode = "activeImports" | "workspaceIdle" | "full";
 
 export interface IWorkspaceModuleLoaderOptions {
     log(message: string): void;
@@ -12,11 +12,12 @@ export interface IWorkspaceModuleLoaderOptions {
     onModuleCountChanged(): void;
     onIndexProgress?(loaded: number, total: number): void;
     requestMissingImport?(name: string): void;
+    idleDelayMs?: number;
 }
 
 /**
- * Последовательная очередь I/O и разбора закрытых .mac.
- * Интерактивные Import имеют приоритет перед фоновым обходом workspace.
+ * Очередь загрузки compact external summaries.
+ * По умолчанию индексируются только Import открытых документов.
  */
 export class WorkspaceModuleLoader {
     private interactiveQueue: string[] = [];
@@ -25,12 +26,20 @@ export class WorkspaceModuleLoader {
     private workspaceUris = new Set<string>();
     private running = false;
     private runningUri: string | undefined;
-    private backgroundEnabled = true;
+    private loadingPromises = new Map<
+        string,
+        Promise<IIndexedModule | undefined>
+    >();
+    private indexingMode: WorkspaceIndexingMode = "activeImports";
+    private idleTimer: NodeJS.Timeout | undefined;
+    private idleDelayMs: number;
 
     constructor(
         private index: WorkspaceIndex,
         private options: IWorkspaceModuleLoaderOptions
-    ) {}
+    ) {
+        this.idleDelayMs = Math.max(1000, options.idleDelayMs ?? 10000);
+    }
 
     registerWorkspaceFiles(uris: readonly string[]): void {
         const previousUris = this.workspaceUris;
@@ -58,24 +67,31 @@ export class WorkspaceModuleLoader {
 
         this.workspaceUris = nextUris;
         this.index.registerWorkspaceFiles(Array.from(this.workspaceUris));
-
-        if (this.backgroundEnabled) {
-            this.startBackgroundIndexing();
-        }
+        this.applyIndexingMode();
     }
 
-    setBackgroundIndexingEnabled(enabled: boolean): void {
-        this.backgroundEnabled = enabled;
-
-        if (enabled) {
-            this.startBackgroundIndexing();
-        } else {
-            this.backgroundQueue = [];
-            this.rebuildQueuedSet();
+    setIndexingMode(mode: WorkspaceIndexingMode): void {
+        if (this.indexingMode === mode) {
+            return;
         }
+
+        this.indexingMode = mode;
+        this.backgroundQueue = [];
+        this.clearIdleTimer();
+        this.rebuildQueuedSet();
+        this.applyIndexingMode();
+    }
+
+    /** Совместимость со старым API. */
+    setBackgroundIndexingEnabled(enabled: boolean): void {
+        this.setIndexingMode(enabled ? "full" : "activeImports");
     }
 
     startBackgroundIndexing(): void {
+        if (this.indexingMode === "activeImports") {
+            return;
+        }
+
         for (const uri of this.workspaceUris) {
             if (!this.index.getModule(uri)) {
                 this.enqueue(uri, "background");
@@ -100,15 +116,10 @@ export class WorkspaceModuleLoader {
         if (resolution.kind === "missing") {
             this.options.requestMissingImport?.(name);
         }
-        /* ambiguous Import остаётся диагностикой и не выбирается молча. */
     }
 
     enqueue(uri: string, priority: ModuleLoadPriority): void {
-        if (
-            !uri ||
-            this.index.getModule(uri) ||
-            this.runningUri === uri
-        ) {
+        if (!uri || this.index.getModule(uri) || this.runningUri === uri) {
             return;
         }
 
@@ -138,9 +149,33 @@ export class WorkspaceModuleLoader {
         this.processQueue();
     }
 
+    async ensureLoadedByName(name: string): Promise<IIndexedModule | undefined> {
+        const loaded = this.index.findModuleByName(name);
+
+        if (loaded) {
+            return loaded;
+        }
+
+        const resolution = this.index.resolveWorkspaceFile(name);
+        return resolution.kind === "resolved"
+            ? this.ensureLoadedUri(resolution.value)
+            : undefined;
+    }
+
+    async ensureLoadedUri(uri: string): Promise<IIndexedModule | undefined> {
+        const loaded = this.index.getModule(uri);
+
+        if (loaded) {
+            return loaded;
+        }
+
+        this.removeQueued(uri);
+        return this.loadOnce(uri);
+    }
+
     async reload(uri: string): Promise<void> {
         this.removeQueued(uri);
-        await this.load(uri);
+        await this.loadOnce(uri);
     }
 
     remove(uri: string): void {
@@ -159,12 +194,42 @@ export class WorkspaceModuleLoader {
     }
 
     get indexedCount(): number {
-        return Array.from(this.workspaceUris)
-            .filter(uri => !!this.index.getModule(uri)).length;
+        let count = 0;
+
+        for (const uri of this.workspaceUris) {
+            if (this.index.getModule(uri)) {
+                count++;
+            }
+        }
+
+        return count;
     }
 
     get totalCount(): number {
         return this.workspaceUris.size;
+    }
+
+    get mode(): WorkspaceIndexingMode {
+        return this.indexingMode;
+    }
+
+    private applyIndexingMode(): void {
+        if (this.indexingMode === "full") {
+            this.startBackgroundIndexing();
+        } else if (this.indexingMode === "workspaceIdle") {
+            this.clearIdleTimer();
+            this.idleTimer = setTimeout(() => {
+                this.idleTimer = undefined;
+                this.startBackgroundIndexing();
+            }, this.idleDelayMs);
+        }
+    }
+
+    private clearIdleTimer(): void {
+        if (this.idleTimer) {
+            clearTimeout(this.idleTimer);
+            this.idleTimer = undefined;
+        }
     }
 
     private processQueue(): void {
@@ -184,7 +249,7 @@ export class WorkspaceModuleLoader {
         this.runningUri = uri;
 
         setImmediate(() => {
-            this.load(uri).catch(error => {
+            this.loadOnce(uri).catch(error => {
                 this.options.log(
                     `Background module load failed: ${uri}\n` +
                     errorToString(error)
@@ -199,24 +264,35 @@ export class WorkspaceModuleLoader {
         });
     }
 
-    private async load(uri: string): Promise<void> {
+    private loadOnce(uri: string): Promise<IIndexedModule | undefined> {
+        const running = this.loadingPromises.get(uri);
+
+        if (running) {
+            return running;
+        }
+
+        const created = this.load(uri).finally(() => {
+            this.loadingPromises.delete(uri);
+        });
+        this.loadingPromises.set(uri, created);
+        return created;
+    }
+
+    private async load(uri: string): Promise<IIndexedModule | undefined> {
         let filePath: string;
 
         try {
             filePath = fileURLToPath(uri);
         } catch (_error) {
-            return;
+            return undefined;
         }
 
         const text = await fs.promises.readFile(filePath, "utf8");
         const stat = await fs.promises.stat(filePath);
-        const tree = CBase.forExternalModule(text);
-        const module = this.index.updateModule(
+        const module = this.index.updateExternalModule(
             uri,
             text,
-            tree,
-            Math.floor(stat.mtimeMs),
-            false
+            Math.floor(stat.mtimeMs)
         );
 
         for (const importName of module.imports) {
@@ -229,6 +305,7 @@ export class WorkspaceModuleLoader {
 
         this.options.onModuleLoaded(module);
         this.options.onModuleCountChanged();
+        return module;
     }
 
     private removeQueued(uri: string): void {
@@ -245,10 +322,7 @@ export class WorkspaceModuleLoader {
     }
 
     private reportProgress(): void {
-        this.options.onIndexProgress?.(
-            this.indexedCount,
-            this.totalCount
-        );
+        this.options.onIndexProgress?.(this.indexedCount, this.totalCount);
     }
 }
 

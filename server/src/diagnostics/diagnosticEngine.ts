@@ -4,10 +4,10 @@ import { applyProjectDiagnosticRules } from "./diagnosticPostProcessor";
 import {
     buildRslDiagnostics,
     normalizeDiagnosticSettings
-} from "./diagnostics";
+} from "../diagnostics";
 import { buildImportResolutionDiagnostics } from "./importResolutionDiagnostics";
-import type { IRslDiagnosticSettings } from "./interfaces";
-import type { IIndexedModule, WorkspaceIndex } from "./workspaceIndex";
+import type { IRslDiagnosticSettings } from "../interfaces";
+import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 
 export interface IRslDiagnosticContext {
     module: IIndexedModule;
@@ -33,10 +33,7 @@ export class RslDiagnosticEngine {
             run: context => buildRslDiagnostics(
                 context.module,
                 context.index,
-                {
-                    ...(context.settings || {}),
-                    maxProblems: Number.MAX_SAFE_INTEGER
-                }
+                context.settings
             )
         });
         this.register({
@@ -68,17 +65,27 @@ export class RslDiagnosticEngine {
             return [];
         }
 
-        const context: IRslDiagnosticContext = {
-            module,
-            index,
-            settings
-        };
-        const diagnostics = this.rules.reduce(
-            (result, rule) => result.concat(rule.run(context)),
-            [] as Diagnostic[]
-        );
-        const processed = applyProjectDiagnosticRules(module, diagnostics);
+        const diagnostics: Diagnostic[] = [];
 
+        for (const rule of this.rules) {
+            const remaining = options.maxProblems - diagnostics.length;
+
+            if (remaining <= 0) {
+                break;
+            }
+
+            const ruleSettings = {
+                ...(settings || {}),
+                maxProblems: remaining
+            };
+            diagnostics.push(...rule.run({
+                module,
+                index,
+                settings: ruleSettings
+            }).slice(0, remaining));
+        }
+
+        const processed = applyProjectDiagnosticRules(module, diagnostics);
         return deduplicate(processed).slice(0, options.maxProblems);
     }
 }

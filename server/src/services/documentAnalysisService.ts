@@ -1,9 +1,9 @@
 import type { TextDocuments } from "vscode-languageserver/node";
 import type { TextDocument } from "vscode-languageserver-textdocument";
 
-import { CBase } from "./common";
+import { CBase } from "../common";
 import type { RslSettingsService } from "./settingsService";
-import type { IIndexedModule, WorkspaceIndex } from "./workspaceIndex";
+import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 
 export interface IDocumentAnalysisOptions {
     parseDebounceMs?: number;
@@ -80,6 +80,7 @@ export class DocumentAnalysisService {
         this.cancel(uri);
         this.parsedVersions.delete(uri);
         this.parseGeneration.set(uri, (this.parseGeneration.get(uri) || 0) + 1);
+        this.index.compactModule(uri);
     }
 
     invalidate(uri: string): void {
@@ -118,12 +119,11 @@ export class DocumentAnalysisService {
             return;
         }
 
-        const indexed = this.index.updateModule(
+        const indexed = this.index.updateOpenModule(
             uri,
             text,
             parsedObject,
-            version,
-            true
+            version
         );
         this.parsedVersions.set(uri, version);
         this.options.invalidateProviderCaches(uri);

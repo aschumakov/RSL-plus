@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("assert");
-const { RslSettingsService } = require("../server/out/settingsService");
+const { RslSettingsService } = require("../server/out/services/settingsService");
 
 const calls = [];
 const connection = {

@@ -16,7 +16,9 @@ require.cache[serverModulePath] = {
 const { CBase } = require("../server/out/common");
 const { buildRslCodeActions } = require("../server/out/codeActions");
 const { buildRslDiagnostics } = require("../server/out/diagnostics");
-const { findRslReferences } = require("../server/out/references");
+const {
+    findRslReferences
+} = require("../server/out/analysis/references");
 const { RslScopeResolver } = require("../server/out/scopeResolver");
 const { buildRslSemanticTokens } = require("../server/out/semanticTokens");
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
@@ -96,7 +98,8 @@ test("Find All References находит объявление и вызов", ()
     const index = new WorkspaceIndex();
     const library = "Macro Shared(value)\nEnd;";
     const main = "Import library;\nMacro Test()\n Shared(1);\nEnd;";
-    createModule(index, "file:///library.mac", library, false);
+    /* Синхронный helper работает по открытым моделям; workspace-поиск — async. */
+    createModule(index, "file:///library.mac", library, true);
     createModule(index, "file:///main.mac", main);
     const resolver = new RslScopeResolver(index);
     const references = findRslReferences(
@@ -135,8 +138,8 @@ test("Semantic Tokens помечают объявление Macro", () => {
     const tokens = buildRslSemanticTokens(module, index).data;
 
     assert.ok(tokens.length >= 5);
-    assert.strictEqual(tokens[3], 2); // function
-    assert.strictEqual(tokens[4] & 1, 1); // declaration
+    assert.strictEqual(tokens[3], 2);
+    assert.strictEqual(tokens[4] & 1, 1);
 });
 
 test("Semantic Tokens помечают параметр отдельно от переменной", () => {
@@ -150,7 +153,7 @@ test("Semantic Tokens помечают параметр отдельно от п
         tokenTypes.push(tokens[offset + 3]);
     }
 
-    assert.ok(tokenTypes.includes(4)); // parameter
+    assert.ok(tokenTypes.includes(4));
 });
 
 console.log("");

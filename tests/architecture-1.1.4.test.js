@@ -10,12 +10,19 @@ const packageJson = JSON.parse(read("package.json"));
 const server = read("server", "src", "server.ts");
 const workspaceIndex = read("server", "src", "workspaceIndex.ts");
 const moduleModel = read("server", "src", "moduleModel.ts");
-const engine = read("server", "src", "diagnosticEngine.ts");
-const fixes = read("server", "src", "quickFixRegistry.ts");
+const engine = read("server", "src", "diagnostics", "diagnosticEngine.ts");
+const fixes = read("server", "src", "features", "quickFixRegistry.ts");
 const readme = read("README.md");
 const tsconfig = JSON.parse(read("server", "tsconfig.json"));
 
 assert.strictEqual(packageJson.version, "1.1.4");
+
+for (const folder of ["analysis", "diagnostics", "features", "indexing", "services"]) {
+  assert.ok(
+    fs.existsSync(path.join(root, "server", "src", folder)),
+    `server/src/${folder} должен существовать`
+  );
+}
 assert.ok(readme.includes("## Что изменилось в 1.1.4"));
 assert.ok(readme.includes("standard-handlers.json"));
 
@@ -33,6 +40,7 @@ assert.ok(!server.includes("globalSettings"), "Resource-настройки не�
 assert.ok(!server.includes("ensureWorkspaceModulesLoaded"), "References не должен читать workspace синхронно");
 
 assert.ok(moduleModel.includes("IRslModuleModel"));
+assert.ok(moduleModel.includes("createExternalModuleSummary"));
 assert.ok(moduleModel.includes("symbolTree"));
 assert.ok(workspaceIndex.includes("ModuleResolution"));
 assert.ok(workspaceIndex.includes('kind: "ambiguous"'));

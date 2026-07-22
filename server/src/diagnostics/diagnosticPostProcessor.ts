@@ -3,9 +3,9 @@ import {
     DiagnosticSeverity
 } from "vscode-languageserver";
 
-import { isStandardHandler } from "./standardHandlers";
-import type { IRslSyntaxNode } from "./syntaxParser";
-import type { IIndexedModule } from "./workspaceIndex";
+import { isStandardHandler } from "../features/standardHandlers";
+import type { IRslSyntaxNode } from "../syntaxParser";
+import type { IIndexedModule } from "../workspaceIndex";
 
 interface IDiagnosticData {
     start?: number;

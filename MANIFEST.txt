@@ -1,0 +1,14 @@
+RSL-plus 1.1.4 resource optimization overlay
+
+Распаковать в корень репозитория, затем выполнить apply-resource-patch.ps1.
+Версия package.json остаётся 1.1.4.
+
+Основные изменения:
+- active Import graph вместо автоматического full workspace index;
+- compact external module summary;
+- compaction при закрытии документа;
+- единый cache owner для Definition;
+- bounded/addressed Import caches;
+- on-demand References;
+- active-document diagnostics;
+- группировка server/src по смысловым папкам.

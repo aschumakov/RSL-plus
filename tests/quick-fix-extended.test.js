@@ -16,10 +16,10 @@ require.cache[serverModulePath] = {
 const { CBase } = require("../server/out/common");
 const {
   applyProjectDiagnosticRules
-} = require("../server/out/diagnosticPostProcessor");
+} = require("../server/out/diagnostics/diagnosticPostProcessor");
 const {
   buildEnhancedRslCodeActions
-} = require("../server/out/enhancedCodeActions");
+} = require("../server/out/features/enhancedCodeActions");
 const { buildRslDiagnostics } = require("../server/out/diagnostics");
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
 

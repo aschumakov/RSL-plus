@@ -4,7 +4,7 @@ const assert = require("assert");
 const { CBase } = require("../server/out/common");
 const {
   buildImportResolutionDiagnostics
-} = require("../server/out/importResolutionDiagnostics");
+} = require("../server/out/diagnostics/importResolutionDiagnostics");
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
 
 const index = new WorkspaceIndex();

@@ -10,15 +10,15 @@ const serverSource = fs.readFileSync(
   "utf8"
 );
 const analysisSource = fs.readFileSync(
-  path.join(root, "server", "src", "documentAnalysisService.ts"),
+  path.join(root, "server", "src", "services", "documentAnalysisService.ts"),
   "utf8"
 );
 const diagnosticsSource = fs.readFileSync(
-  path.join(root, "server", "src", "diagnosticsCoordinator.ts"),
+  path.join(root, "server", "src", "diagnostics", "diagnosticsCoordinator.ts"),
   "utf8"
 );
 const loaderSource = fs.readFileSync(
-  path.join(root, "server", "src", "workspaceModuleLoader.ts"),
+  path.join(root, "server", "src", "indexing", "workspaceModuleLoader.ts"),
   "utf8"
 );
 const clientSource = fs.readFileSync(

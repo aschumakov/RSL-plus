@@ -3,9 +3,9 @@ import {
     DiagnosticSeverity
 } from "vscode-languageserver";
 
-import { GetImportDefinitionTargetsFromTokens } from "./execMacroDefinition";
-import type { IRslDiagnosticSettings } from "./interfaces";
-import type { IIndexedModule, WorkspaceIndex } from "./workspaceIndex";
+import { GetImportDefinitionTargetsFromTokens } from "../execMacroDefinition";
+import type { IRslDiagnosticSettings } from "../interfaces";
+import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 
 /** Предупреждает, когда Import по одному basename соответствует нескольким файлам. */
 export function buildImportResolutionDiagnostics(

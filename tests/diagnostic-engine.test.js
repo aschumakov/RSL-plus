@@ -2,7 +2,7 @@
 
 const assert = require("assert");
 const { CBase } = require("../server/out/common");
-const { RslDiagnosticEngine } = require("../server/out/diagnosticEngine");
+const { RslDiagnosticEngine } = require("../server/out/diagnostics/diagnosticEngine");
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
 
 const source = "Macro Test()\nEnd;";

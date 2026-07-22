@@ -4,7 +4,7 @@ const assert = require("assert");
 const {
   planActiveDocumentDiagnostics,
   planUpdatedDiagnostics
-} = require("../server/out/diagnosticVisibility");
+} = require("../server/out/diagnostics/diagnosticVisibility");
 
 const activeUri = "file:///active.mac";
 const otherUri = "file:///other.mac";

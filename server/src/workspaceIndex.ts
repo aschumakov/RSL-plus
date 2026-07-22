@@ -4,11 +4,17 @@ import { fileURLToPath } from "url";
 import { CompletionItem } from "vscode-languageserver";
 
 import { CBase } from "./common";
+import { LruCache } from "./core/lruCache";
 import { IFAStruct } from "./interfaces";
-import { createRslModuleModel, IRslModuleModel } from "./moduleModel";
+import {
+    compactOpenModuleModel,
+    createExternalModuleSummary,
+    createOpenModuleModel,
+    createRslModuleModel,
+    IRslModuleModel
+} from "./moduleModel";
 
 export interface IIndexedModule extends IFAStruct, IRslModuleModel {
-    /** Compatibility alias while provider-ы переходят с CBase на syntax model. */
     object: CBase;
     version: number;
     isOpen: boolean;
@@ -24,38 +30,35 @@ export interface IIndexedSymbol {
     object: CBase;
 }
 
-/**
- * Индекс загруженных RSL-модулей и их зависимостей.
- *
- * Индекс не читает файлы сам: сервер передаёт ему уже разобранный документ.
- * Благодаря этому parser остаётся чистым, а управление I/O сосредоточено в
- * language server / definition provider.
- */
+export interface IWorkspaceIndexOptions {
+    /** Кэши Import нужны только нескольким активным документам. */
+    importCacheEntries?: number;
+}
+
+/** Индекс лёгких summary и полных моделей только для открытых документов. */
 export class WorkspaceIndex {
-    private modules: Map<string, IIndexedModule> =
-        new Map<string, IIndexedModule>();
-
-    private symbolsByName: Map<string, IIndexedSymbol[]> =
-        new Map<string, IIndexedSymbol[]>();
-
-    private reverseImports: Map<string, Set<string>> =
-        new Map<string, Set<string>>();
-
-    private workspaceFiles: Set<string> = new Set<string>();
-    private workspaceFilesByBaseName: Map<string, Set<string>> =
-        new Map<string, Set<string>>();
-    private modulesByBaseName: Map<string, Set<string>> =
-        new Map<string, Set<string>>();
-    private importedModulesCache: Map<string, IIndexedModule[]> =
-        new Map<string, IIndexedModule[]>();
-    private importedCompletionCache: Map<string, CompletionItem[]> =
-        new Map<string, CompletionItem[]>();
+    private modules = new Map<string, IIndexedModule>();
+    private symbolsByName = new Map<string, IIndexedSymbol[]>();
+    private reverseImports = new Map<string, Set<string>>();
+    private workspaceFiles = new Set<string>();
+    private workspaceFilesByBaseName = new Map<string, Set<string>>();
+    private modulesByBaseName = new Map<string, Set<string>>();
+    private importedModulesCache: LruCache<string, IIndexedModule[]>;
+    private importedCompletionCache: LruCache<string, CompletionItem[]>;
     private importedSymbolsByNameCache:
-        Map<string, Map<string, IIndexedSymbol[]>> =
-            new Map<string, Map<string, IIndexedSymbol[]>>();
-    private workspaceFilesInitialized: boolean = false;
-    private importsEnabled: boolean = true;
+        LruCache<string, Map<string, IIndexedSymbol[]>>;
+    private workspaceFilesInitialized = false;
+    private importsEnabled = true;
+    private revisionValue = 0;
 
+    constructor(options: IWorkspaceIndexOptions = {}) {
+        const cacheEntries = options.importCacheEntries ?? 32;
+        this.importedModulesCache = new LruCache(cacheEntries);
+        this.importedCompletionCache = new LruCache(cacheEntries);
+        this.importedSymbolsByNameCache = new LruCache(cacheEntries);
+    }
+
+    /** Совместимый API: false теперь создаёт настоящий compact summary. */
     updateModule(
         uri: string,
         source: string,
@@ -63,22 +66,56 @@ export class WorkspaceIndex {
         version: number,
         isOpen: boolean = true
     ): IIndexedModule {
-        this.removeModuleFromIndexes(uri);
-
         const model = createRslModuleModel(source, object, isOpen);
-        const module: IIndexedModule = {
-            uri,
-            ...model,
-            object: model.symbolTree,
-            version,
-            isOpen
-        };
+        return this.replacePersistentModule(uri, model, version, isOpen);
+    }
 
-        this.modules.set(uri, module);
-        this.registerWorkspaceFile(uri);
-        this.addModuleToIndexes(module);
-        this.invalidateImportCaches();
-        return module;
+    updateOpenModule(
+        uri: string,
+        source: string,
+        object: CBase,
+        version: number
+    ): IIndexedModule {
+        return this.replacePersistentModule(
+            uri,
+            createOpenModuleModel(source, object),
+            version,
+            true
+        );
+    }
+
+    updateExternalModule(
+        uri: string,
+        source: string,
+        version: number
+    ): IIndexedModule {
+        return this.replacePersistentModule(
+            uri,
+            createExternalModuleSummary(source),
+            version,
+            false
+        );
+    }
+
+    /** Освобождает source, lexer, AST и локальные объявления закрытого файла. */
+    compactModule(uri: string): IIndexedModule | undefined {
+        const current = this.modules.get(uri);
+
+        if (!current) {
+            return undefined;
+        }
+
+        if (current.kind === "external") {
+            current.isOpen = false;
+            return current;
+        }
+
+        return this.replacePersistentModule(
+            uri,
+            compactOpenModuleModel(current),
+            current.version,
+            false
+        );
     }
 
     markClosed(uri: string): void {
@@ -98,9 +135,12 @@ export class WorkspaceIndex {
     }
 
     removeModule(uri: string): void {
+        const affected = this.collectAffectedUris(uri);
         this.removeModuleFromIndexes(uri);
         this.modules.delete(uri);
-        this.invalidateImportCaches();
+        affected.add(uri);
+        this.invalidateImportCaches(affected);
+        this.revisionValue++;
     }
 
     clear(): void {
@@ -112,9 +152,10 @@ export class WorkspaceIndex {
         this.modulesByBaseName.clear();
         this.invalidateImportCaches();
         this.workspaceFilesInitialized = false;
+        this.revisionValue++;
     }
 
-    registerWorkspaceFiles(uris: string[]): void {
+    registerWorkspaceFiles(uris: readonly string[]): void {
         this.workspaceFilesInitialized = true;
         uris.forEach(uri => this.registerWorkspaceFile(uri));
     }
@@ -134,6 +175,10 @@ export class WorkspaceIndex {
         }
 
         removeUriAlias(this.workspaceFilesByBaseName, uri);
+    }
+
+    getWorkspaceFileUris(): string[] {
+        return Array.from(this.workspaceFiles);
     }
 
     resolveWorkspaceFile(moduleName: string): ModuleResolution<string> {
@@ -166,6 +211,10 @@ export class WorkspaceIndex {
         return Array.from(this.modules.values());
     }
 
+    getOpenModules(): IIndexedModule[] {
+        return Array.from(this.modules.values()).filter(module => module.isOpen);
+    }
+
     getImportNames(uri: string): string[] {
         const module = this.modules.get(uri);
         return module ? module.imports.slice() : [];
@@ -176,20 +225,20 @@ export class WorkspaceIndex {
             return [];
         }
 
-        const cached = this.importedModulesCache.get(uri);
+        const useCache = this.modules.get(uri)?.isOpen === true;
+        const cached = useCache ? this.importedModulesCache.get(uri) : undefined;
 
         if (cached) {
             return cached.slice();
         }
 
         const result: IIndexedModule[] = [];
-        const visited = new Set<string>();
+        const visited = new Set<string>([uri]);
         const queue: string[] = [uri];
-        visited.add(uri);
+        let position = 0;
 
-        while (queue.length > 0) {
-            const currentUri = queue.shift()!;
-            const current = this.modules.get(currentUri);
+        while (position < queue.length) {
+            const current = this.modules.get(queue[position++]);
 
             if (!current) {
                 continue;
@@ -208,7 +257,10 @@ export class WorkspaceIndex {
             }
         }
 
-        this.importedModulesCache.set(uri, result.slice());
+        if (useCache) {
+            this.importedModulesCache.set(uri, result.slice());
+        }
+
         return result;
     }
 
@@ -231,52 +283,16 @@ export class WorkspaceIndex {
         return (this.symbolsByName.get(normalizeName(name)) || []).slice();
     }
 
-    findImportedSymbols(
-        fromUri: string,
-        name: string
-    ): IIndexedSymbol[] {
+    findImportedSymbols(fromUri: string, name: string): IIndexedSymbol[] {
         const byName = this.getImportedSymbolsByName(fromUri);
         return (byName.get(normalizeName(name)) || []).slice();
     }
 
-    private getImportedSymbolsByName(
-        fromUri: string
-    ): Map<string, IIndexedSymbol[]> {
-        const cached = this.importedSymbolsByNameCache.get(fromUri);
-
-        if (cached) {
-            return cached;
-        }
-
-        const result = new Map<string, IIndexedSymbol[]>();
-
-        for (const module of this.getImportedModules(fromUri)) {
-            for (const child of module.object.getChilds()) {
-                if (child.Private) {
-                    continue;
-                }
-
-                const key = normalizeName(child.Name);
-                let symbols = result.get(key);
-
-                if (!symbols) {
-                    symbols = [];
-                    result.set(key, symbols);
-                }
-
-                symbols.push({
-                    uri: module.uri,
-                    object: child
-                });
-            }
-        }
-
-        this.importedSymbolsByNameCache.set(fromUri, result);
-        return result;
-    }
-
     getImportedCompletionItems(fromUri: string): CompletionItem[] {
-        const cached = this.importedCompletionCache.get(fromUri);
+        const useCache = this.modules.get(fromUri)?.isOpen === true;
+        const cached = useCache
+            ? this.importedCompletionCache.get(fromUri)
+            : undefined;
 
         if (cached) {
             return cached.slice();
@@ -302,26 +318,22 @@ export class WorkspaceIndex {
             }
         }
 
-        this.importedCompletionCache.set(fromUri, result.slice());
+        if (useCache) {
+            this.importedCompletionCache.set(fromUri, result.slice());
+        }
+
         return result;
     }
 
     getDependents(uri: string): string[] {
-        const moduleNames = moduleAliases(uri);
         const result = new Set<string>();
 
-        for (const name of moduleNames) {
-            const dependents = this.reverseImports.get(name);
-
-            if (!dependents) {
-                continue;
-            }
-
-            dependents.forEach(value => result.add(value));
+        for (const name of moduleAliases(uri)) {
+            this.reverseImports.get(name)?.forEach(value => result.add(value));
         }
 
         result.delete(uri);
-        return Array.from(result.values());
+        return Array.from(result);
     }
 
     setImportsEnabled(enabled: boolean): void {
@@ -331,6 +343,52 @@ export class WorkspaceIndex {
 
         this.importsEnabled = enabled;
         this.invalidateImportCaches();
+        this.revisionValue++;
+    }
+
+    /**
+     * Временно подменяет summary полной моделью для References. После callback
+     * полная модель становится недостижимой и может быть собрана GC.
+     */
+    withTransientOpenModule<T>(
+        uri: string,
+        source: string,
+        action: (module: IIndexedModule) => T
+    ): T {
+        const previous = this.modules.get(uri);
+        const affectedBefore = this.collectAffectedUris(uri);
+        this.removeModuleFromIndexes(uri);
+
+        const model = createOpenModuleModel(source, new CBase(source, 0));
+        const transient: IIndexedModule = {
+            uri,
+            ...model,
+            object: model.symbolTree,
+            version: previous?.version ?? 0,
+            isOpen: true
+        };
+
+        this.modules.set(uri, transient);
+        this.addModuleToIndexes(transient);
+        this.invalidateImportCaches(affectedBefore);
+
+        try {
+            return action(transient);
+        } finally {
+            const affectedAfter = this.collectAffectedUris(uri);
+            this.removeModuleFromIndexes(uri);
+
+            if (previous) {
+                this.modules.set(uri, previous);
+                this.addModuleToIndexes(previous);
+            } else {
+                this.modules.delete(uri);
+            }
+
+            affectedBefore.forEach(value => affectedAfter.add(value));
+            affectedAfter.add(uri);
+            this.invalidateImportCaches(affectedAfter);
+        }
     }
 
     get areImportsEnabled(): boolean {
@@ -345,6 +403,113 @@ export class WorkspaceIndex {
         return this.modules.size;
     }
 
+    get revision(): number {
+        return this.revisionValue;
+    }
+
+    get importCacheSize(): number {
+        return this.importedModulesCache.size +
+            this.importedCompletionCache.size +
+            this.importedSymbolsByNameCache.size;
+    }
+
+    private replacePersistentModule(
+        uri: string,
+        model: IRslModuleModel,
+        version: number,
+        isOpen: boolean
+    ): IIndexedModule {
+        const affected = this.collectAffectedUris(uri);
+        this.removeModuleFromIndexes(uri);
+
+        const module: IIndexedModule = {
+            uri,
+            ...model,
+            object: model.symbolTree,
+            version,
+            isOpen
+        };
+
+        this.modules.set(uri, module);
+        this.registerWorkspaceFile(uri);
+        this.addModuleToIndexes(module);
+        this.collectAffectedUris(uri).forEach(value => affected.add(value));
+        affected.add(uri);
+        this.invalidateImportCaches(affected);
+        this.revisionValue++;
+        return module;
+    }
+
+    private getImportedSymbolsByName(
+        fromUri: string
+    ): Map<string, IIndexedSymbol[]> {
+        const useCache = this.modules.get(fromUri)?.isOpen === true;
+        const cached = useCache
+            ? this.importedSymbolsByNameCache.get(fromUri)
+            : undefined;
+
+        if (cached) {
+            return cached;
+        }
+
+        const result = new Map<string, IIndexedSymbol[]>();
+
+        for (const module of this.getImportedModules(fromUri)) {
+            for (const child of module.object.getChilds()) {
+                if (child.Private) {
+                    continue;
+                }
+
+                const key = normalizeName(child.Name);
+                const symbols = result.get(key) || [];
+                symbols.push({ uri: module.uri, object: child });
+                result.set(key, symbols);
+            }
+        }
+
+        if (useCache) {
+            this.importedSymbolsByNameCache.set(fromUri, result);
+        }
+
+        return result;
+    }
+
+    private collectAffectedUris(uri: string): Set<string> {
+        const result = new Set<string>([uri]);
+        const queue = [uri];
+        let position = 0;
+
+        while (position < queue.length) {
+            const current = queue[position++];
+
+            for (const dependent of this.getDependents(current)) {
+                if (result.has(dependent)) {
+                    continue;
+                }
+
+                result.add(dependent);
+                queue.push(dependent);
+            }
+        }
+
+        return result;
+    }
+
+    private invalidateImportCaches(uris?: Iterable<string>): void {
+        if (!uris) {
+            this.importedModulesCache.clear();
+            this.importedCompletionCache.clear();
+            this.importedSymbolsByNameCache.clear();
+            return;
+        }
+
+        for (const uri of uris) {
+            this.importedModulesCache.delete(uri);
+            this.importedCompletionCache.delete(uri);
+            this.importedSymbolsByNameCache.delete(uri);
+        }
+    }
+
     private addModuleToIndexes(module: IIndexedModule): void {
         addUriAlias(this.modulesByBaseName, module.uri);
 
@@ -355,17 +520,9 @@ export class WorkspaceIndex {
                 continue;
             }
 
-            let symbols = this.symbolsByName.get(name);
-
-            if (!symbols) {
-                symbols = [];
-                this.symbolsByName.set(name, symbols);
-            }
-
-            symbols.push({
-                uri: module.uri,
-                object: child
-            });
+            const symbols = this.symbolsByName.get(name) || [];
+            symbols.push({ uri: module.uri, object: child });
+            this.symbolsByName.set(name, symbols);
         }
 
         for (const importName of module.imports) {
@@ -376,22 +533,11 @@ export class WorkspaceIndex {
             ]);
 
             aliases.forEach(alias => {
-                let dependents = this.reverseImports.get(alias);
-
-                if (!dependents) {
-                    dependents = new Set<string>();
-                    this.reverseImports.set(alias, dependents);
-                }
-
+                const dependents = this.reverseImports.get(alias) || new Set();
                 dependents.add(module.uri);
+                this.reverseImports.set(alias, dependents);
             });
         }
-    }
-
-    private invalidateImportCaches(): void {
-        this.importedModulesCache.clear();
-        this.importedCompletionCache.clear();
-        this.importedSymbolsByNameCache.clear();
     }
 
     private removeModuleFromIndexes(uri: string): void {
@@ -422,10 +568,7 @@ export class WorkspaceIndex {
 
         for (const importName of previous.imports) {
             const normalized = normalizeModuleName(importName);
-            const aliases = [
-                normalized,
-                path.posix.basename(normalized)
-            ];
+            const aliases = [normalized, path.posix.basename(normalized)];
 
             aliases.forEach(alias => {
                 const dependents = this.reverseImports.get(alias);
@@ -469,10 +612,7 @@ function resolveByModuleName<T>(
 
         const normalizedPath = normalizeUriPath(uri);
 
-        if (
-            normalizedPath === target ||
-            normalizedPath.endsWith("/" + target)
-        ) {
+        if (normalizedPath === target || normalizedPath.endsWith("/" + target)) {
             exact.push(value);
         } else {
             fallback.push(value);
@@ -492,25 +632,14 @@ function resolveByModuleName<T>(
     return { kind: "ambiguous", candidates };
 }
 
-function addUriAlias(
-    index: Map<string, Set<string>>,
-    uri: string
-): void {
+function addUriAlias(index: Map<string, Set<string>>, uri: string): void {
     const baseName = path.posix.basename(normalizeUriPath(uri));
-    let values = index.get(baseName);
-
-    if (!values) {
-        values = new Set<string>();
-        index.set(baseName, values);
-    }
-
+    const values = index.get(baseName) || new Set<string>();
     values.add(uri);
+    index.set(baseName, values);
 }
 
-function removeUriAlias(
-    index: Map<string, Set<string>>,
-    uri: string
-): void {
+function removeUriAlias(index: Map<string, Set<string>>, uri: string): void {
     const baseName = path.posix.basename(normalizeUriPath(uri));
     const values = index.get(baseName);
 
@@ -530,10 +659,7 @@ function normalizeName(value: string): string {
 }
 
 function normalizeModuleName(value: string): string {
-    let result = (value || "")
-        .trim()
-        .replace(/\\/g, "/")
-        .toLowerCase();
+    let result = (value || "").trim().replace(/\\/g, "/").toLowerCase();
 
     while (result.startsWith("./")) {
         result = result.substring(2);
@@ -548,9 +674,7 @@ function normalizeModuleName(value: string): string {
 
 function normalizeUriPath(uri: string): string {
     try {
-        return fileURLToPath(uri)
-            .replace(/\\/g, "/")
-            .toLowerCase();
+        return fileURLToPath(uri).replace(/\\/g, "/").toLowerCase();
     } catch (_error) {
         return uri.replace(/\\/g, "/").toLowerCase();
     }
@@ -558,8 +682,5 @@ function normalizeUriPath(uri: string): string {
 
 function moduleAliases(uri: string): string[] {
     const normalized = normalizeUriPath(uri);
-    return [
-        normalized,
-        path.posix.basename(normalized)
-    ];
+    return [normalized, path.posix.basename(normalized)];
 }

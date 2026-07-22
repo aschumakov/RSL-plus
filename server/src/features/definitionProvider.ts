@@ -10,14 +10,14 @@ import {
 
 import { TextDocument } from "vscode-languageserver-textdocument";
 
-import { CBase } from "./common";
-import { IFAStruct } from "./interfaces";
-import type { ModuleResolution } from "./workspaceIndex";
-import { IRslToken } from "./lexer";
+import { CBase } from "../common";
+import { IFAStruct } from "../interfaces";
+import type { ModuleResolution } from "../workspaceIndex";
+import { IRslToken } from "../lexer";
 import {
     GetDynamicDefinitionTargetFromTokens,
     GetImportDefinitionTargetFromTokens
-} from "./execMacroDefinition";
+} from "../execMacroDefinition";
 
 export interface IRslDefinitionContext {
     document: TextDocument;
@@ -35,18 +35,13 @@ export interface IDefinitionEnvironment {
     getImportedModules(uri: string): IFAStruct[];
     findWorkspaceFileUri(moduleName: string): string | undefined;
     resolveWorkspaceFileUri?(moduleName: string): ModuleResolution<string>;
+    ensureModuleByName?(moduleName: string): Promise<IFAStruct | undefined>;
     log(message: string): void;
 }
 
 interface IDefinitionModule {
     uri: string;
     object: CBase;
-    document: TextDocument;
-}
-
-interface ICachedDefinitionModule {
-    module: IDefinitionModule;
-    modifiedTime: number;
 }
 
 /**
@@ -60,10 +55,6 @@ export class RslDefinitionProvider {
         Map<string, string | null> =
             new Map<string, string | null>();
 
-    private externalModuleCache:
-        Map<string, ICachedDefinitionModule> =
-            new Map<string, ICachedDefinitionModule>();
-
     constructor(
         private environment: IDefinitionEnvironment
     ) {}
@@ -75,12 +66,9 @@ export class RslDefinitionProvider {
 
     clearCaches(): void {
         this.workspaceFileCache.clear();
-        this.externalModuleCache.clear();
     }
 
-    invalidateUri(uri: string): void {
-        this.externalModuleCache.delete(uri);
-
+    invalidateUri(_uri: string): void {
         /*
          * Отрицательный/положительный поиск мог зависеть от созданного,
          * удалённого или переименованного файла. Размер кэша небольшой,
@@ -199,10 +187,7 @@ export class RslDefinitionProvider {
             );
 
             return object
-                ? this.createObjectLocation(
-                    module.document,
-                    object
-                )
+                ? this.createObjectLocationByUri(module.uri, object)
                 : null;
         }
 
@@ -281,96 +266,47 @@ export class RslDefinitionProvider {
     ): Promise<IDefinitionModule | undefined> {
         const loaded = this.environment
             .getLoadedModules()
-            .find(item =>
-                moduleMatchesUri(item.uri, moduleName)
-            );
+            .find(item => moduleMatchesUri(item.uri, moduleName));
 
         if (loaded) {
-            const openedDocument =
-                this.environment.getOpenDocument(loaded.uri);
+            const openedDocument = this.environment.getOpenDocument(loaded.uri);
 
             if (openedDocument) {
-                const parsedTree =
-                    await this.environment.ensureDocumentParsed(
-                        openedDocument
-                    );
+                const parsedTree = await this.environment.ensureDocumentParsed(
+                    openedDocument
+                );
 
                 if (parsedTree) {
-                    return {
-                        uri: loaded.uri,
-                        object: parsedTree,
-                        document: openedDocument
-                    };
+                    return { uri: loaded.uri, object: parsedTree };
                 }
             }
+
+            return { uri: loaded.uri, object: loaded.object };
         }
 
-        const filePath = await this.findWorkspaceFile(
-            moduleName
-        );
+        /* Единственным владельцем external summary остаётся WorkspaceIndex. */
+        const ensured = await this.environment.ensureModuleByName?.(moduleName);
+
+        if (ensured) {
+            return { uri: ensured.uri, object: ensured.object };
+        }
+
+        /* Fallback для unit-тестов/клиентов без WorkspaceModuleLoader: без кэша. */
+        const filePath = await this.findWorkspaceFile(moduleName);
 
         if (!filePath) {
             return undefined;
         }
 
-        const uri = pathToFileURL(filePath).toString();
-        const openedDocument =
-            this.environment.getOpenDocument(uri);
-
-        if (openedDocument) {
-            const parsedTree =
-                await this.environment.ensureDocumentParsed(
-                    openedDocument
-                );
-
-            if (parsedTree) {
-                return {
-                    uri,
-                    object: parsedTree,
-                    document: openedDocument
-                };
-            }
-        }
-
         try {
-            const stat = await fs.promises.stat(filePath);
-            const cached = this.externalModuleCache.get(uri);
-
-            if (
-                cached &&
-                cached.modifiedTime === stat.mtimeMs
-            ) {
-                return cached.module;
-            }
-
-            const text = await fs.promises.readFile(
-                filePath,
-                "utf8"
-            );
-            const document = TextDocument.create(
-                uri,
-                "rsl",
-                0,
-                text
-            );
-            const module: IDefinitionModule = {
-                uri,
-                object: CBase.forExternalModule(text),
-                document
-            };
-
-            this.externalModuleCache.set(uri, {
-                module,
-                modifiedTime: stat.mtimeMs
-            });
-
-            return module;
+            const uri = pathToFileURL(filePath).toString();
+            const text = await fs.promises.readFile(filePath, "utf8");
+            return { uri, object: CBase.forExternalModule(text) };
         } catch (error) {
             this.environment.log(
                 `Definition module read failed: ${filePath}\n` +
                 errorToString(error)
             );
-
             return undefined;
         }
     }

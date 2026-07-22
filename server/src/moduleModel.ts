@@ -6,15 +6,14 @@ import {
     parseRslSyntax
 } from "./syntaxParser";
 
+export type RslModuleModelKind = "open" | "external";
+
 /**
- * Единый владелец результатов разбора модуля.
- *
- * symbolTree пока сохраняет legacy CBase для совместимости существующих
- * provider-ов. Новые проверки должны использовать syntax/lex напрямую.
- * После миграции provider-ов это поле можно будет удалить без изменения
- * WorkspaceIndex и формата кэшей.
+ * Общий контракт модуля. Для external summary поля source/syntax/lex указывают
+ * на пустые разделяемые значения и практически не расходуют память.
  */
 export interface IRslModuleModel {
+    kind: RslModuleModelKind;
     source: string;
     sourceLength: number;
     symbolTree: CBase;
@@ -23,44 +22,93 @@ export interface IRslModuleModel {
     imports: string[];
 }
 
+const EMPTY_LEX_RESULT = Object.freeze({
+    tokens: Object.freeze([]),
+    eol: "\n",
+    hasFinalEol: false,
+    hasBom: false,
+    lineStarts: Object.freeze([0])
+}) as unknown as IRslLexResult;
+
+const EMPTY_PARSE_RESULT = Object.freeze({
+    root: Object.freeze({
+        kind: "Program",
+        start: 0,
+        end: 0,
+        children: Object.freeze([]),
+        tokens: Object.freeze([])
+    }),
+    diagnostics: Object.freeze([]),
+    tokens: Object.freeze([]),
+    lex: EMPTY_LEX_RESULT
+}) as unknown as IRslParseResult;
+
 export function createRslModuleModel(
     source: string,
     symbolTree: CBase,
     isOpen: boolean
 ): IRslModuleModel {
-    const parsedSyntax =
-        symbolTree.getSyntaxResult() || parseRslSyntax(source);
-    const syntax = isOpen
-        ? parsedSyntax
-        : compactExternalSyntax(parsedSyntax);
+    return isOpen
+        ? createOpenModuleModel(source, symbolTree)
+        : createExternalModuleSummary(source);
+}
+
+export function createOpenModuleModel(
+    source: string,
+    symbolTree: CBase
+): IRslModuleModel {
+    const syntax = symbolTree.getSyntaxResult() || parseRslSyntax(source);
 
     return {
-        source: isOpen ? source : "",
+        kind: "open",
+        source,
         sourceLength: source.length,
         symbolTree,
         syntax,
         lex: syntax.lex,
-        imports: getImportNamesFromSyntax(parsedSyntax.root)
+        imports: getImportNamesFromSyntax(syntax.root)
     };
 }
 
 /**
- * Для закрытого импортируемого модуля сохраняются lexer tokens и Import,
- * но не полное statement-дерево и parser diagnostics.
+ * Строит компактную модель закрытого файла: parser используется временно,
+ * после чего остаются только Import и экспортируемое legacy symbol tree.
  */
-function compactExternalSyntax(
-    syntax: IRslParseResult
-): IRslParseResult {
+export function createExternalModuleSummary(
+    source: string,
+    parsedSyntax?: IRslParseResult
+): IRslModuleModel {
+    const syntax = parsedSyntax || parseRslSyntax(source, undefined, {
+        buildExpressionTree: false,
+        includeTrivia: false
+    });
+    const imports = getImportNamesFromSyntax(syntax.root);
+    const symbolTree = CBase.fromExternalSyntax(source, syntax);
+
     return {
-        root: {
-            ...syntax.root,
-            children: syntax.root.children.filter(child =>
-                child.kind === "ImportDeclaration"
-            ),
-            tokens: []
-        },
-        diagnostics: [],
-        tokens: syntax.tokens,
-        lex: syntax.lex
+        kind: "external",
+        source: "",
+        sourceLength: source.length,
+        symbolTree,
+        syntax: EMPTY_PARSE_RESULT,
+        lex: EMPTY_LEX_RESULT,
+        imports
     };
+}
+
+/** Превращает полную модель закрытого редактора в external summary без reparse. */
+export function compactOpenModuleModel(
+    model: IRslModuleModel
+): IRslModuleModel {
+    if (model.kind === "external") {
+        return model;
+    }
+
+    return createExternalModuleSummary(model.source, model.syntax);
+}
+
+export function isOpenModuleModel(
+    model: IRslModuleModel
+): boolean {
+    return model.kind === "open";
 }

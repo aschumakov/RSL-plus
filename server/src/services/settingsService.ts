@@ -1,6 +1,6 @@
 import type { Connection } from "vscode-languageserver/node";
 
-import type { IRslSettings } from "./interfaces";
+import type { IRslSettings } from "../interfaces";
 
 /**
  * Изолирует workspace-настройки от resource-настроек конкретного документа.

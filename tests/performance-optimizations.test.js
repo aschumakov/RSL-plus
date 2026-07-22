@@ -54,7 +54,11 @@ const externalTree = CBase.forExternalModule(source);
 assert.ok(openTree.getCurrentToken(source.indexOf("Test")));
 assert.strictEqual(externalTree.getCurrentToken(source.indexOf("Test")), undefined);
 assert.ok(externalTree.RecursiveFind("Test"));
-assert.ok(externalTree.RecursiveFind("localValue"));
+assert.strictEqual(
+  externalTree.RecursiveFind("localValue"),
+  undefined,
+  "External summary не должен удерживать локальные переменные Macro"
+);
 
 const index = new WorkspaceIndex();
 const workspaceUris = [];
@@ -86,11 +90,11 @@ index.removeModule(commonUri);
 assert.deepStrictEqual(index.getImportedModules(mainUri), []);
 
 const featureSource = fs.readFileSync(
-  path.join(__dirname, "..", "server", "src", "languageFeatureRegistry.ts"),
+  path.join(__dirname, "..", "server", "src", "features", "languageFeatureRegistry.ts"),
   "utf8"
 );
 const analysisSource = fs.readFileSync(
-  path.join(__dirname, "..", "server", "src", "documentAnalysisService.ts"),
+  path.join(__dirname, "..", "server", "src", "services", "documentAnalysisService.ts"),
   "utf8"
 );
 const semanticSource = fs.readFileSync(
@@ -106,7 +110,7 @@ const diagnosticsSource = fs.readFileSync(
   "utf8"
 );
 const referencesSource = fs.readFileSync(
-  path.join(__dirname, "..", "server", "src", "references.ts"),
+  path.join(__dirname, "..", "server", "src", "analysis", "references.ts"),
   "utf8"
 );
 const foldingSource = fs.readFileSync(
@@ -129,8 +133,8 @@ assert.ok(!scopeResolverSource.includes("significantTokens(module.lex.tokens)"))
 assert.ok(diagnosticsSource.includes("nestedScopesByScope"));
 assert.ok(featureSource.includes("GetFoldingRanges(document.getText(), lex)"));
 assert.ok(foldingSource.includes("lexResult?: IRslLexResult"));
-assert.ok(referencesSource.includes("candidateModule.syntax.tokens"));
-assert.ok(referencesSource.includes("findDeclarationToken"));
-assert.ok(!referencesSource.includes("isDeclarationToken("));
+assert.ok(referencesSource.includes("containsIdentifier"));
+assert.ok(referencesSource.includes("withTransientOpenModule"));
+assert.ok(referencesSource.includes("yieldToInteractiveRequests"));
 
 console.log("[OK] parser, lexer, индекс и LSP-provider-ы используют быстрый путь");

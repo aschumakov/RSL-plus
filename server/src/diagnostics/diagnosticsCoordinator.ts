@@ -11,8 +11,8 @@ import {
     planActiveDocumentDiagnostics,
     planUpdatedDiagnostics
 } from "./diagnosticVisibility";
-import type { RslSettingsService } from "./settingsService";
-import type { IIndexedModule, WorkspaceIndex } from "./workspaceIndex";
+import type { RslSettingsService } from "../services/settingsService";
+import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 
 export interface IDiagnosticsCoordinatorOptions {
     isParseBusy(): boolean;
@@ -33,6 +33,8 @@ export class DiagnosticsCoordinator {
     private timers = new Map<string, NodeJS.Timeout>();
     private cache = new Map<string, Diagnostic[]>();
     private publishedSignatures = new Map<string, string>();
+    private buildKeys = new Map<string, string>();
+    private staleUris = new Set<string>();
     private activeDocumentUri: string | undefined;
     private diagnosticsDebounceMs: number;
     private largeDiagnosticsDebounceMs: number;
@@ -75,15 +77,24 @@ export class DiagnosticsCoordinator {
                 this.cache
             ));
 
-            if (!this.cache.has(next)) {
+            if (!this.cache.has(next) || this.staleUris.has(next)) {
                 this.schedule(next, 0);
             }
         } else {
+            /* Вне RSL показываем уже готовые результаты, но не грузим CPU. */
             this.showAllCached();
         }
     }
 
     schedule(uri: string, delay?: number): void {
+        this.staleUris.add(uri);
+
+        /* Problems показывает активный RSL-файл — остальные считаем по запросу. */
+        if (!this.activeDocumentUri || this.activeDocumentUri !== uri) {
+            this.cancel(uri);
+            return;
+        }
+
         this.cancel(uri);
         const actualDelay = delay === undefined
             ? this.getDelay(uri)
@@ -112,6 +123,8 @@ export class DiagnosticsCoordinator {
     close(uri: string): void {
         this.cancel(uri);
         this.cache.delete(uri);
+        this.buildKeys.delete(uri);
+        this.staleUris.delete(uri);
         this.sendIfChanged(uri, []);
         this.publishedSignatures.delete(uri);
 
@@ -123,7 +136,11 @@ export class DiagnosticsCoordinator {
 
     refreshAll(): void {
         for (const document of this.documents.all()) {
-            this.schedule(document.uri, 0);
+            this.staleUris.add(document.uri);
+        }
+
+        if (this.activeDocumentUri) {
+            this.schedule(this.activeDocumentUri, 0);
         }
     }
 
@@ -159,6 +176,24 @@ export class DiagnosticsCoordinator {
             return;
         }
 
+        const buildKey = [
+            currentModule.version,
+            this.index.revision,
+            JSON.stringify(settings.diagnostics || {})
+        ].join(":");
+        const cached = this.cache.get(uri);
+
+        if (cached && this.buildKeys.get(uri) === buildKey) {
+            this.staleUris.delete(uri);
+            this.publishPlan(planUpdatedDiagnostics(
+                this.activeDocumentUri,
+                uri,
+                cached,
+                this.getOpenUris()
+            ));
+            return;
+        }
+
         const started = Date.now();
         const diagnostics = this.engine.build(
             currentModule,
@@ -166,6 +201,8 @@ export class DiagnosticsCoordinator {
             settings.diagnostics
         );
         this.cache.set(uri, diagnostics);
+        this.buildKeys.set(uri, buildKey);
+        this.staleUris.delete(uri);
         this.publishPlan(planUpdatedDiagnostics(
             this.activeDocumentUri,
             uri,

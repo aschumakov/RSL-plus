@@ -295,18 +295,30 @@ export class CBase extends CAbstractBase {
      * пробелы/переводы строк в token cache и подробное дерево выражений.
      */
     static forExternalModule(source: string, offset: number = 0): CBase {
+        const syntax = parseRslSyntax(source, undefined, {
+            buildExpressionTree: false,
+            includeTrivia: false
+        });
+        return CBase.fromExternalSyntax(source, syntax, offset);
+    }
+
+    /**
+     * Строит только экспортируемое дерево символов из уже готового parser result.
+     * Токены, AST и исходный текст после адаптации не удерживаются.
+     */
+    static fromExternalSyntax(
+        source: string,
+        syntax: IRslParseResult,
+        offset: number = 0
+    ): CBase {
         const root = CBase.fromSyntax(
             source,
             offset,
-            parseRslSyntax(source, undefined, {
-                buildExpressionTree: false,
-                includeTrivia: false
-            }),
+            syntax,
             false,
             true
         );
-        root.compactExternalSyntaxResult();
-        root.releaseSourceTree();
+        root.releaseExternalPayload();
         return root;
     }
 
@@ -516,40 +528,22 @@ export class CBase extends CAbstractBase {
         adapter.populate(this, result.root);
     }
 
-    /** Импортированный модуль не удерживает полное statement AST. */
-    private compactExternalSyntaxResult(): void {
-        const syntax = this.syntaxResult;
-
-        if (!syntax) {
-            return;
-        }
-
-        this.syntaxResult = {
-            root: {
-                ...syntax.root,
-                children: syntax.root.children.filter(child =>
-                    child.kind === "ImportDeclaration"
-                ),
-                tokens: []
-            },
-            diagnostics: [],
-            tokens: syntax.tokens,
-            lex: syntax.lex
-        };
-    }
-
-    /** Импортированный модуль не удерживает полный исходник в каждом CBase. */
-    private releaseSourceTree(): void {
+    /**
+     * Освобождает тяжёлые данные parser-а после построения внешнего summary.
+     * Остаются только CBase/CVar с именами, типами, сигнатурами и диапазонами.
+     */
+    releaseExternalPayload(): void {
         this.source = "";
+        this.tokenCache = [];
+        this.syntaxResult = undefined;
 
         /*
          * В childs исторически хранятся и CBase, и CVar: переменные
          * добавляются через приведение типа для совместимости старого API.
-         * Поэтому рекурсивная очистка допустима только для реальных CBase.
          */
         this.childs.forEach(child => {
             if (child instanceof CBase) {
-                child.releaseSourceTree();
+                child.releaseExternalPayload();
             }
         });
     }
@@ -725,15 +719,10 @@ class LegacySymbolTreeAdapter {
                 false
             ));
 
-        const bodyChildren = node.children
-            .filter(child => child.kind !== "Parameter");
-
-        if (this.externalSymbolsOnly) {
-            bodyChildren.forEach(child =>
-                this.visitExternalDeclarations(macro, child)
-            );
-        } else {
-            bodyChildren.forEach(child => this.visit(macro, child));
+        if (!this.externalSymbolsOnly) {
+            node.children
+                .filter(child => child.kind !== "Parameter")
+                .forEach(child => this.visit(macro, child));
         }
     }
 
@@ -788,7 +777,34 @@ class LegacySymbolTreeAdapter {
 
         node.children
             .filter(child => child.kind !== "Parameter")
-            .forEach(child => this.visit(classObject, child));
+            .forEach(child => {
+                if (this.externalSymbolsOnly) {
+                    this.visitExternalClassMember(classObject, child);
+                } else {
+                    this.visit(classObject, child);
+                }
+            });
+    }
+
+
+    /** В summary класса сохраняются только непосредственные доступные члены. */
+    private visitExternalClassMember(
+        scope: CBase,
+        node: IRslSyntaxNode
+    ): void {
+        switch (node.kind) {
+            case "VariableDeclaration":
+            case "ArrayDeclaration":
+            case "FileDeclaration":
+            case "RecordDeclaration":
+            case "MacroDeclaration":
+            case "ClassDeclaration":
+                this.visit(scope, node);
+                return;
+
+            default:
+                return;
+        }
     }
 
     private addVariable(

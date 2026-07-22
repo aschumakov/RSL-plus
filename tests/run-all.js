@@ -21,6 +21,7 @@ const tests = [
     "language-features.test.js",
     "quick-fix-extended.test.js",
     "architecture-1.1.4.test.js",
+    "resource-optimization-1.1.4.test.js",
     "module-resolution.test.js",
     "settings-service.test.js",
     "quick-fix-registry.test.js",

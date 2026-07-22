@@ -40,7 +40,7 @@ function getHandlerNames(): Set<string> {
 
 function loadHandlerNames(): string[] {
     const filePath = process.env.RSL_STANDARD_HANDLERS_FILE ||
-        path.resolve(__dirname, "..", "..", "standard-handlers.json");
+        path.resolve(__dirname, "..", "..", "..", "standard-handlers.json");
 
     try {
         const parsed = JSON.parse(

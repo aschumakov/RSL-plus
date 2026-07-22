@@ -15,18 +15,18 @@ import {
 import { TextDocument } from "vscode-languageserver-textdocument";
 
 import { CBase, configureSymbolTreeProvider } from "./common";
-import { RslDiagnosticEngine } from "./diagnosticEngine";
-import { DiagnosticsCoordinator } from "./diagnosticsCoordinator";
-import { DocumentAnalysisService } from "./documentAnalysisService";
-import { RslDefinitionProvider } from "./definitionProvider";
+import { RslDiagnosticEngine } from "./diagnostics/diagnosticEngine";
+import { DiagnosticsCoordinator } from "./diagnostics/diagnosticsCoordinator";
+import { DocumentAnalysisService } from "./services/documentAnalysisService";
+import { RslDefinitionProvider } from "./features/definitionProvider";
 import { DEFAULT_DIAGNOSTIC_SETTINGS } from "./diagnostics";
-import { RslLanguageFeatureRegistry } from "./languageFeatureRegistry";
+import { RslLanguageFeatureRegistry } from "./features/languageFeatureRegistry";
 import { RslScopeResolver } from "./scopeResolver";
 import { IFAStruct, IRslSettings } from "./interfaces";
 import { RSL_SEMANTIC_TOKENS_LEGEND } from "./semanticTokens";
-import { RslSettingsService } from "./settingsService";
+import { RslSettingsService } from "./services/settingsService";
 import { WorkspaceIndex } from "./workspaceIndex";
-import { WorkspaceModuleLoader } from "./workspaceModuleLoader";
+import { WorkspaceModuleLoader } from "./indexing/workspaceModuleLoader";
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments<TextDocument>(TextDocument);
@@ -166,7 +166,7 @@ connection.onNotification("workspaceFiles", (uris: string[]) => {
 
 connection.onNotification("clientReady", () => {
     clientReady = true;
-    moduleLoader.startBackgroundIndexing();
+    /* По умолчанию загружается только транзитивная цепочка Import открытых файлов. */
     notifyModuleCount(true);
 });
 
@@ -214,6 +214,7 @@ const definitionProvider = new RslDefinitionProvider({
         workspaceIndex.findWorkspaceFileUri(name),
     resolveWorkspaceFileUri: name =>
         workspaceIndex.resolveWorkspaceFile(name),
+    ensureModuleByName: name => moduleLoader.ensureLoadedByName(name),
     log: logMessage
 });
 
@@ -289,7 +290,7 @@ connection.onInitialized(async () => {
     }
 
     connection.onRequest("getMacros", () =>
-        workspaceIndex.getIndexedModules().map(module => module.uri)
+        workspaceIndex.getWorkspaceFileUris()
     );
 });
 
@@ -380,7 +381,8 @@ async function handleWatchedFileChange(
     if (openDocument) {
         documentAnalysis.invalidate(uri);
         documentAnalysis.schedule(openDocument);
-    } else {
+    } else if (workspaceIndex.getModule(uri)) {
+        /* Не загружаем изменённый файл, если он не был частью активного Import-графа. */
         await moduleLoader.reload(uri);
     }
 

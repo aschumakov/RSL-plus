@@ -19,19 +19,19 @@ import {
 } from "vscode-languageserver/node";
 import type { TextDocument } from "vscode-languageserver-textdocument";
 
-import { CBase } from "./common";
+import { CBase } from "../common";
 import { RslDefinitionProvider } from "./definitionProvider";
-import { getCIInfoForArray, getDefaults } from "./defaults";
-import { getSymbols } from "./docsymbols";
+import { getCIInfoForArray, getDefaults } from "../defaults";
+import { getSymbols } from "../docsymbols";
 import { buildEnhancedRslCodeActions } from "./enhancedCodeActions";
-import { GetFoldingRanges } from "./folding";
-import { FormatCode } from "./format";
-import type { IToken } from "./interfaces";
-import type { IRslToken } from "./lexer";
-import { findRslReferences } from "./references";
-import { RslScopeResolver } from "./scopeResolver";
-import { buildRslSemanticTokens } from "./semanticTokens";
-import type { WorkspaceIndex } from "./workspaceIndex";
+import { GetFoldingRanges } from "../folding";
+import { FormatCode } from "../format";
+import type { IToken } from "../interfaces";
+import type { IRslToken } from "../lexer";
+import { findRslReferencesInWorkspace } from "../analysis/references";
+import { RslScopeResolver } from "../scopeResolver";
+import { buildRslSemanticTokens } from "../semanticTokens";
+import type { WorkspaceIndex } from "../workspaceIndex";
 
 export interface IRslLanguageFeatureEnvironment {
     connection: Connection;
@@ -226,7 +226,7 @@ export class RslLanguageFeatureRegistry {
             }
 
             /* Workspace индексируется фоном; запрос не читает все файлы сам. */
-            return findRslReferences(
+            return findRslReferencesInWorkspace(
                 index,
                 resolver,
                 document.uri,

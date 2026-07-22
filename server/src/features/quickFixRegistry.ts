@@ -4,7 +4,7 @@ import type {
     Diagnostic
 } from "vscode-languageserver";
 
-import type { IIndexedModule } from "./workspaceIndex";
+import type { IIndexedModule } from "../workspaceIndex";
 
 export type RslQuickFixProvider = (
     module: IIndexedModule,

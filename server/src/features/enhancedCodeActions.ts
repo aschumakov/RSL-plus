@@ -9,10 +9,10 @@ import {
     WorkspaceEdit
 } from "vscode-languageserver";
 
-import { buildRslCodeActions } from "./codeActions";
+import { buildRslCodeActions } from "../codeActions";
 import { RslQuickFixRegistry } from "./quickFixRegistry";
-import type { IRslSyntaxNode } from "./syntaxParser";
-import type { IIndexedModule } from "./workspaceIndex";
+import type { IRslSyntaxNode } from "../syntaxParser";
+import type { IIndexedModule } from "../workspaceIndex";
 
 interface IDiagnosticData {
     start?: number;
