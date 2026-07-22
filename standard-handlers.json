@@ -1,0 +1,13 @@
+{
+  "handlers": [
+    "InitOperation",
+    "ExecuteStep",
+    "ExecuteCaseStep",
+    "ExecuteParamStep",
+    "MassExecuteStep",
+    "PostStepAction",
+    "CheckStepAction",
+    "CalcServiceSum",
+    "CalcCommissionSum"
+  ]
+}

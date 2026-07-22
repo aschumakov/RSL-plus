@@ -25,7 +25,8 @@ import {
 import { TextDocument } from "vscode-languageserver-textdocument";
 
 import { CBase, configureSymbolTreeProvider } from "./common";
-import { buildRslCodeActions } from "./codeActions";
+import { applyProjectDiagnosticRules } from "./diagnosticPostProcessor";
+import { buildEnhancedRslCodeActions } from "./enhancedCodeActions";
 import { RslDefinitionProvider } from "./definitionProvider";
 import {
     buildRslDiagnostics,
@@ -694,10 +695,13 @@ async function runDiagnostics(uri: string): Promise<void> {
 
     globalSettings = settings || defaultSettings;
     const started = Date.now();
-    const diagnostics = buildRslDiagnostics(
+    const diagnostics = applyProjectDiagnosticRules(
         currentModule,
-        workspaceIndex,
-        globalSettings.diagnostics
+        buildRslDiagnostics(
+            currentModule,
+            workspaceIndex,
+            globalSettings.diagnostics
+        )
     );
 
     publishDiagnostics(uri, diagnostics);
@@ -1086,7 +1090,7 @@ connection.onReferences(async params => {
 
 connection.onCodeAction(params => {
     const module = workspaceIndex.getModule(params.textDocument.uri);
-    return module ? buildRslCodeActions(module, params) : [];
+    return module ? buildEnhancedRslCodeActions(module, params) : [];
 });
 
 connection.languages.semanticTokens.on(async params => {

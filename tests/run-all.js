@@ -17,7 +17,8 @@ const tests = [
     "performance-optimizations.test.js",
     "scope-index.test.js",
     "diagnostics.test.js",
-    "language-features.test.js"
+    "language-features.test.js",
+    "quick-fix-extended.test.js"
 ];
 
 let failed = false;
