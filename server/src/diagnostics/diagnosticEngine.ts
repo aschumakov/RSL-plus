@@ -7,6 +7,7 @@ import {
 } from "../diagnostics";
 import { buildImportResolutionDiagnostics } from "./importResolutionDiagnostics";
 import type { IRslDiagnosticSettings } from "../interfaces";
+import { normalizeIdentifier } from "../lexer";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 
 export type DiagnosticPhase = "local" | "workspace";
@@ -135,8 +136,96 @@ export class RslDiagnosticEngine {
         }
 
         const processed = applyProjectDiagnosticRules(module, diagnostics);
-        return deduplicate(processed).slice(0, options.maxProblems);
+        const normalized = suppressValidOnErrorDiagnostics(module, processed);
+        return deduplicate(normalized).slice(0, options.maxProblems);
     }
+}
+
+
+/**
+ * ONERROR разрешён не только внутри MACRO. В исполняемом макрофайле он может
+ * открывать обработчик ошибок до конца файла и не требует собственного END.
+ * Старый structural-анализатор всё ещё выдаёт два ложных семейства сообщений;
+ * нормализуем их на границе diagnostic engine, не скрывая остальные END-ошибки.
+ */
+function suppressValidOnErrorDiagnostics(
+    module: IIndexedModule,
+    diagnostics: Diagnostic[]
+): Diagnostic[] {
+    return diagnostics.filter(diagnostic =>
+        !isInvalidOnErrorDiagnostic(module, diagnostic)
+    );
+}
+
+function isInvalidOnErrorDiagnostic(
+    module: IIndexedModule,
+    diagnostic: Diagnostic
+): boolean {
+    const code = String(diagnostic.code || "").toLowerCase();
+    const message = (diagnostic.message || "").toLowerCase();
+    const mentionsOnError = code.includes("onerror") ||
+        message.includes("onerror");
+
+    if (
+        code === "onerror-outside-macro" ||
+        (mentionsOnError && message.includes("macro"))
+    ) {
+        return true;
+    }
+
+    const requiresEnd =
+        code === "missing-end" ||
+        code === "extra-end" ||
+        /(^|[-_])end($|[-_])/.test(code) ||
+        /\bend\b/.test(message);
+
+    return requiresEnd && (
+        mentionsOnError || diagnosticPointsToOnError(module, diagnostic)
+    );
+}
+
+function diagnosticPointsToOnError(
+    module: IIndexedModule,
+    diagnostic: Diagnostic
+): boolean {
+    const start = diagnostic.range.start;
+    const end = diagnostic.range.end;
+
+    return module.lex.tokens.some(token =>
+        token.kind === "identifier" &&
+        normalizeIdentifier(token.value) === "onerror" &&
+        positionInsideDiagnostic(
+            token.line,
+            token.character,
+            start.line,
+            start.character,
+            end.line,
+            end.character
+        )
+    );
+}
+
+function positionInsideDiagnostic(
+    line: number,
+    character: number,
+    startLine: number,
+    startCharacter: number,
+    endLine: number,
+    endCharacter: number
+): boolean {
+    if (line < startLine || line > endLine) {
+        return false;
+    }
+
+    if (line === startLine && character < startCharacter) {
+        return false;
+    }
+
+    if (line === endLine && character > endCharacter) {
+        return false;
+    }
+
+    return true;
 }
 
 function localSettings(

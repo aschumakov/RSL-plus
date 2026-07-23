@@ -2,6 +2,7 @@ import * as fs from "fs";
 import { fileURLToPath } from "url";
 
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
+import { indexReferenceFileSource } from "../analysis/references";
 
 export type ModuleLoadPriority = "interactive" | "background";
 export type WorkspaceIndexingMode = "activeImports" | "workspaceIdle" | "full";
@@ -297,6 +298,7 @@ export class WorkspaceModuleLoader {
 
         const stat = await fs.promises.stat(filePath);
         const text = await fs.promises.readFile(filePath, "utf8");
+        indexReferenceFileSource(uri, text);
         const module = this.index.updateExternalModule(
             uri,
             text,

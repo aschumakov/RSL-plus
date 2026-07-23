@@ -1,13 +1,31 @@
 import * as fs from "fs";
 import { fileURLToPath } from "url";
 
-import { Location, Position, Range } from "vscode-languageserver";
+import {
+    CompletionItemKind,
+    Location,
+    Position,
+    Range
+} from "vscode-languageserver";
 
 import { CBase } from "../common";
 import { isIdentifierPart, normalizeIdentifier } from "../lexer";
 import { RslScopeResolver } from "../scopeResolver";
 import { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 
+const REFERENCE_READ_BATCH_SIZE = 16;
+const REFERENCE_QUERY_CACHE_ENTRIES = 16;
+const IDENTIFIER_BLOOM_WORDS = 64;
+const IDENTIFIER_BLOOM_BITS = IDENTIFIER_BLOOM_WORDS * 32;
+
+interface IReferenceCandidateSource {
+    uri: string;
+    source: string;
+}
+
+const identifierBloomByUri = new Map<string, Uint32Array>();
+const candidateUrisByName = new Map<string, string[]>();
+let referenceWorkspaceUris = new Set<string>();
 
 /** Совместимый быстрый поиск только по уже открытым полным моделям. */
 export function findRslReferences(
@@ -52,9 +70,11 @@ export function findRslReferences(
 }
 
 /**
- * References больше не требует постоянного AST/lexer всего workspace.
- * Неизвестные файлы сначала проходят дешёвый текстовый prefilter, затем
- * разбираются по одному и сразу освобождаются после проверки.
+ * Быстрый workspace References:
+ * - локальные переменные и параметры никогда не обходят workspace;
+ * - внешние файлы читаются небольшими параллельными пакетами;
+ * - после первого обхода для каждого файла остаётся компактный Bloom-индекс;
+ * - повторный поиск того же имени использует LRU-кэш URI-кандидатов.
  */
 export async function findRslReferencesInWorkspace(
     index: WorkspaceIndex,
@@ -80,9 +100,23 @@ export async function findRslReferencesInWorkspace(
     const targetKey = symbolKey(target.uri, target.object);
     const result: Location[] = [];
     const seen = new Set<string>();
+
+    if (isLocalReferenceTarget(sourceModule.object, target.object)) {
+        collectModuleReferences(
+            sourceModule,
+            resolver,
+            targetKey,
+            targetName,
+            includeDeclaration,
+            result,
+            seen,
+            isCancelled
+        );
+        return result.sort(compareLocations);
+    }
+
     const workspaceUris = index.getWorkspaceFileUris();
     const workspaceSet = new Set(workspaceUris);
-    let processedSinceYield = 0;
 
     /* Открытые документы могли ещё не попасть в исходный workspaceFiles list. */
     for (const module of index.getOpenModules()) {
@@ -90,35 +124,59 @@ export async function findRslReferencesInWorkspace(
             workspaceSet.add(module.uri);
             workspaceUris.push(module.uri);
         }
+
+        collectModuleReferences(
+            module,
+            resolver,
+            targetKey,
+            targetName,
+            includeDeclaration,
+            result,
+            seen,
+            isCancelled
+        );
     }
 
-    for (const candidateUri of workspaceUris) {
+    if (isCancelled()) {
+        return [];
+    }
+
+    const cachedCandidateUris = getCachedCandidateUris(targetName);
+    const externalUris = (cachedCandidateUris || workspaceUris).filter(
+        candidateUri => index.getModule(candidateUri)?.kind !== "open"
+    );
+    const discoveredCandidates: string[] = [];
+
+    for (
+        let batchStart = 0;
+        batchStart < externalUris.length;
+        batchStart += REFERENCE_READ_BATCH_SIZE
+    ) {
         if (isCancelled()) {
             return [];
         }
 
-        const loaded = index.getModule(candidateUri);
+        const batchUris = externalUris.slice(
+            batchStart,
+            batchStart + REFERENCE_READ_BATCH_SIZE
+        );
+        const candidates = await Promise.all(
+            batchUris.map(candidateUri => readCandidateSource(
+                candidateUri,
+                targetName
+            ))
+        );
 
-        if (loaded?.kind === "open") {
-            collectModuleReferences(
-                loaded,
-                resolver,
-                targetKey,
-                targetName,
-                includeDeclaration,
-                result,
-                seen,
-                isCancelled
-            );
-        } else {
-            const source = await readWorkspaceFile(candidateUri);
+        for (const candidate of candidates) {
+            if (!candidate || isCancelled()) {
+                continue;
+            }
 
-            if (
-                source !== undefined &&
-                containsIdentifier(source, targetName) &&
-                !isCancelled()
-            ) {
-                index.withTransientOpenModule(candidateUri, source, module => {
+            discoveredCandidates.push(candidate.uri);
+            index.withTransientOpenModule(
+                candidate.uri,
+                candidate.source,
+                module => {
                     collectModuleReferences(
                         module,
                         resolver,
@@ -129,19 +187,66 @@ export async function findRslReferencesInWorkspace(
                         seen,
                         isCancelled
                     );
-                });
-            }
+                }
+            );
         }
 
-        processedSinceYield++;
+        await yieldToInteractiveRequests();
+    }
 
-        if (processedSinceYield >= 4) {
-            processedSinceYield = 0;
-            await yieldToInteractiveRequests();
-        }
+    if (!cachedCandidateUris && !isCancelled()) {
+        cacheCandidateUris(targetName, discoveredCandidates);
     }
 
     return result.sort(compareLocations);
+}
+
+/** Инвалидируется file watcher-ом при изменении, создании или удалении файла. */
+export function invalidateReferenceFileIndex(uri: string): void {
+    identifierBloomByUri.delete(uri);
+    candidateUrisByName.clear();
+}
+
+/** Удаляет summary файлов, которых больше нет в каталоге workspace. */
+export function retainReferenceFileIndex(uris: readonly string[]): void {
+    const retained = new Set(uris);
+    const catalogChanged = retained.size !== referenceWorkspaceUris.size ||
+        Array.from(retained).some(uri => !referenceWorkspaceUris.has(uri));
+
+    for (const uri of identifierBloomByUri.keys()) {
+        if (!retained.has(uri)) {
+            identifierBloomByUri.delete(uri);
+        }
+    }
+
+    referenceWorkspaceUris = retained;
+
+    if (catalogChanged) {
+        candidateUrisByName.clear();
+    }
+}
+
+export function getReferenceFileIndexStats(): {
+    indexedFiles: number;
+    cachedQueries: number;
+} {
+    return {
+        indexedFiles: identifierBloomByUri.size,
+        cachedQueries: candidateUrisByName.size
+    };
+}
+
+/**
+ * Переиспользует уже прочитанный WorkspaceModuleLoader-ом текст.
+ * Дополнительного I/O нет: сохраняется только Bloom-индекс идентификаторов.
+ */
+export function indexReferenceFileSource(uri: string, source: string): void {
+    if (!uri || identifierBloomByUri.has(uri)) {
+        return;
+    }
+
+    identifierBloomByUri.set(uri, buildIdentifierBloom(source));
+    candidateUrisByName.clear();
 }
 
 function collectModuleReferences(
@@ -242,11 +347,12 @@ function findDeclarationTokenByKey(
 function findObjectsByName(root: CBase, name: string): CBase[] {
     const result: CBase[] = [];
     const queue: CBase[] = [root];
+    let position = 0;
 
-    while (queue.length > 0) {
-        const current = queue.shift()!;
+    while (position < queue.length) {
+        const current = queue[position++];
 
-        for (const child of current.getChilds()) {
+        for (const child of getReferenceTreeChildren(current)) {
             if (normalizeIdentifier(child.Name) === name) {
                 result.push(child);
             }
@@ -260,6 +366,74 @@ function findObjectsByName(root: CBase, name: string): CBase[] {
     return result;
 }
 
+/** Символ внутри Macro/Method не может иметь использования в другом файле. */
+function isLocalReferenceTarget(root: CBase, target: CBase): boolean {
+    /* PRIVATE/LOCAL объявления недоступны из других модулей. */
+    if (target.Private) {
+        return true;
+    }
+
+    const path = findObjectPath(root, target);
+
+    if (!path) {
+        return false;
+    }
+
+    return path.slice(0, -1).some(object =>
+        object.ObjKind === CompletionItemKind.Function ||
+        object.ObjKind === CompletionItemKind.Method
+    );
+}
+
+function findObjectPath(
+    current: CBase,
+    target: CBase,
+    path: CBase[] = []
+): CBase[] | undefined {
+    const currentPath = [...path, current];
+
+    if (current === target) {
+        return currentPath;
+    }
+
+    for (const child of getReferenceTreeChildren(current)) {
+        if (child === target) {
+            return [...currentPath, child];
+        }
+
+        /*
+         * CVar и другие листовые элементы наследуют CAbstractBase, но не
+         * имеют getChilds(). В старой версии рекурсия заходила в такой узел
+         * и падала с TypeError до того, как доходила до искомого объекта.
+         */
+        if (!child.isObject()) {
+            continue;
+        }
+
+        const found = findObjectPath(child, target, currentPath);
+
+        if (found) {
+            return found;
+        }
+    }
+
+    return undefined;
+}
+
+/** Безопасно возвращает дочерние узлы только для контейнеров symbol tree. */
+function getReferenceTreeChildren(current: CBase): CBase[] {
+    const candidate = current as unknown as {
+        getChilds?: () => unknown;
+    };
+
+    if (typeof candidate.getChilds !== "function") {
+        return [];
+    }
+
+    const children = candidate.getChilds.call(current);
+    return Array.isArray(children) ? children as CBase[] : [];
+}
+
 function symbolKey(uri: string, object: CBase): string {
     return [
         uri,
@@ -270,6 +444,34 @@ function symbolKey(uri: string, object: CBase): string {
     ].join(":");
 }
 
+async function readCandidateSource(
+    uri: string,
+    normalizedName: string
+): Promise<IReferenceCandidateSource | undefined> {
+    const bloom = identifierBloomByUri.get(uri);
+
+    if (bloom && !bloomMightContain(bloom, normalizedName)) {
+        return undefined;
+    }
+
+    const source = await readWorkspaceFile(uri);
+
+    if (source === undefined) {
+        return undefined;
+    }
+
+    if (!bloom) {
+        /* Первый запрос строит Bloom и проверяет имя одним проходом. */
+        const analysis = analyzeIdentifierSource(source, normalizedName);
+        identifierBloomByUri.set(uri, analysis.bloom);
+        return analysis.containsTarget ? { uri, source } : undefined;
+    }
+
+    return containsIdentifier(source, normalizedName)
+        ? { uri, source }
+        : undefined;
+}
+
 async function readWorkspaceFile(uri: string): Promise<string | undefined> {
     try {
         return await fs.promises.readFile(fileURLToPath(uri), "utf8");
@@ -278,24 +480,151 @@ async function readWorkspaceFile(uri: string): Promise<string | undefined> {
     }
 }
 
+function buildIdentifierBloom(source: string): Uint32Array {
+    return analyzeIdentifierSource(source).bloom;
+}
+
+function analyzeIdentifierSource(
+    source: string,
+    normalizedTarget?: string
+): { bloom: Uint32Array; containsTarget: boolean } {
+    const bloom = new Uint32Array(IDENTIFIER_BLOOM_WORDS);
+    let containsTarget = false;
+    let position = 0;
+
+    while (position < source.length) {
+        if (!isIdentifierPart(source.charAt(position))) {
+            position++;
+            continue;
+        }
+
+        const start = position++;
+
+        while (
+            position < source.length &&
+            isIdentifierPart(source.charAt(position))
+        ) {
+            position++;
+        }
+
+        const identifier = normalizeIdentifier(source.substring(start, position));
+
+        if (!identifier) {
+            continue;
+        }
+
+        addIdentifierToBloom(bloom, identifier);
+
+        if (normalizedTarget && identifier === normalizedTarget) {
+            containsTarget = true;
+        }
+    }
+
+    return { bloom, containsTarget };
+}
+
+function addIdentifierToBloom(
+    bloom: Uint32Array,
+    normalizedIdentifier: string
+): void {
+    const first = hashIdentifier(normalizedIdentifier, 2166136261);
+    const second = hashIdentifier(normalizedIdentifier, 2246822519) | 1;
+
+    for (let index = 0; index < 3; index++) {
+        const bit = (first + Math.imul(index, second)) >>> 0;
+        const normalizedBit = bit % IDENTIFIER_BLOOM_BITS;
+        bloom[normalizedBit >>> 5] |= 1 << (normalizedBit & 31);
+    }
+}
+
+function bloomMightContain(
+    bloom: Uint32Array,
+    normalizedIdentifier: string
+): boolean {
+    if (!normalizedIdentifier) {
+        return false;
+    }
+
+    const first = hashIdentifier(normalizedIdentifier, 2166136261);
+    const second = hashIdentifier(normalizedIdentifier, 2246822519) | 1;
+
+    for (let index = 0; index < 3; index++) {
+        const bit = (first + Math.imul(index, second)) >>> 0;
+        const normalizedBit = bit % IDENTIFIER_BLOOM_BITS;
+
+        if ((bloom[normalizedBit >>> 5] & (1 << (normalizedBit & 31))) === 0) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+function hashIdentifier(value: string, seed: number): number {
+    let result = seed >>> 0;
+
+    for (let index = 0; index < value.length; index++) {
+        result ^= value.charCodeAt(index);
+        result = Math.imul(result, 16777619) >>> 0;
+    }
+
+    return result;
+}
+
+function getCachedCandidateUris(name: string): string[] | undefined {
+    const cached = candidateUrisByName.get(name);
+
+    if (!cached) {
+        return undefined;
+    }
+
+    candidateUrisByName.delete(name);
+    candidateUrisByName.set(name, cached);
+    return cached.slice();
+}
+
+function cacheCandidateUris(name: string, uris: string[]): void {
+    candidateUrisByName.delete(name);
+    candidateUrisByName.set(name, uris.slice());
+
+    while (candidateUrisByName.size > REFERENCE_QUERY_CACHE_ENTRIES) {
+        const oldest = candidateUrisByName.keys().next().value as
+            string | undefined;
+
+        if (oldest === undefined) {
+            break;
+        }
+
+        candidateUrisByName.delete(oldest);
+    }
+}
+
 function containsIdentifier(source: string, normalizedName: string): boolean {
     if (!normalizedName || source.length < normalizedName.length) {
         return false;
     }
 
-    const limit = source.length - normalizedName.length;
-    for (let position = 0; position <= limit; position++) {
-        if (!equalsIgnoreCaseAt(source, normalizedName, position)) {
+    let position = 0;
+
+    while (position < source.length) {
+        if (!isIdentifierPart(source.charAt(position))) {
+            position++;
             continue;
         }
 
-        const before = position > 0 ? source.charAt(position - 1) : "";
-        const afterPosition = position + normalizedName.length;
-        const after = afterPosition < source.length
-            ? source.charAt(afterPosition)
-            : "";
+        const start = position++;
 
-        if (!isIdentifierPart(before) && !isIdentifierPart(after)) {
+        while (
+            position < source.length &&
+            isIdentifierPart(source.charAt(position))
+        ) {
+            position++;
+        }
+
+        if (
+            position - start === normalizedName.length &&
+            identifierEqualsIgnoreCase(source, start, position, normalizedName)
+        ) {
             return true;
         }
     }
@@ -303,16 +632,25 @@ function containsIdentifier(source: string, normalizedName: string): boolean {
     return false;
 }
 
-function equalsIgnoreCaseAt(
+function identifierEqualsIgnoreCase(
     source: string,
-    normalizedNeedle: string,
-    position: number
+    start: number,
+    end: number,
+    normalizedName: string
 ): boolean {
-    for (let index = 0; index < normalizedNeedle.length; index++) {
-        if (source.charAt(position + index).toLowerCase() !== normalizedNeedle.charAt(index)) {
+    if (end - start !== normalizedName.length) {
+        return false;
+    }
+
+    for (let index = 0; index < normalizedName.length; index++) {
+        if (
+            source.charAt(start + index).toLowerCase() !==
+            normalizedName.charAt(index)
+        ) {
             return false;
         }
     }
+
     return true;
 }
 
@@ -332,3 +670,11 @@ function comparePositions(left: Position, right: Position): number {
 function yieldToInteractiveRequests(): Promise<void> {
     return new Promise(resolve => setImmediate(resolve));
 }
+
+/** Минимальный test hook без раскрытия внутренних mutable-кэшей. */
+export const referenceTesting = {
+    buildIdentifierBloom,
+    bloomMightContain,
+    containsIdentifier,
+    isLocalReferenceTarget
+};

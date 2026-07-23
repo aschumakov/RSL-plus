@@ -27,6 +27,10 @@ import { RSL_SEMANTIC_TOKENS_LEGEND } from "./semanticTokens";
 import { RslSettingsService } from "./services/settingsService";
 import { WorkspaceIndex } from "./workspaceIndex";
 import { WorkspaceModuleLoader } from "./indexing/workspaceModuleLoader";
+import {
+    invalidateReferenceFileIndex,
+    retainReferenceFileIndex
+} from "./analysis/references";
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments<TextDocument>(TextDocument);
@@ -179,6 +183,7 @@ diagnosticsCoordinator = new DiagnosticsCoordinator(
 connection.onNotification("workspaceFiles", (uris: string[]) => {
     const items = Array.isArray(uris) ? uris : [];
     moduleLoader.registerWorkspaceFiles(items);
+    retainReferenceFileIndex(items);
     definitionProvider.clearCaches();
 });
 
@@ -384,6 +389,7 @@ async function handleWatchedFileChange(
     uri: string,
     type: FileChangeType
 ): Promise<void> {
+    invalidateReferenceFileIndex(uri);
     definitionProvider.invalidateUri(uri);
     const dependents = workspaceIndex.getDependents(uri);
 

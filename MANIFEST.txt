@@ -1,19 +1,16 @@
-RSL-plus 1.1.4 Fast Open & Performance Patch
+RSL-plus 1.1.4 ONERROR and References Performance Patch
+Base commit: 3caa71efba86a10075e9cb25fe41d8df20fbbcf6
 
-Накладывается на текущий master после resource-optimization patch.
-Версия package.json остаётся 1.1.4.
+Direct overlay files only. No PowerShell or Node installation scripts.
 
-Изменённые области:
-- immediate open parse / debounced edits;
-- shared lexer/parser snapshot for Folding and Outline;
-- two-phase local/workspace diagnostics with max wait;
-- external module summary scanner and stored definition ranges;
-- single bounded ImportContext cache;
-- semantic tokens full/delta/range;
-- lightweight transient References context;
-- delayed workspace inventory and throttled status updates.
-
-После распаковки обязательно выполнить:
-  powershell -ExecutionPolicy Bypass -File .\apply-performance-patch.ps1
-  npm.cmd test
-  vsce.cmd package
+Changes:
+- allow top-level ONERROR without dedicated END diagnostics;
+- keep ordinary missing-END diagnostics;
+- local/private symbol References shortcut;
+- batched concurrent workspace reads;
+- one-pass identifier analysis;
+- per-file identifier Bloom index;
+- prewarm index from already loaded imports;
+- LRU candidate URI cache;
+- file watcher and workspace catalog invalidation;
+- regression tests.

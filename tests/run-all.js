@@ -29,7 +29,8 @@ const tests = [
     "quick-fix-registry.test.js",
     "workspace-loader.test.js",
     "import-resolution-diagnostics.test.js",
-    "diagnostic-engine.test.js"
+    "diagnostic-engine.test.js",
+    "onerror-references-performance.test.js"
 ];
 
 let failed = false;
