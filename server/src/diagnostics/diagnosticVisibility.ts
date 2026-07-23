@@ -6,6 +6,25 @@ export interface IDiagnosticPublication {
 }
 
 /**
+ * VS Code может временно сообщить об отсутствии активного редактора при
+ * переводе фокуса в Problems, Quick Pick или другую служебную панель.
+ * Открытый RSL-файл в этот момент остаётся активным для диагностики.
+ */
+export function resolveActiveDocumentUri(
+    currentUri: string | undefined,
+    requestedUri: string | null | undefined,
+    openUris: readonly string[]
+): string | undefined {
+    if (typeof requestedUri === "string" && requestedUri.length > 0) {
+        return requestedUri;
+    }
+
+    return currentUri && openUris.indexOf(currentUri) >= 0
+        ? currentUri
+        : undefined;
+}
+
+/**
  * Формирует публикации при переключении активного редактора.
  *
  * Пока активен RSL-документ, Problems должен содержать только его сообщения.

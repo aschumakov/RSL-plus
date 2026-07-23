@@ -9,7 +9,8 @@ import type { RslDiagnosticEngine } from "./diagnosticEngine";
 import {
     type IDiagnosticPublication,
     planActiveDocumentDiagnostics,
-    planUpdatedDiagnostics
+    planUpdatedDiagnostics,
+    resolveActiveDocumentUri
 } from "./diagnosticVisibility";
 import type { RslSettingsService } from "../services/settingsService";
 import type { WorkspaceIndex } from "../workspaceIndex";
@@ -67,9 +68,11 @@ export class DiagnosticsCoordinator {
     }
 
     setActiveDocument(uri: string | null | undefined): void {
-        const next = typeof uri === "string" && uri.length > 0
-            ? uri
-            : undefined;
+        const next = resolveActiveDocumentUri(
+            this.activeDocumentUri,
+            uri,
+            this.getOpenUris()
+        );
 
         if (this.activeDocumentUri === next) {
             return;

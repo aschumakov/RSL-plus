@@ -3,7 +3,8 @@
 const assert = require("assert");
 const {
   planActiveDocumentDiagnostics,
-  planUpdatedDiagnostics
+  planUpdatedDiagnostics,
+  resolveActiveDocumentUri
 } = require("../server/out/diagnostics/diagnosticVisibility");
 
 const activeUri = "file:///active.mac";
@@ -39,6 +40,42 @@ test("При открытии файла без кэша остальные Prob
 
   assert.deepStrictEqual(byUri(plan, activeUri), []);
   assert.deepStrictEqual(byUri(plan, otherUri), []);
+});
+
+test("Временный null не сбрасывает открытый активный RSL-файл", () => {
+  let currentUri = resolveActiveDocumentUri(
+    undefined,
+    activeUri,
+    openUris
+  );
+  assert.strictEqual(currentUri, activeUri);
+
+  currentUri = resolveActiveDocumentUri(currentUri, null, openUris);
+  assert.strictEqual(currentUri, activeUri);
+
+  currentUri = resolveActiveDocumentUri(currentUri, undefined, openUris);
+  assert.strictEqual(currentUri, activeUri);
+});
+
+test("Активный URI очищается после фактического закрытия файла", () => {
+  const remainingUris = [otherUri];
+  const resolved = resolveActiveDocumentUri(
+    activeUri,
+    null,
+    remainingUris
+  );
+
+  assert.strictEqual(resolved, undefined);
+});
+
+test("Переключение на другой RSL-файл выполняется сразу", () => {
+  const resolved = resolveActiveDocumentUri(
+    activeUri,
+    otherUri,
+    openUris
+  );
+
+  assert.strictEqual(resolved, otherUri);
 });
 
 test("Пустой результат активного файла не возвращает ошибки других файлов", () => {
