@@ -69,6 +69,92 @@ test("Else и OnError находятся на уровне владельца", 
     assert.strictEqual(FormatCode(source, 4), expected);
 });
 
+test("Верхнеуровневый OnError задаёт отступ до конца файла", () => {
+    const source = [
+        "if(debugmode)",
+        "exit(0);",
+        "end;",
+        "exit(1);",
+        "onerror(x)",
+        "if(rsldefcon.IsInTrans)",
+        "rsldefcon.RollbackTrans;",
+        "end;",
+        'ExecSql("insert into log_table values(:err)",',
+        'MakeArray(SQLParam("err",x.message)),false);',
+        "exit(0);"
+    ].join("\n");
+
+    const expected = [
+        "if(debugmode)",
+        "    exit(0);",
+        "end;",
+        "exit(1);",
+        "onerror(x)",
+        "    if(rsldefcon.IsInTrans)",
+        "        rsldefcon.RollbackTrans;",
+        "    end;",
+        '    ExecSql("insert into log_table values(:err)",',
+        '            MakeArray(SQLParam("err",x.message)),false);',
+        "    exit(0);"
+    ].join("\n");
+
+    assert.strictEqual(FormatCode(source, 4), expected);
+});
+
+test("Последовательные присваивания выравниваются по знаку равно", () => {
+    const source = [
+        "If hasMessage",
+        "Message.id        = AMessage(i).id;",
+        "Message.type      = AMessage(i).type;",
+        "Message.createdAt = AMessage(i).createdAt;",
+        "Message.content   = AMessage(i).content;",
+        "Message.InmessLogId = a.logid;",
+        "Message.ParentId  = a.parentid;",
+        "End;"
+    ].join("\n");
+
+    const expected = [
+        "If hasMessage",
+        "    Message.id          = AMessage(i).id;",
+        "    Message.type        = AMessage(i).type;",
+        "    Message.createdAt   = AMessage(i).createdAt;",
+        "    Message.content     = AMessage(i).content;",
+        "    Message.InmessLogId = a.logid;",
+        "    Message.ParentId    = a.parentid;",
+        "End;"
+    ].join("\n");
+
+    const formatted = FormatCode(source, 4);
+    assert.strictEqual(formatted, expected);
+    assert.strictEqual(FormatCode(formatted, 4), expected);
+});
+
+test("Выравнивание не объединяет разные блоки присваиваний", () => {
+    const source = [
+        "shortName = first;",
+        "longName = second;",
+        "",
+        "If left==right",
+        "nested = third;",
+        "muchLongerNested = fourth;",
+        "End;",
+        "after = fifth;"
+    ].join("\n");
+
+    const expected = [
+        "shortName = first;",
+        "longName  = second;",
+        "",
+        "If left == right",
+        "    nested           = third;",
+        "    muchLongerNested = fourth;",
+        "End;",
+        "after = fifth;"
+    ].join("\n");
+
+    assert.strictEqual(FormatCode(source, 4), expected);
+});
+
 test("Многострочный вызов выравнивается по скобке", () => {
     const source = [
         "Macro Test()",

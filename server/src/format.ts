@@ -14,6 +14,13 @@ interface IContinuationContext {
     indentColumn: number;
 }
 
+interface IAssignmentAlignment {
+    lineIndex: number;
+    indentColumn: number;
+    lhsEndColumn: number;
+    operatorColumn: number;
+}
+
 /**
  * Безопасный форматтер RSL.
  *
@@ -72,6 +79,9 @@ export function FormatCode(text: string, tabSize: number = 4): string {
         const isBranch = structure.firstKeyword !== undefined &&
             BRANCH_KEYWORDS.indexOf(structure.firstKeyword) >= 0;
         const startsWithEnd = structure.firstKeyword === END_KEYWORD;
+        const startsTopLevelOnError =
+            structure.firstKeyword === "onerror" &&
+            indentLevel === 0;
         const lineIndentLevel = isBranch || startsWithEnd
             ? Math.max(indentLevel - 1, 0)
             : indentLevel;
@@ -104,11 +114,145 @@ export function FormatCode(text: string, tabSize: number = 4): string {
 
         indentLevel = Math.max(
             0,
-            indentLevel + structure.blockStarts - structure.blockEnds
+            indentLevel +
+                structure.blockStarts -
+                structure.blockEnds +
+                (startsTopLevelOnError ? 1 : 0)
         );
     }
 
+    alignConsecutiveAssignments(formatted);
     return bom + formatted.join(lex.eol);
+}
+
+function alignConsecutiveAssignments(lines: string[]): void {
+    let group: IAssignmentAlignment[] = [];
+
+    const flushGroup = (): void => {
+        if (group.length < 2) {
+            group = [];
+            return;
+        }
+
+        const targetOperatorColumn = Math.max(
+            ...group.map(item => item.lhsEndColumn)
+        ) + 1;
+
+        for (const item of group) {
+            const line = lines[item.lineIndex];
+            lines[item.lineIndex] =
+                line.substring(0, item.lhsEndColumn) +
+                " ".repeat(targetOperatorColumn - item.lhsEndColumn) +
+                line.substring(item.operatorColumn);
+        }
+
+        group = [];
+    };
+
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+        const assignment = getAssignmentAlignment(lines[lineIndex], lineIndex);
+
+        if (
+            !assignment ||
+            (group.length > 0 &&
+                assignment.indentColumn !== group[0].indentColumn)
+        ) {
+            flushGroup();
+        }
+
+        if (assignment) {
+            group.push(assignment);
+        }
+    }
+
+    flushGroup();
+}
+
+function getAssignmentAlignment(
+    line: string,
+    lineIndex: number
+): IAssignmentAlignment | undefined {
+    const code = getCodeBeforeLineComment(line);
+    const tokens = lexRsl(code).tokens;
+    const operatorIndex = findSimpleAssignmentOperator(tokens);
+
+    if (operatorIndex === undefined) {
+        return undefined;
+    }
+
+    const operator = tokens[operatorIndex];
+    const lhs = code.substring(0, operator.start).trim();
+
+    if (!isSimpleAssignmentTarget(lhs)) {
+        return undefined;
+    }
+
+    const indentColumn = code.length - code.trimStart().length;
+    const lhsEndColumn = code
+        .substring(0, operator.start)
+        .replace(/[ \t]+$/g, "")
+        .length;
+
+    return {
+        lineIndex,
+        indentColumn,
+        lhsEndColumn,
+        operatorColumn: operator.start
+    };
+}
+
+function findSimpleAssignmentOperator(
+    tokens: IRslToken[]
+): number | undefined {
+    for (let index = 0; index < tokens.length; index++) {
+        const token = tokens[index];
+
+        if (token.kind !== "symbol" || token.raw !== "=") {
+            continue;
+        }
+
+        const previous = findSignificantToken(tokens, index, -1);
+        const next = findSignificantToken(tokens, index, 1);
+
+        if (
+            (previous &&
+                previous.kind === "symbol" &&
+                ["!", "<", ">", "=", "+", "-", "*", "/", "%"]
+                    .indexOf(previous.raw) >= 0) ||
+            (next && next.kind === "symbol" && next.raw === "=")
+        ) {
+            continue;
+        }
+
+        return index;
+    }
+
+    return undefined;
+}
+
+function findSignificantToken(
+    tokens: IRslToken[],
+    startIndex: number,
+    direction: -1 | 1
+): IRslToken | undefined {
+    for (
+        let index = startIndex + direction;
+        index >= 0 && index < tokens.length;
+        index += direction
+    ) {
+        if (tokens[index].kind !== "whitespace") {
+            return tokens[index];
+        }
+    }
+
+    return undefined;
+}
+
+function isSimpleAssignmentTarget(value: string): boolean {
+    const identifier =
+        "[@A-Za-zА-Яа-яЁё_][@A-Za-zА-Яа-яЁё0-9_]*";
+    const suffix = `(?:\\s*\\.\\s*${identifier}|\\([^)]*\\)|\\[[^\\]]*\\])`;
+    return new RegExp(`^${identifier}(?:${suffix})*$`).test(value);
 }
 
 interface ILineStructure {

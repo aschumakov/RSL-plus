@@ -167,6 +167,118 @@ test("Неоднозначная ссылка из двух Import являет�
     assert.ok(item.message.includes("second.mac"));
 });
 
+test("Стандартные типы RSL не считаются неоднозначными ссылками", () => {
+    const standardTypes = [
+        "Integer",
+        "Double",
+        "DoubleL",
+        "String",
+        "Bool",
+        "Date",
+        "Time",
+        "DateTime",
+        "MemAddr",
+        "ProcRef",
+        "MethodRef",
+        "Decimal",
+        "Numeric",
+        "Money",
+        "MoneyL",
+        "SpecVal"
+    ];
+    const importedDeclarations = standardTypes
+        .map(typeName => `Macro ${typeName}()\nEnd;`)
+        .join("\n");
+    const typedVariables = standardTypes
+        .map((typeName, index) =>
+            `private var value${index}:${typeName};`
+        );
+    const source = [
+        "Import first, second;",
+        ...typedVariables,
+        "Macro Test(value:String):String",
+        ' return "";',
+        "End;"
+    ].join("\n");
+    const items = diagnosticsFor(source, index => {
+        createModule(
+            index,
+            "file:///first.mac",
+            importedDeclarations,
+            false
+        );
+        createModule(
+            index,
+            "file:///second.mac",
+            importedDeclarations,
+            false
+        );
+    });
+
+    assert.ok(!items.some(item =>
+        item.code === "ambiguous-reference" &&
+        standardTypes.some(typeName =>
+            item.message.toLowerCase().includes(typeName.toLowerCase())
+        )
+    ));
+});
+
+test("ValType и его стандартные коды не считаются неоднозначными", () => {
+    const builtinNames = [
+        "ValType",
+        "V_UNDEF",
+        "V_INTEGER",
+        "V_MONEY",
+        "V_DECIMAL",
+        "V_DOUBLE",
+        "V_STRING",
+        "V_BOOL",
+        "V_DATE",
+        "V_TIME",
+        "V_DTTM",
+        "V_FILE",
+        "V_STRUC",
+        "V_ARRAY",
+        "V_TXTFILE",
+        "V_DBFFILE",
+        "V_PROC",
+        "V_R2M",
+        "V_MEMADDR"
+    ];
+    const importedDeclarations = builtinNames
+        .map(name => `Macro ${name}()\nEnd;`)
+        .join("\n");
+    const source = [
+        "Import first, second;",
+        "Macro Test(value)",
+        " result = ValType(value);",
+        " If result==V_STRING",
+        " End;",
+        "End;"
+    ].join("\n");
+    const items = diagnosticsFor(source, index => {
+        createModule(
+            index,
+            "file:///first.mac",
+            importedDeclarations,
+            false
+        );
+        createModule(
+            index,
+            "file:///second.mac",
+            importedDeclarations,
+            false
+        );
+    });
+
+    assert.ok(!items.some(item =>
+        item.code === "ambiguous-reference" &&
+        builtinNames.some(name =>
+            item.message.toLowerCase().includes(name.toLowerCase())
+        )
+    ));
+});
+
 test("Локальное объявление снимает неоднозначность Import", () => {
     const items = diagnosticsFor(
         [

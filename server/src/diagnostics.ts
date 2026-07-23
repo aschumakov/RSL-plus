@@ -59,7 +59,25 @@ const RESERVED_IDENTIFIERS = new Set([
     "false",
     "null",
     "undefined",
-    "v_undef"
+    "valtype",
+    "v_undef",
+    "v_integer",
+    "v_money",
+    "v_decimal",
+    "v_double",
+    "v_string",
+    "v_bool",
+    "v_date",
+    "v_time",
+    "v_dttm",
+    "v_file",
+    "v_struc",
+    "v_array",
+    "v_txtfile",
+    "v_dbffile",
+    "v_proc",
+    "v_r2m",
+    "v_memaddr"
 ]);
 
 export const DEFAULT_DIAGNOSTIC_SETTINGS: Required<IRslDiagnosticSettings> = {
@@ -894,6 +912,7 @@ function addAmbiguousReferenceDiagnostics(
 
         if (
             !candidates ||
+            isReservedIdentifier(name) ||
             declarationRangeKeys.has(offsetRangeKey(
                 token.start,
                 token.end
