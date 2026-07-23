@@ -236,6 +236,14 @@ export function activate(context: ExtensionContext): void {
         ],
         synchronize: {
             fileEvents: macroFileWatcher
+        },
+        initializationOptions: {
+            referenceIndexCachePath: context.storageUri
+                ? Uri.joinPath(
+                    context.storageUri,
+                    "reference-index-v2.json"
+                ).fsPath
+                : undefined
         }
     };
 

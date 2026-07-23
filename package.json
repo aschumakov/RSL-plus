@@ -229,7 +229,7 @@
       "postinstall": "npm ci --prefix client && npm ci --prefix server",
       "test:diagnostics": "npm run compile && node tests/diagnostics.test.js",
       "test:features": "npm run compile && node tests/language-features.test.js",
-      "test:architecture": "npm run compile && node tests/architecture-1.1.4.test.js"
+      "test:architecture": "npm run compile && node tests/pipeline-architecture.test.js && node tests/semantic-resolution.test.js && node tests/reference-index.test.js"
    },
    "devDependencies": {
       "@types/node": "22.16.5",

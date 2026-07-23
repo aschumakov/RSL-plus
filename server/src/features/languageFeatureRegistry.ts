@@ -25,14 +25,16 @@ import type { TextDocument } from "vscode-languageserver-textdocument";
 
 import { CBase } from "../common";
 import { RslDefinitionProvider } from "./definitionProvider";
-import { getCIInfoForArray, getDefaults } from "../defaults";
 import { getSymbols } from "../docsymbols";
+import { getCIInfoForArray, getDefaults } from "../defaults";
 import { buildEnhancedRslCodeActions } from "./enhancedCodeActions";
-import { GetFoldingRanges } from "../folding";
+import { GetFoldingRanges, type IRslFoldingRange } from "../folding";
 import { FormatCode } from "../format";
 import type { IToken } from "../interfaces";
 import type { IRslToken } from "../lexer";
 import { findRslReferencesInWorkspace } from "../analysis/references";
+import { ReferenceIndex } from "../analysis/referenceIndex";
+import type { IFastDocumentSnapshot } from "../services/fastDocumentSnapshot";
 import { RslScopeResolver } from "../scopeResolver";
 import { buildRslSemanticTokens } from "../semanticTokens";
 import type { WorkspaceIndex } from "../workspaceIndex";
@@ -43,6 +45,8 @@ export interface IRslLanguageFeatureEnvironment {
     index: WorkspaceIndex;
     resolver: RslScopeResolver;
     definitionProvider: RslDefinitionProvider;
+    referenceIndex?: ReferenceIndex;
+    getFastDocumentSnapshot?(document: TextDocument): IFastDocumentSnapshot;
     ensureDocumentParsed(document: TextDocument): Promise<CBase | undefined>;
     log(message: string): void;
 }
@@ -65,7 +69,7 @@ export class RslLanguageFeatureRegistry {
     private semanticResultSequence = 0;
     private foldingRangesCache = new Map<string, {
         version: number;
-        value: ReturnType<typeof GetFoldingRanges>;
+        value: IRslFoldingRange[];
     }>();
     private documentSymbolsCache = new Map<string, {
         version: number;
@@ -73,8 +77,11 @@ export class RslLanguageFeatureRegistry {
     }>();
     private defaultCompletionItems = getCIInfoForArray(getDefaults());
     private registered = false;
+    private referenceIndex: ReferenceIndex;
 
-    constructor(private environment: IRslLanguageFeatureEnvironment) {}
+    constructor(private environment: IRslLanguageFeatureEnvironment) {
+        this.referenceIndex = environment.referenceIndex || new ReferenceIndex();
+    }
 
     register(): void {
         if (this.registered) {
@@ -88,6 +95,7 @@ export class RslLanguageFeatureRegistry {
             index,
             resolver,
             definitionProvider,
+            getFastDocumentSnapshot,
             ensureDocumentParsed
         } = this.environment;
 
@@ -231,10 +239,11 @@ export class RslLanguageFeatureRegistry {
                 return [];
             }
 
-            /* Workspace индексируется фоном; запрос не читает все файлы сам. */
+            /* ReferenceIndex отбирает файлы до точного transient parse. */
             return findRslReferencesInWorkspace(
                 index,
                 resolver,
+                this.referenceIndex,
                 document.uri,
                 context.offset,
                 params.context.includeDeclaration,
@@ -284,56 +293,63 @@ export class RslLanguageFeatureRegistry {
         connection.languages.semanticTokens.onRange(async (
             params: SemanticTokensRangeParams
         ): Promise<SemanticTokens> => {
-            const full = await this.getSemanticTokens(params.textDocument.uri);
-            return {
-                data: semanticTokensForLineRange(
-                    full.data,
-                    params.range.start.line,
-                    params.range.end.line
-                )
-            };
+            const document = documents.get(params.textDocument.uri);
+            if (!document) {
+                return { data: [] };
+            }
+
+            await ensureDocumentParsed(document);
+            const module = index.getModule(document.uri);
+            if (!module || module.version !== document.version) {
+                return { data: [] };
+            }
+
+            return buildRslSemanticTokens(
+                module,
+                index,
+                resolver,
+                {
+                    startLine: params.range.start.line,
+                    startCharacter: params.range.start.character,
+                    endLine: params.range.end.line,
+                    endCharacter: params.range.end.character
+                }
+            );
         });
 
         connection.onDocumentSymbol(async (params: DocumentSymbolParams) => {
-            const { textDocument } = params;
-            const document = documents.get(textDocument.uri);
-
+            const document = documents.get(params.textDocument.uri);
             if (!document) {
                 return [];
             }
 
-            const tree = await ensureDocumentParsed(document);
-
-            if (!tree) {
-                return [];
-            }
-
-            const module = index.getModule(document.uri);
-
-            if (!module) {
-                return [];
-            }
-
             const cached = this.documentSymbolsCache.get(document.uri);
-
-            if (cached && cached.version === module.version) {
+            if (cached && cached.version === document.version) {
                 return cached.value;
             }
 
-            const value = getSymbols(document, tree).filter(
-                (symbol): symbol is SymbolInformation => symbol !== undefined
-            );
+            let value: SymbolInformation[];
+
+            if (getFastDocumentSnapshot) {
+                value = getFastDocumentSnapshot(document).symbols.slice();
+            } else {
+                const tree = await ensureDocumentParsed(document);
+                value = tree
+                    ? getSymbols(document, tree).filter(
+                        (item): item is SymbolInformation => !!item
+                    )
+                    : [];
+            }
+
             this.documentSymbolsCache.set(document.uri, {
-                version: module.version,
+                version: document.version,
                 value
             });
             return value;
         });
 
         connection.onFoldingRanges(async (params: FoldingRangeParams) => {
-            const { textDocument } = params;
-            const document = documents.get(textDocument.uri);
-
+            const document = documents.get(params.textDocument.uri);
             if (!document) {
                 return [];
             }
@@ -343,14 +359,18 @@ export class RslLanguageFeatureRegistry {
                 return cached.value;
             }
 
-            /* Не запускаем второй lexer: используем тот же snapshot, что parser. */
-            await ensureDocumentParsed(document);
-            const module = index.getModule(document.uri);
-            if (!module || module.version !== document.version) {
-                return [];
+            let value: IRslFoldingRange[];
+
+            if (getFastDocumentSnapshot) {
+                value = getFastDocumentSnapshot(document).foldingRanges.slice();
+            } else {
+                await ensureDocumentParsed(document);
+                const module = index.getModule(document.uri);
+                value = module && module.version === document.version
+                    ? GetFoldingRanges(document.getText(), module.lex)
+                    : [];
             }
 
-            const value = GetFoldingRanges(document.getText(), module.lex);
             this.foldingRangesCache.set(document.uri, {
                 version: document.version,
                 value
@@ -493,59 +513,6 @@ function semanticTokenEdits(
         deleteCount: previousEnd - start + 1,
         ...(data.length > 0 ? { data } : {})
     }];
-}
-
-function semanticTokensForLineRange(
-    data: number[],
-    startLine: number,
-    endLine: number
-): number[] {
-    const absolute: Array<{
-        line: number;
-        character: number;
-        length: number;
-        type: number;
-        modifiers: number;
-    }> = [];
-    let line = 0;
-    let character = 0;
-
-    for (let index = 0; index + 4 < data.length; index += 5) {
-        const deltaLine = data[index];
-        line += deltaLine;
-        character = deltaLine === 0
-            ? character + data[index + 1]
-            : data[index + 1];
-        if (line >= startLine && line <= endLine) {
-            absolute.push({
-                line,
-                character,
-                length: data[index + 2],
-                type: data[index + 3],
-                modifiers: data[index + 4]
-            });
-        }
-    }
-
-    const result: number[] = [];
-    let previousLine = 0;
-    let previousCharacter = 0;
-    for (const token of absolute) {
-        const deltaLine = token.line - previousLine;
-        const deltaCharacter = deltaLine === 0
-            ? token.character - previousCharacter
-            : token.character;
-        result.push(
-            deltaLine,
-            deltaCharacter,
-            token.length,
-            token.type,
-            token.modifiers
-        );
-        previousLine = token.line;
-        previousCharacter = token.character;
-    }
-    return result;
 }
 
 function isBlockedToken(token?: IToken): boolean {

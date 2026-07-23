@@ -21,6 +21,11 @@ export interface IResolvedSymbol {
     token: IRslToken;
 }
 
+interface IResolutionCache {
+    closureKey: string;
+    byTokenStart: Map<number, IResolvedSymbol | null>;
+}
+
 /*
  * CBase после построения syntax tree фактически неизменяем. Кэши WeakMap
  * не удерживают старые деревья после обновления документа.
@@ -37,6 +42,9 @@ const childrenByNameCache = new WeakMap<CBase, Map<string, CBase[]>>();
  */
 export class RslScopeResolver {
     private tokensByModule = new WeakMap<IIndexedModule, IRslToken[]>();
+    private resolutionByModule = new WeakMap<IIndexedModule, IResolutionCache>();
+    private resolutionCacheHits = 0;
+    private resolutionCacheMisses = 0;
 
     constructor(private index: WorkspaceIndex) {}
 
@@ -58,6 +66,48 @@ export class RslScopeResolver {
             return undefined;
         }
 
+        const closureKey = this.index.getImportClosureKey(uri);
+        let cache = this.resolutionByModule.get(module);
+
+        if (!cache || cache.closureKey !== closureKey) {
+            cache = {
+                closureKey,
+                byTokenStart: new Map<number, IResolvedSymbol | null>()
+            };
+            this.resolutionByModule.set(module, cache);
+        }
+
+        if (cache.byTokenStart.has(token.start)) {
+            this.resolutionCacheHits++;
+            return cache.byTokenStart.get(token.start) || undefined;
+        }
+
+        this.resolutionCacheMisses++;
+        const resolved = this.resolveTokenAt(
+            uri,
+            tree,
+            offset,
+            token,
+            tokens
+        );
+        cache.byTokenStart.set(token.start, resolved || null);
+        return resolved;
+    }
+
+    getCacheStats(): { hits: number; misses: number } {
+        return {
+            hits: this.resolutionCacheHits,
+            misses: this.resolutionCacheMisses
+        };
+    }
+
+    private resolveTokenAt(
+        uri: string,
+        tree: CBase,
+        offset: number,
+        token: IRslToken,
+        tokens: IRslToken[]
+    ): IResolvedSymbol | undefined {
         const tokenIndex = findTokenIndex(tokens, token);
         const receiver = this.getReceiverToken(tokens, tokenIndex);
 

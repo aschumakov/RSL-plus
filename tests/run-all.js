@@ -13,24 +13,20 @@ const tests = [
     "definition.test.js",
     "parser-optimized.test.js",
     "symbol-tree-adapter.test.js",
-    "performance-scheduling.test.js",
+    "pipeline-architecture.test.js",
+    "semantic-resolution.test.js",
+    "reference-index.test.js",
     "diagnostic-visibility.test.js",
-    "performance-optimizations.test.js",
     "scope-index.test.js",
     "diagnostics.test.js",
     "language-features.test.js",
     "quick-fix-extended.test.js",
-    "architecture-1.1.4.test.js",
-    "resource-optimization-1.1.4.test.js",
-    "open-pipeline-1.1.4.test.js",
-    "external-summary-scanner.test.js",
     "module-resolution.test.js",
     "settings-service.test.js",
     "quick-fix-registry.test.js",
     "workspace-loader.test.js",
     "import-resolution-diagnostics.test.js",
     "diagnostic-engine.test.js",
-    "onerror-references-performance.test.js"
 ];
 
 let failed = false;

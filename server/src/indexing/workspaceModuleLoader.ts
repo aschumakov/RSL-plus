@@ -2,7 +2,7 @@ import * as fs from "fs";
 import { fileURLToPath } from "url";
 
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
-import { indexReferenceFileSource } from "../analysis/references";
+import { ReferenceIndex } from "../analysis/referenceIndex";
 
 export type ModuleLoadPriority = "interactive" | "background";
 export type WorkspaceIndexingMode = "activeImports" | "workspaceIdle" | "full";
@@ -37,10 +37,16 @@ export class WorkspaceModuleLoader {
     private idleTimer: NodeJS.Timeout | undefined;
     private idleDelayMs: number;
 
+    private referenceIndex: ReferenceIndex;
+
     constructor(
         private index: WorkspaceIndex,
-        private options: IWorkspaceModuleLoaderOptions
+        private options: IWorkspaceModuleLoaderOptions,
+        referenceIndex?: ReferenceIndex
     ) {
+        this.referenceIndex = referenceIndex || new ReferenceIndex({
+            log: options.log
+        });
         this.idleDelayMs = Math.max(1000, options.idleDelayMs ?? 10000);
     }
 
@@ -73,7 +79,9 @@ export class WorkspaceModuleLoader {
         this.indexedUris = new Set(
             Array.from(nextUris).filter(uri => !!this.index.getModule(uri))
         );
-        this.index.registerWorkspaceFiles(Array.from(this.workspaceUris));
+        const workspaceList = Array.from(this.workspaceUris);
+        this.index.registerWorkspaceFiles(workspaceList);
+        this.referenceIndex.retainWorkspaceFiles(workspaceList);
 
         const pending = Array.from(this.pendingImportNames);
         this.pendingImportNames.clear();
@@ -198,6 +206,7 @@ export class WorkspaceModuleLoader {
         this.removeQueued(uri);
         this.workspaceUris.delete(uri);
         this.indexedUris.delete(uri);
+        this.referenceIndex.invalidate(uri);
         this.index.unregisterWorkspaceFile(uri);
         this.index.removeModule(uri);
         this.options.onModuleCountChanged();
@@ -298,12 +307,15 @@ export class WorkspaceModuleLoader {
 
         const stat = await fs.promises.stat(filePath);
         const text = await fs.promises.readFile(filePath, "utf8");
-        indexReferenceFileSource(uri, text);
         const module = this.index.updateExternalModule(
             uri,
             text,
             Math.floor(stat.mtimeMs)
         );
+        this.referenceIndex.indexSource(uri, text, {
+            mtimeMs: stat.mtimeMs,
+            size: stat.size
+        }, module.imports);
         this.indexedUris.add(uri);
 
         for (const importName of module.imports) {

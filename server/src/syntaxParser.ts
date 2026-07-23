@@ -94,7 +94,7 @@ const BLOCK_BOUNDARIES = new Set(["end", "elif", "else", "onerror"]);
 const STATEMENT_KEYWORDS = new Set([
     "import", "var", "const", "array", "file", "record", "macro",
     "class", "if", "while", "for", "with", "return", "break",
-    "continue", "local", "private"
+    "continue", "onerror", "local", "private"
 ]);
 const FILE_RECORD_SPECIFIERS = new Set([
     "sort", "key", "write", "append", "mem", "txt", "dbf", "dialog",
@@ -715,6 +715,8 @@ class Parser {
                 return this.parseSimpleKeyword("BreakStatement");
             case "continue":
                 return this.parseSimpleKeyword("ContinueStatement");
+            case "onerror":
+                return this.parseOnError();
             default:
                 if (modifier) {
                     this.error(

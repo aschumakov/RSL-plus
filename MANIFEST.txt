@@ -1,16 +1,21 @@
-RSL-plus 1.1.4 ONERROR and References Performance Patch
-Base commit: 3caa71efba86a10075e9cb25fe41d8df20fbbcf6
-
-Direct overlay files only. No PowerShell or Node installation scripts.
-
-Changes:
-- allow top-level ONERROR without dedicated END diagnostics;
-- keep ordinary missing-END diagnostics;
-- local/private symbol References shortcut;
-- batched concurrent workspace reads;
-- one-pass identifier analysis;
-- per-file identifier Bloom index;
-- prewarm index from already loaded imports;
-- LRU candidate URI cache;
-- file watcher and workspace catalog invalidation;
-- regression tests.
+CHANGELOG.md
+FILES_TO_DELETE.txt
+README.md
+MANIFEST.txt
+patches/current-master-architecture.patch
+package.json
+server/src/analysis/referenceIndex.ts
+server/src/analysis/referenceImportGraph.ts
+server/src/analysis/referenceSourceFacts.ts
+server/src/analysis/references.ts
+server/src/diagnostics/diagnosticEngine.ts
+server/src/features/languageFeatureRegistry.ts
+server/src/indexing/workspaceModuleLoader.ts
+server/src/semanticTokens.ts
+server/src/server.ts
+server/src/services/documentAnalysisService.ts
+server/src/services/fastDocumentSnapshot.ts
+tests/pipeline-architecture.test.js
+tests/reference-index.test.js
+tests/run-all.js
+tests/semantic-resolution.test.js

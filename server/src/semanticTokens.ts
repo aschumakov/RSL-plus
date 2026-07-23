@@ -40,6 +40,13 @@ export const RSL_SEMANTIC_TOKENS_LEGEND: SemanticTokensLegend = {
     tokenModifiers: TOKEN_MODIFIERS
 };
 
+export interface IRslSemanticTokenRange {
+    startLine: number;
+    startCharacter?: number;
+    endLine: number;
+    endCharacter?: number;
+}
+
 interface ISemanticEntry {
     token: IRslToken;
     type: number;
@@ -60,7 +67,8 @@ interface IObjectInfo {
 export function buildRslSemanticTokens(
     module: IIndexedModule,
     index: WorkspaceIndex,
-    sharedResolver?: RslScopeResolver
+    sharedResolver?: RslScopeResolver,
+    range?: IRslSemanticTokenRange
 ): SemanticTokens {
     const resolver = sharedResolver || new RslScopeResolver(index);
     const tokens = module.syntax.tokens;
@@ -81,8 +89,19 @@ export function buildRslSemanticTokens(
     });
 
     const entries: ISemanticEntry[] = [];
+    const firstTokenIndex = range
+        ? lowerBoundByLine(tokens, Math.max(0, range.startLine))
+        : 0;
 
-    for (const token of tokens) {
+    for (let tokenIndex = firstTokenIndex; tokenIndex < tokens.length; tokenIndex++) {
+        const token = tokens[tokenIndex];
+
+        if (range && isTokenAfterRange(token, range)) {
+            break;
+        }
+        if (range && isTokenBeforeRange(token, range)) {
+            continue;
+        }
         if (
             token.kind !== "identifier" ||
             NON_SYMBOL_IDENTIFIERS.has(normalizeIdentifier(token.value))
@@ -338,6 +357,45 @@ function lowerBoundByStart(tokens: IRslToken[], offset: number): number {
         const middle = Math.floor((left + right) / 2);
 
         if (tokens[middle].start < offset) {
+            left = middle + 1;
+        } else {
+            right = middle;
+        }
+    }
+
+    return left;
+}
+
+
+function isTokenBeforeRange(
+    token: IRslToken,
+    range: IRslSemanticTokenRange
+): boolean {
+    return token.line < range.startLine ||
+        (
+            token.line === range.startLine &&
+            token.endCharacter <= (range.startCharacter ?? 0)
+        );
+}
+
+function isTokenAfterRange(
+    token: IRslToken,
+    range: IRslSemanticTokenRange
+): boolean {
+    return token.line > range.endLine ||
+        (
+            token.line === range.endLine &&
+            token.character >= (range.endCharacter ?? Number.MAX_SAFE_INTEGER)
+        );
+}
+
+function lowerBoundByLine(tokens: IRslToken[], line: number): number {
+    let left = 0;
+    let right = tokens.length;
+
+    while (left < right) {
+        const middle = Math.floor((left + right) / 2);
+        if (tokens[middle].line < line) {
             left = middle + 1;
         } else {
             right = middle;

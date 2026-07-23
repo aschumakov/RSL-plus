@@ -5,6 +5,7 @@ import {
     type IExternalSymbolDescriptor
 } from "../common";
 import { lexRsl, normalizeIdentifier, type IRslToken } from "../lexer";
+import { readClassDeclarationHeader } from "../parsing/classDeclarationHeader";
 
 export interface IExternalModuleScanResult {
     imports: string[];
@@ -120,7 +121,15 @@ export function scanExternalModule(source: string): IExternalModuleScanResult {
         const isExternal = !privateModifier;
 
         if (keyword === "macro" || keyword === "class") {
-            const nameInfo = nextIdentifier(tokens, index + 1);
+            const classHeader = keyword === "class"
+                ? readClassDeclarationHeader(tokens, index + 1)
+                : undefined;
+            const nameInfo = keyword === "class"
+                ? classHeader && {
+                    token: classHeader.nameToken,
+                    index: classHeader.nameIndex
+                }
+                : nextIdentifier(tokens, index + 1);
             const visibleContainer = !insideMacro &&
                 (currentClass === undefined || currentClass.descriptor !== undefined);
             const descriptor = nameInfo && isExternal && visibleContainer

@@ -5,10 +5,16 @@ import { CBase } from "../common";
 import { parseRslSyntax } from "../syntaxParser";
 import type { RslSettingsService } from "./settingsService";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
+import {
+    createFastDocumentSnapshot,
+    type IFastDocumentSnapshot
+} from "./fastDocumentSnapshot";
 
 export interface IDocumentAnalysisOptions {
     changeDebounceMs?: number;
     slowParseLogMs?: number;
+    fastSnapshotDebounceMs?: number;
+    initialParseDelayMs?: number;
     log(message: string): void;
     invalidateProviderCaches(uri: string): void;
     onParsed(module: IIndexedModule, wasKnown: boolean): void;
@@ -17,15 +23,20 @@ export interface IDocumentAnalysisOptions {
 
 /**
  * Управляет versioned-разбором документа.
- * Первый разбор после открытия запускается без debounce; изменения объединяются.
+ * Fast snapshot строится сразу; полный parse запускается после короткого
+ * приоритетного окна, а изменения текста объединяются.
  */
 export class DocumentAnalysisService {
     private parseGeneration = new Map<string, number>();
     private parsedVersions = new Map<string, number>();
     private parseTimers = new Map<string, NodeJS.Timeout>();
     private running = new Map<string, Promise<void>>();
+    private fastSnapshots = new Map<string, IFastDocumentSnapshot>();
+    private fastSnapshotTimers = new Map<string, NodeJS.Timeout>();
     private changeDebounceMs: number;
     private slowParseLogMs: number;
+    private fastSnapshotDebounceMs: number;
+    private initialParseDelayMs: number;
 
     constructor(
         private documents: TextDocuments<TextDocument>,
@@ -35,29 +46,52 @@ export class DocumentAnalysisService {
     ) {
         this.changeDebounceMs = options.changeDebounceMs ?? 90;
         this.slowParseLogMs = options.slowParseLogMs ?? 75;
+        this.fastSnapshotDebounceMs = options.fastSnapshotDebounceMs ?? 35;
+        this.initialParseDelayMs = options.initialParseDelayMs ?? 25;
     }
 
     get isBusy(): boolean {
-        return this.parseTimers.size > 0 || this.running.size > 0;
+        return this.parseTimers.size > 0 ||
+            this.fastSnapshotTimers.size > 0 ||
+            this.running.size > 0;
     }
 
     isBusyFor(uri: string): boolean {
-        return this.parseTimers.has(uri) || this.running.has(uri);
+        return this.parseTimers.has(uri) ||
+            this.fastSnapshotTimers.has(uri) ||
+            this.running.has(uri);
     }
 
-    /** Первый snapshot нужен folding/Outline сразу, поэтому delay отсутствует. */
+    /**
+     * Snapshot создаётся синхронно; полный parser получает короткое окно, чтобы
+     * Folding и Outline успели ответить без блокировки event loop.
+     */
     open(document: TextDocument): void {
-        this.scheduleWithDelay(document, 0);
+        this.refreshFastSnapshot(document);
+        this.scheduleWithDelay(document, this.initialParseDelayMs);
     }
 
     /** Частые изменения текста объединяются в один разбор. */
     changed(document: TextDocument): void {
+        this.scheduleFastSnapshot(document);
         this.scheduleWithDelay(document, this.changeDebounceMs);
     }
 
     /** Совместимость со старым API: считается изменением документа. */
     schedule(document: TextDocument): void {
         this.changed(document);
+    }
+
+
+    /** Folding и Outline получают snapshot без ожидания полного parser. */
+    getFastSnapshot(document: TextDocument): IFastDocumentSnapshot {
+        const current = this.fastSnapshots.get(document.uri);
+        if (current && current.version === document.version) {
+            return current;
+        }
+
+        this.cancelFastSnapshotTimer(document.uri);
+        return this.refreshFastSnapshot(document);
     }
 
     async ensureParsed(document: TextDocument): Promise<CBase | undefined> {
@@ -82,13 +116,47 @@ export class DocumentAnalysisService {
 
     close(uri: string): void {
         this.cancelTimer(uri);
+        this.cancelFastSnapshotTimer(uri);
+        this.fastSnapshots.delete(uri);
         this.parsedVersions.delete(uri);
         this.nextGeneration(uri);
         this.index.compactModule(uri);
     }
 
     invalidate(uri: string): void {
+        this.fastSnapshots.delete(uri);
         this.parsedVersions.delete(uri);
+    }
+
+
+    private scheduleFastSnapshot(document: TextDocument): void {
+        const uri = document.uri;
+        const version = document.version;
+        this.cancelFastSnapshotTimer(uri);
+        this.fastSnapshotTimers.set(uri, setTimeout(() => {
+            this.fastSnapshotTimers.delete(uri);
+            const current = this.documents.get(uri);
+            if (current && current.version === version) {
+                this.refreshFastSnapshot(current);
+            }
+        }, this.fastSnapshotDebounceMs));
+    }
+
+    private refreshFastSnapshot(
+        document: TextDocument
+    ): IFastDocumentSnapshot {
+        const snapshot = createFastDocumentSnapshot(document);
+        this.fastSnapshots.set(document.uri, snapshot);
+        this.options.invalidateProviderCaches(document.uri);
+        return snapshot;
+    }
+
+    private cancelFastSnapshotTimer(uri: string): void {
+        const timer = this.fastSnapshotTimers.get(uri);
+        if (timer) {
+            clearTimeout(timer);
+            this.fastSnapshotTimers.delete(uri);
+        }
     }
 
     private scheduleWithDelay(document: TextDocument, delay: number): void {
@@ -154,11 +222,12 @@ export class DocumentAnalysisService {
         }
 
         const text = document.getText();
+        const fastSnapshot = this.getFastSnapshot(document);
         const started = Date.now();
         const wasKnown = !!this.index.getModule(uri);
 
         /* Один parser/lexer pass на версию документа. */
-        const syntax = parseRslSyntax(text, undefined, {
+        const syntax = parseRslSyntax(text, fastSnapshot.lex, {
             buildExpressionTree: false
         });
         const parsedObject = CBase.fromSyntax(text, 0, syntax, true, false);

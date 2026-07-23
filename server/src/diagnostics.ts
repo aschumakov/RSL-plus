@@ -407,18 +407,8 @@ function addEndDiagnostics(
             continue;
         }
 
+        /* ONERROR открывает обработчик до END родительского MACRO или EOF. */
         if (canStartBlock && word === "onerror") {
-            const insideMacro = stack.some(item => item.keyword === "macro");
-
-            if (!insideMacro) {
-                result.push(createTokenDiagnostic(
-                    token,
-                    DiagnosticSeverity.Warning,
-                    "ONERROR находится вне блока MACRO",
-                    "onerror-outside-macro"
-                ));
-            }
-
             canStartBlock = false;
             continue;
         }
