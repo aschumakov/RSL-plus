@@ -312,10 +312,6 @@ export class WorkspaceModuleLoader {
             text,
             Math.floor(stat.mtimeMs)
         );
-        this.referenceIndex.indexSource(uri, text, {
-            mtimeMs: stat.mtimeMs,
-            size: stat.size
-        }, module.imports);
         this.indexedUris.add(uri);
 
         for (const importName of module.imports) {

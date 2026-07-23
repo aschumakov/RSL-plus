@@ -20,7 +20,7 @@ export type { IReferenceImportModule } from "./referenceImportGraph";
 
 const CACHE_VERSION = 2;
 const DEFAULT_READ_BATCH_SIZE = 16;
-const SAVE_DEBOUNCE_MS = 500;
+const SAVE_DEBOUNCE_MS = 3000;
 
 export interface IReferenceFileStat {
     mtimeMs: number;
@@ -74,6 +74,7 @@ export class ReferenceIndex {
     private cacheFilePath: string | undefined;
     private saveTimer: NodeJS.Timeout | undefined;
     private loadPromise: Promise<void> = Promise.resolve();
+    private loadStarted = false;
     private persistedFiles = 0;
     private readBatchSize: number;
     private importGraphValidated = false;
@@ -88,16 +89,15 @@ export class ReferenceIndex {
     configurePersistence(cacheFilePath: string | undefined): void {
         const normalized = (cacheFilePath || "").trim();
         this.cacheFilePath = normalized || undefined;
-        this.loadPromise = this.cacheFilePath
-            ? this.loadFromDisk(this.cacheFilePath)
-            : Promise.resolve();
+        this.loadStarted = false;
+        this.loadPromise = Promise.resolve();
     }
 
     retainWorkspaceFiles(uris: readonly string[]): void {
         const retained = new Set(uris.filter(uri => !!uri));
         const catalogChanged = retained.size !== this.workspaceUris.size ||
             Array.from(retained).some(uri => !this.workspaceUris.has(uri));
-        let changed = catalogChanged;
+        let changed = false;
 
         for (const uri of this.entries.keys()) {
             if (!retained.has(uri)) {
@@ -132,10 +132,22 @@ export class ReferenceIndex {
             return;
         }
 
+        const normalizedStat = {
+            mtimeMs: normalizeMtime(stat.mtimeMs),
+            size: Math.max(0, stat.size)
+        };
+        const existing = this.entries.get(uri);
+        if (
+            existing &&
+            existing.mtimeMs === normalizedStat.mtimeMs &&
+            existing.size === normalizedStat.size
+        ) {
+            return;
+        }
+
         const facts = scanReferenceSource(source, imports);
         this.entries.set(uri, {
-            mtimeMs: normalizeMtime(stat.mtimeMs),
-            size: Math.max(0, stat.size),
+            ...normalizedStat,
             hashes: facts.hashes,
             imports: facts.imports
         });
@@ -154,7 +166,7 @@ export class ReferenceIndex {
         loadedModules: readonly IReferenceImportModule[] = [],
         isCancelled: () => boolean = () => false
     ): Promise<string[]> {
-        await this.loadPromise;
+        await this.ensureLoaded();
         const allUris = Array.from(new Set(workspaceUris.filter(uri => !!uri)));
 
         if (
@@ -185,7 +197,7 @@ export class ReferenceIndex {
         uris: readonly string[],
         isCancelled: () => boolean = () => false
     ): Promise<IReferenceCandidateSource[]> {
-        await this.loadPromise;
+        await this.ensureLoaded();
 
         const target = normalizeIdentifier(normalizedName);
         if (!target || isCancelled()) {
@@ -238,7 +250,25 @@ export class ReferenceIndex {
             clearTimeout(this.saveTimer);
             this.saveTimer = undefined;
         }
+
+        /* Не читаем и не переписываем кэш, если References не использовался. */
+        if (!this.loadStarted && this.entries.size === 0) {
+            return;
+        }
+
+        await this.ensureLoaded();
         await this.saveToDisk();
+    }
+
+    private ensureLoaded(): Promise<void> {
+        if (!this.loadStarted) {
+            this.loadStarted = true;
+            this.loadPromise = this.cacheFilePath
+                ? this.loadFromDisk(this.cacheFilePath)
+                : Promise.resolve();
+        }
+
+        return this.loadPromise;
     }
 
     private async inspectFile(
@@ -396,8 +426,12 @@ export class ReferenceIndex {
     }
 
     private scheduleSave(): void {
-        if (!this.cacheFilePath || this.saveTimer) {
+        if (!this.cacheFilePath) {
             return;
+        }
+
+        if (this.saveTimer) {
+            clearTimeout(this.saveTimer);
         }
 
         this.saveTimer = setTimeout(() => {

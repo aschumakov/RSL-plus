@@ -4,6 +4,7 @@ import {
     CompletionItem,
     Definition,
     DocumentFormattingParams,
+    DocumentSymbol,
     DocumentSymbolParams,
     FoldingRangeParams,
     FormattingOptions,
@@ -34,7 +35,11 @@ import type { IToken } from "../interfaces";
 import type { IRslToken } from "../lexer";
 import { findRslReferencesInWorkspace } from "../analysis/references";
 import { ReferenceIndex } from "../analysis/referenceIndex";
-import type { IFastDocumentSnapshot } from "../services/fastDocumentSnapshot";
+import {
+    getFastDocumentSymbols,
+    getFastFoldingRanges,
+    type IFastDocumentSnapshot
+} from "../services/fastDocumentSnapshot";
 import { RslScopeResolver } from "../scopeResolver";
 import { buildRslSemanticTokens } from "../semanticTokens";
 import type { WorkspaceIndex } from "../workspaceIndex";
@@ -73,7 +78,7 @@ export class RslLanguageFeatureRegistry {
     }>();
     private documentSymbolsCache = new Map<string, {
         version: number;
-        value: SymbolInformation[];
+        value: DocumentSymbol[] | SymbolInformation[];
     }>();
     private defaultCompletionItems = getCIInfoForArray(getDefaults());
     private registered = false;
@@ -328,10 +333,11 @@ export class RslLanguageFeatureRegistry {
                 return cached.value;
             }
 
-            let value: SymbolInformation[];
+            let value: DocumentSymbol[] | SymbolInformation[];
 
             if (getFastDocumentSnapshot) {
-                value = getFastDocumentSnapshot(document).symbols.slice();
+                const snapshot = getFastDocumentSnapshot(document);
+                value = getFastDocumentSymbols(document, snapshot).slice();
             } else {
                 const tree = await ensureDocumentParsed(document);
                 value = tree
@@ -362,7 +368,8 @@ export class RslLanguageFeatureRegistry {
             let value: IRslFoldingRange[];
 
             if (getFastDocumentSnapshot) {
-                value = getFastDocumentSnapshot(document).foldingRanges.slice();
+                const snapshot = getFastDocumentSnapshot(document);
+                value = getFastFoldingRanges(document, snapshot).slice();
             } else {
                 await ensureDocumentParsed(document);
                 const module = index.getModule(document.uri);

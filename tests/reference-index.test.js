@@ -10,6 +10,12 @@ const {
     ReferenceIndex,
     referenceIndexTesting
 } = require("../server/out/analysis/referenceIndex");
+const {
+    WorkspaceIndex
+} = require("../server/out/workspaceIndex");
+const {
+    WorkspaceModuleLoader
+} = require("../server/out/indexing/workspaceModuleLoader");
 
 (async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "rsl-ref-index-"));
@@ -38,12 +44,33 @@ const {
     await referenceIndex.flush();
     assert.ok(fs.existsSync(cachePath));
 
+    const originalReadFile = fs.promises.readFile;
+    let persistentCacheReads = 0;
+    fs.promises.readFile = async (filePath, ...args) => {
+        if (path.resolve(String(filePath)) === path.resolve(cachePath)) {
+            persistentCacheReads++;
+        }
+        return originalReadFile.call(fs.promises, filePath, ...args);
+    };
+
     const restored = new ReferenceIndex({ readBatchSize: 2 });
     restored.configurePersistence(cachePath);
     restored.retainWorkspaceFiles(uris);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.strictEqual(
+        persistentCacheReads,
+        0,
+        "Persistent index не должен читаться при старте language server"
+    );
     const restoredCandidates = await restored.findCandidates(
         "targetname",
         uris
+    );
+    fs.promises.readFile = originalReadFile;
+    assert.strictEqual(
+        persistentCacheReads,
+        1,
+        "Persistent index должен загружаться лениво при первом References"
     );
     assert.deepStrictEqual(
         restoredCandidates.map(item => item.uri),
@@ -65,6 +92,30 @@ const {
         staleCandidates.length,
         0,
         "Изменение mtime/size должно принудительно перестроить запись"
+    );
+
+    let eagerReferenceScans = 0;
+    const loaderIndex = new WorkspaceIndex();
+    const loaderReferenceIndex = {
+        retainWorkspaceFiles: () => undefined,
+        invalidate: () => undefined,
+        indexSource: () => { eagerReferenceScans++; }
+    };
+    const loader = new WorkspaceModuleLoader(
+        loaderIndex,
+        {
+            log: () => undefined,
+            onModuleLoaded: () => undefined,
+            onModuleCountChanged: () => undefined
+        },
+        loaderReferenceIndex
+    );
+    loader.registerWorkspaceFiles([secondUri]);
+    await loader.ensureLoadedUri(secondUri);
+    assert.strictEqual(
+        eagerReferenceScans,
+        0,
+        "Загрузка Import не должна повторно сканировать файл ради References"
     );
 
     const hashes = referenceIndexTesting.collectIdentifierHashes(
@@ -98,7 +149,7 @@ const {
     assert.ok(!limited.has(graphUris[3]));
 
     fs.rmSync(directory, { recursive: true, force: true });
-    console.log("[OK] ReferenceIndex точный, persistent, адресно инвалидируется и поддерживает Import closure");
+    console.log("[OK] ReferenceIndex ленивый, точный, persistent и адресно инвалидируется");
 })().catch(error => {
     console.error(error);
     process.exitCode = 1;

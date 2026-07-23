@@ -13,7 +13,6 @@ import {
 export interface IDocumentAnalysisOptions {
     changeDebounceMs?: number;
     slowParseLogMs?: number;
-    fastSnapshotDebounceMs?: number;
     initialParseDelayMs?: number;
     log(message: string): void;
     invalidateProviderCaches(uri: string): void;
@@ -32,10 +31,8 @@ export class DocumentAnalysisService {
     private parseTimers = new Map<string, NodeJS.Timeout>();
     private running = new Map<string, Promise<void>>();
     private fastSnapshots = new Map<string, IFastDocumentSnapshot>();
-    private fastSnapshotTimers = new Map<string, NodeJS.Timeout>();
     private changeDebounceMs: number;
     private slowParseLogMs: number;
-    private fastSnapshotDebounceMs: number;
     private initialParseDelayMs: number;
 
     constructor(
@@ -46,20 +43,15 @@ export class DocumentAnalysisService {
     ) {
         this.changeDebounceMs = options.changeDebounceMs ?? 90;
         this.slowParseLogMs = options.slowParseLogMs ?? 75;
-        this.fastSnapshotDebounceMs = options.fastSnapshotDebounceMs ?? 35;
-        this.initialParseDelayMs = options.initialParseDelayMs ?? 25;
+        this.initialParseDelayMs = options.initialParseDelayMs ?? 50;
     }
 
     get isBusy(): boolean {
-        return this.parseTimers.size > 0 ||
-            this.fastSnapshotTimers.size > 0 ||
-            this.running.size > 0;
+        return this.parseTimers.size > 0 || this.running.size > 0;
     }
 
     isBusyFor(uri: string): boolean {
-        return this.parseTimers.has(uri) ||
-            this.fastSnapshotTimers.has(uri) ||
-            this.running.has(uri);
+        return this.parseTimers.has(uri) || this.running.has(uri);
     }
 
     /**
@@ -71,9 +63,10 @@ export class DocumentAnalysisService {
         this.scheduleWithDelay(document, this.initialParseDelayMs);
     }
 
-    /** Частые изменения текста объединяются в один разбор. */
+    /** Частые изменения текста объединяются; snapshot пересоздаётся лениво. */
     changed(document: TextDocument): void {
-        this.scheduleFastSnapshot(document);
+        this.fastSnapshots.delete(document.uri);
+        this.options.invalidateProviderCaches(document.uri);
         this.scheduleWithDelay(document, this.changeDebounceMs);
     }
 
@@ -90,7 +83,6 @@ export class DocumentAnalysisService {
             return current;
         }
 
-        this.cancelFastSnapshotTimer(document.uri);
         return this.refreshFastSnapshot(document);
     }
 
@@ -116,7 +108,6 @@ export class DocumentAnalysisService {
 
     close(uri: string): void {
         this.cancelTimer(uri);
-        this.cancelFastSnapshotTimer(uri);
         this.fastSnapshots.delete(uri);
         this.parsedVersions.delete(uri);
         this.nextGeneration(uri);
@@ -129,19 +120,6 @@ export class DocumentAnalysisService {
     }
 
 
-    private scheduleFastSnapshot(document: TextDocument): void {
-        const uri = document.uri;
-        const version = document.version;
-        this.cancelFastSnapshotTimer(uri);
-        this.fastSnapshotTimers.set(uri, setTimeout(() => {
-            this.fastSnapshotTimers.delete(uri);
-            const current = this.documents.get(uri);
-            if (current && current.version === version) {
-                this.refreshFastSnapshot(current);
-            }
-        }, this.fastSnapshotDebounceMs));
-    }
-
     private refreshFastSnapshot(
         document: TextDocument
     ): IFastDocumentSnapshot {
@@ -149,14 +127,6 @@ export class DocumentAnalysisService {
         this.fastSnapshots.set(document.uri, snapshot);
         this.options.invalidateProviderCaches(document.uri);
         return snapshot;
-    }
-
-    private cancelFastSnapshotTimer(uri: string): void {
-        const timer = this.fastSnapshotTimers.get(uri);
-        if (timer) {
-            clearTimeout(timer);
-            this.fastSnapshotTimers.delete(uri);
-        }
     }
 
     private scheduleWithDelay(document: TextDocument, delay: number): void {
@@ -247,7 +217,11 @@ export class DocumentAnalysisService {
             syntax
         );
         this.parsedVersions.set(uri, version);
-        this.options.invalidateProviderCaches(uri);
+        /*
+         * Folding/Outline уже привязаны к той же версии Fast Snapshot.
+         * Повторная инвалидация после parser вызывала мерцание Structure и
+         * заставляла заново проходить token stream сразу после Problems.
+         */
         this.options.onParsed(indexed, wasKnown);
 
         try {
