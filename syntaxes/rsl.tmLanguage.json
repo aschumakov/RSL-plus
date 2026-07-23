@@ -138,7 +138,13 @@
                      "name": "string.quoted.single.rsl"
                   }
                },
-               "name": "string.quoted.single.rsl"
+               "name": "string.quoted.single.rsl",
+               "patterns": [
+                  {
+                     "match": "#+",
+                     "name": "constant.other.placeholder.output.rsl"
+                  }
+               ]
             },
             {
                "match": "(\\s|^)\\[(\\s*.*)\\]\\s*(?=;|\\()",

@@ -10,6 +10,7 @@ import {
     normalizeIdentifier
 } from "./lexer";
 import { RslScopeResolver } from "./scopeResolver";
+import { collectFormatSpecifierTokenStarts } from "./parsing/outputFormParser";
 import { IIndexedModule, WorkspaceIndex } from "./workspaceIndex";
 
 const TOKEN_TYPES = [
@@ -18,7 +19,10 @@ const TOKEN_TYPES = [
     "function",
     "variable",
     "parameter",
-    "property"
+    "property",
+    "string",
+    "regexp",
+    "keyword"
 ];
 
 const TOKEN_MODIFIERS = [
@@ -51,6 +55,7 @@ interface ISemanticEntry {
     token: IRslToken;
     type: number;
     modifiers: number;
+    length?: number;
 }
 
 interface IObjectInfo {
@@ -89,6 +94,10 @@ export function buildRslSemanticTokens(
     });
 
     const entries: ISemanticEntry[] = [];
+    const formatSpecifierStarts = collectFormatSpecifierTokenStarts(
+        module.lex.tokens
+    );
+    appendOutputFormEntries(module.lex.tokens, entries, range);
     const firstTokenIndex = range
         ? lowerBoundByLine(tokens, Math.max(0, range.startLine))
         : 0;
@@ -102,10 +111,20 @@ export function buildRslSemanticTokens(
         if (range && isTokenBeforeRange(token, range)) {
             continue;
         }
-        if (
-            token.kind !== "identifier" ||
-            NON_SYMBOL_IDENTIFIERS.has(normalizeIdentifier(token.value))
-        ) {
+        if (token.kind !== "identifier") {
+            continue;
+        }
+
+        if (formatSpecifierStarts.has(token.start)) {
+            entries.push({
+                token,
+                type: TOKEN_TYPES.indexOf("keyword"),
+                modifiers: 0
+            });
+            continue;
+        }
+
+        if (NON_SYMBOL_IDENTIFIERS.has(normalizeIdentifier(token.value))) {
             continue;
         }
 
@@ -153,8 +172,112 @@ export function buildRslSemanticTokens(
         });
     }
 
+    entries.sort((left, right) =>
+        left.token.line - right.token.line ||
+        left.token.character - right.token.character ||
+        (left.length || 0) - (right.length || 0)
+    );
+
     return {
         data: encodeDelta(entries)
+    };
+}
+
+
+function appendOutputFormEntries(
+    tokens: readonly IRslToken[],
+    entries: ISemanticEntry[],
+    range?: IRslSemanticTokenRange
+): void {
+    for (const token of tokens) {
+        if (token.kind !== "square" || token.squareKind !== "output") {
+            continue;
+        }
+
+        const lines = token.raw.split(/\r\n|\n|\r/);
+        let absoluteOffset = token.start;
+
+        lines.forEach((rawLine, lineIndex) => {
+            const lineNumber = token.line + lineIndex;
+            let contentStart = lineIndex === 0 && rawLine.startsWith("[") ? 1 : 0;
+            let contentEnd = rawLine.length;
+            if (lineIndex === lines.length - 1 && rawLine.endsWith("]")) {
+                contentEnd--;
+            }
+
+            const content = rawLine.substring(contentStart, contentEnd);
+            const baseCharacter = lineIndex === 0
+                ? token.character + contentStart
+                : contentStart;
+            let cursor = 0;
+            const placeholders = [...content.matchAll(/#+/g)];
+
+            const appendSegment = (
+                start: number,
+                end: number,
+                typeName: "string" | "regexp"
+            ): void => {
+                if (end <= start) {
+                    return;
+                }
+
+                const virtual = createVirtualToken(
+                    token,
+                    absoluteOffset + contentStart + start,
+                    lineNumber,
+                    baseCharacter + start,
+                    end - start
+                );
+                if (range && (
+                    isTokenBeforeRange(virtual, range) ||
+                    isTokenAfterRange(virtual, range)
+                )) {
+                    return;
+                }
+
+                entries.push({
+                    token: virtual,
+                    type: TOKEN_TYPES.indexOf(typeName),
+                    modifiers: 0,
+                    length: end - start
+                });
+            };
+
+            for (const placeholder of placeholders) {
+                const start = placeholder.index || 0;
+                appendSegment(cursor, start, "string");
+                appendSegment(start, start + placeholder[0].length, "regexp");
+                cursor = start + placeholder[0].length;
+            }
+            appendSegment(cursor, content.length, "string");
+
+            absoluteOffset += rawLine.length;
+            if (lineIndex < lines.length - 1) {
+                const remaining = token.raw.substring(absoluteOffset - token.start);
+                absoluteOffset += remaining.startsWith("\r\n") ? 2 : 1;
+            }
+        });
+    }
+}
+
+function createVirtualToken(
+    source: IRslToken,
+    start: number,
+    line: number,
+    character: number,
+    length: number
+): IRslToken {
+    return {
+        kind: "square",
+        raw: "",
+        value: "",
+        start,
+        end: start + length,
+        line,
+        character,
+        endLine: line,
+        endCharacter: character + length,
+        squareKind: source.squareKind
     };
 }
 
@@ -244,7 +367,7 @@ function encodeDelta(entries: ISemanticEntry[]): number[] {
         const deltaCharacter = deltaLine === 0
             ? character - previousCharacter
             : character;
-        const length = Math.max(1, entry.token.end - entry.token.start);
+        const length = Math.max(1, entry.length ?? (entry.token.end - entry.token.start));
 
         data.push(
             deltaLine,

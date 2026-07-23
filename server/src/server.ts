@@ -21,6 +21,10 @@ import { DocumentAnalysisService } from "./services/documentAnalysisService";
 import { RslDefinitionProvider } from "./features/definitionProvider";
 import { DEFAULT_DIAGNOSTIC_SETTINGS } from "./diagnostics";
 import { RslLanguageFeatureRegistry } from "./features/languageFeatureRegistry";
+import {
+    GO_TO_BLOCK_END_COMMAND,
+    GO_TO_BLOCK_START_COMMAND
+} from "./features/blockNavigation";
 import { RslScopeResolver } from "./scopeResolver";
 import { IFAStruct, IRslSettings } from "./interfaces";
 import { RSL_SEMANTIC_TOKENS_LEGEND } from "./semanticTokens";
@@ -289,10 +293,18 @@ connection.onInitialize((params: InitializeParams) => {
                 triggerCharacters: ["."]
             },
             hoverProvider: true,
+            documentHighlightProvider: true,
+            selectionRangeProvider: true,
             definitionProvider: true,
             referencesProvider: true,
+            executeCommandProvider: {
+                commands: [
+                    GO_TO_BLOCK_START_COMMAND,
+                    GO_TO_BLOCK_END_COMMAND
+                ]
+            },
             codeActionProvider: {
-                codeActionKinds: [CodeActionKind.QuickFix]
+                codeActionKinds: [CodeActionKind.QuickFix, CodeActionKind.Refactor]
             },
             semanticTokensProvider: {
                 legend: RSL_SEMANTIC_TOKENS_LEGEND,

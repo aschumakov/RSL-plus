@@ -27,6 +27,7 @@ const tests = [
     "workspace-loader.test.js",
     "import-resolution-diagnostics.test.js",
     "diagnostic-engine.test.js",
+    "productivity-features.test.js",
 ];
 
 let failed = false;

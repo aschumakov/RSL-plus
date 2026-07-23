@@ -6,6 +6,7 @@ import {
     normalizeDiagnosticSettings
 } from "../diagnostics";
 import { buildImportResolutionDiagnostics } from "./importResolutionDiagnostics";
+import { buildCyclicImportDiagnostics } from "./cyclicImportDiagnostics";
 import type { IRslDiagnosticSettings } from "../interfaces";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 
@@ -53,6 +54,15 @@ export class RslDiagnosticEngine {
             id: "import-resolution",
             phase: "workspace",
             run: context => buildImportResolutionDiagnostics(
+                context.module,
+                context.index,
+                context.settings
+            )
+        });
+        this.register({
+            id: "cyclic-import",
+            phase: "workspace",
+            run: context => buildCyclicImportDiagnostics(
                 context.module,
                 context.index,
                 context.settings
@@ -135,8 +145,57 @@ export class RslDiagnosticEngine {
         }
 
         const processed = applyProjectDiagnosticRules(module, diagnostics);
-        return deduplicate(processed).slice(0, options.maxProblems);
+        const filtered = filterClosedOutputFormDiagnostics(module, processed);
+        return deduplicate(filtered).slice(0, options.maxProblems);
     }
+}
+
+
+/**
+ * Core diagnostics historically validates every square token using SQL rules.
+ * In an output form a line beginning with "--" is literal form text, not an
+ * SQL comment. Therefore a separator like "----------------]" must not hide
+ * the closing bracket from diagnostics.
+ */
+export function filterClosedOutputFormDiagnostics(
+    module: IIndexedModule,
+    diagnostics: readonly Diagnostic[]
+): Diagnostic[] {
+    const closedOutputRanges = new Set<string>();
+
+    for (const token of module.lex.tokens) {
+        if (
+            token.kind === "square" &&
+            token.squareKind === "output" &&
+            token.raw.endsWith("]")
+        ) {
+            closedOutputRanges.add([
+                token.line,
+                token.character,
+                token.endLine,
+                token.endCharacter
+            ].join(":"));
+        }
+    }
+
+    if (closedOutputRanges.size === 0) {
+        return diagnostics.slice();
+    }
+
+    return diagnostics.filter(diagnostic => {
+        if (String(diagnostic.code || "") !== "unclosed-square-block") {
+            return true;
+        }
+
+        const key = [
+            diagnostic.range.start.line,
+            diagnostic.range.start.character,
+            diagnostic.range.end.line,
+            diagnostic.range.end.character
+        ].join(":");
+
+        return !closedOutputRanges.has(key);
+    });
 }
 
 

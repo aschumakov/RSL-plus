@@ -7,6 +7,8 @@
  * и навигация.
  */
 
+export type RslSquareKind = "output" | "sql";
+
 export type RslTokenKind =
     | "identifier"
     | "number"
@@ -28,6 +30,7 @@ export interface IRslToken {
     character: number;
     endLine: number;
     endCharacter: number;
+    squareKind?: RslSquareKind;
 }
 
 export interface IRslLexOptions {
@@ -172,8 +175,21 @@ export function lexRsl(
                 pushToken(tokens, text, position, "symbol", 1, lineStarts);
             } else {
                 const start = snapshot(position);
-                skipSquareBlock(text, position, lineStarts);
+                const simpleEnd = findSimpleSquareEnd(text, start.index);
+                const preliminaryKind = classifySquareBlock(
+                    text,
+                    start.index,
+                    simpleEnd
+                );
+
+                if (preliminaryKind === "output") {
+                    advanceTo(text, position, simpleEnd, lineStarts);
+                } else {
+                    skipSquareBlock(text, position, lineStarts);
+                }
+
                 pushSnapshotToken(tokens, text, "square", start, position);
+                tokens[tokens.length - 1].squareKind = preliminaryKind;
             }
 
             continue;
@@ -385,6 +401,42 @@ function detectEol(text: string): "\r\n" | "\n" | "\r" {
 }
 
 
+const SQL_SQUARE_START = new Set([
+    "select", "insert", "update", "delete", "merge", "with",
+    "declare", "begin", "create", "alter", "drop", "truncate",
+    "grant", "revoke", "commit", "rollback", "call"
+]);
+
+/** Определяет, является самостоятельный [ ... ] SQL-блоком или формой вывода. */
+export function classifySquareBlock(
+    source: string,
+    start: number,
+    end: number
+): RslSquareKind {
+    const raw = source.substring(start, end);
+    const bodyStart = raw.charAt(0) === "[" ? 1 : 0;
+    const bodyEnd = raw.endsWith("]") ? raw.length - 1 : raw.length;
+    const body = raw.substring(bodyStart, bodyEnd);
+
+    let next = end;
+    while (next < source.length && /\s/.test(source.charAt(next))) {
+        next++;
+    }
+
+    if (source.charAt(next) === "(" || /#+/.test(body)) {
+        return "output";
+    }
+
+    const significant = body
+        .replace(/^\s*(?:(?:--|\/\/)\s*[^\r\n]*(?:\r?\n|$)|\/\*[\s\S]*?\*\/)*/g, "")
+        .trimStart();
+    const word = significant.match(/^([A-Za-zА-Яа-яЁё_][\wА-Яа-яЁё]*)/);
+
+    return word && SQL_SQUARE_START.has(word[1].toLowerCase())
+        ? "sql"
+        : "output";
+}
+
 function isArrayIndexStart(
     tokens: IRslToken[],
     position: IPosition
@@ -418,6 +470,23 @@ function isArrayIndexStart(
     }
 
     return false;
+}
+
+
+function findSimpleSquareEnd(source: string, start: number): number {
+    const close = source.indexOf("]", start + 1);
+    return close >= 0 ? close + 1 : source.length;
+}
+
+function advanceTo(
+    source: string,
+    position: IPosition,
+    end: number,
+    lineStarts: number[]
+): void {
+    while (position.index < end && position.index < source.length) {
+        advanceWithLine(source, position, lineStarts);
+    }
 }
 
 function skipRslString(

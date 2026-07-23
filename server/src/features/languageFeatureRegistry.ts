@@ -1,16 +1,20 @@
 import {
     CancellationToken,
+    CodeActionKind,
     CodeActionParams,
     CompletionItem,
     Definition,
     DocumentFormattingParams,
+    DocumentHighlightParams,
     DocumentSymbol,
     DocumentSymbolParams,
+    ExecuteCommandParams,
     FoldingRangeParams,
     FormattingOptions,
     Hover,
     Range,
     ReferenceParams,
+    SelectionRangeParams,
     SemanticTokens,
     SemanticTokensDelta,
     SemanticTokensDeltaParams,
@@ -29,10 +33,23 @@ import { RslDefinitionProvider } from "./definitionProvider";
 import { getSymbols } from "../docsymbols";
 import { getCIInfoForArray, getDefaults } from "../defaults";
 import { buildEnhancedRslCodeActions } from "./enhancedCodeActions";
+import { buildRslDocumentHighlights } from "./documentHighlights";
+import { buildRslHoverContent } from "./hoverFormatter";
+import {
+    buildBlockNavigationActions,
+    buildSelectionRanges,
+    GO_TO_BLOCK_END_COMMAND,
+    GO_TO_BLOCK_START_COMMAND,
+    resolveBlockNavigationPosition
+} from "./blockNavigation";
 import { GetFoldingRanges, type IRslFoldingRange } from "../folding";
 import { FormatCode } from "../format";
 import type { IToken } from "../interfaces";
 import type { IRslToken } from "../lexer";
+import {
+    describeFormatSpecifier,
+    getFormatSpecifierAt
+} from "../parsing/outputFormParser";
 import { findRslReferencesInWorkspace } from "../analysis/references";
 import { ReferenceIndex } from "../analysis/referenceIndex";
 import {
@@ -144,6 +161,25 @@ export class RslLanguageFeatureRegistry {
                 return null;
             }
 
+            const formatSpecifier = getFormatSpecifierAt(
+                context.tokens,
+                context.offset
+            );
+            if (formatSpecifier) {
+                return {
+                    contents: {
+                        kind: "markdown",
+                        value:
+                            `**Спецификатор форматирования :${formatSpecifier.raw}**  \n` +
+                            describeFormatSpecifier(formatSpecifier.raw)
+                    },
+                    range: {
+                        start: document.positionAt(formatSpecifier.start),
+                        end: document.positionAt(formatSpecifier.end)
+                    }
+                };
+            }
+
             const resolved = resolver.resolveAt(
                 document.uri,
                 context.tree,
@@ -154,20 +190,40 @@ export class RslLanguageFeatureRegistry {
                 return null;
             }
 
-            const info = resolved.object.CIInfo;
-            const documentation = info.documentation
-                ? info.documentation.toString()
-                : "";
-
             return {
-                contents:
-                    `${info.detail || ""}` +
-                    (documentation ? `  \n${documentation}` : ""),
+                contents: buildRslHoverContent(
+                    index,
+                    resolved.uri,
+                    resolved.object
+                ),
                 range: {
                     start: document.positionAt(resolved.token.start),
                     end: document.positionAt(resolved.token.end)
                 }
             };
+        });
+
+        connection.onDocumentHighlight(async (
+            params: DocumentHighlightParams
+        ) => {
+            const document = documents.get(params.textDocument.uri);
+            if (!document) {
+                return [];
+            }
+
+            await ensureDocumentParsed(document);
+            const context = this.getPositionContext(params);
+            const module = index.getModule(document.uri);
+            if (!context || !module || isBlockedToken(context.token)) {
+                return [];
+            }
+
+            return buildRslDocumentHighlights(
+                module,
+                index,
+                resolver,
+                context.offset
+            );
         });
 
         connection.onDefinition(async (
@@ -258,7 +314,68 @@ export class RslLanguageFeatureRegistry {
 
         connection.onCodeAction((params: CodeActionParams) => {
             const module = index.getModule(params.textDocument.uri);
-            return module ? buildEnhancedRslCodeActions(module, params) : [];
+            if (!module) {
+                return [];
+            }
+
+            const navigation = supportsRefactorActions(params)
+                ? buildBlockNavigationActions(module, params.range)
+                : [];
+            return [
+                ...buildEnhancedRslCodeActions(module, params),
+                ...navigation
+            ];
+        });
+
+        connection.onSelectionRanges(async (params: SelectionRangeParams) => {
+            const document = documents.get(params.textDocument.uri);
+            if (!document) {
+                return [];
+            }
+
+            await ensureDocumentParsed(document);
+            const module = index.getModule(document.uri);
+            return module
+                ? buildSelectionRanges(module, params.positions)
+                : [];
+        });
+
+        connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
+            const direction = params.command === GO_TO_BLOCK_START_COMMAND
+                ? "start"
+                : params.command === GO_TO_BLOCK_END_COMMAND
+                    ? "end"
+                    : undefined;
+            if (!direction) {
+                return null;
+            }
+
+            const args = Array.isArray(params.arguments) ? params.arguments : [];
+            const uri = typeof args[0] === "string" ? args[0] : "";
+            const line = typeof args[1] === "number" ? args[1] : 0;
+            const character = typeof args[2] === "number" ? args[2] : 0;
+            const document = documents.get(uri);
+            if (document) {
+                await ensureDocumentParsed(document);
+            }
+            const module = index.getModule(uri);
+            const position = module
+                ? resolveBlockNavigationPosition(
+                    module,
+                    { line, character },
+                    direction
+                )
+                : undefined;
+            if (!position) {
+                return null;
+            }
+
+            await connection.sendRequest("window/showDocument", {
+                uri,
+                takeFocus: true,
+                selection: { start: position, end: position }
+            });
+            return null;
         });
 
         connection.languages.semanticTokens.on(async (
@@ -487,6 +604,15 @@ export class RslLanguageFeatureRegistry {
             tokens: module.lex.tokens
         };
     }
+}
+
+
+function supportsRefactorActions(params: CodeActionParams): boolean {
+    const only = params.context.only;
+    return !only || only.length === 0 || only.some(kind =>
+        kind === CodeActionKind.Refactor ||
+        String(kind).startsWith(CodeActionKind.Refactor + ".")
+    );
 }
 
 function semanticTokenEdits(
