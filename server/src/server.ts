@@ -47,6 +47,7 @@ let hasWorkspaceFolderCapability = false;
 let workFolderOpened = false;
 let clientReady = false;
 let lastReportedModuleCount = -1;
+let moduleCountTimer: NodeJS.Timeout | undefined;
 
 function logMessage(message: string): void {
     const line =
@@ -95,14 +96,30 @@ function notifyClient(method: string, params?: unknown): void {
 }
 
 function notifyModuleCount(force: boolean = false): void {
-    const count = workspaceIndex.size;
+    const publish = (): void => {
+        moduleCountTimer = undefined;
+        const count = workspaceIndex.size;
 
-    if (!force && count === lastReportedModuleCount) {
+        if (!force && count === lastReportedModuleCount) {
+            return;
+        }
+
+        lastReportedModuleCount = count;
+        notifyClient("updateStatusBar", count);
+    };
+
+    if (force) {
+        if (moduleCountTimer) {
+            clearTimeout(moduleCountTimer);
+            moduleCountTimer = undefined;
+        }
+        publish();
         return;
     }
 
-    lastReportedModuleCount = count;
-    notifyClient("updateStatusBar", count);
+    if (!moduleCountTimer) {
+        moduleCountTimer = setTimeout(publish, 250);
+    }
 }
 
 let languageFeatures: RslLanguageFeatureRegistry;
@@ -130,7 +147,8 @@ const documentAnalysis = new DocumentAnalysisService(
         log: logMessage,
         invalidateProviderCaches,
         onParsed: (module, wasKnown) => {
-            diagnosticsCoordinator.schedule(module.uri);
+            diagnosticsCoordinator.scheduleLocal(module.uri);
+            diagnosticsCoordinator.scheduleWorkspace(module.uri);
             notifyModuleCount();
 
             if (!wasKnown) {
@@ -150,7 +168,7 @@ diagnosticsCoordinator = new DiagnosticsCoordinator(
     settingsService,
     diagnosticEngine,
     {
-        isParseBusy: () => documentAnalysis.isBusy,
+        isParseBusy: uri => documentAnalysis.isBusyFor(uri),
         log: logMessage,
         onImports: (_uri, imports) => {
             imports.forEach(name => moduleLoader.enqueueImport(name));
@@ -215,6 +233,8 @@ const definitionProvider = new RslDefinitionProvider({
     resolveWorkspaceFileUri: name =>
         workspaceIndex.resolveWorkspaceFile(name),
     ensureModuleByName: name => moduleLoader.ensureLoadedByName(name),
+    getDefinitionRange: (uri, object) =>
+        workspaceIndex.getDefinitionRange(uri, object),
     log: logMessage
 });
 
@@ -262,7 +282,8 @@ connection.onInitialize((params: InitializeParams) => {
             },
             semanticTokensProvider: {
                 legend: RSL_SEMANTIC_TOKENS_LEGEND,
-                full: true
+                full: { delta: true },
+                range: true
             },
             documentSymbolProvider: true,
             documentFormattingProvider: true,
@@ -321,7 +342,7 @@ documents.onDidOpen(event => {
     }).catch(error => logMessage(
         `Settings read failed: ${event.document.uri}\n${errorToString(error)}`
     ));
-    documentAnalysis.schedule(event.document);
+    documentAnalysis.open(event.document);
 });
 
 documents.onDidClose(event => {
@@ -329,19 +350,19 @@ documents.onDidClose(event => {
     settingsService.clear(uri);
     documentAnalysis.close(uri);
     diagnosticsCoordinator.close(uri);
-    invalidateProviderCaches(uri);
+    languageFeatures?.forget(uri);
     workspaceIndex.markClosed(uri);
 });
 
 documents.onDidChangeContent(change => {
     diagnosticsCoordinator.cancel(change.document.uri);
-    documentAnalysis.schedule(change.document);
+    documentAnalysis.changed(change.document);
 });
 
 async function ensureDocumentParsed(
     document: TextDocument
 ): Promise<CBase | undefined> {
-    diagnosticsCoordinator.cancel(document.uri);
+    /* Интерактивный LSP-запрос не должен отменять уже запланированные Problems. */
     return documentAnalysis.ensureParsed(document);
 }
 
@@ -370,7 +391,7 @@ async function handleWatchedFileChange(
         moduleLoader.remove(uri);
         documentAnalysis.invalidate(uri);
         dependents.forEach(dependentUri =>
-            diagnosticsCoordinator.schedule(dependentUri, 650)
+            diagnosticsCoordinator.scheduleWorkspace(dependentUri, 650)
         );
         return;
     }
@@ -380,21 +401,21 @@ async function handleWatchedFileChange(
 
     if (openDocument) {
         documentAnalysis.invalidate(uri);
-        documentAnalysis.schedule(openDocument);
+        documentAnalysis.changed(openDocument);
     } else if (workspaceIndex.getModule(uri)) {
         /* Не загружаем изменённый файл, если он не был частью активного Import-графа. */
         await moduleLoader.reload(uri);
     }
 
     dependents.forEach(dependentUri =>
-        diagnosticsCoordinator.schedule(dependentUri, 650)
+        diagnosticsCoordinator.scheduleWorkspace(dependentUri, 650)
     );
 }
 
 function refreshOpenDependents(uri: string): void {
     workspaceIndex.getDependents(uri).forEach(dependentUri => {
         if (documents.get(dependentUri)) {
-            diagnosticsCoordinator.schedule(dependentUri, 650);
+            diagnosticsCoordinator.scheduleWorkspace(dependentUri, 650);
         }
     });
 }

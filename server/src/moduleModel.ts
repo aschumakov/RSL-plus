@@ -1,10 +1,11 @@
-import { CBase } from "./common";
+import { CBase, type IExternalLocationRange } from "./common";
 import type { IRslLexResult } from "./lexer";
 import {
     getImportNamesFromSyntax,
     type IRslParseResult,
     parseRslSyntax
 } from "./syntaxParser";
+import { scanExternalModule } from "./indexing/externalModuleScanner";
 
 export type RslModuleModelKind = "open" | "external";
 
@@ -20,6 +21,8 @@ export interface IRslModuleModel {
     syntax: IRslParseResult;
     lex: IRslLexResult;
     imports: string[];
+    /** Готовые line/character позиции внешних символов без повторного чтения файла. */
+    definitionRanges?: Map<CBase, IExternalLocationRange>;
 }
 
 const EMPTY_LEX_RESULT = Object.freeze({
@@ -55,9 +58,12 @@ export function createRslModuleModel(
 
 export function createOpenModuleModel(
     source: string,
-    symbolTree: CBase
+    symbolTree: CBase,
+    parsedSyntax?: IRslParseResult
 ): IRslModuleModel {
-    const syntax = symbolTree.getSyntaxResult() || parseRslSyntax(source);
+    const syntax = parsedSyntax ||
+        symbolTree.getSyntaxResult() ||
+        parseRslSyntax(source, undefined, { buildExpressionTree: false });
 
     return {
         kind: "open",
@@ -71,32 +77,25 @@ export function createOpenModuleModel(
 }
 
 /**
- * Строит компактную модель закрытого файла: parser используется временно,
- * после чего остаются только Import и экспортируемое legacy symbol tree.
+ * Строит компактную модель закрытого файла однопроходным scanner-ом.
+ * Statement/expression AST и полный token stream не создаются и не удерживаются.
  */
-export function createExternalModuleSummary(
-    source: string,
-    parsedSyntax?: IRslParseResult
-): IRslModuleModel {
-    const syntax = parsedSyntax || parseRslSyntax(source, undefined, {
-        buildExpressionTree: false,
-        includeTrivia: false
-    });
-    const imports = getImportNamesFromSyntax(syntax.root);
-    const symbolTree = CBase.fromExternalSyntax(source, syntax);
+export function createExternalModuleSummary(source: string): IRslModuleModel {
+    const scan = scanExternalModule(source);
 
     return {
         kind: "external",
         source: "",
         sourceLength: source.length,
-        symbolTree,
+        symbolTree: scan.symbolTree,
         syntax: EMPTY_PARSE_RESULT,
         lex: EMPTY_LEX_RESULT,
-        imports
+        imports: scan.imports,
+        definitionRanges: scan.definitionRanges
     };
 }
 
-/** Превращает полную модель закрытого редактора в external summary без reparse. */
+/** Превращает полную модель закрытого редактора в external summary. */
 export function compactOpenModuleModel(
     model: IRslModuleModel
 ): IRslModuleModel {
@@ -104,7 +103,7 @@ export function compactOpenModuleModel(
         return model;
     }
 
-    return createExternalModuleSummary(model.source, model.syntax);
+    return createExternalModuleSummary(model.source);
 }
 
 export function isOpenModuleModel(

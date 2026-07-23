@@ -36,6 +36,13 @@ export interface IDefinitionEnvironment {
     findWorkspaceFileUri(moduleName: string): string | undefined;
     resolveWorkspaceFileUri?(moduleName: string): ModuleResolution<string>;
     ensureModuleByName?(moduleName: string): Promise<IFAStruct | undefined>;
+    getDefinitionRange?(
+        uri: string,
+        object: CBase
+    ): {
+        start: { line: number; character: number };
+        end: { line: number; character: number };
+    } | undefined;
     log(message: string): void;
 }
 
@@ -212,6 +219,12 @@ export class RslDefinitionProvider {
                 openedDocument,
                 object
             );
+        }
+
+        const indexedRange = this.environment.getDefinitionRange?.(uri, object);
+
+        if (indexedRange) {
+            return Location.create(uri, indexedRange);
         }
 
         const filePath = uriToFilePath(uri);

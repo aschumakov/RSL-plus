@@ -48,11 +48,15 @@ assert.ok(!server.includes("moduleLoader.startBackgroundIndexing()"));
 assert.ok(loader.includes('indexingMode: WorkspaceIndexingMode = "activeImports"'));
 assert.ok(!definition.includes("externalModuleCache"));
 assert.ok(workspaceIndex.includes("LruCache"));
-assert.ok(workspaceIndex.includes("invalidateImportCaches(affected"));
+assert.ok(workspaceIndex.includes("importContextCache"));
+assert.ok(!workspaceIndex.includes("importedCompletionCache"));
 assert.ok(references.includes("containsIdentifier"));
 assert.ok(references.includes("withTransientOpenModule"));
-assert.ok(diagnostics.includes("this.activeDocumentUri !== uri"));
-assert.ok(diagnostics.includes("buildKeys"));
+assert.ok(diagnostics.includes("scheduleLocal"));
+assert.ok(diagnostics.includes("scheduleWorkspace"));
+assert.ok(diagnostics.includes("workspaceMaxWaitMs"));
+assert.ok(engine.includes("buildLocal"));
+assert.ok(engine.includes("buildWorkspace"));
 assert.ok(!engine.includes("Number.MAX_SAFE_INTEGER"));
 
 console.log("[OK] resource-патч 1.1.4 ограничивает постоянный индекс и тяжёлые кэши");

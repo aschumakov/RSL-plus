@@ -10,7 +10,11 @@ import {
     Hover,
     Range,
     ReferenceParams,
+    SemanticTokens,
+    SemanticTokensDelta,
+    SemanticTokensDeltaParams,
     SemanticTokensParams,
+    SemanticTokensRangeParams,
     SymbolInformation,
     TextDocumentPositionParams,
     TextEdit,
@@ -55,8 +59,10 @@ interface IPositionContext {
 export class RslLanguageFeatureRegistry {
     private semanticTokensCache = new Map<string, {
         version: number;
-        value: ReturnType<typeof buildRslSemanticTokens>;
+        resultId: string;
+        value: SemanticTokens;
     }>();
+    private semanticResultSequence = 0;
     private foldingRangesCache = new Map<string, {
         version: number;
         value: ReturnType<typeof GetFoldingRanges>;
@@ -243,32 +249,49 @@ export class RslLanguageFeatureRegistry {
 
         connection.languages.semanticTokens.on(async (
             params: SemanticTokensParams
-        ) => {
-            const document = documents.get(params.textDocument.uri);
+        ): Promise<SemanticTokens> => {
+            return this.getSemanticTokens(params.textDocument.uri);
+        });
 
-            if (!document) {
-                return { data: [] };
+        connection.languages.semanticTokens.onDelta(async (
+            params: SemanticTokensDeltaParams
+        ): Promise<SemanticTokens | SemanticTokensDelta> => {
+            const previous = this.semanticTokensCache.get(
+                params.textDocument.uri
+            );
+            const current = await this.getSemanticTokens(
+                params.textDocument.uri
+            );
+
+            if (
+                previous &&
+                previous.resultId === params.previousResultId &&
+                previous.resultId === current.resultId
+            ) {
+                return { resultId: current.resultId, edits: [] };
             }
 
-            await ensureDocumentParsed(document);
-            const module = index.getModule(document.uri);
-
-            if (!module) {
-                return { data: [] };
+            if (!previous || previous.resultId !== params.previousResultId) {
+                return current;
             }
 
-            const cached = this.semanticTokensCache.get(document.uri);
+            return {
+                resultId: current.resultId,
+                edits: semanticTokenEdits(previous.value.data, current.data)
+            };
+        });
 
-            if (cached && cached.version === module.version) {
-                return cached.value;
-            }
-
-            const value = buildRslSemanticTokens(module, index, resolver);
-            this.semanticTokensCache.set(document.uri, {
-                version: module.version,
-                value
-            });
-            return value;
+        connection.languages.semanticTokens.onRange(async (
+            params: SemanticTokensRangeParams
+        ): Promise<SemanticTokens> => {
+            const full = await this.getSemanticTokens(params.textDocument.uri);
+            return {
+                data: semanticTokensForLineRange(
+                    full.data,
+                    params.range.start.line,
+                    params.range.end.line
+                )
+            };
         });
 
         connection.onDocumentSymbol(async (params: DocumentSymbolParams) => {
@@ -307,7 +330,7 @@ export class RslLanguageFeatureRegistry {
             return value;
         });
 
-        connection.onFoldingRanges((params: FoldingRangeParams) => {
+        connection.onFoldingRanges(async (params: FoldingRangeParams) => {
             const { textDocument } = params;
             const document = documents.get(textDocument.uri);
 
@@ -316,16 +339,18 @@ export class RslLanguageFeatureRegistry {
             }
 
             const cached = this.foldingRangesCache.get(document.uri);
-
             if (cached && cached.version === document.version) {
                 return cached.value;
             }
 
+            /* Не запускаем второй lexer: используем тот же snapshot, что parser. */
+            await ensureDocumentParsed(document);
             const module = index.getModule(document.uri);
-            const lex = module && module.version === document.version
-                ? module.lex
-                : undefined;
-            const value = GetFoldingRanges(document.getText(), lex);
+            if (!module || module.version !== document.version) {
+                return [];
+            }
+
+            const value = GetFoldingRanges(document.getText(), module.lex);
             this.foldingRangesCache.set(document.uri, {
                 version: document.version,
                 value
@@ -361,7 +386,50 @@ export class RslLanguageFeatureRegistry {
         });
     }
 
+    private async getSemanticTokens(uri: string): Promise<SemanticTokens> {
+        const document = this.environment.documents.get(uri);
+
+        if (!document) {
+            return { data: [] };
+        }
+
+        await this.environment.ensureDocumentParsed(document);
+        const module = this.environment.index.getModule(uri);
+
+        if (!module) {
+            return { data: [] };
+        }
+
+        const cached = this.semanticTokensCache.get(uri);
+        if (cached && cached.version === module.version) {
+            return cached.value;
+        }
+
+        const built = buildRslSemanticTokens(
+            module,
+            this.environment.index,
+            this.environment.resolver
+        );
+        const resultId = `${module.version}:${++this.semanticResultSequence}`;
+        const value: SemanticTokens = {
+            data: built.data,
+            resultId
+        };
+        this.semanticTokensCache.set(uri, {
+            version: module.version,
+            resultId,
+            value
+        });
+        return value;
+    }
+
     invalidate(uri: string): void {
+        /* Старый semantic result нужен клиенту для следующего delta-запроса. */
+        this.foldingRangesCache.delete(uri);
+        this.documentSymbolsCache.delete(uri);
+    }
+
+    forget(uri: string): void {
         this.semanticTokensCache.delete(uri);
         this.foldingRangesCache.delete(uri);
         this.documentSymbolsCache.delete(uri);
@@ -392,6 +460,92 @@ export class RslLanguageFeatureRegistry {
             tokens: module.lex.tokens
         };
     }
+}
+
+function semanticTokenEdits(
+    previous: number[],
+    current: number[]
+): Array<{ start: number; deleteCount: number; data?: number[] }> {
+    let start = 0;
+    const commonLimit = Math.min(previous.length, current.length);
+    while (start < commonLimit && previous[start] === current[start]) {
+        start++;
+    }
+
+    if (start === previous.length && start === current.length) {
+        return [];
+    }
+
+    let previousEnd = previous.length - 1;
+    let currentEnd = current.length - 1;
+    while (
+        previousEnd >= start &&
+        currentEnd >= start &&
+        previous[previousEnd] === current[currentEnd]
+    ) {
+        previousEnd--;
+        currentEnd--;
+    }
+
+    const data = current.slice(start, currentEnd + 1);
+    return [{
+        start,
+        deleteCount: previousEnd - start + 1,
+        ...(data.length > 0 ? { data } : {})
+    }];
+}
+
+function semanticTokensForLineRange(
+    data: number[],
+    startLine: number,
+    endLine: number
+): number[] {
+    const absolute: Array<{
+        line: number;
+        character: number;
+        length: number;
+        type: number;
+        modifiers: number;
+    }> = [];
+    let line = 0;
+    let character = 0;
+
+    for (let index = 0; index + 4 < data.length; index += 5) {
+        const deltaLine = data[index];
+        line += deltaLine;
+        character = deltaLine === 0
+            ? character + data[index + 1]
+            : data[index + 1];
+        if (line >= startLine && line <= endLine) {
+            absolute.push({
+                line,
+                character,
+                length: data[index + 2],
+                type: data[index + 3],
+                modifiers: data[index + 4]
+            });
+        }
+    }
+
+    const result: number[] = [];
+    let previousLine = 0;
+    let previousCharacter = 0;
+    for (const token of absolute) {
+        const deltaLine = token.line - previousLine;
+        const deltaCharacter = deltaLine === 0
+            ? token.character - previousCharacter
+            : token.character;
+        result.push(
+            deltaLine,
+            deltaCharacter,
+            token.length,
+            token.type,
+            token.modifiers
+        );
+        previousLine = token.line;
+        previousCharacter = token.character;
+    }
+    return result;
 }
 
 function isBlockedToken(token?: IToken): boolean {

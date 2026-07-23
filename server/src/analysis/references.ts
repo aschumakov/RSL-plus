@@ -81,11 +81,13 @@ export async function findRslReferencesInWorkspace(
     const result: Location[] = [];
     const seen = new Set<string>();
     const workspaceUris = index.getWorkspaceFileUris();
+    const workspaceSet = new Set(workspaceUris);
     let processedSinceYield = 0;
 
     /* Открытые документы могли ещё не попасть в исходный workspaceFiles list. */
     for (const module of index.getOpenModules()) {
-        if (!workspaceUris.includes(module.uri)) {
+        if (!workspaceSet.has(module.uri)) {
+            workspaceSet.add(module.uri);
             workspaceUris.push(module.uri);
         }
     }
@@ -133,7 +135,7 @@ export async function findRslReferencesInWorkspace(
 
         processedSinceYield++;
 
-        if (processedSinceYield >= 8) {
+        if (processedSinceYield >= 4) {
             processedSinceYield = 0;
             await yieldToInteractiveRequests();
         }
@@ -212,6 +214,13 @@ function findDeclarationTokenByKey(
     normalizedName: string,
     targetKey: string
 ): { start: number; end: number } | undefined {
+    const objects = findObjectsByName(module.object, normalizedName)
+        .filter(object => symbolKey(module.uri, object) === targetKey);
+
+    if (objects.length === 0) {
+        return undefined;
+    }
+
     for (const token of module.syntax.tokens) {
         if (
             token.kind !== "identifier" ||
@@ -220,14 +229,10 @@ function findDeclarationTokenByKey(
             continue;
         }
 
-        for (const object of findObjectsByName(module.object, normalizedName)) {
-            if (
-                object.Range.start <= token.start &&
-                token.end <= object.Range.end &&
-                symbolKey(module.uri, object) === targetKey
-            ) {
-                return token;
-            }
+        if (objects.some(object =>
+            object.Range.start <= token.start && token.end <= object.Range.end
+        )) {
+            return token;
         }
     }
 
@@ -274,24 +279,41 @@ async function readWorkspaceFile(uri: string): Promise<string | undefined> {
 }
 
 function containsIdentifier(source: string, normalizedName: string): boolean {
-    const text = source.toLowerCase();
-    let position = text.indexOf(normalizedName);
+    if (!normalizedName || source.length < normalizedName.length) {
+        return false;
+    }
 
-    while (position >= 0) {
-        const before = position > 0 ? text.charAt(position - 1) : "";
+    const limit = source.length - normalizedName.length;
+    for (let position = 0; position <= limit; position++) {
+        if (!equalsIgnoreCaseAt(source, normalizedName, position)) {
+            continue;
+        }
+
+        const before = position > 0 ? source.charAt(position - 1) : "";
         const afterPosition = position + normalizedName.length;
-        const after = afterPosition < text.length
-            ? text.charAt(afterPosition)
+        const after = afterPosition < source.length
+            ? source.charAt(afterPosition)
             : "";
 
         if (!isIdentifierPart(before) && !isIdentifierPart(after)) {
             return true;
         }
-
-        position = text.indexOf(normalizedName, position + 1);
     }
 
     return false;
+}
+
+function equalsIgnoreCaseAt(
+    source: string,
+    normalizedNeedle: string,
+    position: number
+): boolean {
+    for (let index = 0; index < normalizedNeedle.length; index++) {
+        if (source.charAt(position + index).toLowerCase() !== normalizedNeedle.charAt(index)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 function compareLocations(left: Location, right: Location): number {

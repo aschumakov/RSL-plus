@@ -1,14 +1,19 @@
-RSL-plus 1.1.4 resource optimization overlay
+RSL-plus 1.1.4 Fast Open & Performance Patch
 
-Распаковать в корень репозитория, затем выполнить apply-resource-patch.ps1.
+Накладывается на текущий master после resource-optimization patch.
 Версия package.json остаётся 1.1.4.
 
-Основные изменения:
-- active Import graph вместо автоматического full workspace index;
-- compact external module summary;
-- compaction при закрытии документа;
-- единый cache owner для Definition;
-- bounded/addressed Import caches;
-- on-demand References;
-- active-document diagnostics;
-- группировка server/src по смысловым папкам.
+Изменённые области:
+- immediate open parse / debounced edits;
+- shared lexer/parser snapshot for Folding and Outline;
+- two-phase local/workspace diagnostics with max wait;
+- external module summary scanner and stored definition ranges;
+- single bounded ImportContext cache;
+- semantic tokens full/delta/range;
+- lightweight transient References context;
+- delayed workspace inventory and throttled status updates.
+
+После распаковки обязательно выполнить:
+  powershell -ExecutionPolicy Bypass -File .\apply-performance-patch.ps1
+  npm.cmd test
+  vsce.cmd package

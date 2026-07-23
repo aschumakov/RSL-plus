@@ -260,16 +260,24 @@ export function activate(context: ExtensionContext): void {
             /* Активный файл известен серверу до фонового обхода workspace. */
             await notifyActiveDocument();
 
-            const workspaceFiles = await workspace.findFiles(
-                "**/*.mac",
-                "**/{.git,node_modules,out}/**"
-            );
-
-            await client.sendNotification(
-                "workspaceFiles",
-                workspaceFiles.map(uri => uri.toString())
-            );
             await client.sendNotification("clientReady");
+
+            /* Инвентаризация workspace не конкурирует с первым folding/Outline. */
+            setTimeout(() => {
+                workspace.findFiles(
+                    "**/*.mac",
+                    "**/{.git,node_modules,out,dist,build,archive,backup,.history}/**"
+                ).then(
+                    workspaceFiles => client.sendNotification(
+                        "workspaceFiles",
+                        workspaceFiles.map(uri => uri.toString())
+                    ),
+                    error => console.error(
+                        "RSL workspace inventory failed",
+                        error
+                    )
+                );
+            }, 500);
         },
         error => {
             console.error(

@@ -131,7 +131,7 @@ assert.ok(scopeResolverSource.includes("upperBoundByStart"));
 assert.ok(scopeResolverSource.includes("findContainingObject"));
 assert.ok(!scopeResolverSource.includes("significantTokens(module.lex.tokens)"));
 assert.ok(diagnosticsSource.includes("nestedScopesByScope"));
-assert.ok(featureSource.includes("GetFoldingRanges(document.getText(), lex)"));
+assert.ok(featureSource.includes("GetFoldingRanges(document.getText(), module.lex)"));
 assert.ok(foldingSource.includes("lexResult?: IRslLexResult"));
 assert.ok(referencesSource.includes("containsIdentifier"));
 assert.ok(referencesSource.includes("withTransientOpenModule"));

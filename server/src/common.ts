@@ -250,6 +250,36 @@ export class CVar extends CAbstractBase {
     }
 }
 
+export interface IExternalLocationRange {
+    start: { line: number; character: number };
+    end: { line: number; character: number };
+}
+
+export interface IExternalSymbolDescriptor {
+    kind: "macro" | "class" | "variable";
+    name: string;
+    privateFlag: boolean;
+    isMethod?: boolean;
+    isProperty?: boolean;
+    isConstant?: boolean;
+    parameterText?: string;
+    returnType?: string;
+    baseClassName?: string;
+    typeName?: string;
+    start: number;
+    end: number;
+    startLine: number;
+    startCharacter: number;
+    endLine: number;
+    endCharacter: number;
+    children: IExternalSymbolDescriptor[];
+}
+
+export interface IExternalSymbolTreeResult {
+    root: CBase;
+    definitionRanges: Map<CBase, IExternalLocationRange>;
+}
+
 /**
  * Совместимое дерево символов для существующих provider-ов расширения.
  * Оно больше не разбирает исходный текст самостоятельно: все узлы создаёт
@@ -341,6 +371,74 @@ export class CBase extends CAbstractBase {
             externalSymbolsOnly
         );
         return root;
+    }
+
+    /** Строит компактное external symbol tree без syntax AST. */
+    static fromExternalDescriptors(
+        sourceLength: number,
+        descriptors: readonly IExternalSymbolDescriptor[]
+    ): IExternalSymbolTreeResult {
+        const root = new CBase("", 0, CompletionItemKind.Unit, false);
+        root.range = { start: 0, end: Math.max(0, sourceLength) };
+        const definitionRanges = new Map<CBase, IExternalLocationRange>();
+
+        const append = (
+            parent: CBase,
+            descriptor: IExternalSymbolDescriptor
+        ): void => {
+            let object: CBase;
+
+            if (descriptor.kind === "macro") {
+                object = new CMacro(
+                    "",
+                    descriptor.name,
+                    descriptor.privateFlag,
+                    { start: descriptor.start, end: descriptor.end },
+                    descriptor.isMethod === true,
+                    descriptor.parameterText || "",
+                    descriptor.returnType || getTypeStr(varType._variant)
+                );
+            } else if (descriptor.kind === "class") {
+                object = new CClass(
+                    "",
+                    descriptor.name,
+                    descriptor.baseClassName || "",
+                    descriptor.privateFlag,
+                    { start: descriptor.start, end: descriptor.end }
+                );
+            } else {
+                const variable = new CVar(
+                    descriptor.name,
+                    descriptor.privateFlag,
+                    descriptor.isConstant === true,
+                    descriptor.isProperty === true
+                );
+                variable.setRange({
+                    start: descriptor.start,
+                    end: descriptor.end
+                });
+                if (descriptor.typeName) {
+                    variable.setType(descriptor.typeName);
+                }
+                object = variable as unknown as CBase;
+            }
+
+            parent.addChild(object);
+            definitionRanges.set(object, {
+                start: {
+                    line: descriptor.startLine,
+                    character: descriptor.startCharacter
+                },
+                end: {
+                    line: descriptor.endLine,
+                    character: descriptor.endCharacter
+                }
+            });
+            descriptor.children.forEach(child => append(object, child));
+        };
+
+        descriptors.forEach(descriptor => append(root, descriptor));
+        return { root, definitionRanges };
     }
 
     getSyntaxResult(): IRslParseResult | undefined {
@@ -930,6 +1028,13 @@ class LegacySymbolTreeAdapter {
             end: node.end + this.offset
         };
     }
+}
+
+export function createExternalSymbolTree(
+    sourceLength: number,
+    descriptors: readonly IExternalSymbolDescriptor[]
+): IExternalSymbolTreeResult {
+    return CBase.fromExternalDescriptors(sourceLength, descriptors);
 }
 
 /** Макрос или метод класса. */

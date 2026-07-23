@@ -3,9 +3,10 @@ import { fileURLToPath } from "url";
 
 import { CompletionItem } from "vscode-languageserver";
 
-import { CBase } from "./common";
+import { CBase, type IExternalLocationRange } from "./common";
 import { LruCache } from "./core/lruCache";
 import { IFAStruct } from "./interfaces";
+import type { IRslParseResult } from "./syntaxParser";
 import {
     compactOpenModuleModel,
     createExternalModuleSummary,
@@ -31,8 +32,15 @@ export interface IIndexedSymbol {
 }
 
 export interface IWorkspaceIndexOptions {
-    /** Кэши Import нужны только нескольким активным документам. */
+    /** Контексты нужны только нескольким открытым/недавно активным документам. */
     importCacheEntries?: number;
+}
+
+interface IImportContext {
+    modules: IIndexedModule[];
+    symbolsByName: Map<string, IIndexedSymbol[]>;
+    completionItems?: CompletionItem[];
+    closureKey: string;
 }
 
 /** Индекс лёгких summary и полных моделей только для открытых документов. */
@@ -43,22 +51,18 @@ export class WorkspaceIndex {
     private workspaceFiles = new Set<string>();
     private workspaceFilesByBaseName = new Map<string, Set<string>>();
     private modulesByBaseName = new Map<string, Set<string>>();
-    private importedModulesCache: LruCache<string, IIndexedModule[]>;
-    private importedCompletionCache: LruCache<string, CompletionItem[]>;
-    private importedSymbolsByNameCache:
-        LruCache<string, Map<string, IIndexedSymbol[]>>;
+    private importContextCache: LruCache<string, IImportContext>;
     private workspaceFilesInitialized = false;
     private importsEnabled = true;
     private revisionValue = 0;
 
     constructor(options: IWorkspaceIndexOptions = {}) {
-        const cacheEntries = options.importCacheEntries ?? 32;
-        this.importedModulesCache = new LruCache(cacheEntries);
-        this.importedCompletionCache = new LruCache(cacheEntries);
-        this.importedSymbolsByNameCache = new LruCache(cacheEntries);
+        this.importContextCache = new LruCache(
+            Math.max(1, options.importCacheEntries ?? 8)
+        );
     }
 
-    /** Совместимый API: false теперь создаёт настоящий compact summary. */
+    /** Совместимый API: false создаёт compact summary. */
     updateModule(
         uri: string,
         source: string,
@@ -74,11 +78,12 @@ export class WorkspaceIndex {
         uri: string,
         source: string,
         object: CBase,
-        version: number
+        version: number,
+        parsedSyntax?: IRslParseResult
     ): IIndexedModule {
         return this.replacePersistentModule(
             uri,
-            createOpenModuleModel(source, object),
+            createOpenModuleModel(source, object, parsedSyntax),
             version,
             true
         );
@@ -120,7 +125,6 @@ export class WorkspaceIndex {
 
     markClosed(uri: string): void {
         const module = this.modules.get(uri);
-
         if (module) {
             module.isOpen = false;
         }
@@ -128,7 +132,6 @@ export class WorkspaceIndex {
 
     markOpen(uri: string): void {
         const module = this.modules.get(uri);
-
         if (module) {
             module.isOpen = true;
         }
@@ -139,7 +142,7 @@ export class WorkspaceIndex {
         this.removeModuleFromIndexes(uri);
         this.modules.delete(uri);
         affected.add(uri);
-        this.invalidateImportCaches(affected);
+        this.invalidateImportContexts(affected);
         this.revisionValue++;
     }
 
@@ -150,7 +153,7 @@ export class WorkspaceIndex {
         this.workspaceFiles.clear();
         this.workspaceFilesByBaseName.clear();
         this.modulesByBaseName.clear();
-        this.invalidateImportCaches();
+        this.importContextCache.clear();
         this.workspaceFilesInitialized = false;
         this.revisionValue++;
     }
@@ -164,17 +167,14 @@ export class WorkspaceIndex {
         if (!uri || this.workspaceFiles.has(uri)) {
             return;
         }
-
         this.workspaceFiles.add(uri);
         addUriAlias(this.workspaceFilesByBaseName, uri);
     }
 
     unregisterWorkspaceFile(uri: string): void {
-        if (!this.workspaceFiles.delete(uri)) {
-            return;
+        if (this.workspaceFiles.delete(uri)) {
+            removeUriAlias(this.workspaceFilesByBaseName, uri);
         }
-
-        removeUriAlias(this.workspaceFilesByBaseName, uri);
     }
 
     getWorkspaceFileUris(): string[] {
@@ -191,9 +191,7 @@ export class WorkspaceIndex {
 
     findWorkspaceFileUri(moduleName: string): string | undefined {
         const resolution = this.resolveWorkspaceFile(moduleName);
-        return resolution.kind === "resolved"
-            ? resolution.value
-            : undefined;
+        return resolution.kind === "resolved" ? resolution.value : undefined;
     }
 
     getModule(uri: string): IIndexedModule | undefined {
@@ -216,52 +214,21 @@ export class WorkspaceIndex {
     }
 
     getImportNames(uri: string): string[] {
-        const module = this.modules.get(uri);
-        return module ? module.imports.slice() : [];
+        return this.modules.get(uri)?.imports.slice() || [];
     }
 
     getImportedModules(uri: string): IIndexedModule[] {
+        return this.importsEnabled
+            ? this.getImportContext(uri).modules.slice()
+            : [];
+    }
+
+    /** Ключ меняется только при изменении активного Import-графа. */
+    getImportClosureKey(uri: string): string {
         if (!this.importsEnabled) {
-            return [];
+            return "imports-disabled";
         }
-
-        const useCache = this.modules.get(uri)?.isOpen === true;
-        const cached = useCache ? this.importedModulesCache.get(uri) : undefined;
-
-        if (cached) {
-            return cached.slice();
-        }
-
-        const result: IIndexedModule[] = [];
-        const visited = new Set<string>([uri]);
-        const queue: string[] = [uri];
-        let position = 0;
-
-        while (position < queue.length) {
-            const current = this.modules.get(queue[position++]);
-
-            if (!current) {
-                continue;
-            }
-
-            for (const importName of current.imports) {
-                const imported = this.findModuleByName(importName);
-
-                if (!imported || visited.has(imported.uri)) {
-                    continue;
-                }
-
-                visited.add(imported.uri);
-                result.push(imported);
-                queue.push(imported.uri);
-            }
-        }
-
-        if (useCache) {
-            this.importedModulesCache.set(uri, result.slice());
-        }
-
-        return result;
+        return this.getImportContext(uri).closureKey;
     }
 
     resolveModule(moduleName: string): ModuleResolution<IIndexedModule> {
@@ -274,9 +241,7 @@ export class WorkspaceIndex {
 
     findModuleByName(moduleName: string): IIndexedModule | undefined {
         const resolution = this.resolveModule(moduleName);
-        return resolution.kind === "resolved"
-            ? resolution.value
-            : undefined;
+        return resolution.kind === "resolved" ? resolution.value : undefined;
     }
 
     findSymbols(name: string): IIndexedSymbol[] {
@@ -284,54 +249,52 @@ export class WorkspaceIndex {
     }
 
     findImportedSymbols(fromUri: string, name: string): IIndexedSymbol[] {
-        const byName = this.getImportedSymbolsByName(fromUri);
+        const byName = this.getImportContext(fromUri).symbolsByName;
         return (byName.get(normalizeName(name)) || []).slice();
     }
 
     getImportedCompletionItems(fromUri: string): CompletionItem[] {
-        const useCache = this.modules.get(fromUri)?.isOpen === true;
-        const cached = useCache
-            ? this.importedCompletionCache.get(fromUri)
-            : undefined;
+        if (!this.importsEnabled) {
+            return [];
+        }
 
-        if (cached) {
-            return cached.slice();
+        const context = this.getImportContext(fromUri);
+        if (context.completionItems) {
+            return context.completionItems.slice();
         }
 
         const result: CompletionItem[] = [];
         const seen = new Set<string>();
 
-        for (const module of this.getImportedModules(fromUri)) {
+        for (const module of context.modules) {
             for (const child of module.object.getChilds()) {
                 if (child.Private) {
                     continue;
                 }
-
                 const key = normalizeName(child.Name);
-
-                if (seen.has(key)) {
-                    continue;
+                if (!seen.has(key)) {
+                    seen.add(key);
+                    result.push(child.CIInfo);
                 }
-
-                seen.add(key);
-                result.push(child.CIInfo);
             }
         }
 
-        if (useCache) {
-            this.importedCompletionCache.set(fromUri, result.slice());
-        }
+        context.completionItems = result;
+        return result.slice();
+    }
 
-        return result;
+    getDefinitionRange(
+        uri: string,
+        object: CBase
+    ): IExternalLocationRange | undefined {
+        return this.modules.get(uri)?.definitionRanges?.get(object);
     }
 
     getDependents(uri: string): string[] {
         const result = new Set<string>();
-
         for (const name of moduleAliases(uri)) {
             this.reverseImports.get(name)?.forEach(value => result.add(value));
         }
-
         result.delete(uri);
         return Array.from(result);
     }
@@ -340,15 +303,14 @@ export class WorkspaceIndex {
         if (this.importsEnabled === enabled) {
             return;
         }
-
         this.importsEnabled = enabled;
-        this.invalidateImportCaches();
+        this.importContextCache.clear();
         this.revisionValue++;
     }
 
     /**
-     * Временно подменяет summary полной моделью для References. После callback
-     * полная модель становится недостижимой и может быть собрана GC.
+     * Временно подменяет только запись modules для точного References-разбора.
+     * Глобальные symbol/import индексы не перестраиваются и не создают GC-пик.
      */
     withTransientOpenModule<T>(
         uri: string,
@@ -356,9 +318,6 @@ export class WorkspaceIndex {
         action: (module: IIndexedModule) => T
     ): T {
         const previous = this.modules.get(uri);
-        const affectedBefore = this.collectAffectedUris(uri);
-        this.removeModuleFromIndexes(uri);
-
         const model = createOpenModuleModel(source, new CBase(source, 0));
         const transient: IIndexedModule = {
             uri,
@@ -367,27 +326,22 @@ export class WorkspaceIndex {
             version: previous?.version ?? 0,
             isOpen: true
         };
-
+        const cachedContext = this.importContextCache.get(uri);
+        this.importContextCache.delete(uri);
         this.modules.set(uri, transient);
-        this.addModuleToIndexes(transient);
-        this.invalidateImportCaches(affectedBefore);
 
         try {
             return action(transient);
         } finally {
-            const affectedAfter = this.collectAffectedUris(uri);
-            this.removeModuleFromIndexes(uri);
-
             if (previous) {
                 this.modules.set(uri, previous);
-                this.addModuleToIndexes(previous);
             } else {
                 this.modules.delete(uri);
             }
-
-            affectedBefore.forEach(value => affectedAfter.add(value));
-            affectedAfter.add(uri);
-            this.invalidateImportCaches(affectedAfter);
+            this.importContextCache.delete(uri);
+            if (cachedContext) {
+                this.importContextCache.set(uri, cachedContext);
+            }
         }
     }
 
@@ -408,9 +362,7 @@ export class WorkspaceIndex {
     }
 
     get importCacheSize(): number {
-        return this.importedModulesCache.size +
-            this.importedCompletionCache.size +
-            this.importedSymbolsByNameCache.size;
+        return this.importContextCache.size;
     }
 
     private replacePersistentModule(
@@ -435,43 +387,68 @@ export class WorkspaceIndex {
         this.addModuleToIndexes(module);
         this.collectAffectedUris(uri).forEach(value => affected.add(value));
         affected.add(uri);
-        this.invalidateImportCaches(affected);
+        this.invalidateImportContexts(affected);
         this.revisionValue++;
         return module;
     }
 
-    private getImportedSymbolsByName(
-        fromUri: string
-    ): Map<string, IIndexedSymbol[]> {
-        const useCache = this.modules.get(fromUri)?.isOpen === true;
-        const cached = useCache
-            ? this.importedSymbolsByNameCache.get(fromUri)
-            : undefined;
-
+    private getImportContext(uri: string): IImportContext {
+        const useCache = this.modules.get(uri)?.isOpen === true;
+        const cached = useCache ? this.importContextCache.get(uri) : undefined;
         if (cached) {
             return cached;
         }
 
-        const result = new Map<string, IIndexedSymbol[]>();
+        const modules: IIndexedModule[] = [];
+        const visited = new Set<string>([uri]);
+        const queue: string[] = [uri];
+        let position = 0;
 
-        for (const module of this.getImportedModules(fromUri)) {
+        while (position < queue.length) {
+            const current = this.modules.get(queue[position++]);
+            if (!current) {
+                continue;
+            }
+            for (const importName of current.imports) {
+                const imported = this.findModuleByName(importName);
+                if (!imported || visited.has(imported.uri)) {
+                    continue;
+                }
+                visited.add(imported.uri);
+                modules.push(imported);
+                queue.push(imported.uri);
+            }
+        }
+
+        const symbolsByName = new Map<string, IIndexedSymbol[]>();
+        for (const module of modules) {
             for (const child of module.object.getChilds()) {
                 if (child.Private) {
                     continue;
                 }
-
                 const key = normalizeName(child.Name);
-                const symbols = result.get(key) || [];
+                const symbols = symbolsByName.get(key) || [];
                 symbols.push({ uri: module.uri, object: child });
-                result.set(key, symbols);
+                symbolsByName.set(key, symbols);
             }
         }
 
-        if (useCache) {
-            this.importedSymbolsByNameCache.set(fromUri, result);
-        }
+        const root = this.modules.get(uri);
+        const closureKey = [root, ...modules]
+            .filter((item): item is IIndexedModule => !!item)
+            .map(item => `${item.uri}@${item.version}`)
+            .sort()
+            .join("|");
+        const context: IImportContext = {
+            modules,
+            symbolsByName,
+            closureKey
+        };
 
-        return result;
+        if (useCache) {
+            this.importContextCache.set(uri, context);
+        }
+        return context;
     }
 
     private collectAffectedUris(uri: string): Set<string> {
@@ -481,32 +458,23 @@ export class WorkspaceIndex {
 
         while (position < queue.length) {
             const current = queue[position++];
-
             for (const dependent of this.getDependents(current)) {
-                if (result.has(dependent)) {
-                    continue;
+                if (!result.has(dependent)) {
+                    result.add(dependent);
+                    queue.push(dependent);
                 }
-
-                result.add(dependent);
-                queue.push(dependent);
             }
         }
-
         return result;
     }
 
-    private invalidateImportCaches(uris?: Iterable<string>): void {
+    private invalidateImportContexts(uris?: Iterable<string>): void {
         if (!uris) {
-            this.importedModulesCache.clear();
-            this.importedCompletionCache.clear();
-            this.importedSymbolsByNameCache.clear();
+            this.importContextCache.clear();
             return;
         }
-
         for (const uri of uris) {
-            this.importedModulesCache.delete(uri);
-            this.importedCompletionCache.delete(uri);
-            this.importedSymbolsByNameCache.delete(uri);
+            this.importContextCache.delete(uri);
         }
     }
 
@@ -515,11 +483,9 @@ export class WorkspaceIndex {
 
         for (const child of module.object.getChilds()) {
             const name = normalizeName(child.Name);
-
             if (!name) {
                 continue;
             }
-
             const symbols = this.symbolsByName.get(name) || [];
             symbols.push({ uri: module.uri, object: child });
             this.symbolsByName.set(name, symbols);
@@ -531,7 +497,6 @@ export class WorkspaceIndex {
                 normalized,
                 path.posix.basename(normalized)
             ]);
-
             aliases.forEach(alias => {
                 const dependents = this.reverseImports.get(alias) || new Set();
                 dependents.add(module.uri);
@@ -542,23 +507,18 @@ export class WorkspaceIndex {
 
     private removeModuleFromIndexes(uri: string): void {
         const previous = this.modules.get(uri);
-
         if (!previous) {
             return;
         }
 
         removeUriAlias(this.modulesByBaseName, uri);
-
         for (const child of previous.object.getChilds()) {
             const name = normalizeName(child.Name);
             const symbols = this.symbolsByName.get(name);
-
             if (!symbols) {
                 continue;
             }
-
             const filtered = symbols.filter(symbol => symbol.uri !== uri);
-
             if (filtered.length === 0) {
                 this.symbolsByName.delete(name);
             } else {
@@ -569,16 +529,12 @@ export class WorkspaceIndex {
         for (const importName of previous.imports) {
             const normalized = normalizeModuleName(importName);
             const aliases = [normalized, path.posix.basename(normalized)];
-
             aliases.forEach(alias => {
                 const dependents = this.reverseImports.get(alias);
-
                 if (!dependents) {
                     return;
                 }
-
                 dependents.delete(uri);
-
                 if (dependents.size === 0) {
                     this.reverseImports.delete(alias);
                 }
@@ -602,16 +558,12 @@ function resolveByModuleName<T>(
 
     const exact: T[] = [];
     const fallback: T[] = [];
-
     for (const uri of uris) {
         const value = getValue(uri);
-
         if (value === undefined) {
             continue;
         }
-
         const normalizedPath = normalizeUriPath(uri);
-
         if (normalizedPath === target || normalizedPath.endsWith("/" + target)) {
             exact.push(value);
         } else {
@@ -620,16 +572,12 @@ function resolveByModuleName<T>(
     }
 
     const candidates = exact.length > 0 ? exact : fallback;
-
     if (candidates.length === 0) {
         return { kind: "missing" };
     }
-
-    if (candidates.length === 1) {
-        return { kind: "resolved", value: candidates[0] };
-    }
-
-    return { kind: "ambiguous", candidates };
+    return candidates.length === 1
+        ? { kind: "resolved", value: candidates[0] }
+        : { kind: "ambiguous", candidates };
 }
 
 function addUriAlias(index: Map<string, Set<string>>, uri: string): void {
@@ -642,13 +590,10 @@ function addUriAlias(index: Map<string, Set<string>>, uri: string): void {
 function removeUriAlias(index: Map<string, Set<string>>, uri: string): void {
     const baseName = path.posix.basename(normalizeUriPath(uri));
     const values = index.get(baseName);
-
     if (!values) {
         return;
     }
-
     values.delete(uri);
-
     if (values.size === 0) {
         index.delete(baseName);
     }
@@ -660,15 +605,12 @@ function normalizeName(value: string): string {
 
 function normalizeModuleName(value: string): string {
     let result = (value || "").trim().replace(/\\/g, "/").toLowerCase();
-
     while (result.startsWith("./")) {
         result = result.substring(2);
     }
-
     if (!result.endsWith(".mac")) {
         result += ".mac";
     }
-
     return result;
 }
 

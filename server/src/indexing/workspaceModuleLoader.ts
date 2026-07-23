@@ -24,6 +24,8 @@ export class WorkspaceModuleLoader {
     private backgroundQueue: string[] = [];
     private queued = new Set<string>();
     private workspaceUris = new Set<string>();
+    private indexedUris = new Set<string>();
+    private pendingImportNames = new Set<string>();
     private running = false;
     private runningUri: string | undefined;
     private loadingPromises = new Map<
@@ -57,6 +59,7 @@ export class WorkspaceModuleLoader {
             }
 
             this.removeQueued(uri);
+            this.indexedUris.delete(uri);
             this.index.unregisterWorkspaceFile(uri);
             const module = this.index.getModule(uri);
 
@@ -66,7 +69,14 @@ export class WorkspaceModuleLoader {
         }
 
         this.workspaceUris = nextUris;
+        this.indexedUris = new Set(
+            Array.from(nextUris).filter(uri => !!this.index.getModule(uri))
+        );
         this.index.registerWorkspaceFiles(Array.from(this.workspaceUris));
+
+        const pending = Array.from(this.pendingImportNames);
+        this.pendingImportNames.clear();
+        pending.forEach(name => this.enqueueImport(name));
         this.applyIndexingMode();
     }
 
@@ -103,6 +113,11 @@ export class WorkspaceModuleLoader {
 
     enqueueImport(name: string): void {
         if (!name) {
+            return;
+        }
+
+        if (this.index.workspaceFilesReady === false) {
+            this.pendingImportNames.add(name);
             return;
         }
 
@@ -181,6 +196,7 @@ export class WorkspaceModuleLoader {
     remove(uri: string): void {
         this.removeQueued(uri);
         this.workspaceUris.delete(uri);
+        this.indexedUris.delete(uri);
         this.index.unregisterWorkspaceFile(uri);
         this.index.removeModule(uri);
         this.options.onModuleCountChanged();
@@ -194,15 +210,7 @@ export class WorkspaceModuleLoader {
     }
 
     get indexedCount(): number {
-        let count = 0;
-
-        for (const uri of this.workspaceUris) {
-            if (this.index.getModule(uri)) {
-                count++;
-            }
-        }
-
-        return count;
+        return this.indexedUris.size;
     }
 
     get totalCount(): number {
@@ -287,13 +295,14 @@ export class WorkspaceModuleLoader {
             return undefined;
         }
 
-        const text = await fs.promises.readFile(filePath, "utf8");
         const stat = await fs.promises.stat(filePath);
+        const text = await fs.promises.readFile(filePath, "utf8");
         const module = this.index.updateExternalModule(
             uri,
             text,
             Math.floor(stat.mtimeMs)
         );
+        this.indexedUris.add(uri);
 
         for (const importName of module.imports) {
             const resolution = this.index.resolveWorkspaceFile(importName);
