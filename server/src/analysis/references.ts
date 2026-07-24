@@ -8,7 +8,10 @@ import {
 } from "vscode-languageserver";
 
 import { CBase } from "../common";
-import { normalizeIdentifier } from "../lexer";
+import {
+    normalizeIdentifier,
+    normalizeReferenceIdentifier
+} from "../lexer";
 import { RslScopeResolver } from "../scopeResolver";
 import { ReferenceIndex } from "./referenceIndex";
 import { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
@@ -82,12 +85,43 @@ export async function findRslReferencesInWorkspace(
         return [];
     }
 
-    const targetName = normalizeIdentifier(target.object.Name);
-    const targetKey = symbolKey(target.uri, target.object);
+    return findRslReferencesForSymbol(
+        index,
+        resolver,
+        referenceIndex,
+        target.uri,
+        target.object,
+        includeDeclaration,
+        isCancelled
+    );
+}
+
+/**
+ * Вариант workspace References для уже разрешённого символа.
+ * Нужен Call Hierarchy, где дочерний элемент может быть compact external
+ * summary без полного token stream объявления.
+ */
+export async function findRslReferencesForSymbol(
+    index: WorkspaceIndex,
+    resolver: RslScopeResolver,
+    referenceIndex: ReferenceIndex,
+    targetUri: string,
+    targetObject: CBase,
+    includeDeclaration: boolean,
+    isCancelled: () => boolean = () => false
+): Promise<Location[]> {
+    const sourceModule = index.getModule(targetUri);
+
+    if (!sourceModule || isCancelled()) {
+        return [];
+    }
+
+    const targetName = normalizeIdentifier(targetObject.Name);
+    const targetKey = symbolKey(targetUri, targetObject);
     const result: Location[] = [];
     const seen = new Set<string>();
 
-    if (isLocalReferenceTarget(sourceModule.object, target.object)) {
+    if (isLocalReferenceTarget(sourceModule.object, targetObject)) {
         collectModuleReferences(
             sourceModule,
             resolver,
@@ -121,7 +155,7 @@ export async function findRslReferencesInWorkspace(
     }
 
     const candidateUniverse = await referenceIndex.getCandidateUris(
-        target.uri,
+        targetUri,
         index.getWorkspaceFileUris(),
         index.getIndexedModules().map(module => ({
             uri: module.uri,
@@ -190,7 +224,7 @@ function collectModuleReferences(
 
         if (
             token.kind !== "identifier" ||
-            normalizeIdentifier(token.value) !== targetName
+            normalizeReferenceIdentifier(token.value) !== targetName
         ) {
             continue;
         }
@@ -247,7 +281,7 @@ function findDeclarationTokenByKey(
     for (const token of module.syntax.tokens) {
         if (
             token.kind !== "identifier" ||
-            normalizeIdentifier(token.value) !== normalizedName
+            normalizeReferenceIdentifier(token.value) !== normalizedName
         ) {
             continue;
         }
@@ -370,4 +404,3 @@ function comparePositions(left: Position, right: Position): number {
 function yieldToInteractiveRequests(): Promise<void> {
     return new Promise(resolve => setImmediate(resolve));
 }
-

@@ -4,7 +4,11 @@ import {
 } from "vscode-languageserver/node";
 
 import { collectFormatSpecifierTokenStarts } from "../parsing/outputFormParser";
-import { normalizeIdentifier, type IRslToken } from "../lexer";
+import {
+    normalizeIdentifier,
+    normalizeReferenceIdentifier,
+    type IRslToken
+} from "../lexer";
 import type { RslScopeResolver } from "../scopeResolver";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 
@@ -43,7 +47,7 @@ export function buildRslDocumentHighlights(
         const token = tokens[tokenIndex];
         if (
             token.kind !== "identifier" ||
-            normalizeIdentifier(token.value) !== targetName ||
+            normalizeReferenceIdentifier(token.value) !== targetName ||
             formatSpecifierStarts.has(token.start)
         ) {
             continue;
@@ -94,7 +98,7 @@ function findDeclarationStart(
         token.kind === "identifier" &&
         start <= token.start &&
         token.end <= end &&
-        normalizeIdentifier(token.value) === normalizedName
+        normalizeReferenceIdentifier(token.value) === normalizedName
     )?.start;
 }
 

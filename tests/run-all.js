@@ -14,6 +14,7 @@ const tests = [
     "scope-index.test.js",
     "diagnostics.test.js",
     "language-features.test.js",
+    "interactive-features.test.js",
     "quick-fix-extended.test.js",
     "workspace-resolution.test.js",
     "server-services.test.js",

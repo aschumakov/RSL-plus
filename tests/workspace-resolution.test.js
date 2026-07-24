@@ -711,6 +711,63 @@ async function testImportedSymbolLoadsOnDemand() {
     }
 }
 
+async function testAutoImportSearchLoadsOnlyExporter() {
+    const directory = await fs.promises.mkdtemp(
+        path.join(os.tmpdir(), "rsl-auto-import-")
+    );
+
+    try {
+        const exporterPath = path.join(directory, "library.mac");
+        const usagePath = path.join(directory, "usage.mac");
+        const privatePath = path.join(directory, "private.mac");
+        await Promise.all([
+            fs.promises.writeFile(
+                exporterPath,
+                "Macro Shared(value)\nEnd;",
+                "utf8"
+            ),
+            fs.promises.writeFile(
+                usagePath,
+                "Macro Test()\n Shared(1);\nEnd;",
+                "utf8"
+            ),
+            fs.promises.writeFile(
+                privatePath,
+                "Private Macro Shared(value)\nEnd;",
+                "utf8"
+            )
+        ]);
+
+        const uris = [exporterPath, usagePath, privatePath].map(file =>
+            pathToFileURL(file).toString()
+        );
+        const index = new WorkspaceIndex();
+        const loader = new WorkspaceModuleLoader(index, {
+            log: message => {
+                throw new Error(message);
+            },
+            onModuleLoaded: () => undefined,
+            onModuleCountChanged: () => undefined
+        });
+        loader.registerWorkspaceFiles(uris);
+
+        const modules = await loader.findModulesExportingSymbol("Shared");
+
+        assert.deepStrictEqual(
+            modules.map(module => module.uri),
+            [uris[0]]
+        );
+        assert.ok(index.getModule(uris[0]));
+        assert.strictEqual(index.getModule(uris[1]), undefined);
+        assert.strictEqual(index.getModule(uris[2]), undefined);
+    } finally {
+        await fs.promises.rm(directory, {
+            recursive: true,
+            force: true
+        });
+    }
+}
+
 (async () => {
     testModuleResolution();
     console.log("[OK] workspace различает resolved, ambiguous и missing");
@@ -738,6 +795,9 @@ async function testImportedSymbolLoadsOnDemand() {
 
     await testImportedSymbolLoadsOnDemand();
     console.log("[OK] Import-символ загружается для навигации по запросу");
+
+    await testAutoImportSearchLoadsOnlyExporter();
+    console.log("[OK] Auto Import адресно загружает только экспортирующий модуль");
 })().catch(error => {
     console.error(error);
     process.exitCode = 1;

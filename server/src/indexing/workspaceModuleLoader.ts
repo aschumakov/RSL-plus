@@ -4,6 +4,8 @@ import { fileURLToPath } from "url";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 import { ReferenceIndex } from "../analysis/referenceIndex";
 import type { PerformanceLogger } from "../performanceLogger";
+import { scanExternalModule } from "./externalModuleScanner";
+import { normalizeIdentifier } from "../lexer";
 
 export type ModuleLoadPriority = "foreground" | "background";
 export type WorkspaceIndexingMode = "activeImports" | "workspaceIdle" | "full";
@@ -43,6 +45,7 @@ export class WorkspaceModuleLoader {
         string,
         Promise<IIndexedModule | undefined>
     >();
+    private exportSearchCache = new Map<string, string[]>();
     private indexingMode: WorkspaceIndexingMode = "activeImports";
     private idleTimer: NodeJS.Timeout | undefined;
     private idleDelayMs: number;
@@ -92,6 +95,7 @@ export class WorkspaceModuleLoader {
         const workspaceList = Array.from(this.workspaceUris);
         this.index.registerWorkspaceFiles(workspaceList);
         this.referenceIndex.retainWorkspaceFiles(workspaceList);
+        this.exportSearchCache.clear();
 
         const pending = Array.from(this.pendingImportNames.values());
         this.pendingImportNames.clear();
@@ -349,7 +353,71 @@ export class WorkspaceModuleLoader {
         return this.index.findImportedSymbols(fromUri, symbolName).length > 0;
     }
 
+    /**
+     * Точный поиск модулей, экспортирующих символ. Полный workspace читается
+     * только по явному Quick Fix; обычный Completion использует уже известные
+     * compact summaries и не запускает этот обход.
+     */
+    async findModulesExportingSymbol(
+        symbolName: string,
+        maxResults: number = 10
+    ): Promise<IIndexedModule[]> {
+        const normalized = normalizeIdentifier(symbolName);
+        if (!normalized) {
+            return [];
+        }
+
+        const known = this.index.findSymbols(normalized)
+            .filter(symbol => !symbol.object.Private)
+            .map(symbol => this.index.getModule(symbol.uri))
+            .filter((module): module is IIndexedModule => !!module);
+        const uniqueKnown = uniqueModules(known);
+
+        const cachedUris = this.exportSearchCache.get(normalized);
+        if (cachedUris) {
+            return cachedUris
+                .map(uri => this.index.getModule(uri))
+                .filter((module): module is IIndexedModule => !!module)
+                .slice(0, maxResults);
+        }
+
+        const candidates = Array.from(this.workspaceUris).filter(uri =>
+            !this.index.getModule(uri)
+        );
+        const result: IIndexedModule[] = uniqueKnown.slice(0, maxResults);
+        const batchSize = 16;
+
+        for (
+            let start = 0;
+            start < candidates.length && result.length < maxResults;
+            start += batchSize
+        ) {
+            const batch = candidates.slice(start, start + batchSize);
+            const matches = await Promise.all(batch.map(uri =>
+                this.inspectExport(uri, normalized)
+            ));
+
+            for (const module of matches) {
+                if (module) {
+                    result.push(module);
+                    if (result.length >= maxResults) {
+                        break;
+                    }
+                }
+            }
+
+            await yieldToInteractiveRequests();
+        }
+
+        this.exportSearchCache.set(
+            normalized,
+            result.map(module => module.uri)
+        );
+        return result;
+    }
+
     async reload(uri: string): Promise<void> {
+        this.exportSearchCache.clear();
         this.removeQueued(uri);
         await this.loadOnce(uri, {
             uri,
@@ -359,6 +427,7 @@ export class WorkspaceModuleLoader {
     }
 
     remove(uri: string): void {
+        this.exportSearchCache.clear();
         this.removeQueued(uri);
         this.workspaceUris.delete(uri);
         this.indexedUris.delete(uri);
@@ -542,6 +611,53 @@ export class WorkspaceModuleLoader {
         return module;
     }
 
+    private async inspectExport(
+        uri: string,
+        normalizedName: string
+    ): Promise<IIndexedModule | undefined> {
+        let filePath: string;
+
+        try {
+            filePath = fileURLToPath(uri);
+        } catch (_error) {
+            return undefined;
+        }
+
+        try {
+            const [stat, source] = await Promise.all([
+                fs.promises.stat(filePath),
+                fs.promises.readFile(filePath, "utf8")
+            ]);
+
+            if (!containsIdentifier(source, normalizedName)) {
+                return undefined;
+            }
+
+            const scan = scanExternalModule(source);
+            const exported = scan.symbolTree.getChilds().some(object =>
+                !object.Private &&
+                normalizeIdentifier(object.Name) === normalizedName
+            );
+
+            if (!exported) {
+                return undefined;
+            }
+
+            const module = this.index.updateExternalModuleFromScan(
+                uri,
+                source.length,
+                scan,
+                Math.floor(stat.mtimeMs)
+            );
+            this.indexedUris.add(uri);
+            this.options.onModuleLoaded(module);
+            this.options.onModuleCountChanged();
+            return module;
+        } catch (_error) {
+            return undefined;
+        }
+    }
+
     private removeQueued(uri: string): void {
         this.foregroundQueue = this.foregroundQueue.filter(
             item => item.uri !== uri
@@ -562,6 +678,46 @@ export class WorkspaceModuleLoader {
     private reportProgress(): void {
         this.options.onIndexProgress?.(this.indexedCount, this.totalCount);
     }
+}
+
+function uniqueModules(items: readonly IIndexedModule[]): IIndexedModule[] {
+    const result: IIndexedModule[] = [];
+    const seen = new Set<string>();
+
+    for (const item of items) {
+        if (!seen.has(item.uri)) {
+            seen.add(item.uri);
+            result.push(item);
+        }
+    }
+
+    return result;
+}
+
+function containsIdentifier(source: string, normalizedName: string): boolean {
+    const lower = source.toLowerCase();
+    let index = lower.indexOf(normalizedName);
+
+    while (index >= 0) {
+        const before = index > 0 ? lower.charAt(index - 1) : "";
+        const after = lower.charAt(index + normalizedName.length);
+
+        if (!isIdentifierCharacter(before) && !isIdentifierCharacter(after)) {
+            return true;
+        }
+
+        index = lower.indexOf(normalizedName, index + normalizedName.length);
+    }
+
+    return false;
+}
+
+function isIdentifierCharacter(value: string): boolean {
+    return !!value && /[a-zа-яё0-9_@]/i.test(value);
+}
+
+function yieldToInteractiveRequests(): Promise<void> {
+    return new Promise(resolve => setImmediate(resolve));
 }
 
 function errorToString(error: unknown): string {

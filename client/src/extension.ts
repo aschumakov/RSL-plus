@@ -10,7 +10,10 @@ import {
     QuickPickItem,
     Uri,
     env,
-    TextEditor
+    TextEditor,
+    DocumentSymbol,
+    SymbolInformation,
+    SymbolKind
 } from "vscode";
 
 import {
@@ -351,6 +354,66 @@ async function showQuickPick(): Promise<void> {
     }
 }
 
+type RslSymbol = DocumentSymbol | SymbolInformation;
+
+async function foldAllMacros(): Promise<void> {
+    const editor = window.activeTextEditor;
+
+    if (!editor || editor.document.languageId !== "rsl") {
+        return;
+    }
+
+    const symbols = await commands.executeCommand<RslSymbol[]>(
+        "vscode.executeDocumentSymbolProvider",
+        editor.document.uri
+    ) || [];
+    const macroSymbols = collectMacroSymbols(symbols);
+    const lines = Array.from(new Set(macroSymbols.map(symbol =>
+        symbolRange(symbol).start.line
+    )));
+
+    if (lines.length === 0) {
+        window.showInformationMessage(
+            "В файле нет Macro для сворачивания"
+        );
+        return;
+    }
+
+    await commands.executeCommand("editor.fold", {
+        selectionLines: lines
+    });
+}
+
+function collectMacroSymbols(symbols: readonly RslSymbol[]): RslSymbol[] {
+    const result: RslSymbol[] = [];
+
+    const visit = (symbol: RslSymbol): void => {
+        if (
+            symbol.kind === SymbolKind.Function ||
+            symbol.kind === SymbolKind.Method
+        ) {
+            result.push(symbol);
+        }
+
+        if (isDocumentSymbol(symbol)) {
+            symbol.children.forEach(visit);
+        }
+    };
+
+    symbols.forEach(visit);
+    return result;
+}
+
+function symbolRange(symbol: RslSymbol) {
+    return isDocumentSymbol(symbol)
+        ? symbol.range
+        : symbol.location.range;
+}
+
+function isDocumentSymbol(symbol: RslSymbol): symbol is DocumentSymbol {
+    return "range" in symbol && "selectionRange" in symbol;
+}
+
 
 /**
  * Точка входа расширения.
@@ -540,6 +603,13 @@ export function activate(context: ExtensionContext): void {
                     }
                 );
             }
+        )
+    );
+
+    context.subscriptions.push(
+        commands.registerCommand(
+            "rsl.foldAllMacros",
+            foldAllMacros
         )
     );
 

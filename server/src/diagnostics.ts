@@ -20,8 +20,12 @@ import {
 } from "./interfaces";
 import {
     IRslToken,
-    normalizeIdentifier
+    normalizeIdentifier,
+    normalizeReferenceIdentifier
 } from "./lexer";
+import {
+    isRslSystemSpecialVariableName
+} from "./systemSpecialVariables";
 import {
     IIndexedModule,
     WorkspaceIndex
@@ -964,7 +968,9 @@ function addAmbiguousReferenceDiagnostics(
     );
     const memberNameStarts = collectMemberNameStarts(code);
 
-    for (const token of code) {
+    for (let tokenIndex = 0; tokenIndex < code.length; tokenIndex++) {
+        const token = code[tokenIndex];
+
         if (token.kind !== "identifier") {
             continue;
         }
@@ -975,6 +981,7 @@ function addAmbiguousReferenceDiagnostics(
         if (
             !candidates ||
             isReservedIdentifier(name) ||
+            isRslSystemSpecialVariableReference(code, tokenIndex) ||
             declarationRangeKeys.has(offsetRangeKey(
                 token.start,
                 token.end
@@ -1067,7 +1074,7 @@ function buildIdentifierIndex(
             continue;
         }
 
-        const name = normalizeIdentifier(token.value);
+        const name = normalizeReferenceIdentifier(token.value);
 
         if (isReservedIdentifier(name)) {
             continue;
@@ -1079,6 +1086,22 @@ function buildIdentifierIndex(
     }
 
     return result;
+}
+
+function isRslSystemSpecialVariableReference(
+    tokens: IRslToken[],
+    index: number
+): boolean {
+    const token = tokens[index];
+    const previous = tokens[index - 1];
+    const next = tokens[index + 1];
+
+    return token?.kind === "identifier" &&
+        isRslSystemSpecialVariableName(token.value) &&
+        previous?.kind === "symbol" &&
+        previous.raw === "{" &&
+        next?.kind === "symbol" &&
+        next.raw === "}";
 }
 
 function someTokenInRange(

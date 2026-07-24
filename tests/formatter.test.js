@@ -41,6 +41,32 @@ test("Простой If форматируется", () => {
     assert.strictEqual(FormatCode(source, 4), expected);
 });
 
+test("Присваивания и списки получают пробелы", () => {
+    const source = [
+        "Macro Test()",
+        "appkind =rs.value;",
+        "other=value;",
+        "var sql,rs;",
+        "private var cmd,rs;",
+        "Call(cmd,rs,\"a,b\");",
+        "End;"
+    ].join("\n");
+
+    const expected = [
+        "Macro Test()",
+        "    appkind = rs.value;",
+        "    other   = value;",
+        "    var sql, rs;",
+        "    private var cmd, rs;",
+        "    Call(cmd, rs, \"a,b\");",
+        "End;"
+    ].join("\n");
+
+    const formatted = FormatCode(source, 4);
+    assert.strictEqual(formatted, expected);
+    assert.strictEqual(FormatCode(formatted, 4), expected);
+});
+
 test("Else и OnError находятся на уровне владельца", () => {
     const source = [
         "Macro Test()",
@@ -94,7 +120,7 @@ test("Верхнеуровневый OnError задаёт отступ до ко
         "        rsldefcon.RollbackTrans;",
         "    end;",
         '    ExecSql("insert into log_table values(:err)",',
-        '            MakeArray(SQLParam("err",x.message)),false);',
+        '            MakeArray(SQLParam("err", x.message)), false);',
         "    exit(0);"
     ].join("\n");
 

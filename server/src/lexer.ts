@@ -339,6 +339,14 @@ export function normalizeIdentifier(value: string): string {
     return (value || "").toLowerCase();
 }
 
+/**
+ * Имя после оператора передачи по ссылке `@` ссылается на тот же символ,
+ * что и обычный идентификатор без `@`.
+ */
+export function normalizeReferenceIdentifier(value: string): string {
+    return normalizeIdentifier(value).replace(/^@/, "");
+}
+
 export function isIdentifierStart(value: string): boolean {
     if (!value) {
         return false;

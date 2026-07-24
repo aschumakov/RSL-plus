@@ -5,7 +5,10 @@ import {
     type IRslParseResult,
     parseRslSyntax
 } from "./syntaxParser";
-import { scanExternalModule } from "./indexing/externalModuleScanner";
+import {
+    scanExternalModule,
+    type IExternalModuleScanResult
+} from "./indexing/externalModuleScanner";
 
 export type RslModuleModelKind = "open" | "external";
 
@@ -83,10 +86,17 @@ export function createOpenModuleModel(
 export function createExternalModuleSummary(source: string): IRslModuleModel {
     const scan = scanExternalModule(source);
 
+    return createExternalModuleSummaryFromScan(source.length, scan);
+}
+
+export function createExternalModuleSummaryFromScan(
+    sourceLength: number,
+    scan: IExternalModuleScanResult
+): IRslModuleModel {
     return {
         kind: "external",
         source: "",
-        sourceLength: source.length,
+        sourceLength,
         symbolTree: scan.symbolTree,
         syntax: EMPTY_PARSE_RESULT,
         lex: EMPTY_LEX_RESULT,

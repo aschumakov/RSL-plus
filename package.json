@@ -4,7 +4,7 @@
    "description": "RSL / Object RSL language support with diagnostics, navigation and Quick Fixes",
    "author": "Veniamin Rakov + AChumakov",
    "license": "SEE LICENSE IN LICENSE.txt",
-   "version": "1.1.4",
+   "version": "1.1.5",
    "icon": "icon.png",
    "bugs": {
       "url": "https://github.com/aschumakov/RSL-plus/issues"
@@ -114,6 +114,10 @@
          {
             "command": "extension.copyQueryToClipboard",
             "title": "Копировать запрос в буфер"
+         },
+         {
+            "command": "rsl.foldAllMacros",
+            "title": "RSL: Свернуть все Macro в файле"
          }
       ],
       "menus": {
@@ -127,6 +131,11 @@
                "when": "resourceLangId == rsl",
                "command": "extension.copyQueryToClipboard",
                "group": "9_cutcopypaste"
+            },
+            {
+               "when": "resourceLangId == rsl",
+               "command": "rsl.foldAllMacros",
+               "group": "1_modification"
             }
          ]
       },

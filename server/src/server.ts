@@ -364,6 +364,8 @@ languageFeatures = new RslLanguageFeatureRegistry({
     ensureDocumentParsed,
     ensureImportedSymbol: (uri, symbolName) =>
         moduleLoader.ensureImportedSymbol(uri, symbolName),
+    findAutoImportModules: symbolName =>
+        moduleLoader.findModulesExportingSymbol(symbolName),
     log: logMessage,
     performance: performanceLogger
 });
@@ -404,11 +406,16 @@ connection.onInitialize((params: InitializeParams) => {
                 resolveProvider: false,
                 triggerCharacters: ["."]
             },
+            signatureHelpProvider: {
+                triggerCharacters: ["(", ","],
+                retriggerCharacters: [","]
+            },
             hoverProvider: true,
             documentHighlightProvider: true,
             selectionRangeProvider: true,
             definitionProvider: true,
             referencesProvider: true,
+            callHierarchyProvider: true,
             executeCommandProvider: {
                 commands: [
                     GO_TO_BLOCK_START_COMMAND,
@@ -425,6 +432,7 @@ connection.onInitialize((params: InitializeParams) => {
             },
             documentSymbolProvider: true,
             documentFormattingProvider: true,
+            documentRangeFormattingProvider: true,
             foldingRangeProvider: true
         }
     };

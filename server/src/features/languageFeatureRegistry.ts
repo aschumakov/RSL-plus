@@ -6,6 +6,7 @@ import {
     Definition,
     DocumentFormattingParams,
     DocumentHighlightParams,
+    DocumentRangeFormattingParams,
     DocumentSymbol,
     DocumentSymbolParams,
     ExecuteCommandParams,
@@ -41,7 +42,10 @@ import {
     resolveBlockNavigationPosition
 } from "./blockNavigation";
 import type { IRslFoldingRange } from "../folding";
-import { FormatCode } from "../format";
+import {
+    FORMATTER_REVISION,
+    FormatCode
+} from "../format";
 import type { IToken } from "../interfaces";
 import { tokenAtOffset, type IRslToken } from "../lexer";
 import {
@@ -59,6 +63,15 @@ import { RslScopeResolver } from "../scopeResolver";
 import { buildRslSemanticTokens } from "../semanticTokens";
 import type { WorkspaceIndex } from "../workspaceIndex";
 import type { PerformanceLogger } from "../performanceLogger";
+import {
+    buildKnownAutoImportCompletions,
+    buildMissingImportActions
+} from "./autoImportProvider";
+import {
+    RslCallHierarchyProvider
+} from "./callHierarchyProvider";
+import { formatRslDocumentRange } from "./rangeFormatting";
+import { buildRslSignatureHelp } from "./signatureHelpProvider";
 
 export interface IRslLanguageFeatureEnvironment {
     connection: Connection;
@@ -73,6 +86,9 @@ export interface IRslLanguageFeatureEnvironment {
         fromUri: string,
         symbolName: string
     ): Promise<boolean>;
+    findAutoImportModules?(
+        symbolName: string
+    ): Promise<import("../workspaceIndex").IIndexedModule[]>;
     log(message: string): void;
     performance?: PerformanceLogger;
 }
@@ -104,9 +120,15 @@ export class RslLanguageFeatureRegistry {
     private defaultCompletionItems = getCIInfoForArray(getDefaults());
     private registered = false;
     private referenceIndex: ReferenceIndex;
+    private callHierarchyProvider: RslCallHierarchyProvider;
 
     constructor(private environment: IRslLanguageFeatureEnvironment) {
         this.referenceIndex = environment.referenceIndex || new ReferenceIndex();
+        this.callHierarchyProvider = new RslCallHierarchyProvider({
+            index: environment.index,
+            resolver: environment.resolver,
+            referenceIndex: this.referenceIndex
+        });
     }
 
     register(): void {
@@ -145,8 +167,29 @@ export class RslLanguageFeatureRegistry {
                     context.tree,
                     context.offset
                 ),
-                this.defaultCompletionItems
+                this.defaultCompletionItems,
+                buildKnownAutoImportCompletions(
+                    index.getModule(document.uri)!,
+                    index
+                )
             );
+        });
+
+        connection.onSignatureHelp(async params => {
+            const document = documents.get(params.textDocument.uri);
+            if (!document) {
+                return null;
+            }
+
+            await ensureDocumentParsed(document);
+            const module = index.getModule(document.uri);
+            return module
+                ? buildRslSignatureHelp(
+                    module,
+                    resolver,
+                    document.offsetAt(params.position)
+                )
+                : null;
         });
 
         connection.onHover(async (
@@ -364,7 +407,7 @@ export class RslLanguageFeatureRegistry {
             );
         });
 
-        connection.onCodeAction((params: CodeActionParams) => {
+        connection.onCodeAction(async (params: CodeActionParams) => {
             const module = index.getModule(params.textDocument.uri);
             if (!module) {
                 return [];
@@ -373,11 +416,50 @@ export class RslLanguageFeatureRegistry {
             const navigation = supportsRefactorActions(params)
                 ? buildBlockNavigationActions(module, params.range)
                 : [];
+            const autoImports = this.environment.findAutoImportModules
+                ? await buildMissingImportActions(
+                    module,
+                    index,
+                    resolver,
+                    params.range,
+                    this.environment.findAutoImportModules
+                )
+                : [];
             return [
                 ...buildEnhancedRslCodeActions(module, params),
-                ...navigation
+                ...navigation,
+                ...autoImports
             ];
         });
+
+        connection.languages.callHierarchy.onPrepare(async params => {
+            const document = documents.get(params.textDocument.uri);
+            if (!document) {
+                return [];
+            }
+
+            await ensureDocumentParsed(document);
+            return this.callHierarchyProvider.prepare(
+                document.uri,
+                document.offsetAt(params.position)
+            );
+        });
+
+        connection.languages.callHierarchy.onIncomingCalls((
+            params,
+            cancellationToken
+        ) => this.callHierarchyProvider.incoming(
+            params.item,
+            () => cancellationToken.isCancellationRequested
+        ));
+
+        connection.languages.callHierarchy.onOutgoingCalls((
+            params,
+            cancellationToken
+        ) => this.callHierarchyProvider.outgoing(
+            params.item,
+            () => cancellationToken.isCancellationRequested
+        ));
 
         connection.onSelectionRanges(async (params: SelectionRangeParams) => {
             const document = documents.get(params.textDocument.uri);
@@ -599,7 +681,8 @@ export class RslLanguageFeatureRegistry {
                 if (span) {
                     performance.end(span, {
                         changed: formatted !== source,
-                        failed: false
+                        failed: false,
+                        formatterRevision: FORMATTER_REVISION
                     });
                 }
 
@@ -618,6 +701,26 @@ export class RslLanguageFeatureRegistry {
                 }
                 this.environment.log(
                     `Formatting failed: ${document.uri}\n` +
+                    errorToString(error)
+                );
+                return [];
+            }
+        });
+
+        connection.onDocumentRangeFormatting((
+            params: DocumentRangeFormattingParams
+        ) => {
+            const document = documents.get(params.textDocument.uri);
+
+            if (!document) {
+                return [];
+            }
+
+            try {
+                return formatRslDocumentRange(document, params);
+            } catch (error) {
+                this.environment.log(
+                    `Range formatting failed: ${document.uri}\n` +
                     errorToString(error)
                 );
                 return [];
@@ -773,7 +876,12 @@ function deduplicateCompletionItems(
 
     for (const items of groups) {
         for (const item of items) {
-            const key = String(item.label).toLowerCase();
+            const autoImportUri = (
+                item.data as { rslAutoImportUri?: unknown } | undefined
+            )?.rslAutoImportUri;
+            const key = autoImportUri
+                ? `${String(item.label).toLowerCase()}:${autoImportUri}`
+                : String(item.label).toLowerCase();
 
             if (seen.has(key)) {
                 continue;

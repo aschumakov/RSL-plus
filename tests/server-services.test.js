@@ -296,6 +296,7 @@ async function testOutlineUsesPreparedSnapshotAndReportsTiming() {
     };
     const connection = {
         onCompletion: register("completion"),
+        onSignatureHelp: register("signatureHelp"),
         onHover: register("hover"),
         onDocumentHighlight: register("documentHighlight"),
         onDefinition: register("definition"),
@@ -306,8 +307,14 @@ async function testOutlineUsesPreparedSnapshotAndReportsTiming() {
         onDocumentSymbol: register("documentSymbol"),
         onFoldingRanges: register("foldingRanges"),
         onDocumentFormatting: register("documentFormatting"),
+        onDocumentRangeFormatting: register("documentRangeFormatting"),
         sendRequest: async () => undefined,
         languages: {
+            callHierarchy: {
+                onPrepare: register("callHierarchyPrepare"),
+                onIncomingCalls: register("callHierarchyIncoming"),
+                onOutgoingCalls: register("callHierarchyOutgoing")
+            },
             semanticTokens: {
                 on: register("semanticTokens"),
                 onDelta: register("semanticTokensDelta"),

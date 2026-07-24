@@ -7,7 +7,8 @@ import { CBase } from "./common";
 import {
     IRslToken,
     tokenAtOffset,
-    normalizeIdentifier
+    normalizeIdentifier,
+    normalizeReferenceIdentifier
 } from "./lexer";
 import {
     IIndexedModule,
@@ -110,6 +111,7 @@ export class RslScopeResolver {
     ): IResolvedSymbol | undefined {
         const tokenIndex = findTokenIndex(tokens, token);
         const receiver = this.getReceiverToken(tokens, tokenIndex);
+        const referenceName = normalizeReferenceIdentifier(token.value);
 
         if (receiver) {
             const member = this.resolveMember(
@@ -131,7 +133,7 @@ export class RslScopeResolver {
 
         const local = this.resolveInScopeChain(
             tree,
-            token.value,
+            referenceName,
             offset
         );
 
@@ -141,7 +143,7 @@ export class RslScopeResolver {
 
         const imported = this.index.findImportedSymbols(
             uri,
-            token.value
+            referenceName
         )[0];
 
         return imported

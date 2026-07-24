@@ -9,6 +9,8 @@ import {
     lexRsl
 } from "./lexer";
 
+export const FORMATTER_REVISION = "spacing-v2";
+
 interface IContinuationContext {
     kind: "declaration" | "assignment";
     indentColumn: number;
@@ -360,6 +362,11 @@ function normalizeLineSafely(
 function normalizeCodeSegment(segment: string): string {
     return segment
         .replace(/[ \t]*(==|!=|<=|>=|>|<)[ \t]*/g, " $1 ")
+        .replace(
+            /(^|[^!<>=+\-*/%])[ \t]*=[ \t]*(?!=)/g,
+            "$1 = "
+        )
+        .replace(/,[ \t]*/g, ", ")
         .replace(/[ \t]+/g, " ");
 }
 

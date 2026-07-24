@@ -10,10 +10,12 @@ import type { IRslParseResult } from "./syntaxParser";
 import {
     compactOpenModuleModel,
     createExternalModuleSummary,
+    createExternalModuleSummaryFromScan,
     createOpenModuleModel,
     createRslModuleModel,
     IRslModuleModel
 } from "./moduleModel";
+import type { IExternalModuleScanResult } from "./indexing/externalModuleScanner";
 
 export interface IIndexedModule extends IFAStruct, IRslModuleModel {
     object: CBase;
@@ -97,6 +99,20 @@ export class WorkspaceIndex {
         return this.replacePersistentModule(
             uri,
             createExternalModuleSummary(source),
+            version,
+            false
+        );
+    }
+
+    updateExternalModuleFromScan(
+        uri: string,
+        sourceLength: number,
+        scan: IExternalModuleScanResult,
+        version: number
+    ): IIndexedModule {
+        return this.replacePersistentModule(
+            uri,
+            createExternalModuleSummaryFromScan(sourceLength, scan),
             version,
             false
         );
@@ -248,6 +264,24 @@ export class WorkspaceIndex {
         return (this.symbolsByName.get(normalizeName(name)) || []).slice();
     }
 
+    findUnimportedSymbols(
+        fromUri: string,
+        name?: string
+    ): IIndexedSymbol[] {
+        const importedUris = new Set(
+            this.getImportedModules(fromUri).map(module => module.uri)
+        );
+        importedUris.add(fromUri);
+        const candidates = name
+            ? this.findSymbols(name)
+            : Array.from(this.symbolsByName.values()).flat();
+
+        return candidates.filter(candidate =>
+            !candidate.object.Private &&
+            !importedUris.has(candidate.uri)
+        );
+    }
+
     findImportedSymbols(fromUri: string, name: string): IIndexedSymbol[] {
         const byName = this.getImportContext(fromUri).symbolsByName;
         return (byName.get(normalizeName(name)) || []).slice();
@@ -297,6 +331,37 @@ export class WorkspaceIndex {
         }
         result.delete(uri);
         return Array.from(result);
+    }
+
+    /**
+     * Возвращает кратчайшее имя файла, однозначное внутри workspace.
+     * Расширение .mac в Import не добавляется.
+     */
+    getImportNameForUri(uri: string): string {
+        const normalized = normalizeUriPath(uri);
+        const segments = normalized.split("/").filter(value => !!value);
+        const fileName = segments[segments.length - 1] || normalized;
+        const baseName = fileName.replace(/\.mac$/i, "");
+        const aliases = this.workspaceFilesByBaseName.get(
+            fileName.toLowerCase()
+        );
+
+        if (!aliases || aliases.size <= 1) {
+            return baseName;
+        }
+
+        for (let count = 2; count <= segments.length; count++) {
+            const suffix = segments.slice(-count).join("/");
+            const matches = Array.from(aliases).filter(candidate =>
+                normalizeUriPath(candidate).endsWith("/" + suffix)
+            );
+
+            if (matches.length === 1) {
+                return suffix.replace(/\.mac$/i, "");
+            }
+        }
+
+        return baseName;
     }
 
     setImportsEnabled(enabled: boolean): void {

@@ -5,6 +5,7 @@
 
 import {CNodeClass, CNode, CNodeFunc} from './extended_h'
 import { InsertTextFormat, CompletionItemKind, CompletionItem, MarkupKind } from 'vscode-languageserver';
+import { RSL_SYSTEM_SPECIAL_VARIABLES } from "./systemSpecialVariables";
 
 
 /**
@@ -14,6 +15,17 @@ export class ArrayClass {
     private _arr : Array<CNode>;
     public constructor() {this._arr = new Array();}
     public push(node:CNode) {this._arr.push(node)}
+    public upsert(node:CNode) {
+        const index = this._arr.findIndex(current =>
+            current.Name().toLowerCase() === node.Name().toLowerCase()
+        );
+
+        if (index >= 0) {
+            this._arr[index] = node;
+        } else {
+            this._arr.push(node);
+        }
+    }
     public find(name:string):CNode {
         let res:CNode;
         for (let index = 0; index < this._arr.length; index++) {
@@ -591,3 +603,22 @@ specVar = new CNode(
     InsertTextFormat.PlainText
 );
 DefaultsArray.push(specVar);
+
+/*
+ * Официальный список общесистемных переменных является источником истины.
+ * upsert сохраняет дополнительные исторические переменные выше, но исправляет
+ * типы старых записей и добавляет отсутствующие системные имена.
+ */
+RSL_SYSTEM_SPECIAL_VARIABLES.forEach(variable => {
+    DefaultsArray.upsert(new CNode(
+        variable.name,
+        variable.type,
+        `Спецпеременная {${variable.name}}`,
+        {
+            kind: MarkupKind.Markdown,
+            value: variable.description
+        },
+        `{${variable.name}}`,
+        InsertTextFormat.PlainText
+    ));
+});
