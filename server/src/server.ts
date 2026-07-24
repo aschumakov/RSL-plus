@@ -434,8 +434,10 @@ connection.onDidChangeConfiguration(change => {
 
 documents.onDidOpen(event => {
     workspaceIndex.markOpen(event.document.uri);
-    requestDocumentSettings(event.document.uri);
-    documentAnalysis.open(event.document);
+    const isNewVersion = documentAnalysis.open(event.document);
+    if (isNewVersion) {
+        requestDocumentSettings(event.document.uri);
+    }
 });
 
 documents.onDidClose(event => {

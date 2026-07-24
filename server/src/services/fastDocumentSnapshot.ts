@@ -19,15 +19,18 @@ import {
 /**
  * Лёгкий versioned snapshot открытого документа.
  *
- * На горячем пути всегда строится только lexer. Folding и Outline вычисляются
- * лениво при первом соответствующем LSP-запросе и затем кэшируются на версию.
+ * На горячем пути всегда строится lexer. Presentation-данные кэшируются на
+ * версию: Outline может быть подготовлен фазой открытия документа, Folding
+ * остаётся ленивым до соответствующего LSP-запроса.
  */
 export interface IFastDocumentSnapshot {
     uri: string;
     version: number;
+    createdAtMs: number;
     lex: IRslLexResult;
     foldingRanges?: IRslFoldingRange[];
     symbols?: DocumentSymbol[];
+    symbolsPreparedAtMs?: number;
 }
 
 interface IOpenScope {
@@ -79,6 +82,7 @@ export function createFastDocumentSnapshot(
     return {
         uri: document.uri,
         version: document.version,
+        createdAtMs: Date.now(),
         lex: lexRsl(document.getText())
     };
 }
@@ -111,6 +115,7 @@ export function getFastDocumentSymbols(
             document,
             snapshot.lex.tokens
         );
+        snapshot.symbolsPreparedAtMs = Date.now();
     }
 
     return snapshot.symbols;

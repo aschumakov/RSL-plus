@@ -8,6 +8,10 @@ const { pathToFileURL } = require("url");
 
 const { CBase } = require("../server/out/common");
 const {
+    ReferenceIndex,
+    referenceIndexTesting
+} = require("../server/out/analysis/referenceIndex");
+const {
     buildImportResolutionDiagnostics
 } = require("../server/out/diagnostics/importResolutionDiagnostics");
 const {
@@ -245,7 +249,12 @@ async function testParseReadinessDoesNotWaitForSettings() {
         }
     );
 
-    service.open(document);
+    assert.strictEqual(service.open(document), true);
+    assert.strictEqual(
+        service.open(document),
+        false,
+        "Повторный open той же версии должен быть идемпотентным"
+    );
     service.changed(document);
 
     assert.strictEqual(
@@ -254,6 +263,17 @@ async function testParseReadinessDoesNotWaitForSettings() {
         ).length,
         1,
         "onDidChangeContent после open не должен повторно запускать lexer"
+    );
+    assert.strictEqual(
+        performanceEvents.filter(event =>
+            event === "analysis.outlineSnapshot"
+        ).length,
+        1,
+        "Outline должен готовиться один раз до фонового parser"
+    );
+    assert.ok(
+        Array.isArray(service.getFastSnapshot(document).symbols),
+        "Structure должна быть готова сразу после открытия"
     );
 
     const parsed = await Promise.race([
@@ -269,6 +289,173 @@ async function testParseReadinessDoesNotWaitForSettings() {
     assert.ok(parsed, "AST должен быть доступен без запроса настроек");
     assert.deepStrictEqual(imported, ["library"]);
     service.close(uri);
+}
+
+async function testReferenceIndexIsLazyPersistentAndTargeted() {
+    const directory = await fs.promises.mkdtemp(
+        path.join(os.tmpdir(), "rsl-ref-index-")
+    );
+    const originalReadFile = fs.promises.readFile;
+
+    try {
+        const firstPath = path.join(directory, "First.mac");
+        const secondPath = path.join(directory, "Second.mac");
+        const cachePath = path.join(
+            directory,
+            "cache",
+            "references-v2.json"
+        );
+        fs.writeFileSync(firstPath, "Macro TargetName()\nEnd;\n", "utf8");
+        fs.writeFileSync(secondPath, "Macro OtherName()\nEnd;\n", "utf8");
+
+        const firstUri = pathToFileURL(firstPath).toString();
+        const secondUri = pathToFileURL(secondPath).toString();
+        const uris = [firstUri, secondUri];
+        const referenceIndex = new ReferenceIndex({ readBatchSize: 2 });
+        referenceIndex.configurePersistence(cachePath);
+        referenceIndex.retainWorkspaceFiles(uris);
+
+        const firstCandidates = await referenceIndex.findCandidates(
+            "targetname",
+            uris
+        );
+        assert.deepStrictEqual(
+            firstCandidates.map(item => item.uri),
+            [firstUri]
+        );
+        assert.strictEqual(referenceIndex.getStats().indexedFiles, 2);
+        await referenceIndex.flush();
+        assert.ok(fs.existsSync(cachePath));
+
+        let persistentCacheReads = 0;
+        fs.promises.readFile = async (filePath, ...args) => {
+            if (path.resolve(String(filePath)) === path.resolve(cachePath)) {
+                persistentCacheReads++;
+            }
+            return originalReadFile.call(fs.promises, filePath, ...args);
+        };
+
+        const restored = new ReferenceIndex({ readBatchSize: 2 });
+        restored.configurePersistence(cachePath);
+        restored.retainWorkspaceFiles(uris);
+        await new Promise(resolve => setImmediate(resolve));
+        assert.strictEqual(
+            persistentCacheReads,
+            0,
+            "Persistent index не должен читаться при старте language server"
+        );
+        const restoredCandidates = await restored.findCandidates(
+            "targetname",
+            uris
+        );
+        fs.promises.readFile = originalReadFile;
+        assert.strictEqual(
+            persistentCacheReads,
+            1,
+            "Persistent index должен загружаться лениво при первом References"
+        );
+        assert.deepStrictEqual(
+            restoredCandidates.map(item => item.uri),
+            [firstUri],
+            "Индекс должен восстанавливаться с диска по mtime + size"
+        );
+        assert.ok(restored.getStats().persistedFiles >= 2);
+
+        restored.invalidate(secondUri);
+        assert.strictEqual(
+            restored.getStats().indexedFiles,
+            1,
+            "Инвалидация одного файла не должна очищать весь ReferenceIndex"
+        );
+
+        fs.writeFileSync(
+            firstPath,
+            "Macro RenamedTarget()\nEnd;\n// changed size\n",
+            "utf8"
+        );
+        const staleCandidates = await restored.findCandidates(
+            "targetname",
+            [firstUri]
+        );
+        assert.strictEqual(
+            staleCandidates.length,
+            0,
+            "Изменение mtime/size должно принудительно перестроить запись"
+        );
+
+        let eagerReferenceScans = 0;
+        const loader = new WorkspaceModuleLoader(
+            new WorkspaceIndex(),
+            {
+                log: () => undefined,
+                onModuleLoaded: () => undefined,
+                onModuleCountChanged: () => undefined
+            },
+            {
+                retainWorkspaceFiles: () => undefined,
+                invalidate: () => undefined,
+                indexSource: () => {
+                    eagerReferenceScans++;
+                }
+            }
+        );
+        loader.registerWorkspaceFiles([secondUri]);
+        await loader.ensureLoadedUri(secondUri);
+        assert.strictEqual(
+            eagerReferenceScans,
+            0,
+            "Загрузка Import не должна сканировать файл ради References"
+        );
+
+        const hashes = referenceIndexTesting.collectIdentifierHashes(
+            "Alpha Alpha Beta"
+        );
+        assert.strictEqual(
+            hashes.length,
+            2,
+            "Хэши в файле должны быть уникальными"
+        );
+
+        const graphPaths = ["A.mac", "B.mac", "C.mac", "Unrelated.mac"]
+            .map(name => path.join(directory, name));
+        fs.writeFileSync(
+            graphPaths[0],
+            "Macro TargetName()\nEnd;",
+            "utf8"
+        );
+        fs.writeFileSync(
+            graphPaths[1],
+            "Import A;\nMacro Use()\n TargetName();\nEnd;",
+            "utf8"
+        );
+        fs.writeFileSync(graphPaths[2], "Import B;", "utf8");
+        fs.writeFileSync(
+            graphPaths[3],
+            "Macro Nothing()\nEnd;",
+            "utf8"
+        );
+
+        const graphUris = graphPaths.map(value =>
+            pathToFileURL(value).toString()
+        );
+        const graphIndex = new ReferenceIndex({ readBatchSize: 4 });
+        graphIndex.retainWorkspaceFiles(graphUris);
+        await graphIndex.findCandidates("targetname", graphUris);
+        const limited = new Set(await graphIndex.getCandidateUris(
+            graphUris[0],
+            graphUris
+        ));
+        assert.ok(limited.has(graphUris[0]));
+        assert.ok(limited.has(graphUris[1]));
+        assert.ok(limited.has(graphUris[2]));
+        assert.ok(!limited.has(graphUris[3]));
+    } finally {
+        fs.promises.readFile = originalReadFile;
+        await fs.promises.rm(directory, {
+            recursive: true,
+            force: true
+        });
+    }
 }
 
 async function testImportedSymbolLoadsOnDemand() {
@@ -338,6 +525,9 @@ async function testImportedSymbolLoadsOnDemand() {
 
     await testParseReadinessDoesNotWaitForSettings();
     console.log("[OK] парсер и Import не ждут workspace/configuration");
+
+    await testReferenceIndexIsLazyPersistentAndTargeted();
+    console.log("[OK] ReferenceIndex ленивый, persistent и адресный");
 
     await testImportedSymbolLoadsOnDemand();
     console.log("[OK] Import-символ загружается для навигации по запросу");

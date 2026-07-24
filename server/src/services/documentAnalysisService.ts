@@ -7,6 +7,7 @@ import type { RslSettingsService } from "./settingsService";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 import {
     createFastDocumentSnapshot,
+    getFastDocumentSymbols,
     type IFastDocumentSnapshot
 } from "./fastDocumentSnapshot";
 import type { PerformanceLogger } from "../performanceLogger";
@@ -57,12 +58,46 @@ export class DocumentAnalysisService {
     }
 
     /**
-     * Snapshot создаётся синхронно; полный parser получает короткое окно, чтобы
-     * Folding и Outline успели ответить без блокировки event loop.
+     * Snapshot и Outline создаются синхронно; полный parser получает короткое
+     * окно, чтобы Structure гарантированно была готова раньше Problems.
+     *
+     * Возвращает false для повторного onDidOpen той же версии. Это позволяет
+     * вызывающему коду не дублировать workspace/configuration request.
      */
-    open(document: TextDocument): void {
-        this.refreshFastSnapshot(document);
+    open(document: TextDocument): boolean {
+        const performance = this.options.performance;
+        const span = performance?.enabled
+            ? performance.start("document.open", {
+                uri: document.uri,
+                version: document.version,
+                chars: document.getText().length
+            })
+            : undefined;
+        const current = this.fastSnapshots.get(document.uri);
+
+        if (current && current.version === document.version) {
+            if (span) {
+                performance.end(span, {
+                    duplicate: true,
+                    outlineReady: current.symbols !== undefined,
+                    topLevelSymbols: current.symbols?.length ?? 0
+                });
+            }
+            return false;
+        }
+
+        const snapshot = this.refreshFastSnapshot(document);
+        this.prepareOutline(document, snapshot);
         this.scheduleWithDelay(document, this.initialParseDelayMs);
+        if (span) {
+            performance.end(span, {
+                duplicate: false,
+                outlineReady: true,
+                tokens: snapshot.lex.tokens.length,
+                topLevelSymbols: snapshot.symbols?.length ?? 0
+            });
+        }
+        return true;
     }
 
     /** Частые изменения текста объединяются; snapshot пересоздаётся лениво. */
@@ -153,6 +188,31 @@ export class DocumentAnalysisService {
         this.fastSnapshots.set(document.uri, snapshot);
         this.options.invalidateProviderCaches(document.uri);
         return snapshot;
+    }
+
+    /**
+     * Отдельная presentation-фаза: не строит CBase и не зависит от настроек,
+     * Import-графа или диагностики.
+     */
+    private prepareOutline(
+        document: TextDocument,
+        snapshot: IFastDocumentSnapshot
+    ): void {
+        const performance = this.options.performance;
+        const span = performance?.enabled
+            ? performance.start("analysis.outlineSnapshot", {
+                uri: document.uri,
+                version: document.version,
+                tokens: snapshot.lex.tokens.length
+            })
+            : undefined;
+        const symbols = getFastDocumentSymbols(document, snapshot);
+
+        if (span) {
+            performance.end(span, {
+                topLevelSymbols: symbols.length
+            });
+        }
     }
 
     private scheduleWithDelay(document: TextDocument, delay: number): void {

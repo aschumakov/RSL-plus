@@ -16,6 +16,9 @@ require.cache[serverModulePath] = {
 const { CBase } = require("../server/out/common");
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
 const { buildRslDiagnostics } = require("../server/out/diagnostics");
+const {
+    RslDiagnosticEngine
+} = require("../server/out/diagnostics/diagnosticEngine");
 
 let passed = 0;
 let failed = 0;
@@ -413,6 +416,40 @@ test("Поле класса в индексированном присваива
     assert.ok(!items.some(item =>
         item.code === "duplicate-declaration" && /BlockSum/i.test(item.message)
     ));
+});
+
+test("Diagnostic engine подключает правила через реестр и применяет лимит", () => {
+    const source = "Macro Test()\nEnd;";
+    const index = new WorkspaceIndex();
+    const indexedModule = createModule(
+        index,
+        "file:///registry.mac",
+        source
+    );
+    const engine = new RslDiagnosticEngine();
+    engine.register({
+        id: "custom-test",
+        run: () => [{
+            code: "custom-test",
+            message: "custom",
+            severity: 2,
+            range: {
+                start: { line: 0, character: 0 },
+                end: { line: 0, character: 1 }
+            }
+        }]
+    });
+
+    const diagnostics = engine.build(
+        indexedModule,
+        index,
+        { maxProblems: 1 }
+    );
+    assert.strictEqual(diagnostics.length, 1);
+    assert.strictEqual(diagnostics[0].code, "custom-test");
+    assert.throws(() =>
+        engine.register({ id: "custom-test", run: () => [] })
+    );
 });
 
 console.log("");

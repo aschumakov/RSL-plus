@@ -494,21 +494,58 @@ export class RslLanguageFeatureRegistry {
         });
 
         connection.onDocumentSymbol(async (params: DocumentSymbolParams) => {
+            const performance = this.environment.performance;
+            const span = performance?.enabled
+                ? performance.start("outline.resolve", {
+                    uri: params.textDocument.uri
+                })
+                : undefined;
             const document = documents.get(params.textDocument.uri);
             if (!document) {
+                if (span) {
+                    performance.end(span, {
+                        outcome: "documentMissing",
+                        topLevelSymbols: 0
+                    });
+                }
                 return [];
             }
 
             const cached = this.documentSymbolsCache.get(document.uri);
             if (cached && cached.version === document.version) {
+                if (span) {
+                    performance.end(span, {
+                        version: document.version,
+                        outcome: "providerCache",
+                        topLevelSymbols: cached.value.length
+                    });
+                }
                 return cached.value;
             }
 
             let value: DocumentSymbol[] | SymbolInformation[];
+            let outcome = "fullParse";
+            let snapshotAgeMs: number | undefined;
+            let outlineReadyAgeMs: number | undefined;
 
             if (getFastDocumentSnapshot) {
                 const snapshot = getFastDocumentSnapshot(document);
+                const wasPrepared = snapshot.symbols !== undefined;
                 value = getFastDocumentSymbols(document, snapshot).slice();
+                outcome = wasPrepared
+                    ? "preparedFastSnapshot"
+                    : "onDemandFastSnapshot";
+                snapshotAgeMs = Math.max(
+                    0,
+                    Date.now() - snapshot.createdAtMs
+                );
+                outlineReadyAgeMs = Math.max(
+                    0,
+                    Date.now() - (
+                        snapshot.symbolsPreparedAtMs ??
+                        snapshot.createdAtMs
+                    )
+                );
             } else {
                 const tree = await ensureDocumentParsed(document);
                 value = tree
@@ -522,6 +559,15 @@ export class RslLanguageFeatureRegistry {
                 version: document.version,
                 value
             });
+            if (span) {
+                performance.end(span, {
+                    version: document.version,
+                    outcome,
+                    snapshotAgeMs,
+                    outlineReadyAgeMs,
+                    topLevelSymbols: value.length
+                });
+            }
             return value;
         });
 

@@ -10,10 +10,7 @@ const tests = [
     "formatter.test.js",
     "folding.test.js",
     "definition.test.js",
-    "symbol-tree-adapter.test.js",
     "pipeline-architecture.test.js",
-    "semantic-resolution.test.js",
-    "reference-index.test.js",
     "diagnostic-visibility.test.js",
     "scope-index.test.js",
     "diagnostics.test.js",
@@ -21,8 +18,6 @@ const tests = [
     "quick-fix-extended.test.js",
     "workspace-resolution.test.js",
     "server-services.test.js",
-    "diagnostic-engine.test.js",
-    "productivity-features.test.js",
 ];
 
 let failed = false;

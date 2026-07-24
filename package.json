@@ -229,13 +229,13 @@
       "test:formatter": "npm run compile && node tests/formatter.test.js",
       "test:folding": "npm run compile && node tests/folding.test.js",
       "test:definition": "npm run compile && node tests/definition.test.js",
-      "test:parser": "npm run compile && node tests/parser-optimized.test.js",
+      "test:parser": "npm run compile && node tests/parser-regressions.test.js",
       "test:scope": "npm run compile && node tests/scope-index.test.js",
       "test": "npm run compile && node tests/run-all.js",
       "postinstall": "npm ci --prefix client && npm ci --prefix server",
       "test:diagnostics": "npm run compile && node tests/diagnostics.test.js",
       "test:features": "npm run compile && node tests/language-features.test.js",
-      "test:architecture": "npm run compile && node tests/pipeline-architecture.test.js && node tests/semantic-resolution.test.js && node tests/reference-index.test.js"
+      "test:architecture": "npm run compile && node tests/pipeline-architecture.test.js && node tests/scope-index.test.js && node tests/workspace-resolution.test.js"
    },
    "devDependencies": {
       "@types/node": "22.16.5",

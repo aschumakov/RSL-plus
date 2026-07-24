@@ -15,8 +15,12 @@ require.cache[serverModulePath] = {
 };
 
 const { CBase } = require("../server/out/common");
+const { parseRslSyntax } = require("../server/out/syntaxParser");
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
 const { RslScopeResolver } = require("../server/out/scopeResolver");
+const {
+    buildRslSemanticTokens
+} = require("../server/out/semanticTokens");
 
 let passed = 0;
 let failed = 0;
@@ -238,6 +242,67 @@ test("Reverse import graph возвращает зависимые модули"
     assert.deepStrictEqual(
         index.getDependents("file:///lib/common.mac"),
         ["file:///main.mac"]
+    );
+});
+
+test("ResolveAt кэшируется, Semantic Tokens Range не выходит за диапазон", () => {
+    const source = [
+        "Macro Test(pValue)",
+        "  Var localValue: Integer;",
+        "  localValue = pValue;",
+        "  localValue = localValue + 1;",
+        "End;"
+    ].join("\n");
+    const uri = "file:///workspace/semantic.mac";
+    const syntax = parseRslSyntax(source, undefined, {
+        buildExpressionTree: false
+    });
+    const tree = CBase.fromSyntax(source, 0, syntax, true, false);
+    const index = new WorkspaceIndex();
+    index.updateOpenModule(uri, source, tree, 1, syntax);
+    const resolver = new RslScopeResolver(index);
+    const offset = source.indexOf("localValue = pValue") + 2;
+
+    const first = resolver.resolveAt(uri, tree, offset);
+    const second = resolver.resolveAt(uri, tree, offset);
+    assert.ok(first);
+    assert.strictEqual(second && second.object, first.object);
+    const stats = resolver.getCacheStats();
+    assert.ok(stats.misses >= 1);
+    assert.ok(
+        stats.hits >= 1,
+        "Повторный resolveAt должен попадать в token-start cache"
+    );
+
+    const rangeTokens = buildRslSemanticTokens(
+        index.getModule(uri),
+        index,
+        resolver,
+        {
+            startLine: 2,
+            startCharacter: 0,
+            endLine: 2,
+            endCharacter: 1000
+        }
+    );
+    const lines = [];
+    let line = 0;
+    let character = 0;
+
+    for (let index = 0; index < rangeTokens.data.length; index += 5) {
+        const deltaLine = rangeTokens.data[index];
+        const deltaCharacter = rangeTokens.data[index + 1];
+        line += deltaLine;
+        character = deltaLine === 0
+            ? character + deltaCharacter
+            : deltaCharacter;
+        lines.push(line);
+    }
+
+    assert.ok(lines.length > 0);
+    assert.ok(
+        lines.every(value => value === 2),
+        `Range semantic tokens не должны разрешать другие строки: ${lines.join(",")}`
     );
 });
 

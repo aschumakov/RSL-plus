@@ -1,6 +1,13 @@
 "use strict";
 
 const assert = require("assert");
+const fs = require("fs");
+const path = require("path");
+const vscodeLanguageServerPath = require.resolve(
+    "vscode-languageserver",
+    { paths: [path.join(__dirname, "..", "server")] }
+);
+const { CompletionItemKind } = require(vscodeLanguageServerPath);
 const {
     createFastDocumentSnapshot,
     getFastDocumentSymbols,
@@ -9,7 +16,10 @@ const {
 const {
     parseRslSyntax
 } = require("../server/out/syntaxParser");
-const { CBase } = require("../server/out/common");
+const {
+    CBase,
+    RSL_PARSER_VERSION
+} = require("../server/out/common");
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
 const {
     RslDiagnosticEngine
@@ -134,11 +144,25 @@ const analysisService = new DocumentAnalysisService(
         initialParseDelayMs: 1000
     }
 );
-analysisService.open(document);
 assert.strictEqual(
-    analysisService.getFastSnapshot(document).version,
+    analysisService.open(document),
+    true,
+    "Первая версия документа должна запускать fast-анализ"
+);
+const openedSnapshot = analysisService.getFastSnapshot(document);
+assert.strictEqual(
+    openedSnapshot.version,
     document.version,
     "FastDocumentSnapshot должен быть доступен синхронно после open"
+);
+assert.ok(
+    Array.isArray(openedSnapshot.symbols),
+    "Outline должен быть подготовлен синхронно до полного parser"
+);
+assert.strictEqual(
+    analysisService.open(document),
+    false,
+    "Повторный onDidOpen той же версии не должен дублировать анализ"
 );
 analysisService.close(document.uri);
 
@@ -397,4 +421,141 @@ assert.strictEqual(
     false
 );
 
-console.log("[OK] FastDocumentSnapshot ленивый, Outline иерархический, ONERROR находится в grammar");
+function testSyntaxTreeAdapterBuildsLegacySymbols() {
+    const source = [
+        "import common, bankinter;",
+        "var globalValue: integer = 1;",
+        "macro Test(p1, p2:@integer): string",
+        "  if (p1 > 0)",
+        "    var insideIf = 10;",
+        "  end;",
+        "  for (var i: numeric, 1, 10)",
+        "    insideIf = insideIf + i;",
+        "  end;",
+        "onerror (er)",
+        "  return er.Message",
+        "end;",
+        "class (BaseClass) DemoClass(cp)",
+        "  var Prop: integer;",
+        "  macro Method(mp)",
+        "    var localValue = mp;",
+        "  end;",
+        "end;"
+    ].join("\n");
+    const tree = new CBase(source, 0);
+
+    assert.ok(RSL_PARSER_VERSION.includes("syntax-tree-adapter"));
+    assert.ok(tree.getSyntaxResult(), "Syntax tree должен храниться в CBase");
+
+    const rootNames = tree.getChilds().map(item => item.Name);
+    assert.ok(rootNames.includes("globalValue"));
+    assert.ok(rootNames.includes("Test"));
+    assert.ok(rootNames.includes("DemoClass"));
+
+    const macro = tree.getChilds().find(item => item.Name === "Test");
+    assert.ok(macro);
+    assert.strictEqual(macro.ObjKind, CompletionItemKind.Function);
+    const macroNames = macro.getChilds().map(item => item.Name);
+    ["p1", "p2", "insideIf", "i", "er"].forEach(name =>
+        assert.ok(macroNames.includes(name))
+    );
+    assert.strictEqual(
+        macro.getChilds().find(item => item.Name === "i").Type.toLowerCase(),
+        "numeric"
+    );
+    assert.strictEqual(
+        macro.getChilds().find(item => item.Name === "er").Type.toLowerCase(),
+        "trslerror"
+    );
+
+    const cls = tree.getChilds().find(item => item.Name === "DemoClass");
+    assert.ok(cls);
+    assert.strictEqual(cls.ObjKind, CompletionItemKind.Class);
+    const classNames = cls.getChilds().map(item => item.Name);
+    ["cp", "Prop", "Method"].forEach(name =>
+        assert.ok(classNames.includes(name))
+    );
+    const method = cls.getChilds().find(item => item.Name === "Method");
+    assert.strictEqual(method.ObjKind, CompletionItemKind.Method);
+    assert.ok(method.getChilds().some(item => item.Name === "mp"));
+    assert.ok(method.getChilds().some(item => item.Name === "localValue"));
+
+    const commonSource = fs.readFileSync(
+        path.join(__dirname, "..", "server", "src", "common.ts"),
+        "utf8"
+    );
+    assert.ok(
+        !/\bNextToken\s*\(/.test(commonSource),
+        "common.ts больше не должен содержать второй tokenizer NextToken"
+    );
+
+    const documentedTree = new CBase([
+        "array GlobalArray;",
+        "file GlobalFile(account) write;",
+        "record GlobalRecord(account) mem;",
+        "class Demo",
+        "  array Items;",
+        "  file Accounts(account) write;",
+        "  record Buffer(account) mem;",
+        "  local var constructorOnly;",
+        "  local macro Helper()",
+        "    return constructorOnly;",
+        "  end;",
+        "  macro PublicMethod()",
+        "    return Items(0);",
+        "  end;",
+        "end;"
+    ].join("\n"), 0);
+    const documentedRoot = documentedTree.getChilds();
+    assert.strictEqual(
+        documentedRoot.find(
+            item => item.Name === "GlobalArray"
+        ).Type.toLowerCase(),
+        "array"
+    );
+    assert.strictEqual(
+        documentedRoot.find(
+            item => item.Name === "GlobalFile"
+        ).Type.toLowerCase(),
+        "file"
+    );
+    assert.strictEqual(
+        documentedRoot.find(
+            item => item.Name === "GlobalRecord"
+        ).Type.toLowerCase(),
+        "record"
+    );
+
+    const documentedClass = documentedRoot.find(
+        item => item.Name === "Demo"
+    );
+    const members = documentedClass.getChilds();
+    assert.strictEqual(
+        members.find(item => item.Name === "Items").ObjKind,
+        CompletionItemKind.Property
+    );
+    assert.strictEqual(
+        members.find(item => item.Name === "Accounts").Type.toLowerCase(),
+        "file"
+    );
+    assert.strictEqual(
+        members.find(item => item.Name === "Buffer").Type.toLowerCase(),
+        "record"
+    );
+    assert.strictEqual(
+        members.find(item => item.Name === "constructorOnly").ObjKind,
+        CompletionItemKind.Variable
+    );
+    assert.strictEqual(
+        members.find(item => item.Name === "Helper").ObjKind,
+        CompletionItemKind.Function
+    );
+    assert.strictEqual(
+        members.find(item => item.Name === "PublicMethod").ObjKind,
+        CompletionItemKind.Method
+    );
+}
+
+testSyntaxTreeAdapterBuildsLegacySymbols();
+
+console.log("[OK] FastDocumentSnapshot ленивый, open заранее готовит Outline, ONERROR находится в grammar");

@@ -12,8 +12,17 @@ const {
     DiagnosticsCoordinator
 } = require("../server/out/diagnostics/diagnosticsCoordinator");
 const {
+    RslLanguageFeatureRegistry
+} = require("../server/out/features/languageFeatureRegistry");
+const {
+    createFastDocumentSnapshot,
+    getFastDocumentSymbols
+} = require("../server/out/services/fastDocumentSnapshot");
+const {
     RslSettingsService
 } = require("../server/out/services/settingsService");
+const { RslScopeResolver } = require("../server/out/scopeResolver");
+const { WorkspaceIndex } = require("../server/out/workspaceIndex");
 
 const defaults = {
     import: "ДА",
@@ -246,6 +255,108 @@ async function testProblemsDoNotWaitForConfigurationRequest() {
     coordinator.close(uri);
 }
 
+async function testOutlineUsesPreparedSnapshotAndReportsTiming() {
+    const source = "Var GlobalValue;\nMacro Test()\nEnd;";
+    const uri = "file:///outline.mac";
+    const document = {
+        uri,
+        languageId: "rsl",
+        version: 1,
+        lineCount: 3,
+        getText: () => source,
+        positionAt(offset) {
+            const before = source.slice(0, offset);
+            const lines = before.split("\n");
+            return {
+                line: lines.length - 1,
+                character: lines.at(-1).length
+            };
+        },
+        offsetAt: () => 0
+    };
+    const snapshot = createFastDocumentSnapshot(document);
+    getFastDocumentSymbols(document, snapshot);
+
+    const handlers = {};
+    const register = name => callback => {
+        handlers[name] = callback;
+    };
+    const connection = {
+        onCompletion: register("completion"),
+        onHover: register("hover"),
+        onDocumentHighlight: register("documentHighlight"),
+        onDefinition: register("definition"),
+        onReferences: register("references"),
+        onCodeAction: register("codeAction"),
+        onSelectionRanges: register("selectionRanges"),
+        onExecuteCommand: register("executeCommand"),
+        onDocumentSymbol: register("documentSymbol"),
+        onFoldingRanges: register("foldingRanges"),
+        onDocumentFormatting: register("documentFormatting"),
+        sendRequest: async () => undefined,
+        languages: {
+            semanticTokens: {
+                on: register("semanticTokens"),
+                onDelta: register("semanticTokensDelta"),
+                onRange: register("semanticTokensRange")
+            }
+        }
+    };
+    const performanceEvents = [];
+    const index = new WorkspaceIndex();
+    const registry = new RslLanguageFeatureRegistry({
+        connection,
+        documents: {
+            get: requestedUri =>
+                requestedUri === uri ? document : undefined
+        },
+        index,
+        resolver: new RslScopeResolver(index),
+        definitionProvider: {},
+        getFastDocumentSnapshot: () => snapshot,
+        ensureDocumentParsed: async () => {
+            throw new Error("Outline не должен запускать полный parser");
+        },
+        log: () => undefined,
+        performance: {
+            enabled: true,
+            start(event, fields) {
+                return { event, fields };
+            },
+            end(span, fields) {
+                performanceEvents.push({
+                    event: span.event,
+                    ...span.fields,
+                    ...fields
+                });
+            }
+        }
+    });
+    registry.register();
+
+    const symbols = await handlers.documentSymbol({
+        textDocument: { uri }
+    });
+    assert.deepStrictEqual(
+        symbols.map(item => item.name),
+        ["GlobalValue", "Test"]
+    );
+    assert.strictEqual(
+        performanceEvents.at(-1).outcome,
+        "preparedFastSnapshot"
+    );
+    assert.strictEqual(
+        typeof performanceEvents.at(-1).outlineReadyAgeMs,
+        "number"
+    );
+
+    await handlers.documentSymbol({ textDocument: { uri } });
+    assert.strictEqual(
+        performanceEvents.at(-1).outcome,
+        "providerCache"
+    );
+}
+
 (async () => {
     await testAvailableSettingsDoNotWaitForVsCode();
     console.log("[OK] анализ использует настройки без ожидания VS Code");
@@ -258,6 +369,9 @@ async function testProblemsDoNotWaitForConfigurationRequest() {
 
     await testProblemsDoNotWaitForConfigurationRequest();
     console.log("[OK] Problems публикуются без workspace/configuration");
+
+    await testOutlineUsesPreparedSnapshotAndReportsTiming();
+    console.log("[OK] Outline отвечает из подготовленного snapshot и логирует задержку");
 })().catch(error => {
     console.error(error);
     process.exitCode = 1;
