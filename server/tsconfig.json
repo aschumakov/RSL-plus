@@ -13,6 +13,8 @@
         "skipLibCheck": true,
         "strict": false,
         "strictFunctionTypes": true,
+        "noUnusedLocals": true,
+        "noUnusedParameters": true,
         "noFallthroughCasesInSwitch": true,
         "forceConsistentCasingInFileNames": true,
         "types": [

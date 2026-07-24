@@ -5,7 +5,6 @@ import {
 
 import {
     IRslLexResult,
-    IRslToken,
     isFullLineComment,
     lexRsl
 } from "./lexer";

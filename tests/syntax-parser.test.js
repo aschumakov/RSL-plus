@@ -1,8 +1,18 @@
 const assert = require("assert");
+const path = require("path");
+const vscodeLanguageServerPath = require.resolve(
+  "vscode-languageserver",
+  { paths: [path.join(__dirname, "..", "server")] }
+);
+const { CompletionItemKind } = require(vscodeLanguageServerPath);
 const {
   parseRslSyntax,
   getImportNamesFromSyntax
 } = require("../server/out/syntaxParser");
+const {
+  CBase,
+  RSL_PARSER_VERSION
+} = require("../server/out/common");
 
 function codes(source) {
   return parseRslSyntax(source).diagnostics.map(item => item.code);
@@ -168,3 +178,109 @@ assert.ok(
 );
 
 console.log("[OK] параметры FILE/RECORD проверены по формальной грамматике");
+
+const topLevelOnError = parseRslSyntax([
+  "Macro Test()",
+  "End;",
+  "OnError(err)",
+  "  Return err.Message;"
+].join("\n"), undefined, {
+  buildExpressionTree: false
+});
+assert.ok(
+  topLevelOnError.root.children.some(item =>
+    item.kind === "OnErrorClause"
+  )
+);
+assert.ok(
+  !topLevelOnError.diagnostics.some(item =>
+    String(item.code || "").toLowerCase().includes("onerror")
+  )
+);
+assert.ok(codes("If (true)\n  Var value;").includes("missing-end"));
+
+console.log("[OK] ONERROR верхнего уровня не скрывает missing END");
+
+const adaptedTree = new CBase([
+  "var globalValue: integer = 1;",
+  "macro Test(p1, p2:@integer): string",
+  "  for (var i: numeric, 1, 10)",
+  "    globalValue = globalValue + i;",
+  "  end;",
+  "onerror (er)",
+  "  return er.Message",
+  "end;",
+  "class (BaseClass) DemoClass(cp)",
+  "  var Prop: integer;",
+  "  macro Method(mp)",
+  "  end;",
+  "end;"
+].join("\n"), 0);
+
+assert.ok(RSL_PARSER_VERSION.includes("syntax-tree-adapter"));
+assert.ok(adaptedTree.getSyntaxResult());
+const adaptedMacro = adaptedTree.getChilds().find(
+  item => item.Name === "Test"
+);
+const adaptedClass = adaptedTree.getChilds().find(
+  item => item.Name === "DemoClass"
+);
+assert.strictEqual(adaptedMacro.ObjKind, CompletionItemKind.Function);
+assert.ok(
+  ["p1", "p2", "i", "er"].every(name =>
+    adaptedMacro.getChilds().some(item => item.Name === name)
+  )
+);
+assert.strictEqual(adaptedClass.ObjKind, CompletionItemKind.Class);
+assert.ok(
+  adaptedClass.getChilds().some(item =>
+    item.Name === "Method" &&
+    item.ObjKind === CompletionItemKind.Method
+  )
+);
+
+const documentedTree = new CBase([
+  "array GlobalArray;",
+  "file GlobalFile(account) write;",
+  "record GlobalRecord(account) mem;",
+  "class Demo",
+  "  array Items;",
+  "  file Accounts(account) write;",
+  "  record Buffer(account) mem;",
+  "  local var constructorOnly;",
+  "  local macro Helper()",
+  "  end;",
+  "  macro PublicMethod()",
+  "  end;",
+  "end;"
+].join("\n"), 0);
+const documentedRoot = documentedTree.getChilds();
+assert.strictEqual(
+  documentedRoot.find(item => item.Name === "GlobalArray").Type.toLowerCase(),
+  "array"
+);
+assert.strictEqual(
+  documentedRoot.find(item => item.Name === "GlobalFile").Type.toLowerCase(),
+  "file"
+);
+assert.strictEqual(
+  documentedRoot.find(item => item.Name === "GlobalRecord").Type.toLowerCase(),
+  "record"
+);
+const documentedMembers = documentedRoot
+  .find(item => item.Name === "Demo")
+  .getChilds();
+assert.strictEqual(
+  documentedMembers.find(item => item.Name === "Items").ObjKind,
+  CompletionItemKind.Property
+);
+assert.strictEqual(
+  documentedMembers.find(item => item.Name === "Helper").ObjKind,
+  CompletionItemKind.Function
+);
+assert.strictEqual(
+  documentedMembers.find(item => item.Name === "PublicMethod").ObjKind,
+  CompletionItemKind.Method
+);
+
+console.log("[OK] syntax-tree adapter сохраняет legacy symbol tree");

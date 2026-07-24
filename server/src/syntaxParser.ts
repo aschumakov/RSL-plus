@@ -341,7 +341,7 @@ class ExpressionParser {
                 const dot = this.take();
 
                 if (this.isSymbol("(")) {
-                    const list = this.parseDelimitedList("(", ")");
+                    const list = this.parseDelimitedList(")");
                     expression = createExpressionNode(
                         "DefaultPropertyExpression",
                         expression.start,
@@ -381,7 +381,7 @@ class ExpressionParser {
             }
 
             if (this.isSymbol("(")) {
-                const list = this.parseDelimitedList("(", ")");
+                const list = this.parseDelimitedList(")");
                 expression = createExpressionNode(
                     "PostfixAccessExpression",
                     expression.start,
@@ -395,7 +395,7 @@ class ExpressionParser {
             }
 
             if (this.isSymbol("[")) {
-                const list = this.parseDelimitedList("[", "]");
+                const list = this.parseDelimitedList("]");
                 expression = createExpressionNode(
                     "IndexExpression",
                     expression.start,
@@ -476,7 +476,6 @@ class ExpressionParser {
     }
 
     private parseDelimitedList(
-        open: string,
         close: string
     ): { items: IRslSyntaxNode[]; tokens: IRslToken[]; end: number } {
         const tokens: IRslToken[] = [];

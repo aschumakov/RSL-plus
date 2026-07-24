@@ -16,8 +16,12 @@ const {
 } = require("../server/out/features/languageFeatureRegistry");
 const {
     createFastDocumentSnapshot,
-    getFastDocumentSymbols
+    getFastDocumentSymbols,
+    getFastFoldingRanges
 } = require("../server/out/services/fastDocumentSnapshot");
+const {
+    DocumentAnalysisService
+} = require("../server/out/services/documentAnalysisService");
 const {
     RslSettingsService
 } = require("../server/out/services/settingsService");
@@ -275,7 +279,52 @@ async function testOutlineUsesPreparedSnapshotAndReportsTiming() {
         offsetAt: () => 0
     };
     const snapshot = createFastDocumentSnapshot(document);
+    assert.strictEqual(
+        snapshot.symbols,
+        undefined,
+        "Outline должен оставаться ленивым до presentation-фазы"
+    );
+    assert.strictEqual(
+        snapshot.foldingRanges,
+        undefined,
+        "Folding должен оставаться ленивым до первого запроса"
+    );
+    assert.ok(getFastFoldingRanges(document, snapshot).length > 0);
     getFastDocumentSymbols(document, snapshot);
+
+    const classSource = [
+        "Class TExecFunPIParm()",
+        "  Var pi:TRecHandler;",
+        "  Var stat:Integer;",
+        "  Var err_mes:String;",
+        "End;"
+    ].join("\n");
+    const classDocument = {
+        ...document,
+        uri: "file:///outline-class.mac",
+        lineCount: 5,
+        getText: () => classSource,
+        positionAt(offset) {
+            const before = classSource.slice(0, offset);
+            const lines = before.split("\n");
+            return {
+                line: lines.length - 1,
+                character: lines.at(-1).length
+            };
+        }
+    };
+    const classSymbols = getFastDocumentSymbols(
+        classDocument,
+        createFastDocumentSnapshot(classDocument)
+    );
+    assert.deepStrictEqual(
+        classSymbols.map(item => item.name),
+        ["TExecFunPIParm"]
+    );
+    assert.deepStrictEqual(
+        classSymbols[0].children.map(item => item.name),
+        ["pi", "stat", "err_mes"]
+    );
 
     const handlers = {};
     const register = name => callback => {
@@ -357,6 +406,117 @@ async function testOutlineUsesPreparedSnapshotAndReportsTiming() {
     );
 }
 
+async function testOutlineIsReadyBeforeDiagnostics() {
+    const source = "Var GlobalValue;\nMacro Test()\nEnd;";
+    const uri = "file:///event-order.mac";
+    const document = {
+        uri,
+        languageId: "rsl",
+        version: 1,
+        lineCount: 3,
+        getText: () => source,
+        positionAt(offset) {
+            const before = source.slice(0, offset);
+            const lines = before.split("\n");
+            return {
+                line: lines.length - 1,
+                character: lines.at(-1).length
+            };
+        },
+        offsetAt: () => 0
+    };
+    const events = [];
+    const performance = {
+        enabled: true,
+        start(event, fields) {
+            events.push(`start:${event}`);
+            return { event, fields };
+        },
+        end(span) {
+            events.push(`end:${span.event}`);
+        }
+    };
+    const documents = {
+        get: requestedUri => requestedUri === uri ? document : undefined,
+        all: () => [document]
+    };
+    const index = new WorkspaceIndex();
+    let analysis;
+    const coordinator = new DiagnosticsCoordinator(
+        { sendDiagnostics: () => undefined },
+        documents,
+        index,
+        {
+            getAvailable: () => defaults
+        },
+        {
+            buildLocal: () => [],
+            buildWorkspace: () => []
+        },
+        {
+            isParseBusy: requestedUri =>
+                analysis?.isBusyFor(requestedUri) ?? false,
+            log: message => {
+                throw new Error(message);
+            },
+            performance,
+            onImports: () => undefined,
+            localDebounceMs: 0,
+            workspaceDebounceMs: 1000,
+            interactiveRetryMs: 1
+        }
+    );
+    analysis = new DocumentAnalysisService(
+        documents,
+        index,
+        {
+            getAvailable: () => defaults
+        },
+        {
+            log: message => {
+                throw new Error(message);
+            },
+            performance,
+            invalidateProviderCaches: () => undefined,
+            onParsed: () => {
+                coordinator.setActiveDocument(uri);
+            },
+            onImports: () => undefined,
+            initialParseDelayMs: 0
+        }
+    );
+
+    assert.strictEqual(analysis.open(document), true);
+    await waitFor(
+        () => events.includes("end:diagnostics.local"),
+        1000
+    );
+
+    const documentOpen = events.indexOf("start:document.open");
+    const outlineReady = events.indexOf("end:analysis.outlineSnapshot");
+    const diagnostics = events.indexOf("start:diagnostics.local");
+
+    assert.ok(documentOpen >= 0, "document.open не зарегистрирован");
+    assert.ok(outlineReady > documentOpen);
+    assert.ok(
+        diagnostics > outlineReady,
+        `Нарушен порядок событий: ${events.join(" → ")}`
+    );
+
+    analysis.close(uri);
+    coordinator.close(uri);
+}
+
+async function waitFor(predicate, timeoutMs) {
+    const started = Date.now();
+    while (!predicate()) {
+        if (Date.now() - started >= timeoutMs) {
+            throw new Error("Истекло время ожидания тестового события");
+        }
+        await new Promise(resolve => setTimeout(resolve, 5));
+    }
+}
+
 (async () => {
     await testAvailableSettingsDoNotWaitForVsCode();
     console.log("[OK] анализ использует настройки без ожидания VS Code");
@@ -372,6 +532,9 @@ async function testOutlineUsesPreparedSnapshotAndReportsTiming() {
 
     await testOutlineUsesPreparedSnapshotAndReportsTiming();
     console.log("[OK] Outline отвечает из подготовленного snapshot и логирует задержку");
+
+    await testOutlineIsReadyBeforeDiagnostics();
+    console.log("[OK] document.open и Outline завершаются раньше diagnostics");
 })().catch(error => {
     console.error(error);
     process.exitCode = 1;

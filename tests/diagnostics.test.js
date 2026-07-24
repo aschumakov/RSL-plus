@@ -418,6 +418,25 @@ test("Поле класса в индексированном присваива
     ));
 });
 
+test("Верхнеуровневый ONERROR не скрывает структурные ошибки", () => {
+    const onErrorItems = diagnosticsFor([
+        "Macro Test()",
+        "End;",
+        "OnError(err)",
+        "  Return err.Message;"
+    ].join("\n"));
+    assert.ok(!onErrorItems.some(item =>
+        String(item.code || "").toLowerCase() === "onerror-outside-macro"
+    ));
+
+    const missingEndItems = diagnosticsFor(
+        "If (true)\n  Var value;"
+    );
+    assert.ok(missingEndItems.some(item =>
+        String(item.code || "").toLowerCase().includes("end")
+    ));
+});
+
 test("Diagnostic engine подключает правила через реестр и применяет лимит", () => {
     const source = "Macro Test()\nEnd;";
     const index = new WorkspaceIndex();

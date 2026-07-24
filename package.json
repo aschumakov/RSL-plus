@@ -223,7 +223,8 @@
    ],
    "scripts": {
       "vscode:prepublish": "npm test",
-      "compile": "tsc -b",
+      "clean": "tsc -b --clean && node -e \"const fs=require('fs'); for (const dir of ['client/out','server/out']) fs.rmSync(dir,{recursive:true,force:true});\"",
+      "compile": "npm run clean && tsc -b",
       "watch": "tsc -b -w",
       "test:lexer": "npm run compile && node tests/lexer.test.js",
       "test:formatter": "npm run compile && node tests/formatter.test.js",
@@ -235,7 +236,7 @@
       "postinstall": "npm ci --prefix client && npm ci --prefix server",
       "test:diagnostics": "npm run compile && node tests/diagnostics.test.js",
       "test:features": "npm run compile && node tests/language-features.test.js",
-      "test:architecture": "npm run compile && node tests/pipeline-architecture.test.js && node tests/scope-index.test.js && node tests/workspace-resolution.test.js"
+      "test:architecture": "npm run compile && node tests/server-services.test.js && node tests/scope-index.test.js && node tests/workspace-resolution.test.js"
    },
    "devDependencies": {
       "@types/node": "22.16.5",

@@ -20,7 +20,6 @@ import {
     SemanticTokensDeltaParams,
     SemanticTokensParams,
     SemanticTokensRangeParams,
-    SymbolInformation,
     TextDocumentPositionParams,
     TextEdit,
     type Connection,
@@ -30,7 +29,6 @@ import type { TextDocument } from "vscode-languageserver-textdocument";
 
 import { CBase } from "../common";
 import { RslDefinitionProvider } from "./definitionProvider";
-import { getSymbols } from "../docsymbols";
 import { getCIInfoForArray, getDefaults } from "../defaults";
 import { buildEnhancedRslCodeActions } from "./enhancedCodeActions";
 import { buildRslDocumentHighlights } from "./documentHighlights";
@@ -42,7 +40,7 @@ import {
     GO_TO_BLOCK_START_COMMAND,
     resolveBlockNavigationPosition
 } from "./blockNavigation";
-import { GetFoldingRanges, type IRslFoldingRange } from "../folding";
+import type { IRslFoldingRange } from "../folding";
 import { FormatCode } from "../format";
 import type { IToken } from "../interfaces";
 import { tokenAtOffset, type IRslToken } from "../lexer";
@@ -69,7 +67,7 @@ export interface IRslLanguageFeatureEnvironment {
     resolver: RslScopeResolver;
     definitionProvider: RslDefinitionProvider;
     referenceIndex?: ReferenceIndex;
-    getFastDocumentSnapshot?(document: TextDocument): IFastDocumentSnapshot;
+    getFastDocumentSnapshot(document: TextDocument): IFastDocumentSnapshot;
     ensureDocumentParsed(document: TextDocument): Promise<CBase | undefined>;
     ensureImportedSymbol?(
         fromUri: string,
@@ -101,7 +99,7 @@ export class RslLanguageFeatureRegistry {
     }>();
     private documentSymbolsCache = new Map<string, {
         version: number;
-        value: DocumentSymbol[] | SymbolInformation[];
+        value: DocumentSymbol[];
     }>();
     private defaultCompletionItems = getCIInfoForArray(getDefaults());
     private registered = false;
@@ -523,37 +521,23 @@ export class RslLanguageFeatureRegistry {
                 return cached.value;
             }
 
-            let value: DocumentSymbol[] | SymbolInformation[];
-            let outcome = "fullParse";
-            let snapshotAgeMs: number | undefined;
-            let outlineReadyAgeMs: number | undefined;
-
-            if (getFastDocumentSnapshot) {
-                const snapshot = getFastDocumentSnapshot(document);
-                const wasPrepared = snapshot.symbols !== undefined;
-                value = getFastDocumentSymbols(document, snapshot).slice();
-                outcome = wasPrepared
-                    ? "preparedFastSnapshot"
-                    : "onDemandFastSnapshot";
-                snapshotAgeMs = Math.max(
-                    0,
-                    Date.now() - snapshot.createdAtMs
-                );
-                outlineReadyAgeMs = Math.max(
-                    0,
-                    Date.now() - (
-                        snapshot.symbolsPreparedAtMs ??
-                        snapshot.createdAtMs
-                    )
-                );
-            } else {
-                const tree = await ensureDocumentParsed(document);
-                value = tree
-                    ? getSymbols(document, tree).filter(
-                        (item): item is SymbolInformation => !!item
-                    )
-                    : [];
-            }
+            const snapshot = getFastDocumentSnapshot(document);
+            const wasPrepared = snapshot.symbols !== undefined;
+            const value = getFastDocumentSymbols(document, snapshot).slice();
+            const outcome = wasPrepared
+                ? "preparedFastSnapshot"
+                : "onDemandFastSnapshot";
+            const snapshotAgeMs = Math.max(
+                0,
+                Date.now() - snapshot.createdAtMs
+            );
+            const outlineReadyAgeMs = Math.max(
+                0,
+                Date.now() - (
+                    snapshot.symbolsPreparedAtMs ??
+                    snapshot.createdAtMs
+                )
+            );
 
             this.documentSymbolsCache.set(document.uri, {
                 version: document.version,
@@ -582,18 +566,9 @@ export class RslLanguageFeatureRegistry {
                 return cached.value;
             }
 
-            let value: IRslFoldingRange[];
-
-            if (getFastDocumentSnapshot) {
-                const snapshot = getFastDocumentSnapshot(document);
-                value = getFastFoldingRanges(document, snapshot).slice();
-            } else {
-                await ensureDocumentParsed(document);
-                const module = index.getModule(document.uri);
-                value = module && module.version === document.version
-                    ? GetFoldingRanges(document.getText(), module.lex)
-                    : [];
-            }
+            const snapshot = getFastDocumentSnapshot(document);
+            const value: IRslFoldingRange[] =
+                getFastFoldingRanges(document, snapshot).slice();
 
             this.foldingRangesCache.set(document.uri, {
                 version: document.version,

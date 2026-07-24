@@ -23,7 +23,7 @@ export function buildRslHoverContent(
     const parent = module ? findParent(module.object, object) : undefined;
     const parameter = module ? isParameterNode(module, object) : false;
     const lines: string[] = [];
-    const declaration = buildDeclaration(object, parent, parameter);
+    const declaration = buildDeclaration(object, parameter);
 
     lines.push("```rsl", declaration, "```");
 
@@ -61,7 +61,6 @@ export function buildRslHoverContent(
 
 function buildDeclaration(
     object: CBase,
-    parent: CBase | undefined,
     parameter: boolean
 ): string {
     const visibility = object.Private ? "Private " : "";

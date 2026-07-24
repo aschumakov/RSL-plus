@@ -20,6 +20,12 @@ const {
 const {
     DocumentAnalysisService
 } = require("../server/out/services/documentAnalysisService");
+const {
+    scanExternalModule
+} = require("../server/out/indexing/externalModuleScanner");
+const {
+    isLocalReferenceTarget
+} = require("../server/out/analysis/references");
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
 
 function createDocument(uri, version, source) {
@@ -118,6 +124,95 @@ function testAmbiguousImportDiagnostic() {
     assert.ok(diagnostics[0].message.includes("retail/common.mac"));
     assert.ok(diagnostics[0].message.includes("corporate/common.mac"));
     assert.strictEqual(index.findWorkspaceFileUri("common"), undefined);
+}
+
+function testExternalSummaryAndReferenceBoundaries() {
+    const source = [
+        "Import common, helpers;",
+        "Macro PublicMacro(value)",
+        "  Var localValue = 1;",
+        "End;",
+        "Class (TRecHandler) Customer",
+        "  Macro Load(id)",
+        "    Var localInMethod;",
+        "  End;",
+        "End;"
+    ].join("\n");
+    const external = scanExternalModule(source);
+
+    assert.deepStrictEqual(
+        external.imports.map(value => value.toLowerCase()),
+        ["common", "helpers"]
+    );
+    assert.ok(external.symbolTree.RecursiveFind("PublicMacro"));
+    assert.ok(external.symbolTree.RecursiveFind("Customer"));
+    assert.ok(external.symbolTree.RecursiveFind("Load"));
+    assert.strictEqual(
+        external.symbolTree.RecursiveFind("TRecHandler"),
+        undefined,
+        "Базовый класс не должен становиться объявлением модуля"
+    );
+    assert.strictEqual(
+        external.symbolTree.RecursiveFind("localValue"),
+        undefined
+    );
+    assert.strictEqual(
+        external.symbolTree.RecursiveFind("localInMethod"),
+        undefined
+    );
+
+    const inheritanceIndex = new WorkspaceIndex();
+    const libraryUri = "file:///workspace/library.mac";
+    inheritanceIndex.updateExternalModule(libraryUri, source, 1);
+    const consumerSource = [
+        "Import library;",
+        "Macro Use(value:TRecHandler)",
+        "End;"
+    ].join("\n");
+    const consumerUri = "file:///workspace/consumer.mac";
+    inheritanceIndex.updateModule(
+        consumerUri,
+        consumerSource,
+        new CBase(consumerSource, 0),
+        1,
+        true
+    );
+    assert.strictEqual(
+        inheritanceIndex.findImportedSymbols(
+            consumerUri,
+            "TRecHandler"
+        ).length,
+        0
+    );
+    assert.strictEqual(
+        inheritanceIndex.findImportedSymbols(
+            consumerUri,
+            "Customer"
+        ).length,
+        1
+    );
+
+    const tree = new CBase([
+        "Macro Test(p)",
+        "  Var localValue: Integer;",
+        "End;",
+        "Private Macro Hidden()",
+        "End;",
+        "Macro PublicMacro()",
+        "End;"
+    ].join("\n"), 0);
+    assert.strictEqual(
+        isLocalReferenceTarget(tree, tree.RecursiveFind("localValue")),
+        true
+    );
+    assert.strictEqual(
+        isLocalReferenceTarget(tree, tree.RecursiveFind("Hidden")),
+        true
+    );
+    assert.strictEqual(
+        isLocalReferenceTarget(tree, tree.RecursiveFind("PublicMacro")),
+        false
+    );
 }
 
 async function testWorkspaceLoaderUsesActiveImports() {
@@ -519,6 +614,9 @@ async function testImportedSymbolLoadsOnDemand() {
 
     testAmbiguousImportDiagnostic();
     console.log("[OK] неоднозначный Import не выбирается молча");
+
+    testExternalSummaryAndReferenceBoundaries();
+    console.log("[OK] external summary не смешивает публичные и локальные символы");
 
     await testWorkspaceLoaderUsesActiveImports();
     console.log("[OK] загружается только активный Import-граф");

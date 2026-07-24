@@ -7,12 +7,14 @@ client/src/**
 server/src/**
 **/*.ts
 **/*.map
+**/*.tsbuildinfo
+**/node_modules/.package-lock.json
 /node_modules/**
 client/node_modules/@types/**
 client/node_modules/undici-types/**
 server/node_modules/@types/**
 server/node_modules/undici-types/**
-tsconfig*.json
+**/tsconfig*.json
 tslint.json
 package-lock.json
 client/package-lock.json

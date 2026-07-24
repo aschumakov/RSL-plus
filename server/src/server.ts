@@ -1,6 +1,3 @@
-import * as fs from "fs";
-import * as path from "path";
-
 import {
     CodeActionKind,
     DidChangeConfigurationNotification,
@@ -40,7 +37,6 @@ const workspaceIndex = new WorkspaceIndex();
 configureSymbolTreeProvider(() => workspaceIndex.getModules());
 const scopeResolver = new RslScopeResolver(workspaceIndex);
 
-const logFilePath = path.resolve(__dirname, "..", "rsl-server.log");
 const defaultSettings: IRslSettings = {
     import: "ДА",
     diagnostics: DEFAULT_DIAGNOSTIC_SETTINGS
@@ -58,12 +54,9 @@ let lastReportedModuleCount = -1;
 let moduleCountTimer: NodeJS.Timeout | undefined;
 
 function logMessage(message: string): void {
-    const line =
-        `[${new Date().toISOString()}] ` +
-        `PID=${process.pid} ${message}\r\n`;
-
-    fs.promises.appendFile(logFilePath, line, "utf8")
-        .catch(() => undefined);
+    connection.console.log(
+        `[${new Date().toISOString()}] PID=${process.pid} ${message}`
+    );
 }
 
 function errorToString(error: unknown): string {
@@ -285,10 +278,6 @@ export function getTree(): IFAStruct[] {
 
 function getCurDoc(uri: string): TextDocument | undefined {
     return documents.get(uri);
-}
-
-function getCurObj(uri: string): CBase | undefined {
-    return workspaceIndex.getModule(uri)?.object;
 }
 
 const definitionProvider = new RslDefinitionProvider({

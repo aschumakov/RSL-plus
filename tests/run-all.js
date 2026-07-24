@@ -10,7 +10,6 @@ const tests = [
     "formatter.test.js",
     "folding.test.js",
     "definition.test.js",
-    "pipeline-architecture.test.js",
     "diagnostic-visibility.test.js",
     "scope-index.test.js",
     "diagnostics.test.js",

@@ -239,12 +239,6 @@ export function GetImportedMacroFilesFromTokens(
     return result;
 }
 
-function getImportReferences(
-    source: string
-): IImportDefinitionTarget[] {
-    return getImportReferencesFromTokens(lexRsl(source || "").tokens);
-}
-
 function getImportReferencesFromTokens(
     sourceTokens: IRslToken[]
 ): IImportDefinitionTarget[] {
