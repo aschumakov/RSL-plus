@@ -41,6 +41,8 @@ export interface IRslSyntaxNode {
     name?: string;
     modifier?: RslDeclarationModifier;
     typeName?: string;
+    /** Тип элемента типизированного ARRAY; typeName сохраняет тип объекта array. */
+    elementTypeName?: string;
     baseClassName?: string;
     variableRole?: RslVariableRole;
     parameterListStart?: number;
@@ -97,8 +99,8 @@ const STATEMENT_KEYWORDS = new Set([
     "continue", "onerror", "local", "private"
 ]);
 const FILE_RECORD_SPECIFIERS = new Set([
-    "sort", "key", "write", "append", "mem", "txt", "dbf", "dialog",
-    "btr"
+    "normal", "sort", "key", "write", "append", "mem", "txt", "dbf",
+    "dialog", "blob", "btr"
 ]);
 const WORD_OPERATORS = new Set(["and", "or", "not"]);
 const SYMBOL_OPERATORS = new Set([
@@ -586,6 +588,15 @@ class Parser {
             if (this.isSymbol(";")) {
                 rootTokens.push(this.take());
             }
+
+            if (!this.atEnd()) {
+                this.warning(
+                    "unreachable-after-unit-end",
+                    "Код после завершающего END не выполняется",
+                    this.current()
+                );
+            }
+
             /* Всё после верхнеуровневого END интерпретатор игнорирует. */
             this.index = this.tokens.length;
         }
@@ -622,6 +633,24 @@ class Parser {
 
             if (this.isSymbol(";")) {
                 const token = this.take();
+
+                /*
+                 * Пустой statement допустим грамматикой RSL, поэтому это не
+                 * синтаксическая ошибка. Но второй подряд разделитель почти
+                 * всегда является опечаткой и должен быть заметен в Problems.
+                 */
+                const previous = this.tokens[this.index - 2];
+                if (
+                    previous?.kind === "symbol" &&
+                    previous.raw === ";"
+                ) {
+                    this.warning(
+                        "duplicate-semicolon",
+                        "Повторная ';' выглядит как опечатка",
+                        token
+                    );
+                }
+
                 result.push(this.node(
                     "EmptyStatement",
                     token.start,
@@ -936,7 +965,19 @@ class Parser {
                     valueStart = expression[0].start;
                     valueEnd = expression[expression.length - 1].end;
                     initializer = this.parseExpression(expression);
+                } else {
+                    this.error(
+                        "expected-initializer-expression",
+                        "После '=' ожидается выражение",
+                        this.current()
+                    );
                 }
+            } else if (isConst) {
+                this.error(
+                    "missing-const-initializer",
+                    `Для константы ${name.raw} обязательно значение`,
+                    name
+                );
             }
 
             const declarator = this.node(
@@ -1010,17 +1051,46 @@ class Parser {
 
             this.take();
             used.push(name);
+            const declTokens: IRslToken[] = [name];
+            let elementTypeName: string | undefined;
+
+            if (this.isSymbol(":")) {
+                declTokens.push(this.take());
+
+                /*
+                 * :@Type уже встречается в реальных макросах и остаётся
+                 * совместимым расширением поверх документированного tpdecl.
+                 */
+                if (this.isSymbol("@")) {
+                    declTokens.push(this.take());
+                }
+
+                if (this.current().kind === "identifier") {
+                    const typeToken = this.take();
+                    declTokens.push(typeToken);
+                    elementTypeName = typeToken.value;
+                } else {
+                    this.error(
+                        "expected-type",
+                        "После ':' ожидается имя типа",
+                        this.current()
+                    );
+                }
+            }
+
             const declarator = this.node(
                 "VariableDeclarator",
                 name.start,
-                name.end,
+                declTokens[declTokens.length - 1].end,
                 [],
-                [name],
+                declTokens,
                 name.value
             );
             declarator.typeName = "array";
+            declarator.elementTypeName = elementTypeName;
             declarator.variableRole = "variable";
             children.push(declarator);
+            used.push(...declTokens.slice(1));
 
             if (this.isSymbol(",")) {
                 used.push(this.take());
@@ -1080,6 +1150,40 @@ class Parser {
             objectName = this.tokensText(parts[0]);
             dictionaryName = this.tokensText(parts[1]);
 
+            if (!objectName) {
+                this.error(
+                    "expected-file-name",
+                    `В ${isRecord ? "RECORD" : "FILE"} ожидается имя файла`,
+                    clause[0] || this.current()
+                );
+            } else if (
+                !this.isFileName(parts[0]) &&
+                !this.hasWhitespaceSeparatedNames(parts[0])
+            ) {
+                this.error(
+                    "invalid-file-name",
+                    "Имя файла должно быть идентификатором или строкой",
+                    parts[0][0]
+                );
+            }
+
+            if (parts.length > 1 && !dictionaryName) {
+                this.error(
+                    "expected-dictionary-name",
+                    "После ',' ожидается имя файла словаря",
+                    parts[1][0] || clause[clause.length - 1] || this.current()
+                );
+            } else if (
+                dictionaryName &&
+                !this.isFileName(parts[1])
+            ) {
+                this.error(
+                    "invalid-dictionary-name",
+                    "Имя файла словаря должно быть идентификатором или строкой",
+                    parts[1][0]
+                );
+            }
+
             if (parts.length > 2) {
                 this.error(
                     "too-many-object-arguments",
@@ -1135,6 +1239,11 @@ class Parser {
                         number
                     );
                 }
+            } else if (
+                specifierName === "txt" &&
+                this.current().kind === "number"
+            ) {
+                used.push(this.take());
             }
         }
 
@@ -2035,6 +2144,15 @@ class Parser {
         }
 
         return false;
+    }
+
+    private isFileName(tokens?: IRslToken[]): boolean {
+        return !!tokens &&
+            tokens.length === 1 &&
+            (
+                tokens[0].kind === "identifier" ||
+                tokens[0].kind === "string"
+            );
     }
 
     private tokensText(tokens?: IRslToken[]): string | undefined {

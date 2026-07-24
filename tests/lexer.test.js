@@ -157,6 +157,19 @@ test("SQL-блок после завершённой инструкции ост
     assert.ok(square.raw.includes("[^[[:digit:]]]*"));
 });
 
+test("SPNAME с фигурными скобками является единым идентификатором", () => {
+    const source = "Var {oper}, {34-23-O};";
+    const identifiers = lexRsl(source).tokens
+        .filter(token => token.kind === "identifier")
+        .map(token => token.value);
+
+    assert.deepStrictEqual(identifiers, [
+        "Var",
+        "{oper}",
+        "{34-23-O}"
+    ]);
+});
+
 console.log("");
 console.log(`Пройдено: ${passed}`);
 console.log(`Ошибок: ${failed}`);

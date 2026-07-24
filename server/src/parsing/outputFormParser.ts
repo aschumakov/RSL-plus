@@ -1,6 +1,10 @@
 import type { IRslToken } from "../lexer";
 
-const FORMAT_CHARACTERS = /^[lrcaemzfosvxtdw]+$/i;
+/*
+ * Документированные символы: l, r, c, a, t, d, m, w, z, f, i, iv.
+ * Остальные ранее поддержанные символы оставлены как совместимые расширения.
+ */
+const FORMAT_CHARACTERS = /^[ilrcaemzfosvxtdw]+$/i;
 
 export interface IRslFormatSpecifier {
     colon: IRslToken;

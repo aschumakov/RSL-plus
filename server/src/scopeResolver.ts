@@ -61,7 +61,21 @@ export class RslScopeResolver {
         }
 
         const tokens = this.getTokens(module);
-        const token = tokenAtOffset(tokens, offset, true);
+        let token = tokenAtOffset(tokens, offset, true);
+
+        /*
+         * По грамматике @ — отдельный унарный оператор, а не часть NAME.
+         * При переходе с самого символа @ всё равно разрешаем следующий
+         * идентификатор, чтобы навигация по ссылочному аргументу не ухудшилась.
+         */
+        if (token?.kind === "symbol" && token.raw === "@") {
+            const operatorIndex = findTokenIndex(tokens, token);
+            const operand = tokens[operatorIndex + 1];
+
+            if (operand?.kind === "identifier") {
+                token = operand;
+            }
+        }
 
         if (!token || token.kind !== "identifier") {
             return undefined;

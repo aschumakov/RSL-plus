@@ -91,6 +91,14 @@ export function buildRslCodeActions(
                 );
                 break;
 
+            case "duplicate-semicolon":
+                action = createDeleteTokenAction(
+                    module,
+                    diagnostic,
+                    "Удалить повторную ';'"
+                );
+                break;
+
             case "implicit-string-concatenation":
                 action = createInsertTextAction(
                     module,

@@ -169,5 +169,11 @@ const RSL_SYSTEM_SPECIAL_VARIABLE_NAMES = new Set(
 );
 
 export function isRslSystemSpecialVariableName(name: string): boolean {
-    return RSL_SYSTEM_SPECIAL_VARIABLE_NAMES.has(normalizeIdentifier(name));
+    const normalized = normalizeIdentifier(name);
+    const bareName = normalized.startsWith("{") &&
+        normalized.endsWith("}")
+        ? normalized.substring(1, normalized.length - 1)
+        : normalized;
+
+    return RSL_SYSTEM_SPECIAL_VARIABLE_NAMES.has(bareName);
 }

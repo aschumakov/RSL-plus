@@ -46,6 +46,8 @@ export interface IRslLexResult {
     lineStarts: number[];
 }
 
+const COMPOUND_SYMBOLS = new Set(["==", "!=", "<=", ">="]);
+
 interface IPosition {
     index: number;
     line: number;
@@ -202,6 +204,33 @@ export function lexRsl(
             continue;
         }
 
+        /*
+         * SPNAME — самостоятельный идентификатор RSL. Фигурные скобки
+         * являются частью имени, а внутри допустимы любые символы:
+         *
+         *     {oper}
+         *     {34-23-O}
+         *
+         * Незакрытую конструкцию оставляем обычными symbol-токенами, чтобы
+         * существующая диагностика скобок показала точную ошибку.
+         */
+        if (current === "{") {
+            const close = text.indexOf("}", position.index + 1);
+
+            if (close >= 0) {
+                const start = snapshot(position);
+                advanceTo(text, position, close + 1, lineStarts);
+                pushSnapshotToken(
+                    tokens,
+                    text,
+                    "identifier",
+                    start,
+                    position
+                );
+                continue;
+            }
+        }
+
         if (isIdentifierStart(current)) {
             const start = snapshot(position);
 
@@ -229,6 +258,13 @@ export function lexRsl(
             }
 
             pushSnapshotToken(tokens, text, "number", start, position);
+            continue;
+        }
+
+        const compound = text.substring(position.index, position.index + 2);
+
+        if (COMPOUND_SYMBOLS.has(compound)) {
+            pushToken(tokens, text, position, "symbol", 2, lineStarts);
             continue;
         }
 
@@ -353,8 +389,7 @@ export function isIdentifierStart(value: string): boolean {
     }
 
     const code = value.charCodeAt(0);
-    return code === 64 || // @
-        code === 95 || // _
+    return code === 95 || // _
         (code >= 65 && code <= 90) ||
         (code >= 97 && code <= 122) ||
         (code >= 0x0410 && code <= 0x044F) ||
@@ -756,13 +791,53 @@ function decodeRslString(raw: string): string {
     for (let index = 0; index < body.length; index++) {
         const current = body.charAt(index);
 
-        if (current === "\\" && index + 1 < body.length) {
-            result += body.charAt(index + 1);
-            index++;
+        if (current !== "\\" || index + 1 >= body.length) {
+            result += current;
             continue;
         }
 
-        result += current;
+        const escaped = body.charAt(index + 1);
+
+        switch (escaped) {
+            case "n":
+                result += "\n";
+                index++;
+                break;
+            case "r":
+                result += "\r";
+                index++;
+                break;
+            case "t":
+                result += "\t";
+                index++;
+                break;
+            case "f":
+                result += "\f";
+                index++;
+                break;
+            case "x":
+            case "X": {
+                const hex = body.substring(index + 2, index + 4);
+
+                if (/^[0-9a-f]{2}$/i.test(hex)) {
+                    result += String.fromCharCode(parseInt(hex, 16));
+                    index += 3;
+                } else {
+                    /*
+                     * Для неизвестной/неполной escape-последовательности
+                     * сохраняем прежнее tolerant-поведение: экранирующий
+                     * слеш удаляется, следующий символ остаётся.
+                     */
+                    result += escaped;
+                    index++;
+                }
+                break;
+            }
+            default:
+                result += escaped;
+                index++;
+                break;
+        }
     }
 
     return result;

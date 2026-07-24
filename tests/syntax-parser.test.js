@@ -41,10 +41,44 @@ assert.deepStrictEqual(codes([
 assert.ok(codes("import common bankinter;").includes("missing-comma"));
 assert.ok(codes("macro Test(a b)\nend").includes("missing-comma"));
 assert.ok(codes("var a = 1\nvar b = 2;").includes("missing-semicolon"));
+const duplicateSemicolon = parseRslSyntax(
+  "import InsCarryDoc, globals, inc_utils, inc_access, inc_icm_lib;;"
+).diagnostics.find(item => item.code === "duplicate-semicolon");
+assert.ok(duplicateSemicolon);
+assert.strictEqual(duplicateSemicolon.severity, "warning");
+assert.ok(!codes(";").includes("duplicate-semicolon"));
 assert.ok(codes("if (true)\n a = 1\nelse\n a = 2\nend").length === 0);
 assert.ok(codes("while (true)\n a = 1;").includes("missing-end"));
 
 console.log("[OK] syntax parser tests");
+
+const specialNames = parseRslSyntax(
+  "Private Var {oper}, {34-23-O};"
+);
+assert.ok(!specialNames.diagnostics.some(item =>
+  item.code === "expected-variable-name"
+));
+assert.deepStrictEqual(
+  specialNames.root.children[0].children.map(item => item.name),
+  ["{oper}", "{34-23-O}"]
+);
+
+console.log("[OK] SPNAME разбирается как имя объявления");
+
+const unitEnd = parseRslSyntax([
+  "value = 1;",
+  "End;",
+  "value = 2;"
+].join("\n"));
+assert.ok(unitEnd.root.tokens.some(token =>
+  token.value.toLowerCase() === "end"
+));
+assert.ok(unitEnd.diagnostics.some(item =>
+  item.code === "unreachable-after-unit-end" &&
+  item.severity === "warning"
+));
+
+console.log("[OK] верхнеуровневый END завершает unit");
 
 const multilineXml = [
   'result = "<bis:ViolationDate>" +',

@@ -408,6 +408,14 @@ function addEndDiagnostics(
 ): void {
     const tokens = module.syntax.tokens;
     const stack: IBlockEntry[] = [];
+    const unitEndStarts = new Set(
+        module.syntax.root.tokens
+            .filter(token =>
+                token.kind === "identifier" &&
+                normalizeIdentifier(token.value) === END_KEYWORD
+            )
+            .map(token => token.start)
+    );
     let canStartBlock = true;
     let currentLine = -1;
 
@@ -429,6 +437,10 @@ function addEndDiagnostics(
         const word = normalizeIdentifier(token.value);
 
         if (word === END_KEYWORD) {
+            if (unitEndStarts.has(token.start)) {
+                break;
+            }
+
             if (stack.length === 0) {
                 result.push(createTokenDiagnostic(
                     token,
@@ -1097,11 +1109,20 @@ function isRslSystemSpecialVariableReference(
     const next = tokens[index + 1];
 
     return token?.kind === "identifier" &&
-        isRslSystemSpecialVariableName(token.value) &&
-        previous?.kind === "symbol" &&
-        previous.raw === "{" &&
-        next?.kind === "symbol" &&
-        next.raw === "}";
+        (
+            (
+                token.raw.startsWith("{") &&
+                token.raw.endsWith("}") &&
+                isRslSystemSpecialVariableName(token.value)
+            ) ||
+            (
+                isRslSystemSpecialVariableName(token.value) &&
+                previous?.kind === "symbol" &&
+                previous.raw === "{" &&
+                next?.kind === "symbol" &&
+                next.raw === "}"
+            )
+        );
 }
 
 function someTokenInRange(

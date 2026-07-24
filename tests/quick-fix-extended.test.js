@@ -139,6 +139,23 @@ test("Повторный Import имеет уровень Warning", () => {
   assert.strictEqual(diagnostic.severity, 2);
 });
 
+test("Quick Fix удаляет повторную точку с запятой", () => {
+  const source = [
+    "import InsCarryDoc, globals, inc_utils, inc_access, inc_icm_lib;;",
+    "private record inc (inc_ords);"
+  ].join("\n");
+  const { module, diagnostics } = diagnosticsFor(source);
+  const diagnostic = diagnostics.find(item =>
+    item.code === "duplicate-semicolon"
+  );
+
+  assert.ok(diagnostic);
+  assert.strictEqual(diagnostic.severity, 2);
+
+  const updated = applyFirstAction(source, module, diagnostic);
+  assert.strictEqual(updated, source.replace(";;", ";"));
+});
+
 test("Если последний параметр обработчика используется, остальные не проверяются", () => {
   const source = [
     "Macro ExecuteStep(doc, payorder, DocKind, IdOperation, NumberStep)",
