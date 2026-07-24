@@ -5,8 +5,14 @@ import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 import { ReferenceIndex } from "../analysis/referenceIndex";
 import type { PerformanceLogger } from "../performanceLogger";
 
-export type ModuleLoadPriority = "interactive" | "background";
+export type ModuleLoadPriority = "foreground" | "background";
 export type WorkspaceIndexingMode = "activeImports" | "workspaceIdle" | "full";
+
+interface IQueuedModule {
+    uri: string;
+    priority: ModuleLoadPriority;
+    generation: number;
+}
 
 export interface IWorkspaceModuleLoaderOptions {
     log(message: string): void;
@@ -23,14 +29,16 @@ export interface IWorkspaceModuleLoaderOptions {
  * По умолчанию индексируются только Import открытых документов.
  */
 export class WorkspaceModuleLoader {
-    private interactiveQueue: string[] = [];
-    private backgroundQueue: string[] = [];
-    private queued = new Set<string>();
+    private foregroundQueue: IQueuedModule[] = [];
+    private backgroundQueue: IQueuedModule[] = [];
+    private queued = new Map<string, IQueuedModule>();
     private workspaceUris = new Set<string>();
     private indexedUris = new Set<string>();
-    private pendingImportNames = new Set<string>();
+    private pendingImportNames = new Map<string, IQueuedModule>();
     private running = false;
     private runningUri: string | undefined;
+    private runningItem: IQueuedModule | undefined;
+    private foregroundGeneration = 0;
     private loadingPromises = new Map<
         string,
         Promise<IIndexedModule | undefined>
@@ -85,9 +93,13 @@ export class WorkspaceModuleLoader {
         this.index.registerWorkspaceFiles(workspaceList);
         this.referenceIndex.retainWorkspaceFiles(workspaceList);
 
-        const pending = Array.from(this.pendingImportNames);
+        const pending = Array.from(this.pendingImportNames.values());
         this.pendingImportNames.clear();
-        pending.forEach(name => this.enqueueImport(name));
+        pending.forEach(item => this.enqueueImport(
+            item.uri,
+            item.priority,
+            item.generation
+        ));
         this.applyIndexingMode();
     }
 
@@ -99,7 +111,7 @@ export class WorkspaceModuleLoader {
         this.indexingMode = mode;
         this.backgroundQueue = [];
         this.clearIdleTimer();
-        this.rebuildQueuedSet();
+        this.rebuildQueuedMap();
         this.applyIndexingMode();
     }
 
@@ -122,20 +134,72 @@ export class WorkspaceModuleLoader {
         this.reportProgress();
     }
 
-    enqueueImport(name: string): void {
+    /**
+     * Начинает новую интерактивную ветвь анализа.
+     * Остаток очереди предыдущего активного документа сохраняется, но
+     * переводится в фон и больше не может задержать новый документ.
+     */
+    beginForegroundGeneration(): void {
+        this.foregroundGeneration++;
+
+        for (const item of this.foregroundQueue) {
+            item.priority = "background";
+            item.generation = 0;
+            this.backgroundQueue.push(item);
+        }
+        this.foregroundQueue = [];
+
+        for (const item of this.pendingImportNames.values()) {
+            if (item.priority === "foreground") {
+                item.priority = "background";
+                item.generation = 0;
+            }
+        }
+
+        this.rebuildQueuedMap();
+    }
+
+    enqueueImports(
+        names: readonly string[],
+        priority: ModuleLoadPriority = "foreground"
+    ): void {
+        const generation = priority === "foreground"
+            ? this.foregroundGeneration
+            : 0;
+
+        for (const name of names) {
+            this.enqueueImport(name, priority, generation);
+        }
+    }
+
+    enqueueImport(
+        name: string,
+        priority: ModuleLoadPriority = "foreground",
+        generation = priority === "foreground"
+            ? this.foregroundGeneration
+            : 0
+    ): void {
         if (!name) {
             return;
         }
 
         if (this.index.workspaceFilesReady === false) {
-            this.pendingImportNames.add(name);
+            const pending = this.pendingImportNames.get(name);
+
+            if (!pending || priority === "foreground") {
+                this.pendingImportNames.set(name, {
+                    uri: name,
+                    priority,
+                    generation
+                });
+            }
             return;
         }
 
         const resolution = this.index.resolveWorkspaceFile(name);
 
         if (resolution.kind === "resolved") {
-            this.enqueue(resolution.value, "interactive");
+            this.enqueue(resolution.value, priority, generation);
             return;
         }
 
@@ -144,32 +208,59 @@ export class WorkspaceModuleLoader {
         }
     }
 
-    enqueue(uri: string, priority: ModuleLoadPriority): void {
-        if (!uri || this.index.getModule(uri) || this.runningUri === uri) {
+    enqueue(
+        uri: string,
+        priority: ModuleLoadPriority,
+        generation = priority === "foreground"
+            ? this.foregroundGeneration
+            : 0
+    ): void {
+        if (!uri || this.index.getModule(uri)) {
             return;
         }
 
-        if (this.queued.has(uri)) {
-            if (priority === "interactive") {
-                this.backgroundQueue = this.backgroundQueue.filter(
-                    item => item !== uri
-                );
+        if (this.runningUri === uri) {
+            if (priority === "foreground" && this.runningItem) {
+                this.runningItem.priority = "foreground";
+                this.runningItem.generation = this.foregroundGeneration;
+            }
+            return;
+        }
 
-                if (!this.interactiveQueue.includes(uri)) {
-                    this.interactiveQueue.push(uri);
-                }
+        const queued = this.queued.get(uri);
+
+        if (queued) {
+            if (priority === "foreground" && (
+                queued.priority !== "foreground" ||
+                queued.generation !== this.foregroundGeneration
+            )) {
+                this.removeQueued(uri);
+                const promoted: IQueuedModule = {
+                    uri,
+                    priority: "foreground",
+                    generation: this.foregroundGeneration
+                };
+                this.queued.set(uri, promoted);
+                this.foregroundQueue.push(promoted);
             }
 
             this.processQueue();
             return;
         }
 
-        this.queued.add(uri);
+        const item: IQueuedModule = {
+            uri,
+            priority,
+            generation: priority === "foreground"
+                ? generation
+                : 0
+        };
+        this.queued.set(uri, item);
 
-        if (priority === "interactive") {
-            this.interactiveQueue.push(uri);
+        if (priority === "foreground") {
+            this.foregroundQueue.push(item);
         } else {
-            this.backgroundQueue.push(uri);
+            this.backgroundQueue.push(item);
         }
 
         this.processQueue();
@@ -195,8 +286,16 @@ export class WorkspaceModuleLoader {
             return loaded;
         }
 
+        if (this.runningUri === uri && this.runningItem) {
+            this.runningItem.priority = "foreground";
+            this.runningItem.generation = this.foregroundGeneration;
+        }
         this.removeQueued(uri);
-        return this.loadOnce(uri);
+        return this.loadOnce(uri, {
+            uri,
+            priority: "foreground",
+            generation: this.foregroundGeneration
+        });
     }
 
     /**
@@ -252,7 +351,11 @@ export class WorkspaceModuleLoader {
 
     async reload(uri: string): Promise<void> {
         this.removeQueued(uri);
-        await this.loadOnce(uri);
+        await this.loadOnce(uri, {
+            uri,
+            priority: "foreground",
+            generation: this.foregroundGeneration
+        });
     }
 
     remove(uri: string): void {
@@ -268,7 +371,7 @@ export class WorkspaceModuleLoader {
 
     get isIndexing(): boolean {
         return this.running ||
-            this.interactiveQueue.length > 0 ||
+            this.foregroundQueue.length > 0 ||
             this.backgroundQueue.length > 0;
     }
 
@@ -308,19 +411,21 @@ export class WorkspaceModuleLoader {
             return;
         }
 
-        const uri = this.interactiveQueue.shift() ||
+        const item = this.foregroundQueue.shift() ||
             this.backgroundQueue.shift();
 
-        if (!uri) {
+        if (!item) {
             this.reportProgress();
             return;
         }
 
+        const { uri } = item;
         this.running = true;
         this.runningUri = uri;
+        this.runningItem = item;
 
         setImmediate(() => {
-            this.loadOnce(uri).catch(error => {
+            this.loadOnce(uri, item).catch(error => {
                 this.options.log(
                     `Background module load failed: ${uri}\n` +
                     errorToString(error)
@@ -329,27 +434,34 @@ export class WorkspaceModuleLoader {
                 this.queued.delete(uri);
                 this.running = false;
                 this.runningUri = undefined;
+                this.runningItem = undefined;
                 this.reportProgress();
                 this.processQueue();
             });
         });
     }
 
-    private loadOnce(uri: string): Promise<IIndexedModule | undefined> {
+    private loadOnce(
+        uri: string,
+        item?: IQueuedModule
+    ): Promise<IIndexedModule | undefined> {
         const running = this.loadingPromises.get(uri);
 
         if (running) {
             return running;
         }
 
-        const created = this.load(uri).finally(() => {
+        const created = this.load(uri, item).finally(() => {
             this.loadingPromises.delete(uri);
         });
         this.loadingPromises.set(uri, created);
         return created;
     }
 
-    private async load(uri: string): Promise<IIndexedModule | undefined> {
+    private async load(
+        uri: string,
+        item?: IQueuedModule
+    ): Promise<IIndexedModule | undefined> {
         let filePath: string;
 
         try {
@@ -360,7 +472,11 @@ export class WorkspaceModuleLoader {
 
         const performance = this.options.performance;
         const loadSpan = performance?.enabled
-            ? performance.start("workspaceModule.load", { uri })
+            ? performance.start("workspaceModule.load", {
+                uri,
+                priority: item?.priority || "foreground",
+                generation: item?.generation || 0
+            })
             : undefined;
         const ioSpan = performance?.enabled
             ? performance.start("workspaceModule.io", { uri })
@@ -393,11 +509,24 @@ export class WorkspaceModuleLoader {
         }
         this.indexedUris.add(uri);
 
+        const keepForeground = item?.priority === "foreground" &&
+            item.generation === this.foregroundGeneration;
+        const childPriority: ModuleLoadPriority = keepForeground
+            ? "foreground"
+            : "background";
+        const childGeneration = keepForeground
+            ? item.generation
+            : 0;
+
         for (const importName of module.imports) {
             const resolution = this.index.resolveWorkspaceFile(importName);
 
             if (resolution.kind === "resolved") {
-                this.enqueue(resolution.value, "interactive");
+                this.enqueue(
+                    resolution.value,
+                    childPriority,
+                    childGeneration
+                );
             }
         }
 
@@ -414,16 +543,20 @@ export class WorkspaceModuleLoader {
     }
 
     private removeQueued(uri: string): void {
-        this.interactiveQueue = this.interactiveQueue.filter(item => item !== uri);
-        this.backgroundQueue = this.backgroundQueue.filter(item => item !== uri);
+        this.foregroundQueue = this.foregroundQueue.filter(
+            item => item.uri !== uri
+        );
+        this.backgroundQueue = this.backgroundQueue.filter(
+            item => item.uri !== uri
+        );
         this.queued.delete(uri);
     }
 
-    private rebuildQueuedSet(): void {
-        this.queued = new Set([
-            ...this.interactiveQueue,
+    private rebuildQueuedMap(): void {
+        this.queued = new Map([
+            ...this.foregroundQueue,
             ...this.backgroundQueue
-        ]);
+        ].map(item => [item.uri, item]));
     }
 
     private reportProgress(): void {

@@ -38,20 +38,7 @@ const defaults = {
 };
 
 async function testAvailableSettingsDoNotWaitForVsCode() {
-    let resolveConfiguration;
-    let requestCompleted = false;
-    const requested = new Promise(resolve => {
-        resolveConfiguration = resolve;
-    });
-    const connection = {
-        workspace: {
-            getConfiguration() {
-                return requested;
-            }
-        }
-    };
-    const service = new RslSettingsService(connection, defaults);
-    service.configure(true);
+    const service = new RslSettingsService(defaults);
     service.updateFromConfiguration({
         RSLanguageServer: {
             import: "НЕТ",
@@ -61,78 +48,55 @@ async function testAvailableSettingsDoNotWaitForVsCode() {
         }
     });
 
-    const changed = [];
-    service.onDidResolve((uri, settings) => {
-        changed.push({ uri, settings });
-    });
-
-    const pending = service.get("file:///slow.mac").then(settings => {
-        requestCompleted = true;
-        return settings;
-    });
     const available = service.getAvailable("file:///slow.mac");
 
     assert.strictEqual(available.import, "НЕТ");
     assert.strictEqual(available.diagnostics.maxProblems, 75);
     assert.strictEqual(available.diagnostics.enabled, true);
-    await Promise.resolve();
     assert.strictEqual(
-        requestCompleted,
-        false,
-        "Доступный снимок не должен ждать workspace/configuration"
+        typeof service.get,
+        "undefined",
+        "Сервис настроек не должен иметь асинхронный LSP-путь"
     );
+}
 
-    resolveConfiguration({
-        import: "ДА",
+async function testResourceSettingsAreIsolatedAndCached() {
+    const service = new RslSettingsService(defaults);
+    const changed = [];
+    service.onDidResolve((uri, settings) => {
+        changed.push({ uri, settings });
+    });
+
+    service.updateResource("file:///a.mac", {
         diagnostics: {
             maxProblems: 10
         }
     });
-    const resolved = await pending;
-
-    assert.strictEqual(resolved.import, "ДА");
-    assert.strictEqual(service.getAvailable(
-        "file:///slow.mac"
-    ).diagnostics.maxProblems, 10);
-    assert.strictEqual(changed.length, 1);
-    assert.strictEqual(changed[0].uri, "file:///slow.mac");
-}
-
-async function testResourceSettingsAreIsolatedAndCached() {
-    const calls = [];
-    const connection = {
-        workspace: {
-            getConfiguration({ scopeUri }) {
-                calls.push(scopeUri);
-                return Promise.resolve({
-                    import: "ДА",
-                    diagnostics: {
-                        maxProblems: scopeUri.endsWith("a.mac") ? 10 : 20
-                    }
-                });
-            }
+    service.updateResource("file:///b.mac", {
+        diagnostics: {
+            maxProblems: 20
         }
-    };
-    const service = new RslSettingsService(connection, defaults);
-    service.configure(true);
+    });
 
-    const a = await service.get("file:///a.mac");
-    const b = await service.get("file:///b.mac");
+    const a = service.getAvailable("file:///a.mac");
+    const b = service.getAvailable("file:///b.mac");
     assert.strictEqual(a.diagnostics.maxProblems, 10);
     assert.strictEqual(b.diagnostics.maxProblems, 20);
     assert.strictEqual(a.diagnostics.enabled, true);
-    assert.strictEqual(calls.length, 2);
+    assert.strictEqual(changed.length, 2);
 
-    await service.get("file:///a.mac");
-    assert.strictEqual(
-        calls.length,
-        2,
-        "Настройки документа должны кэшироваться отдельно"
-    );
+    assert.strictEqual(service.updateResource("file:///a.mac", {
+        diagnostics: {
+            maxProblems: 10
+        }
+    }), false);
+    assert.strictEqual(changed.length, 2, "Одинаковый snapshot не публикуется");
 
     service.clear("file:///a.mac");
-    await service.get("file:///a.mac");
-    assert.strictEqual(calls.length, 3);
+    assert.strictEqual(
+        service.getAvailable("file:///a.mac").diagnostics.maxProblems,
+        200
+    );
 }
 
 async function testPerformanceLogger() {

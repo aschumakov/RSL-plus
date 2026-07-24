@@ -301,6 +301,109 @@ async function testWorkspaceLoaderUsesActiveImports() {
     }
 }
 
+async function testActiveDocumentPreemptsQueuedModules() {
+    const directory = await fs.promises.mkdtemp(
+        path.join(os.tmpdir(), "rsl-priority-")
+    );
+
+    try {
+        const names = ["running.mac", "old-active.mac", "new-active.mac"];
+        const files = names.map(name =>
+            pathToFileURL(path.join(directory, name)).toString()
+        );
+        await Promise.all(names.map((name, index) =>
+            fs.promises.writeFile(
+                path.join(directory, name),
+                `Macro Test${index}()\nEnd;`,
+                "utf8"
+            )
+        ));
+
+        const loaded = [];
+        const index = new WorkspaceIndex();
+        const loader = new WorkspaceModuleLoader(index, {
+            log: message => {
+                throw new Error(message);
+            },
+            onModuleLoaded: module => loaded.push(module.uri),
+            onModuleCountChanged() {}
+        });
+        loader.registerWorkspaceFiles(files);
+
+        loader.enqueue(files[0], "background");
+        loader.enqueue(files[1], "foreground");
+        loader.beginForegroundGeneration();
+        loader.enqueue(files[2], "foreground");
+
+        while (loader.isIndexing) {
+            await new Promise(resolve => setTimeout(resolve, 5));
+        }
+
+        assert.deepStrictEqual(
+            loaded,
+            [files[0], files[2], files[1]],
+            "Новая активная ветвь должна обгонять старую очередь"
+        );
+    } finally {
+        await fs.promises.rm(directory, {
+            recursive: true,
+            force: true
+        });
+    }
+}
+
+async function testActiveDocumentPreemptsQueuedParses() {
+    const sources = new Map([
+        ["file:///old-a.mac", "Macro OldA()\nEnd;"],
+        ["file:///old-b.mac", "Macro OldB()\nEnd;"],
+        ["file:///active.mac", "Macro Active()\nEnd;"]
+    ]);
+    const documents = new Map(
+        Array.from(sources, ([uri, source]) => [
+            uri,
+            createDocument(uri, 1, source)
+        ])
+    );
+    const parsed = [];
+    const service = new DocumentAnalysisService(
+        {
+            get: uri => documents.get(uri)
+        },
+        new WorkspaceIndex(),
+        {
+            getAvailable: () => ({
+                import: "ДА",
+                diagnostics: {}
+            })
+        },
+        {
+            log: message => {
+                throw new Error(message);
+            },
+            invalidateProviderCaches: () => undefined,
+            onParsed: module => parsed.push(module.uri),
+            onImports: () => undefined,
+            initialParseDelayMs: 0,
+            inactiveParseDelayMs: 0
+        }
+    );
+
+    for (const document of documents.values()) {
+        service.open(document);
+    }
+    service.setActiveDocument("file:///active.mac");
+
+    while (service.isBusy) {
+        await new Promise(resolve => setTimeout(resolve, 5));
+    }
+
+    assert.strictEqual(
+        parsed[0],
+        "file:///active.mac",
+        "Полный parse активного файла должен получить первый scheduler slot"
+    );
+}
+
 async function testParseReadinessDoesNotWaitForSettings() {
     const uri = "file:///workspace/navigation.mac";
     const source = [
@@ -620,6 +723,12 @@ async function testImportedSymbolLoadsOnDemand() {
 
     await testWorkspaceLoaderUsesActiveImports();
     console.log("[OK] загружается только активный Import-граф");
+
+    await testActiveDocumentPreemptsQueuedModules();
+    console.log("[OK] новая активная Import-ветвь вытесняет старую очередь");
+
+    await testActiveDocumentPreemptsQueuedParses();
+    console.log("[OK] полный parse активного файла вытесняет фоновые разборы");
 
     await testParseReadinessDoesNotWaitForSettings();
     console.log("[OK] парсер и Import не ждут workspace/configuration");

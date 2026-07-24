@@ -16,11 +16,23 @@ export interface IDocumentAnalysisOptions {
     changeDebounceMs?: number;
     slowParseLogMs?: number;
     initialParseDelayMs?: number;
+    inactiveParseDelayMs?: number;
     log(message: string): void;
     performance?: PerformanceLogger;
     invalidateProviderCaches(uri: string): void;
     onParsed(module: IIndexedModule, wasKnown: boolean): void;
     onImports(uri: string, imports: readonly string[]): void;
+}
+
+type AnalysisPriority = "foreground" | "background";
+
+interface IValidationTask {
+    document: TextDocument;
+    generation: number;
+    priority: AnalysisPriority;
+    promise: Promise<void>;
+    resolve(): void;
+    reject(error: unknown): void;
 }
 
 /**
@@ -33,10 +45,17 @@ export class DocumentAnalysisService {
     private parsedVersions = new Map<string, number>();
     private parseTimers = new Map<string, NodeJS.Timeout>();
     private running = new Map<string, Promise<void>>();
+    private foregroundQueue: IValidationTask[] = [];
+    private backgroundQueue: IValidationTask[] = [];
+    private queued = new Map<string, IValidationTask>();
+    private queueScheduled = false;
+    private validationRunning = false;
     private fastSnapshots = new Map<string, IFastDocumentSnapshot>();
     private changeDebounceMs: number;
     private slowParseLogMs: number;
     private initialParseDelayMs: number;
+    private inactiveParseDelayMs: number;
+    private activeDocumentUri: string | undefined;
 
     constructor(
         private documents: TextDocuments<TextDocument>,
@@ -47,14 +66,19 @@ export class DocumentAnalysisService {
         this.changeDebounceMs = options.changeDebounceMs ?? 90;
         this.slowParseLogMs = options.slowParseLogMs ?? 75;
         this.initialParseDelayMs = options.initialParseDelayMs ?? 50;
+        this.inactiveParseDelayMs = options.inactiveParseDelayMs ?? 500;
     }
 
     get isBusy(): boolean {
-        return this.parseTimers.size > 0 || this.running.size > 0;
+        return this.parseTimers.size > 0 ||
+            this.running.size > 0 ||
+            this.queued.size > 0;
     }
 
     isBusyFor(uri: string): boolean {
-        return this.parseTimers.has(uri) || this.running.has(uri);
+        return this.parseTimers.has(uri) ||
+            this.running.has(uri) ||
+            this.queued.has(uri);
     }
 
     /**
@@ -88,7 +112,12 @@ export class DocumentAnalysisService {
 
         const snapshot = this.refreshFastSnapshot(document);
         this.prepareOutline(document, snapshot);
-        this.scheduleWithDelay(document, this.initialParseDelayMs);
+        this.scheduleWithDelay(
+            document,
+            document.uri === this.activeDocumentUri
+                ? this.initialParseDelayMs
+                : this.inactiveParseDelayMs
+        );
         if (span) {
             performance.end(span, {
                 duplicate: false,
@@ -115,12 +144,61 @@ export class DocumentAnalysisService {
 
         this.fastSnapshots.delete(document.uri);
         this.options.invalidateProviderCaches(document.uri);
-        this.scheduleWithDelay(document, this.changeDebounceMs);
+        this.scheduleWithDelay(
+            document,
+            document.uri === this.activeDocumentUri
+                ? this.changeDebounceMs
+                : this.inactiveParseDelayMs
+        );
     }
 
     /** Совместимость со старым API: считается изменением документа. */
     schedule(document: TextDocument): void {
         this.changed(document);
+    }
+
+    /**
+     * Активный документ получает ближайший parser slot. Остальные открытые
+     * вкладки сохраняют готовый Fast Snapshot, но полный AST строят позже.
+     */
+    setActiveDocument(uri: string | undefined): void {
+        this.activeDocumentUri = uri;
+
+        for (const task of this.foregroundQueue) {
+            task.priority = "background";
+            this.backgroundQueue.push(task);
+        }
+        this.foregroundQueue = [];
+
+        if (!uri) {
+            return;
+        }
+
+        const document = this.documents.get(uri);
+        if (!document || this.isCurrent(document)) {
+            return;
+        }
+
+        const queued = this.queued.get(uri);
+        if (queued) {
+            this.promoteValidation(queued);
+        } else {
+            this.cancelTimer(uri);
+            const generation = this.nextGeneration(uri);
+            this.startValidation(
+                document,
+                generation,
+                "foreground"
+            ).catch(error => {
+                this.options.log(
+                    `Validation failed: ${uri}\n${errorToString(error)}`
+                );
+            });
+        }
+        this.options.performance?.mark("analysis.priority", {
+            uri,
+            priority: "active"
+        });
     }
 
 
@@ -150,12 +228,13 @@ export class DocumentAnalysisService {
         }
 
         const generation = this.nextGeneration(document.uri);
-        await this.startValidation(document, generation);
+        await this.startValidation(document, generation, "foreground");
         return this.index.getModule(document.uri)?.object;
     }
 
     close(uri: string): void {
         this.cancelTimer(uri);
+        this.cancelQueued(uri);
         this.fastSnapshots.delete(uri);
         this.parsedVersions.delete(uri);
         this.nextGeneration(uri);
@@ -163,6 +242,7 @@ export class DocumentAnalysisService {
     }
 
     invalidate(uri: string): void {
+        this.cancelQueued(uri);
         this.fastSnapshots.delete(uri);
         this.parsedVersions.delete(uri);
     }
@@ -229,7 +309,11 @@ export class DocumentAnalysisService {
                 return;
             }
 
-            this.startValidation(current, generation).catch(error => {
+            const priority: AnalysisPriority =
+                current.uri === this.activeDocumentUri
+                    ? "foreground"
+                    : "background";
+            this.startValidation(current, generation, priority).catch(error => {
                 this.options.log(
                     `Validation failed: ${uri}\n${errorToString(error)}`
                 );
@@ -241,29 +325,130 @@ export class DocumentAnalysisService {
 
     private startValidation(
         document: TextDocument,
-        generation: number
+        generation: number,
+        priority: AnalysisPriority =
+            document.uri === this.activeDocumentUri
+                ? "foreground"
+                : "background"
     ): Promise<void> {
         const uri = document.uri;
         const existing = this.running.get(uri);
 
         if (existing) {
             return existing.then(() => {
-                if (this.isCurrent(document)) {
+                const current = this.documents.get(uri);
+
+                if (!current || this.isCurrent(current)) {
                     return;
                 }
-                return this.startValidation(document, generation);
+                return this.startValidation(
+                    current,
+                    this.parseGeneration.get(uri) ?? generation,
+                    priority
+                );
             });
         }
 
-        const task = Promise.resolve()
-            .then(() => this.validate(document, generation))
-            .finally(() => {
-                if (this.running.get(uri) === task) {
-                    this.running.delete(uri);
-                }
-            });
-        this.running.set(uri, task);
-        return task;
+        const queued = this.queued.get(uri);
+        if (queued) {
+            queued.document = document;
+            queued.generation = generation;
+            if (priority === "foreground") {
+                this.promoteValidation(queued);
+            }
+            return queued.promise;
+        }
+
+        let resolveTask!: () => void;
+        let rejectTask!: (error: unknown) => void;
+        const promise = new Promise<void>((resolve, reject) => {
+            resolveTask = resolve;
+            rejectTask = reject;
+        });
+        const task: IValidationTask = {
+            document,
+            generation,
+            priority,
+            promise,
+            resolve: resolveTask,
+            reject: rejectTask
+        };
+        this.queued.set(uri, task);
+        if (priority === "foreground") {
+            this.foregroundQueue.push(task);
+        } else {
+            this.backgroundQueue.push(task);
+        }
+        this.scheduleValidationQueue();
+        return promise;
+    }
+
+    private promoteValidation(task: IValidationTask): void {
+        if (task.priority === "foreground") {
+            return;
+        }
+
+        this.backgroundQueue = this.backgroundQueue.filter(
+            item => item !== task
+        );
+        task.priority = "foreground";
+        this.foregroundQueue.push(task);
+        this.scheduleValidationQueue();
+    }
+
+    private scheduleValidationQueue(): void {
+        if (this.queueScheduled || this.validationRunning) {
+            return;
+        }
+
+        this.queueScheduled = true;
+        setImmediate(() => {
+            this.queueScheduled = false;
+            this.processValidationQueue();
+        });
+    }
+
+    private processValidationQueue(): void {
+        if (this.validationRunning) {
+            return;
+        }
+
+        const task = this.foregroundQueue.shift() ??
+            this.backgroundQueue.shift();
+        if (!task) {
+            return;
+        }
+
+        const uri = task.document.uri;
+        this.queued.delete(uri);
+        this.validationRunning = true;
+        this.running.set(uri, task.promise);
+
+        Promise.resolve()
+            .then(() => this.validate(task.document, task.generation))
+            .then(
+                () => this.finishValidation(task, true),
+                error => this.finishValidation(task, false, error)
+            );
+    }
+
+    private finishValidation(
+        task: IValidationTask,
+        succeeded: boolean,
+        error?: unknown
+    ): void {
+        const uri = task.document.uri;
+        if (this.running.get(uri) === task.promise) {
+            this.running.delete(uri);
+        }
+        this.validationRunning = false;
+
+        if (succeeded) {
+            task.resolve();
+        } else {
+            task.reject(error);
+        }
+        this.scheduleValidationQueue();
     }
 
     private async validate(
@@ -378,9 +563,9 @@ export class DocumentAnalysisService {
         }
 
         /*
-         * workspace/configuration — отдельный LSP round-trip к VS Code.
-         * Он не должен удерживать ensureParsed(), Ctrl+Click, Hover и
-         * Semantic Tokens после того, как AST уже готов и помещён в индекс.
+         * Resource-настройки уже находятся в локальном snapshot. Планирование
+         * Import не удерживает ensureParsed(), Ctrl+Click, Hover и Semantic
+         * Tokens после того, как AST помещён в индекс.
          */
         this.refreshImportsAfterParse(
             uri,
@@ -443,6 +628,22 @@ export class DocumentAnalysisService {
             clearTimeout(timer);
             this.parseTimers.delete(uri);
         }
+    }
+
+    private cancelQueued(uri: string): void {
+        const task = this.queued.get(uri);
+        if (!task) {
+            return;
+        }
+
+        this.foregroundQueue = this.foregroundQueue.filter(
+            item => item !== task
+        );
+        this.backgroundQueue = this.backgroundQueue.filter(
+            item => item !== task
+        );
+        this.queued.delete(uri);
+        task.resolve();
     }
 }
 

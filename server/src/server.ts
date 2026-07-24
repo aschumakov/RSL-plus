@@ -1,6 +1,5 @@
 import {
     CodeActionKind,
-    DidChangeConfigurationNotification,
     FileChangeType,
     InitializeParams,
     ProposedFeatures,
@@ -29,7 +28,10 @@ import { RslSettingsService } from "./services/settingsService";
 import { WorkspaceIndex } from "./workspaceIndex";
 import { WorkspaceModuleLoader } from "./indexing/workspaceModuleLoader";
 import { ReferenceIndex } from "./analysis/referenceIndex";
-import { PerformanceLogger } from "./performanceLogger";
+import {
+    PerformanceLogger,
+    type IPerformanceFields
+} from "./performanceLogger";
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments<TextDocument>(TextDocument);
@@ -41,17 +43,28 @@ const defaultSettings: IRslSettings = {
     import: "ДА",
     diagnostics: DEFAULT_DIAGNOSTIC_SETTINGS
 };
-const settingsService = new RslSettingsService(connection, defaultSettings);
+const settingsService = new RslSettingsService(defaultSettings);
 const diagnosticEngine = new RslDiagnosticEngine();
 const referenceIndex = new ReferenceIndex({ log: logMessage });
 const performanceLogger = new PerformanceLogger(message => logMessage(message));
 
-let hasConfigurationCapability = false;
 let hasWorkspaceFolderCapability = false;
 let workFolderOpened = false;
 let clientReady = false;
+let activeDocumentUri: string | undefined;
 let lastReportedModuleCount = -1;
 let moduleCountTimer: NodeJS.Timeout | undefined;
+
+interface IActiveDocumentState {
+    uri?: string | null;
+    settings?: IRslSettings;
+    clientAtMs?: number;
+}
+
+interface IClientPerformanceEvent extends IPerformanceFields {
+    event?: string;
+    clientAtMs?: number;
+}
 
 function logMessage(message: string): void {
     connection.console.log(
@@ -162,8 +175,10 @@ const documentAnalysis = new DocumentAnalysisService(
                 refreshOpenDependents(module.uri);
             }
         },
-        onImports: (_uri, imports) => {
-            imports.forEach(name => moduleLoader.enqueueImport(name));
+        onImports: (uri, imports) => {
+            if (uri === activeDocumentUri) {
+                moduleLoader.enqueueImports(imports, "foreground");
+            }
         }
     }
 );
@@ -178,16 +193,17 @@ diagnosticsCoordinator = new DiagnosticsCoordinator(
         isParseBusy: uri => documentAnalysis.isBusyFor(uri),
         log: logMessage,
         performance: performanceLogger,
-        onImports: (_uri, imports) => {
-            imports.forEach(name => moduleLoader.enqueueImport(name));
+        onImports: (uri, imports) => {
+            if (uri === activeDocumentUri) {
+                moduleLoader.enqueueImports(imports, "foreground");
+            }
         }
     }
 );
 
 /*
- * Уточнённые resource-настройки приходят асинхронно. До этого момента
- * анализ использует initial/default snapshot. Пересчитываем Problems только
- * когда ответ VS Code действительно отличается от уже применённого снимка.
+ * Resource-настройки приходят вместе с уведомлением об активном документе.
+ * Пересчитываем Problems только при реальном изменении snapshot.
  */
 settingsService.onDidResolve((uri, settings) => {
     const document = documents.get(uri);
@@ -203,43 +219,13 @@ settingsService.onDidResolve((uri, settings) => {
         return;
     }
 
-    if (settings.import === "ДА") {
-        module.imports.forEach(name => moduleLoader.enqueueImport(name));
+    if (uri === activeDocumentUri && settings.import === "ДА") {
+        moduleLoader.enqueueImports(module.imports, "foreground");
     }
 
     diagnosticsCoordinator.scheduleLocal(uri, 0);
     diagnosticsCoordinator.scheduleWorkspace(uri, 0);
 });
-
-function requestDocumentSettings(uri: string): void {
-    const available = settingsService.getAvailable(uri);
-    workspaceIndex.setImportsEnabled(available.import === "ДА");
-
-    const span = performanceLogger.enabled
-        ? performanceLogger.start("settings.request", { uri })
-        : undefined;
-
-    settingsService.get(uri).then(() => {
-        /*
-         * Запрос мог быть инвалидирован сменой конфигурации или закрытием
-         * документа. Применяем только актуальный снимок, а не поздний ответ.
-         */
-        const current = settingsService.getAvailable(uri);
-        workspaceIndex.setImportsEnabled(current.import === "ДА");
-        if (span) {
-            performanceLogger.end(span, {
-                importsEnabled: current.import === "ДА"
-            });
-        }
-    }).catch(error => {
-        if (span) {
-            performanceLogger.end(span, { failed: true });
-        }
-        logMessage(
-            `Settings read failed: ${uri}\n${errorToString(error)}`
-        );
-    });
-}
 
 connection.onNotification("workspaceFiles", (uris: string[]) => {
     const items = Array.isArray(uris) ? uris : [];
@@ -255,14 +241,81 @@ connection.onNotification("clientReady", () => {
 
 connection.onNotification(
     "activeDocumentChanged",
-    (uri: string | null | undefined) => {
+    (value: IActiveDocumentState | string | null | undefined) => {
+        let state: IActiveDocumentState;
+
+        if (typeof value === "string") {
+            state = { uri: value };
+        } else if (value == null) {
+            state = { uri: null };
+        } else {
+            state = value;
+        }
+        const uri = state.uri || undefined;
+        activeDocumentUri = uri;
+
+        if (uri && state.settings) {
+            settingsService.updateResource(uri, state.settings);
+        }
+
+        const settings = uri
+            ? settingsService.getAvailable(uri)
+            : settingsService.getWorkspaceSnapshot();
+        workspaceIndex.setImportsEnabled(settings.import === "ДА");
+        moduleLoader.beginForegroundGeneration();
+        documentAnalysis.setActiveDocument(uri);
         diagnosticsCoordinator.setActiveDocument(uri);
+
+        const module = uri ? workspaceIndex.getModule(uri) : undefined;
+        if (module && settings.import === "ДА") {
+            moduleLoader.enqueueImports(module.imports, "foreground");
+        }
+
+        performanceLogger.mark("activeDocument.changed", {
+            uri: uri ?? null,
+            settingsSource: state.settings ? "clientSnapshot" : "cached",
+            clientToServerMs: typeof state.clientAtMs === "number"
+                ? Math.max(0, Date.now() - state.clientAtMs)
+                : undefined
+        });
+    }
+);
+
+connection.onNotification(
+    "clientPerformance",
+    (value: IClientPerformanceEvent | undefined) => {
+        if (!value || typeof value.event !== "string") {
+            return;
+        }
+
+        const fields: IPerformanceFields = {};
+        for (const [name, fieldValue] of Object.entries(value)) {
+            if (
+                name !== "event" &&
+                name !== "clientAtMs" &&
+                (
+                    typeof fieldValue === "string" ||
+                    typeof fieldValue === "number" ||
+                    typeof fieldValue === "boolean" ||
+                    fieldValue === null
+                )
+            ) {
+                fields[name] = fieldValue;
+            }
+        }
+        if (typeof value.clientAtMs === "number") {
+            fields.clientToServerMs = Math.max(
+                0,
+                Date.now() - value.clientAtMs
+            );
+        }
+        performanceLogger.mark(value.event, fields);
     }
 );
 
 export function GetFileByNameRequest(name: string): void {
     if (workFolderOpened && name) {
-        moduleLoader.enqueueImport(name);
+        moduleLoader.enqueueImport(name, "foreground");
     }
 }
 
@@ -336,15 +389,10 @@ connection.onInitialize((params: InitializeParams) => {
         params.rootUri ||
         params.rootPath
     );
-    hasConfigurationCapability = !!(
-        capabilities.workspace &&
-        capabilities.workspace.configuration
-    );
     hasWorkspaceFolderCapability = !!(
         capabilities.workspace &&
         capabilities.workspace.workspaceFolders
     );
-    settingsService.configure(hasConfigurationCapability);
     settingsService.updateFromConfiguration({
         RSLanguageServer: initializationOptions?.initialSettings
     });
@@ -382,16 +430,9 @@ connection.onInitialize((params: InitializeParams) => {
     };
 });
 
-connection.onInitialized(async () => {
+connection.onInitialized(() => {
     if (!workFolderOpened) {
         sendClientNotification("noRootFolder");
-    }
-
-    if (hasConfigurationCapability) {
-        await connection.client.register(
-            DidChangeConfigurationNotification.type,
-            undefined
-        );
     }
 
     if (hasWorkspaceFolderCapability) {
@@ -405,28 +446,9 @@ connection.onInitialized(async () => {
     );
 });
 
-connection.onDidChangeConfiguration(change => {
-    if (hasConfigurationCapability) {
-        settingsService.clearAll();
-    } else {
-        settingsService.updateFromConfiguration(change.settings);
-    }
-
-    const documentsList = documents.all();
-
-    for (const document of documentsList) {
-        requestDocumentSettings(document.uri);
-    }
-
-    diagnosticsCoordinator.refreshAll();
-});
-
 documents.onDidOpen(event => {
     workspaceIndex.markOpen(event.document.uri);
-    const isNewVersion = documentAnalysis.open(event.document);
-    if (isNewVersion) {
-        requestDocumentSettings(event.document.uri);
-    }
+    documentAnalysis.open(event.document);
 });
 
 documents.onDidClose(event => {

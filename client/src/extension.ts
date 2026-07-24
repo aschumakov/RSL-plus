@@ -25,6 +25,33 @@ let client: LanguageClient;
 let languageClientStarted = false;
 let activeEditor: TextEditor | undefined = window.activeTextEditor;
 let myStatusBarItem: StatusBarItem;
+let workspaceInventoryTimer: NodeJS.Timeout | undefined;
+let workspaceInventoryRunning = false;
+let workspaceInventoryCompleted = false;
+let workspaceInventoryRevision = 0;
+
+const WORKSPACE_INVENTORY_IDLE_MS = 8000;
+const WORKSPACE_EXCLUDE =
+    "**/{.git,node_modules,out,dist,build,archive,backup,.history}/**";
+
+interface IRslClientSettings {
+    import: string;
+    diagnostics: {
+        enabled: boolean;
+        deprecatedDeclarations: boolean;
+        structure: boolean;
+        unusedVariables: boolean;
+        unusedImports: boolean;
+        debugBreak: boolean;
+        useBeforeDeclaration: boolean;
+        ambiguousReferences: boolean;
+        maxProblems: number;
+    };
+}
+
+interface IClientPerformanceFields {
+    [name: string]: string | number | boolean | null | undefined;
+}
 
 /**
  * Элемент списка открытых/загруженных макросов.
@@ -117,20 +144,155 @@ function activeRslDocumentUri(): string | null {
     return activeEditor.document.uri.toString();
 }
 
+function readRslSettings(resource?: Uri): IRslClientSettings {
+    const configuration = workspace.getConfiguration(
+        "RSLanguageServer",
+        resource
+    );
+
+    return {
+        import: configuration.get<string>("import", "ДА"),
+        diagnostics: {
+            enabled: configuration.get<boolean>(
+                "diagnostics.enabled",
+                true
+            ),
+            deprecatedDeclarations: configuration.get<boolean>(
+                "diagnostics.deprecatedDeclarations",
+                true
+            ),
+            structure: configuration.get<boolean>(
+                "diagnostics.structure",
+                true
+            ),
+            unusedVariables: configuration.get<boolean>(
+                "diagnostics.unusedVariables",
+                true
+            ),
+            unusedImports: configuration.get<boolean>(
+                "diagnostics.unusedImports",
+                true
+            ),
+            debugBreak: configuration.get<boolean>(
+                "diagnostics.debugBreak",
+                true
+            ),
+            useBeforeDeclaration: configuration.get<boolean>(
+                "diagnostics.useBeforeDeclaration",
+                true
+            ),
+            ambiguousReferences: configuration.get<boolean>(
+                "diagnostics.ambiguousReferences",
+                true
+            ),
+            maxProblems: configuration.get<number>(
+                "diagnostics.maxProblems",
+                200
+            )
+        }
+    };
+}
+
+function sendClientPerformance(
+    event: string,
+    fields: IClientPerformanceFields = {}
+): void {
+    if (!languageClientStarted || client === undefined) {
+        return;
+    }
+
+    client.sendNotification("clientPerformance", {
+        event,
+        clientAtMs: Date.now(),
+        ...fields
+    }).then(
+        undefined,
+        error => console.error(
+            "RSL: client performance notification failed",
+            error
+        )
+    );
+}
+
 
 /**
  * Language server использует активный URI, чтобы Problems не терял текущий
- * файл среди групп, которые VS Code сортирует самостоятельно.
+ * файл среди групп, которые VS Code сортирует самостоятельно. Resource-
+ * настройки вычисляются здесь же, без workspace/configuration round-trip.
  */
 async function notifyActiveDocument(): Promise<void> {
     if (!languageClientStarted || client === undefined) {
         return;
     }
 
-    await client.sendNotification(
-        "activeDocumentChanged",
-        activeRslDocumentUri()
+    const uri = activeRslDocumentUri();
+    const resource = uri ? Uri.parse(uri) : undefined;
+    const clientAtMs = Date.now();
+
+    await client.sendNotification("activeDocumentChanged", {
+        uri,
+        settings: resource ? readRslSettings(resource) : undefined,
+        clientAtMs
+    });
+}
+
+function scheduleWorkspaceInventory(
+    delayMs: number = WORKSPACE_INVENTORY_IDLE_MS
+): void {
+    if (
+        !languageClientStarted ||
+        workspaceInventoryCompleted ||
+        workspaceInventoryRunning
+    ) {
+        return;
+    }
+
+    if (workspaceInventoryTimer) {
+        clearTimeout(workspaceInventoryTimer);
+    }
+
+    workspaceInventoryTimer = setTimeout(() => {
+        workspaceInventoryTimer = undefined;
+        runWorkspaceInventory().catch(error => {
+            workspaceInventoryRunning = false;
+            console.error("RSL workspace inventory failed", error);
+            scheduleWorkspaceInventory(WORKSPACE_INVENTORY_IDLE_MS);
+        });
+    }, Math.max(0, delayMs));
+}
+
+async function runWorkspaceInventory(): Promise<void> {
+    if (workspaceInventoryRunning || workspaceInventoryCompleted) {
+        return;
+    }
+
+    workspaceInventoryRunning = true;
+    const inventoryRevision = workspaceInventoryRevision;
+    const startedAtMs = Date.now();
+    sendClientPerformance("client.workspaceInventory.start");
+
+    const workspaceFiles = await workspace.findFiles(
+        "**/*.mac",
+        WORKSPACE_EXCLUDE
     );
+
+    await client.sendNotification(
+        "workspaceFiles",
+        workspaceFiles.map(uri => uri.toString())
+    );
+
+    workspaceInventoryRunning = false;
+    workspaceInventoryCompleted =
+        inventoryRevision === workspaceInventoryRevision;
+    sendClientPerformance("client.workspaceInventory.end", {
+        durationMs: Date.now() - startedAtMs,
+        files: workspaceFiles.length,
+        stale: !workspaceInventoryCompleted
+    });
+
+    if (!workspaceInventoryCompleted) {
+        scheduleWorkspaceInventory(2000);
+    }
 }
 
 
@@ -229,47 +391,7 @@ export function activate(context: ExtensionContext): void {
     const performanceLogFile = rslConfiguration
         .get<string>("performanceLogFile", "")
         .trim();
-    const initialSettings = {
-        import: rslConfiguration.get<string>("import", "ДА"),
-        diagnostics: {
-            enabled: rslConfiguration.get<boolean>(
-                "diagnostics.enabled",
-                true
-            ),
-            deprecatedDeclarations: rslConfiguration.get<boolean>(
-                "diagnostics.deprecatedDeclarations",
-                true
-            ),
-            structure: rslConfiguration.get<boolean>(
-                "diagnostics.structure",
-                true
-            ),
-            unusedVariables: rslConfiguration.get<boolean>(
-                "diagnostics.unusedVariables",
-                true
-            ),
-            unusedImports: rslConfiguration.get<boolean>(
-                "diagnostics.unusedImports",
-                true
-            ),
-            debugBreak: rslConfiguration.get<boolean>(
-                "diagnostics.debugBreak",
-                true
-            ),
-            useBeforeDeclaration: rslConfiguration.get<boolean>(
-                "diagnostics.useBeforeDeclaration",
-                true
-            ),
-            ambiguousReferences: rslConfiguration.get<boolean>(
-                "diagnostics.ambiguousReferences",
-                true
-            ),
-            maxProblems: rslConfiguration.get<number>(
-                "diagnostics.maxProblems",
-                200
-            )
-        }
-    };
+    const initialSettings = readRslSettings();
 
     context.subscriptions.push(macroFileWatcher);
 
@@ -282,6 +404,20 @@ export function activate(context: ExtensionContext): void {
         ],
         synchronize: {
             fileEvents: macroFileWatcher
+        },
+        middleware: {
+            provideDocumentSymbols: async (document, token, next) => {
+                const startedAtMs = Date.now();
+                sendClientPerformance("client.outline.request", {
+                    uri: document.uri.toString()
+                });
+                const result = await next(document, token);
+                sendClientPerformance("client.outline.response", {
+                    uri: document.uri.toString(),
+                    durationMs: Date.now() - startedAtMs
+                });
+                return result;
+            }
         },
         initializationOptions: {
             referenceIndexCachePath: context.storageUri
@@ -317,23 +453,7 @@ export function activate(context: ExtensionContext): void {
             await notifyActiveDocument();
 
             await client.sendNotification("clientReady");
-
-            /* Инвентаризация workspace не конкурирует с первым folding/Outline. */
-            setTimeout(() => {
-                workspace.findFiles(
-                    "**/*.mac",
-                    "**/{.git,node_modules,out,dist,build,archive,backup,.history}/**"
-                ).then(
-                    workspaceFiles => client.sendNotification(
-                        "workspaceFiles",
-                        workspaceFiles.map(uri => uri.toString())
-                    ),
-                    error => console.error(
-                        "RSL workspace inventory failed",
-                        error
-                    )
-                );
-            }, 500);
+            scheduleWorkspaceInventory();
         },
         error => {
             console.error(
@@ -365,6 +485,7 @@ export function activate(context: ExtensionContext): void {
     context.subscriptions.push(
         window.onDidChangeActiveTextEditor(editor => {
             activeEditor = editor;
+            scheduleWorkspaceInventory();
             notifyActiveDocument().then(
                 undefined,
                 error => console.error(
@@ -372,7 +493,35 @@ export function activate(context: ExtensionContext): void {
                     error
                 )
             );
-        })
+        }),
+        workspace.onDidChangeTextDocument(() => {
+            scheduleWorkspaceInventory();
+        }),
+        workspace.onDidChangeConfiguration(event => {
+            if (!event.affectsConfiguration("RSLanguageServer")) {
+                return;
+            }
+            notifyActiveDocument().then(
+                undefined,
+                error => console.error(
+                    "RSL: active settings notification failed",
+                    error
+                )
+            );
+        }),
+        workspace.onDidChangeWorkspaceFolders(() => {
+            workspaceInventoryRevision++;
+            workspaceInventoryCompleted = false;
+            scheduleWorkspaceInventory(2000);
+        }),
+        {
+            dispose: () => {
+                if (workspaceInventoryTimer) {
+                    clearTimeout(workspaceInventoryTimer);
+                    workspaceInventoryTimer = undefined;
+                }
+            }
+        }
     );
 
     const showMacrosCommand = "rsl.showMacroFiles";
