@@ -39,6 +39,12 @@ interface IDeclarationInfo {
     parameter: boolean;
 }
 
+interface ILocalDiagnosticFacts {
+    declarations: IDeclarationInfo[];
+    identifierIndex: Map<string, IRslToken[]>;
+    declarationRangeKeys: Set<string>;
+}
+
 interface IDiagnosticData {
     start?: number;
     end?: number;
@@ -130,38 +136,93 @@ export function buildRslDiagnostics(
     }
 
     const result: Diagnostic[] = [];
+    const hasCapacity = (): boolean =>
+        result.length < options.maxProblems;
+    let resolver: RslScopeResolver | undefined;
+    const getResolver = (): RslScopeResolver => {
+        if (!resolver) {
+            resolver = new RslScopeResolver(index);
+        }
+
+        return resolver;
+    };
+    let localFacts: ILocalDiagnosticFacts | undefined;
+    const getLocalFacts = (): ILocalDiagnosticFacts => {
+        if (!localFacts) {
+            const declarations = collectDeclarations(
+                module,
+                module.syntax.tokens
+            );
+            localFacts = {
+                declarations,
+                identifierIndex: buildIdentifierIndex(module.syntax.tokens),
+                declarationRangeKeys: new Set(
+                    declarations.map(item => offsetRangeKey(
+                        item.object.Range.start,
+                        item.object.Range.end
+                    ))
+                )
+            };
+        }
+
+        return localFacts;
+    };
 
     addSyntaxParserDiagnostics(module, result);
 
-    if (options.deprecatedDeclarations) {
-        addDeprecatedDeclarationDiagnostics(module, result);
-    }
-
-    if (options.structure) {
+    if (options.structure && hasCapacity()) {
         addUnterminatedTokenDiagnostics(module, result);
+    }
+    if (options.structure && hasCapacity()) {
         addBracketDiagnostics(module, result);
+    }
+    if (options.structure && hasCapacity()) {
         addEndDiagnostics(module, result);
+    }
+    if (options.structure && hasCapacity()) {
         addDuplicateDeclarationDiagnostics(module, result);
+    }
+    if (options.structure && hasCapacity()) {
         addBasicImportDiagnostics(module, index, result);
     }
 
-    if (options.debugBreak) {
+    /*
+     * Ошибки использования до объявления публикуются раньше предупреждений,
+     * чтобы maxProblems не скрывал более важные сообщения.
+     */
+    if (options.useBeforeDeclaration && hasCapacity()) {
+        addUseBeforeDeclarationDiagnostics(
+            module,
+            getResolver(),
+            getLocalFacts(),
+            result,
+            options.maxProblems
+        );
+    }
+
+    if (options.deprecatedDeclarations && hasCapacity()) {
+        addDeprecatedDeclarationDiagnostics(module, result);
+    }
+
+    if (options.debugBreak && hasCapacity()) {
         addDebugBreakDiagnostics(module, result);
     }
 
-    if (options.unusedVariables) {
-        addUnusedDeclarationDiagnostics(module, index, result);
+    if (options.unusedVariables && hasCapacity()) {
+        addUnusedDeclarationDiagnostics(
+            module,
+            getResolver(),
+            getLocalFacts(),
+            result,
+            options.maxProblems
+        );
     }
 
-    if (options.useBeforeDeclaration) {
-        addUseBeforeDeclarationDiagnostics(module, index, result);
-    }
-
-    if (options.ambiguousReferences) {
+    if (options.ambiguousReferences && hasCapacity()) {
         addAmbiguousReferenceDiagnostics(module, index, result);
     }
 
-    if (options.unusedImports) {
+    if (options.unusedImports && hasCapacity()) {
         addUnusedImportDiagnostics(module, index, result);
     }
 
@@ -462,21 +523,16 @@ function addEndDiagnostics(
 
 function addUnusedDeclarationDiagnostics(
     module: IIndexedModule,
-    index: WorkspaceIndex,
-    result: Diagnostic[]
+    resolver: RslScopeResolver,
+    facts: ILocalDiagnosticFacts,
+    result: Diagnostic[],
+    maxProblems: number
 ): void {
-    const code = module.syntax.tokens;
-    const declarations = collectDeclarations(module, code);
-    const identifierIndex = buildIdentifierIndex(code);
-    const declarationRangeKeys = new Set(
-        declarations.map(item => offsetRangeKey(
-            item.object.Range.start,
-            item.object.Range.end
-        ))
-    );
-    const resolver = new RslScopeResolver(index);
+    for (const declaration of facts.declarations) {
+        if (result.length >= maxProblems) {
+            break;
+        }
 
-    for (const declaration of declarations) {
         const object = declaration.object;
         const scope = declaration.scope;
         const isLocal = scope.ObjKind === CompletionItemKind.Function ||
@@ -493,28 +549,33 @@ function addUnusedDeclarationDiagnostics(
         }
 
         const name = normalizeIdentifier(object.Name);
-        const used = (identifierIndex.get(name) || []).some(token => {
-            if (
-                token.start < scope.Range.start ||
-                token.end > scope.Range.end ||
-                declarationRangeKeys.has(offsetRangeKey(
-                    token.start,
-                    token.end
-                ))
-            ) {
-                return false;
+        const occurrences = facts.identifierIndex.get(name) || [];
+        const used = someTokenInRange(
+            occurrences,
+            scope.Range.start,
+            scope.Range.end,
+            token => {
+                if (
+                    token.end > scope.Range.end ||
+                    facts.declarationRangeKeys.has(offsetRangeKey(
+                        token.start,
+                        token.end
+                    ))
+                ) {
+                    return false;
+                }
+
+                const resolved = resolver.resolveAt(
+                    module.uri,
+                    module.object,
+                    token.start
+                );
+
+                return !!resolved &&
+                    resolved.uri === module.uri &&
+                    resolved.object === object;
             }
-
-            const resolved = resolver.resolveAt(
-                module.uri,
-                module.object,
-                token.start
-            );
-
-            return !!resolved &&
-                resolved.uri === module.uri &&
-                resolved.object === object;
-        });
+        );
 
         if (used) {
             continue;
@@ -548,23 +609,20 @@ function addUnusedDeclarationDiagnostics(
 
 function addUseBeforeDeclarationDiagnostics(
     module: IIndexedModule,
-    index: WorkspaceIndex,
-    result: Diagnostic[]
+    resolver: RslScopeResolver,
+    facts: ILocalDiagnosticFacts,
+    result: Diagnostic[],
+    maxProblems: number
 ): void {
     const code = module.syntax.tokens;
-    const declarations = collectDeclarations(module, code);
-    const identifierIndex = buildIdentifierIndex(code);
-    const declarationRangeKeys = new Set(
-        declarations.map(item => offsetRangeKey(
-            item.object.Range.start,
-            item.object.Range.end
-        ))
-    );
     const memberNameStarts = collectMemberNameStarts(code);
     const nestedScopesByScope = new Map<CBase, CBase[]>();
-    const resolver = new RslScopeResolver(index);
 
-    for (const declaration of declarations) {
+    for (const declaration of facts.declarations) {
+        if (result.length >= maxProblems) {
+            break;
+        }
+
         const scope = declaration.scope;
 
         if (
@@ -596,32 +654,36 @@ function addUseBeforeDeclarationDiagnostics(
             nestedScopesByScope.set(scope, nestedScopes);
         }
 
-        const use = (identifierIndex.get(name) || []).find(token => {
-            if (
-                token.start < scope.Range.start ||
-                token.start >= object.Range.start ||
-                declarationRangeKeys.has(offsetRangeKey(
-                    token.start,
-                    token.end
-                )) ||
-                memberNameStarts.has(token.start) ||
-                nestedScopes.some(child =>
-                    child !== scope &&
-                    child.Range.start <= token.start &&
-                    token.end <= child.Range.end
-                )
-            ) {
-                return false;
+        const occurrences = facts.identifierIndex.get(name) || [];
+        const use = findTokenInRange(
+            occurrences,
+            scope.Range.start,
+            object.Range.start,
+            token => {
+                if (
+                    facts.declarationRangeKeys.has(offsetRangeKey(
+                        token.start,
+                        token.end
+                    )) ||
+                    memberNameStarts.has(token.start) ||
+                    nestedScopes.some(child =>
+                        child !== scope &&
+                        child.Range.start <= token.start &&
+                        token.end <= child.Range.end
+                    )
+                ) {
+                    return false;
+                }
+
+                const resolved = resolver.resolveAt(
+                    module.uri,
+                    module.object,
+                    token.start
+                );
+
+                return !resolved;
             }
-
-            const resolved = resolver.resolveAt(
-                module.uri,
-                module.object,
-                token.start
-            );
-
-            return !resolved;
-        });
+        );
 
         if (!use) {
             continue;
@@ -1017,6 +1079,51 @@ function buildIdentifierIndex(
     }
 
     return result;
+}
+
+function someTokenInRange(
+    tokens: IRslToken[],
+    start: number,
+    end: number,
+    predicate: (token: IRslToken) => boolean
+): boolean {
+    return findTokenInRange(tokens, start, end, predicate) !== undefined;
+}
+
+function findTokenInRange(
+    tokens: IRslToken[],
+    start: number,
+    end: number,
+    predicate: (token: IRslToken) => boolean
+): IRslToken | undefined {
+    for (
+        let index = lowerBoundTokenStart(tokens, start);
+        index < tokens.length && tokens[index].start < end;
+        index++
+    ) {
+        if (predicate(tokens[index])) {
+            return tokens[index];
+        }
+    }
+
+    return undefined;
+}
+
+function lowerBoundTokenStart(tokens: IRslToken[], start: number): number {
+    let low = 0;
+    let high = tokens.length;
+
+    while (low < high) {
+        const middle = low + Math.floor((high - low) / 2);
+
+        if (tokens[middle].start < start) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+
+    return low;
 }
 
 function isReservedIdentifier(value: string): boolean {

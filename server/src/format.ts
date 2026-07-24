@@ -38,19 +38,20 @@ export function FormatCode(text: string, tabSize: number = 4): string {
     const lineStarts = buildLineStarts(body, lex.eol);
     const formatted: string[] = [];
     const parenthesisStack: number[] = [];
+    const lineTokenCursor = new LineTokenCursor(lex.tokens);
     let continuation: IContinuationContext | undefined;
     let indentLevel = 0;
 
     for (let lineNumber = 0; lineNumber < lines.length; lineNumber++) {
         const originalLine = lines[lineNumber];
         const absoluteLineStart = bodyOffset + lineStarts[lineNumber];
-        const protectedToken = getMultilineProtectedToken(
-            lex.tokens,
+        const lineTokenData = lineTokenCursor.get(
             lineNumber,
-            bodyOffset
+            absoluteLineStart,
+            originalLine.length
         );
 
-        if (protectedToken) {
+        if (lineTokenData.protectedToken) {
             /*
              * Многострочный SQL/текст или комментарий сохраняется байт-в-байт
              * внутри строки. Он не влияет на RSL nesting/parentheses.
@@ -64,12 +65,7 @@ export function FormatCode(text: string, tabSize: number = 4): string {
             continue;
         }
 
-        const lineTokens = getSingleLineTokens(
-            lex.tokens,
-            lineNumber,
-            absoluteLineStart,
-            originalLine.length
-        );
+        const lineTokens = lineTokenData.tokens;
         const normalizedLine = normalizeLineSafely(
             originalLine,
             absoluteLineStart,
@@ -477,33 +473,69 @@ function containsCodeSymbol(line: string, symbol: string): boolean {
     );
 }
 
-function getSingleLineTokens(
-    tokens: IRslToken[],
-    line: number,
-    absoluteStart: number,
-    length: number
-): IRslToken[] {
-    const absoluteEnd = absoluteStart + length;
+/**
+ * Возвращает токены очередной строки последовательным проходом.
+ *
+ * Раньше форматтер для каждой строки заново выполнял filter/find по полному
+ * массиву токенов, из-за чего время росло примерно как lines * tokens.
+ */
+class LineTokenCursor {
+    private index = 0;
 
-    return tokens.filter(token =>
-        token.line === line &&
-        token.endLine === line &&
-        token.start >= absoluteStart &&
-        token.start <= absoluteEnd
-    );
-}
+    constructor(private tokens: IRslToken[]) {
+    }
 
-function getMultilineProtectedToken(
-    tokens: IRslToken[],
-    line: number,
-    _bodyOffset: number
-): IRslToken | undefined {
-    return tokens.find(token =>
-        (token.kind === "square" || token.kind === "comment") &&
-        token.endLine > token.line &&
-        token.line <= line &&
-        line <= token.endLine
-    );
+    get(
+        line: number,
+        absoluteStart: number,
+        length: number
+    ): {
+        tokens: IRslToken[];
+        protectedToken?: IRslToken;
+    } {
+        while (
+            this.index < this.tokens.length &&
+            this.tokens[this.index].endLine < line
+        ) {
+            this.index++;
+        }
+
+        const absoluteEnd = absoluteStart + length;
+        const lineTokens: IRslToken[] = [];
+        let protectedToken: IRslToken | undefined;
+
+        for (
+            let scan = this.index;
+            scan < this.tokens.length && this.tokens[scan].line <= line;
+            scan++
+        ) {
+            const token = this.tokens[scan];
+
+            if (
+                (token.kind === "square" || token.kind === "comment") &&
+                token.endLine > token.line &&
+                token.line <= line &&
+                line <= token.endLine
+            ) {
+                protectedToken = token;
+                break;
+            }
+
+            if (
+                token.line === line &&
+                token.endLine === line &&
+                token.start >= absoluteStart &&
+                token.start <= absoluteEnd
+            ) {
+                lineTokens.push(token);
+            }
+        }
+
+        return {
+            tokens: lineTokens,
+            protectedToken
+        };
+    }
 }
 
 function buildLineStarts(

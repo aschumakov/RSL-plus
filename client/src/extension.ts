@@ -224,6 +224,52 @@ export function activate(context: ExtensionContext): void {
 
     const macroFileWatcher =
         workspace.createFileSystemWatcher("**/*.mac");
+    const rslConfiguration = workspace
+        .getConfiguration("RSLanguageServer");
+    const performanceLogFile = rslConfiguration
+        .get<string>("performanceLogFile", "")
+        .trim();
+    const initialSettings = {
+        import: rslConfiguration.get<string>("import", "ДА"),
+        diagnostics: {
+            enabled: rslConfiguration.get<boolean>(
+                "diagnostics.enabled",
+                true
+            ),
+            deprecatedDeclarations: rslConfiguration.get<boolean>(
+                "diagnostics.deprecatedDeclarations",
+                true
+            ),
+            structure: rslConfiguration.get<boolean>(
+                "diagnostics.structure",
+                true
+            ),
+            unusedVariables: rslConfiguration.get<boolean>(
+                "diagnostics.unusedVariables",
+                true
+            ),
+            unusedImports: rslConfiguration.get<boolean>(
+                "diagnostics.unusedImports",
+                true
+            ),
+            debugBreak: rslConfiguration.get<boolean>(
+                "diagnostics.debugBreak",
+                true
+            ),
+            useBeforeDeclaration: rslConfiguration.get<boolean>(
+                "diagnostics.useBeforeDeclaration",
+                true
+            ),
+            ambiguousReferences: rslConfiguration.get<boolean>(
+                "diagnostics.ambiguousReferences",
+                true
+            ),
+            maxProblems: rslConfiguration.get<number>(
+                "diagnostics.maxProblems",
+                200
+            )
+        }
+    };
 
     context.subscriptions.push(macroFileWatcher);
 
@@ -243,7 +289,9 @@ export function activate(context: ExtensionContext): void {
                     context.storageUri,
                     "reference-index-v2.json"
                 ).fsPath
-                : undefined
+                : undefined,
+            performanceLogFile: performanceLogFile || undefined,
+            initialSettings
         }
     };
 

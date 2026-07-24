@@ -45,7 +45,7 @@ import {
 import { GetFoldingRanges, type IRslFoldingRange } from "../folding";
 import { FormatCode } from "../format";
 import type { IToken } from "../interfaces";
-import type { IRslToken } from "../lexer";
+import { tokenAtOffset, type IRslToken } from "../lexer";
 import {
     describeFormatSpecifier,
     getFormatSpecifierAt
@@ -60,6 +60,7 @@ import {
 import { RslScopeResolver } from "../scopeResolver";
 import { buildRslSemanticTokens } from "../semanticTokens";
 import type { WorkspaceIndex } from "../workspaceIndex";
+import type { PerformanceLogger } from "../performanceLogger";
 
 export interface IRslLanguageFeatureEnvironment {
     connection: Connection;
@@ -70,7 +71,12 @@ export interface IRslLanguageFeatureEnvironment {
     referenceIndex?: ReferenceIndex;
     getFastDocumentSnapshot?(document: TextDocument): IFastDocumentSnapshot;
     ensureDocumentParsed(document: TextDocument): Promise<CBase | undefined>;
+    ensureImportedSymbol?(
+        fromUri: string,
+        symbolName: string
+    ): Promise<boolean>;
     log(message: string): void;
+    performance?: PerformanceLogger;
 }
 
 interface IPositionContext {
@@ -235,52 +241,100 @@ export class RslLanguageFeatureRegistry {
                 return null;
             }
 
-            await ensureDocumentParsed(document);
-            const context = this.getPositionContext(params);
+            const performance = this.environment.performance;
+            const span = performance?.enabled
+                ? performance.start("definition.resolve", {
+                    uri: document.uri,
+                    version: document.version
+                })
+                : undefined;
+            let outcome = "none";
+            let loadedOnDemand = false;
 
-            if (!context || !context.token) {
-                return null;
-            }
+            try {
+                await ensureDocumentParsed(document);
+                const context = this.getPositionContext(params);
 
-            if (
-                context.token.kind === "comment" ||
-                context.token.kind === "square"
-            ) {
-                return null;
-            }
-
-            const importedFile = await definitionProvider
-                .findImportDefinition(context);
-
-            if (importedFile) {
-                return importedFile;
-            }
-
-            if (context.token.kind === "string") {
-                const dynamic = await definitionProvider
-                    .findDynamicDefinition(context);
-
-                if (dynamic) {
-                    return dynamic;
+                if (!context || !context.token) {
+                    return null;
                 }
-            }
 
-            if (isBlockedToken(context.token)) {
-                return null;
-            }
+                if (
+                    context.token.kind === "comment" ||
+                    context.token.kind === "square"
+                ) {
+                    return null;
+                }
 
-            const resolved = resolver.resolveAt(
-                document.uri,
-                context.tree,
-                context.offset
-            );
+                const importedFile = await definitionProvider
+                    .findImportDefinition(context);
 
-            return resolved
-                ? definitionProvider.createObjectLocationByUri(
+                if (importedFile) {
+                    outcome = "import";
+                    return importedFile;
+                }
+
+                if (context.token.kind === "string") {
+                    const dynamic = await definitionProvider
+                        .findDynamicDefinition(context);
+
+                    if (dynamic) {
+                        outcome = "dynamic";
+                        return dynamic;
+                    }
+                }
+
+                if (isBlockedToken(context.token)) {
+                    return null;
+                }
+
+                let resolved = resolver.resolveAt(
+                    document.uri,
+                    context.tree,
+                    context.offset
+                );
+                const identifierToken = tokenAtOffset(
+                    context.tokens,
+                    context.offset,
+                    true
+                );
+
+                if (
+                    !resolved &&
+                    identifierToken?.kind === "identifier" &&
+                    this.environment.ensureImportedSymbol
+                ) {
+                    loadedOnDemand =
+                        await this.environment.ensureImportedSymbol(
+                            document.uri,
+                            identifierToken.value
+                        );
+                    resolved = resolver.resolveAt(
+                        document.uri,
+                        context.tree,
+                        context.offset
+                    );
+                }
+
+                if (!resolved) {
+                    return null;
+                }
+
+                outcome = resolved.uri === document.uri
+                    ? "local"
+                    : "imported";
+                return definitionProvider.createObjectLocationByUri(
                     resolved.uri,
                     resolved.object
-                )
-                : null;
+                );
+            } finally {
+                if (span) {
+                    performance.end(span, {
+                        outcome,
+                        loadedOnDemand
+                    });
+                }
+            }
         });
 
         connection.onReferences(async (
@@ -509,9 +563,24 @@ export class RslLanguageFeatureRegistry {
                 return [];
             }
 
+            const source = document.getText();
+            const performance = this.environment.performance;
+            const span = performance?.enabled
+                ? performance.start("format.document", {
+                    uri: document.uri,
+                    version: document.version,
+                    chars: source.length
+                })
+                : undefined;
+
             try {
-                const source = document.getText();
                 const formatted = formattingFunction(source, params.options);
+                if (span) {
+                    performance.end(span, {
+                        changed: formatted !== source,
+                        failed: false
+                    });
+                }
 
                 if (formatted === source) {
                     return [];
@@ -521,6 +590,11 @@ export class RslLanguageFeatureRegistry {
                     TextEdit.replace(fullDocumentRange(document), formatted)
                 ];
             } catch (error) {
+                if (span) {
+                    performance.end(span, {
+                        failed: true
+                    });
+                }
                 this.environment.log(
                     `Formatting failed: ${document.uri}\n` +
                     errorToString(error)

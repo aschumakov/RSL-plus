@@ -14,10 +14,13 @@ import {
 } from "./diagnosticVisibility";
 import type { RslSettingsService } from "../services/settingsService";
 import type { WorkspaceIndex } from "../workspaceIndex";
+import type { PerformanceLogger } from "../performanceLogger";
+import type { IRslSettings } from "../interfaces";
 
 export interface IDiagnosticsCoordinatorOptions {
     isParseBusy(uri: string): boolean;
     log(message: string): void;
+    performance?: PerformanceLogger;
     onImports(uri: string, imports: readonly string[]): void;
     localDebounceMs?: number;
     largeLocalDebounceMs?: number;
@@ -199,7 +202,7 @@ export class DiagnosticsCoordinator {
             return;
         }
 
-        const state = await this.getCurrentState(uri);
+        const state = this.getCurrentState(uri);
         if (!state) {
             return;
         }
@@ -216,14 +219,25 @@ export class DiagnosticsCoordinator {
             this.workspaceKeys.delete(uri);
             this.staleWorkspace.add(uri);
             const started = Date.now();
-            this.localCache.set(
-                uri,
-                this.engine.buildLocal(
-                    state.module,
-                    this.index,
-                    state.settings.diagnostics
-                )
+            const performance = this.options.performance;
+            const span = performance?.enabled
+                ? performance.start("diagnostics.local", {
+                    uri,
+                    version: state.module.version,
+                    chars: state.module.sourceLength
+                })
+                : undefined;
+            const diagnostics = this.engine.buildLocal(
+                state.module,
+                this.index,
+                state.settings.diagnostics
             );
+            if (span) {
+                performance.end(span, {
+                    diagnostics: diagnostics.length
+                });
+            }
+            this.localCache.set(uri, diagnostics);
             this.localKeys.set(uri, key);
             this.logSlow("local", uri, state.module.version, started);
         }
@@ -242,7 +256,7 @@ export class DiagnosticsCoordinator {
             return;
         }
 
-        const state = await this.getCurrentState(uri);
+        const state = this.getCurrentState(uri);
         if (!state) {
             return;
         }
@@ -256,14 +270,26 @@ export class DiagnosticsCoordinator {
 
         if (this.workspaceKeys.get(uri) !== key || !this.workspaceCache.has(uri)) {
             const started = Date.now();
-            this.workspaceCache.set(
-                uri,
-                this.engine.buildWorkspace(
-                    state.module,
-                    this.index,
-                    state.settings.diagnostics
-                )
+            const performance = this.options.performance;
+            const span = performance?.enabled
+                ? performance.start("diagnostics.workspace", {
+                    uri,
+                    version: state.module.version,
+                    chars: state.module.sourceLength
+                })
+                : undefined;
+            const diagnostics = this.engine.buildWorkspace(
+                state.module,
+                this.index,
+                state.settings.diagnostics
             );
+            if (span) {
+                performance.end(span, {
+                    diagnostics: diagnostics.length,
+                    indexedModules: this.index.size
+                });
+            }
+            this.workspaceCache.set(uri, diagnostics);
             this.workspaceKeys.set(uri, key);
             this.logSlow("workspace", uri, state.module.version, started);
         }
@@ -273,28 +299,21 @@ export class DiagnosticsCoordinator {
         this.publishCombined(uri);
     }
 
-    private async getCurrentState(uri: string): Promise<{
+    private getCurrentState(uri: string): {
         document: TextDocument;
         module: NonNullable<ReturnType<WorkspaceIndex["getModule"]>>;
-        settings: Awaited<ReturnType<RslSettingsService["get"]>>;
-    } | undefined> {
+        settings: IRslSettings;
+    } | undefined {
         const document = this.documents.get(uri);
         const module = this.index.getModule(uri);
         if (!document || !module || module.version !== document.version) {
             return undefined;
         }
-        const settings = await this.settings.get(uri);
-        const currentDocument = this.documents.get(uri);
-        const currentModule = this.index.getModule(uri);
-        if (
-            !currentDocument ||
-            !currentModule ||
-            currentDocument.version !== document.version ||
-            currentModule.version !== module.version
-        ) {
-            return undefined;
-        }
-        return { document: currentDocument, module: currentModule, settings };
+        return {
+            document,
+            module,
+            settings: this.settings.getAvailable(uri)
+        };
     }
 
     private publishCombined(uri: string): void {

@@ -144,6 +144,12 @@
                "default": "ДА",
                "description": "Подгружать импортируемые макросы."
             },
+            "RSLanguageServer.performanceLogFile": {
+               "scope": "window",
+               "type": "string",
+               "default": "",
+               "description": "Абсолютный путь к JSONL-файлу профилирования. Пустое значение полностью отключает замеры. После изменения перезапустите окно VS Code."
+            },
             "rsl-plus.programmerName": {
                "type": "string",
                "default": "RS Programmer",

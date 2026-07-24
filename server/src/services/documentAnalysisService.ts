@@ -9,12 +9,14 @@ import {
     createFastDocumentSnapshot,
     type IFastDocumentSnapshot
 } from "./fastDocumentSnapshot";
+import type { PerformanceLogger } from "../performanceLogger";
 
 export interface IDocumentAnalysisOptions {
     changeDebounceMs?: number;
     slowParseLogMs?: number;
     initialParseDelayMs?: number;
     log(message: string): void;
+    performance?: PerformanceLogger;
     invalidateProviderCaches(uri: string): void;
     onParsed(module: IIndexedModule, wasKnown: boolean): void;
     onImports(uri: string, imports: readonly string[]): void;
@@ -65,6 +67,17 @@ export class DocumentAnalysisService {
 
     /** Частые изменения текста объединяются; snapshot пересоздаётся лениво. */
     changed(document: TextDocument): void {
+        const current = this.fastSnapshots.get(document.uri);
+
+        /*
+         * TextDocuments отправляет onDidChangeContent сразу после onDidOpen.
+         * Это не новая версия документа: open() уже построил snapshot и
+         * запланировал parse, поэтому повторный lexer здесь не нужен.
+         */
+        if (current && current.version === document.version) {
+            return;
+        }
+
         this.fastSnapshots.delete(document.uri);
         this.options.invalidateProviderCaches(document.uri);
         this.scheduleWithDelay(document, this.changeDebounceMs);
@@ -123,7 +136,20 @@ export class DocumentAnalysisService {
     private refreshFastSnapshot(
         document: TextDocument
     ): IFastDocumentSnapshot {
+        const performance = this.options.performance;
+        const span = performance?.enabled
+            ? performance.start("analysis.fastSnapshot", {
+                uri: document.uri,
+                version: document.version,
+                chars: document.getText().length
+            })
+            : undefined;
         const snapshot = createFastDocumentSnapshot(document);
+        if (span) {
+            performance.end(span, {
+                tokens: snapshot.lex.tokens.length
+            });
+        }
         this.fastSnapshots.set(document.uri, snapshot);
         this.options.invalidateProviderCaches(document.uri);
         return snapshot;
@@ -195,20 +221,66 @@ export class DocumentAnalysisService {
         const fastSnapshot = this.getFastSnapshot(document);
         const started = Date.now();
         const wasKnown = !!this.index.getModule(uri);
+        const performance = this.options.performance;
+        const fullSpan = performance?.enabled
+            ? performance.start("analysis.full", {
+                uri,
+                version,
+                chars: text.length,
+                lexTokens: fastSnapshot.lex.tokens.length
+            })
+            : undefined;
 
         /* Один parser/lexer pass на версию документа. */
+        const syntaxSpan = performance?.enabled
+            ? performance.start("analysis.syntax", {
+                uri,
+                version,
+                chars: text.length,
+                lexTokens: fastSnapshot.lex.tokens.length
+            })
+            : undefined;
         const syntax = parseRslSyntax(text, fastSnapshot.lex, {
             buildExpressionTree: false
         });
+        if (syntaxSpan) {
+            performance.end(syntaxSpan, {
+                syntaxTokens: syntax.tokens.length,
+                parserDiagnostics: syntax.diagnostics.length
+            });
+        }
+        const treeSpan = performance?.enabled
+            ? performance.start("analysis.symbolTree", {
+                uri,
+                version,
+                syntaxTokens: syntax.tokens.length
+            })
+            : undefined;
         const parsedObject = CBase.fromSyntax(text, 0, syntax, true, false);
+        if (treeSpan) {
+            performance.end(treeSpan, {
+                topLevelSymbols: parsedObject.getChilds().length
+            });
+        }
 
         if (
             this.parseGeneration.get(uri) !== generation ||
             this.documents.get(uri)?.version !== version
         ) {
+            if (fullSpan) {
+                performance.end(fullSpan, {
+                    cancelled: true
+                });
+            }
             return;
         }
 
+        const indexSpan = performance?.enabled
+            ? performance.start("analysis.index", {
+                uri,
+                version
+            })
+            : undefined;
         const indexed = this.index.updateOpenModule(
             uri,
             text,
@@ -216,6 +288,11 @@ export class DocumentAnalysisService {
             version,
             syntax
         );
+        if (indexSpan) {
+            performance.end(indexSpan, {
+                imports: indexed.imports.length
+            });
+        }
         this.parsedVersions.set(uri, version);
         /*
          * Folding/Outline уже привязаны к той же версии Fast Snapshot.
@@ -224,25 +301,14 @@ export class DocumentAnalysisService {
          */
         this.options.onParsed(indexed, wasKnown);
 
-        try {
-            const settings = await this.settings.get(uri);
-            const current = this.index.getModule(uri);
-
-            if (
-                current &&
-                current.version === version &&
-                this.parseGeneration.get(uri) === generation &&
-                settings.import === "ДА"
-            ) {
-                this.options.onImports(uri, indexed.imports);
-            }
-        } catch (error) {
-            this.options.log(
-                `Settings read failed: ${uri}\n${errorToString(error)}`
-            );
-        }
-
         const elapsed = Date.now() - started;
+        if (fullSpan) {
+            performance.end(fullSpan, {
+                cancelled: false,
+                imports: indexed.imports.length,
+                topLevelSymbols: parsedObject.getChilds().length
+            });
+        }
 
         if (elapsed >= this.slowParseLogMs) {
             this.options.log(
@@ -250,12 +316,58 @@ export class DocumentAnalysisService {
                 `ms=${elapsed}; symbols=${parsedObject.getChilds().length}`
             );
         }
+
+        /*
+         * workspace/configuration — отдельный LSP round-trip к VS Code.
+         * Он не должен удерживать ensureParsed(), Ctrl+Click, Hover и
+         * Semantic Tokens после того, как AST уже готов и помещён в индекс.
+         */
+        this.refreshImportsAfterParse(
+            uri,
+            version,
+            generation,
+            indexed.imports
+        );
     }
 
     private isCurrent(document: TextDocument): boolean {
         return this.parsedVersions.get(document.uri) === document.version &&
             !!this.index.getModule(document.uri) &&
             this.index.getModule(document.uri)?.kind === "open";
+    }
+
+    private refreshImportsAfterParse(
+        uri: string,
+        version: number,
+        generation: number,
+        imports: readonly string[]
+    ): void {
+        const performance = this.options.performance;
+        const span = performance?.enabled
+            ? performance.start("analysis.importSettings", {
+                uri,
+                version,
+                imports: imports.length
+            })
+            : undefined;
+
+        const settings = this.settings.getAvailable(uri);
+        const current = this.index.getModule(uri);
+        const isCurrent = !!current &&
+            current.version === version &&
+            this.parseGeneration.get(uri) === generation;
+
+        if (isCurrent && settings.import === "ДА") {
+            this.options.onImports(uri, imports);
+        }
+
+        if (span) {
+            performance.end(span, {
+                current: isCurrent,
+                importsEnabled: settings.import === "ДА",
+                source: "availableSnapshot"
+            });
+        }
     }
 
     private nextGeneration(uri: string): number {

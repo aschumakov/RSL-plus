@@ -3,12 +3,14 @@ import { fileURLToPath } from "url";
 
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 import { ReferenceIndex } from "../analysis/referenceIndex";
+import type { PerformanceLogger } from "../performanceLogger";
 
 export type ModuleLoadPriority = "interactive" | "background";
 export type WorkspaceIndexingMode = "activeImports" | "workspaceIdle" | "full";
 
 export interface IWorkspaceModuleLoaderOptions {
     log(message: string): void;
+    performance?: PerformanceLogger;
     onModuleLoaded(module: IIndexedModule): void;
     onModuleCountChanged(): void;
     onIndexProgress?(loaded: number, total: number): void;
@@ -197,6 +199,57 @@ export class WorkspaceModuleLoader {
         return this.loadOnce(uri);
     }
 
+    /**
+     * Интерактивно загружает только Import-ветвь до первого подходящего
+     * публичного символа. Используется Ctrl+Click, если фоновая очередь ещё
+     * не успела построить нужную часть графа.
+     */
+    async ensureImportedSymbol(
+        fromUri: string,
+        symbolName: string
+    ): Promise<boolean> {
+        if (this.index.findImportedSymbols(fromUri, symbolName).length > 0) {
+            return true;
+        }
+
+        const root = this.index.getModule(fromUri);
+
+        if (!root) {
+            return false;
+        }
+
+        const queue = root.imports.slice();
+        const visitedNames = new Set<string>();
+        const visitedUris = new Set<string>([fromUri]);
+
+        for (let position = 0; position < queue.length; position++) {
+            const importName = queue[position];
+            const key = importName.replace(/\\/g, "/").toLowerCase();
+
+            if (visitedNames.has(key)) {
+                continue;
+            }
+            visitedNames.add(key);
+
+            const imported = await this.ensureLoadedByName(importName);
+
+            if (!imported || visitedUris.has(imported.uri)) {
+                continue;
+            }
+            visitedUris.add(imported.uri);
+
+            if (
+                this.index.findImportedSymbols(fromUri, symbolName).length > 0
+            ) {
+                return true;
+            }
+
+            queue.push(...imported.imports);
+        }
+
+        return this.index.findImportedSymbols(fromUri, symbolName).length > 0;
+    }
+
     async reload(uri: string): Promise<void> {
         this.removeQueued(uri);
         await this.loadOnce(uri);
@@ -305,13 +358,39 @@ export class WorkspaceModuleLoader {
             return undefined;
         }
 
-        const stat = await fs.promises.stat(filePath);
-        const text = await fs.promises.readFile(filePath, "utf8");
+        const performance = this.options.performance;
+        const loadSpan = performance?.enabled
+            ? performance.start("workspaceModule.load", { uri })
+            : undefined;
+        const ioSpan = performance?.enabled
+            ? performance.start("workspaceModule.io", { uri })
+            : undefined;
+        const [stat, text] = await Promise.all([
+            fs.promises.stat(filePath),
+            fs.promises.readFile(filePath, "utf8")
+        ]);
+        if (ioSpan) {
+            performance.end(ioSpan, {
+                chars: text.length
+            });
+        }
+        const indexSpan = performance?.enabled
+            ? performance.start("workspaceModule.index", {
+                uri,
+                chars: text.length
+            })
+            : undefined;
         const module = this.index.updateExternalModule(
             uri,
             text,
             Math.floor(stat.mtimeMs)
         );
+        if (indexSpan) {
+            performance.end(indexSpan, {
+                imports: module.imports.length,
+                topLevelSymbols: module.object.getChilds().length
+            });
+        }
         this.indexedUris.add(uri);
 
         for (const importName of module.imports) {
@@ -324,6 +403,13 @@ export class WorkspaceModuleLoader {
 
         this.options.onModuleLoaded(module);
         this.options.onModuleCountChanged();
+        if (loadSpan) {
+            performance.end(loadSpan, {
+                chars: text.length,
+                imports: module.imports.length,
+                indexedModules: this.index.size
+            });
+        }
         return module;
     }
 

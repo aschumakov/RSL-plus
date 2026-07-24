@@ -20,6 +20,9 @@ const {
 const {
   buildEnhancedRslCodeActions
 } = require("../server/out/features/enhancedCodeActions");
+const {
+  RslQuickFixRegistry
+} = require("../server/out/features/quickFixRegistry");
 const { buildRslDiagnostics } = require("../server/out/diagnostics");
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
 
@@ -195,6 +198,42 @@ test("Обычный Macro по-прежнему проверяет каждый
   assert.strictEqual(messages.length, 2);
   assert.ok(messages.some(message => message.includes("параметр a")));
   assert.ok(messages.some(message => message.includes("параметр b")));
+});
+
+test("Registry выбирает AST-провайдер и fallback по коду диагностики", () => {
+  const diagnostic = {
+    code: "unused-declaration",
+    message: "unused",
+    range: {
+      start: { line: 1, character: 2 },
+      end: { line: 1, character: 3 }
+    }
+  };
+  const registry = new RslQuickFixRegistry();
+  registry.setFallback((_module, item) => ({
+    title: "Legacy",
+    diagnostics: [item]
+  }));
+  registry.register("unused-declaration", (_module, item) => ({
+    title: "AST fix",
+    diagnostics: [item]
+  }));
+
+  let actions = registry.build(
+    { uri: "file:///main.mac" },
+    { context: { diagnostics: [diagnostic] } }
+  );
+  assert.deepStrictEqual(actions.map(item => item.title), ["AST fix"]);
+
+  actions = registry.build(
+    { uri: "file:///main.mac" },
+    {
+      context: {
+        diagnostics: [{ ...diagnostic, code: "debugbreak" }]
+      }
+    }
+  );
+  assert.deepStrictEqual(actions.map(item => item.title), ["Legacy"]);
 });
 
 console.log("");

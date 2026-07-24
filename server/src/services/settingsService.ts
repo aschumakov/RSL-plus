@@ -11,6 +11,10 @@ export class RslSettingsService {
     private hasConfigurationCapability = false;
     private workspaceSettings: IRslSettings;
     private documentSettings = new Map<string, Promise<IRslSettings>>();
+    private resolvedDocumentSettings = new Map<string, IRslSettings>();
+    private resolvedListeners = new Set<
+        (resource: string, settings: IRslSettings) => void
+    >();
 
     constructor(
         private connection: Connection,
@@ -22,6 +26,7 @@ export class RslSettingsService {
     configure(hasConfigurationCapability: boolean): void {
         this.hasConfigurationCapability = hasConfigurationCapability;
         this.documentSettings.clear();
+        this.resolvedDocumentSettings.clear();
     }
 
     updateFromConfiguration(settingsRoot: unknown): void {
@@ -32,11 +37,26 @@ export class RslSettingsService {
 
         this.workspaceSettings = mergeSettings(this.defaults, value);
         this.documentSettings.clear();
+        this.resolvedDocumentSettings.clear();
+    }
+
+    /**
+     * Возвращает доступный снимок без LSP round-trip.
+     *
+     * До первого ответа workspace/configuration используются настройки,
+     * переданные клиентом при initialize, либо безопасные defaults. Поэтому
+     * parser, Import и Problems не блокируются занятой очередью Extension Host.
+     */
+    getAvailable(resource: string): IRslSettings {
+        return cloneSettings(
+            this.resolvedDocumentSettings.get(resource) ??
+            this.workspaceSettings
+        );
     }
 
     get(resource: string): Promise<IRslSettings> {
         if (!this.hasConfigurationCapability) {
-            return Promise.resolve(cloneSettings(this.workspaceSettings));
+            return Promise.resolve(this.getAvailable(resource));
         }
 
         const cached = this.documentSettings.get(resource);
@@ -45,25 +65,57 @@ export class RslSettingsService {
             return cached;
         }
 
+        const previous = this.getAvailable(resource);
         const created: Promise<IRslSettings> =
             this.connection.workspace.getConfiguration({
                 scopeUri: resource,
                 section: "RSLanguageServer"
-            }).then((value: unknown) => mergeSettings(this.defaults, value));
+            }).then((value: unknown) => {
+                const resolved = mergeSettings(this.defaults, value);
+
+                /*
+                 * clear()/clearAll() могут инвалидировать запрос, пока VS Code
+                 * ещё готовит ответ. Такой ответ нельзя возвращать в кэш.
+                 */
+                if (this.documentSettings.get(resource) === created) {
+                    this.resolvedDocumentSettings.set(resource, resolved);
+                    if (!settingsEqual(previous, resolved)) {
+                        for (const listener of this.resolvedListeners) {
+                            listener(resource, cloneSettings(resolved));
+                        }
+                    }
+                }
+
+                return cloneSettings(resolved);
+            }, error => {
+                if (this.documentSettings.get(resource) === created) {
+                    this.documentSettings.delete(resource);
+                }
+                throw error;
+            });
         this.documentSettings.set(resource, created);
         return created;
     }
 
     clear(resource: string): void {
         this.documentSettings.delete(resource);
+        this.resolvedDocumentSettings.delete(resource);
     }
 
     clearAll(): void {
         this.documentSettings.clear();
+        this.resolvedDocumentSettings.clear();
     }
 
     getWorkspaceSnapshot(): IRslSettings {
         return cloneSettings(this.workspaceSettings);
+    }
+
+    onDidResolve(
+        listener: (resource: string, settings: IRslSettings) => void
+    ): () => void {
+        this.resolvedListeners.add(listener);
+        return () => this.resolvedListeners.delete(listener);
     }
 }
 
@@ -94,6 +146,15 @@ function cloneSettings(value: IRslSettings): IRslSettings {
             ...(value.diagnostics || {})
         }
     };
+}
+
+function settingsEqual(
+    left: IRslSettings,
+    right: IRslSettings
+): boolean {
+    return left.import === right.import &&
+        JSON.stringify(left.diagnostics || {}) ===
+        JSON.stringify(right.diagnostics || {});
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

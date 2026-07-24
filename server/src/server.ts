@@ -32,6 +32,7 @@ import { RslSettingsService } from "./services/settingsService";
 import { WorkspaceIndex } from "./workspaceIndex";
 import { WorkspaceModuleLoader } from "./indexing/workspaceModuleLoader";
 import { ReferenceIndex } from "./analysis/referenceIndex";
+import { PerformanceLogger } from "./performanceLogger";
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments<TextDocument>(TextDocument);
@@ -47,6 +48,7 @@ const defaultSettings: IRslSettings = {
 const settingsService = new RslSettingsService(connection, defaultSettings);
 const diagnosticEngine = new RslDiagnosticEngine();
 const referenceIndex = new ReferenceIndex({ log: logMessage });
+const performanceLogger = new PerformanceLogger(message => logMessage(message));
 
 let hasConfigurationCapability = false;
 let hasWorkspaceFolderCapability = false;
@@ -140,6 +142,7 @@ const moduleLoader = new WorkspaceModuleLoader(
     workspaceIndex,
     {
         log: logMessage,
+        performance: performanceLogger,
         onModuleLoaded: module => {
             refreshOpenDependents(module.uri);
         },
@@ -155,6 +158,7 @@ const documentAnalysis = new DocumentAnalysisService(
     settingsService,
     {
         log: logMessage,
+        performance: performanceLogger,
         invalidateProviderCaches,
         onParsed: (module, wasKnown) => {
             diagnosticsCoordinator.scheduleLocal(module.uri);
@@ -180,11 +184,69 @@ diagnosticsCoordinator = new DiagnosticsCoordinator(
     {
         isParseBusy: uri => documentAnalysis.isBusyFor(uri),
         log: logMessage,
+        performance: performanceLogger,
         onImports: (_uri, imports) => {
             imports.forEach(name => moduleLoader.enqueueImport(name));
         }
     }
 );
+
+/*
+ * Уточнённые resource-настройки приходят асинхронно. До этого момента
+ * анализ использует initial/default snapshot. Пересчитываем Problems только
+ * когда ответ VS Code действительно отличается от уже применённого снимка.
+ */
+settingsService.onDidResolve((uri, settings) => {
+    const document = documents.get(uri);
+    const module = workspaceIndex.getModule(uri);
+
+    workspaceIndex.setImportsEnabled(settings.import === "ДА");
+
+    if (
+        !document ||
+        !module ||
+        module.version !== document.version
+    ) {
+        return;
+    }
+
+    if (settings.import === "ДА") {
+        module.imports.forEach(name => moduleLoader.enqueueImport(name));
+    }
+
+    diagnosticsCoordinator.scheduleLocal(uri, 0);
+    diagnosticsCoordinator.scheduleWorkspace(uri, 0);
+});
+
+function requestDocumentSettings(uri: string): void {
+    const available = settingsService.getAvailable(uri);
+    workspaceIndex.setImportsEnabled(available.import === "ДА");
+
+    const span = performanceLogger.enabled
+        ? performanceLogger.start("settings.request", { uri })
+        : undefined;
+
+    settingsService.get(uri).then(() => {
+        /*
+         * Запрос мог быть инвалидирован сменой конфигурации или закрытием
+         * документа. Применяем только актуальный снимок, а не поздний ответ.
+         */
+        const current = settingsService.getAvailable(uri);
+        workspaceIndex.setImportsEnabled(current.import === "ДА");
+        if (span) {
+            performanceLogger.end(span, {
+                importsEnabled: current.import === "ДА"
+            });
+        }
+    }).catch(error => {
+        if (span) {
+            performanceLogger.end(span, { failed: true });
+        }
+        logMessage(
+            `Settings read failed: ${uri}\n${errorToString(error)}`
+        );
+    });
+}
 
 connection.onNotification("workspaceFiles", (uris: string[]) => {
     const items = Array.isArray(uris) ? uris : [];
@@ -258,16 +320,26 @@ languageFeatures = new RslLanguageFeatureRegistry({
     getFastDocumentSnapshot: document =>
         documentAnalysis.getFastSnapshot(document),
     ensureDocumentParsed,
-    log: logMessage
+    ensureImportedSymbol: (uri, symbolName) =>
+        moduleLoader.ensureImportedSymbol(uri, symbolName),
+    log: logMessage,
+    performance: performanceLogger
 });
 languageFeatures.register();
 
 connection.onInitialize((params: InitializeParams) => {
     const capabilities = params.capabilities;
     const initializationOptions = params.initializationOptions as
-        { referenceIndexCachePath?: string } | undefined;
+        {
+            referenceIndexCachePath?: string;
+            performanceLogFile?: string;
+            initialSettings?: IRslSettings;
+        } | undefined;
     referenceIndex.configurePersistence(
         initializationOptions?.referenceIndexCachePath
+    );
+    performanceLogger.configure(
+        initializationOptions?.performanceLogFile
     );
     definitionProvider.configureWorkspace(params);
     workFolderOpened = !!(
@@ -284,6 +356,9 @@ connection.onInitialize((params: InitializeParams) => {
         capabilities.workspace.workspaceFolders
     );
     settingsService.configure(hasConfigurationCapability);
+    settingsService.updateFromConfiguration({
+        RSLanguageServer: initializationOptions?.initialSettings
+    });
 
     return {
         capabilities: {
@@ -350,12 +425,8 @@ connection.onDidChangeConfiguration(change => {
 
     const documentsList = documents.all();
 
-    if (documentsList.length > 0) {
-        settingsService.get(documentsList[0].uri).then(settings => {
-            workspaceIndex.setImportsEnabled(settings.import === "ДА");
-        }).catch(error => logMessage(
-            `Settings refresh failed\n${errorToString(error)}`
-        ));
+    for (const document of documentsList) {
+        requestDocumentSettings(document.uri);
     }
 
     diagnosticsCoordinator.refreshAll();
@@ -363,11 +434,7 @@ connection.onDidChangeConfiguration(change => {
 
 documents.onDidOpen(event => {
     workspaceIndex.markOpen(event.document.uri);
-    settingsService.get(event.document.uri).then(settings => {
-        workspaceIndex.setImportsEnabled(settings.import === "ДА");
-    }).catch(error => logMessage(
-        `Settings read failed: ${event.document.uri}\n${errorToString(error)}`
-    ));
+    requestDocumentSettings(event.document.uri);
     documentAnalysis.open(event.document);
 });
 
@@ -449,6 +516,7 @@ function refreshOpenDependents(uri: string): void {
 
 connection.onShutdown(async () => {
     await referenceIndex.flush();
+    await performanceLogger.shutdown();
 });
 
 documents.listen(connection);
