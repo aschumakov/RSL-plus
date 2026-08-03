@@ -1657,9 +1657,11 @@ class Parser {
 
         if (this.isSymbol("(")) {
             used.push(this.take());
-            const name = this.expectIdentifier(
-                "В ONERROR ожидается имя переменной ошибки"
-            );
+            const name = this.isSymbol(")")
+                ? undefined
+                : this.expectIdentifier(
+                    "В ONERROR ожидается имя переменной ошибки"
+                );
 
             if (name) {
                 used.push(name);
@@ -1945,7 +1947,7 @@ class Parser {
                     "implicit-string-concatenation",
                     "Строковые литералы объединяются неявно; " +
                         "рекомендуется добавить '+' для явной конкатенации",
-                    current
+                    previous
                 );
             }
         }

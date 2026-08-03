@@ -118,6 +118,10 @@
          {
             "command": "rsl.foldAllMacros",
             "title": "RSL: Свернуть все Macro в файле"
+         },
+         {
+            "command": "rsl.selectCurrentBlock",
+            "title": "RSL: Выделить текущий блок"
          }
       ],
       "menus": {
@@ -134,8 +138,13 @@
             },
             {
                "when": "resourceLangId == rsl",
+               "command": "rsl.selectCurrentBlock",
+               "group": "1_modification@1"
+            },
+            {
+               "when": "resourceLangId == rsl",
                "command": "rsl.foldAllMacros",
-               "group": "1_modification"
+               "group": "1_modification@2"
             }
          ]
       },

@@ -100,11 +100,11 @@ export function buildRslCodeActions(
                 break;
 
             case "implicit-string-concatenation":
-                action = createInsertTextAction(
+                action = createInsertAfterDiagnosticAction(
                     module,
                     diagnostic,
-                    "Добавить '+' между строками",
-                    "+ "
+                    "Добавить '+' после строки",
+                    " +"
                 );
                 break;
 
@@ -161,7 +161,7 @@ function createDeleteTokenAction(
     );
 }
 
-function createInsertTextAction(
+function createInsertAfterDiagnosticAction(
     module: IIndexedModule,
     diagnostic: Diagnostic,
     title: string,
@@ -174,7 +174,7 @@ function createInsertTextAction(
         diagnostic,
         title,
         {
-            range: offsetRange(module, offsets.start, offsets.start),
+            range: offsetRange(module, offsets.end, offsets.end),
             newText
         }
     );

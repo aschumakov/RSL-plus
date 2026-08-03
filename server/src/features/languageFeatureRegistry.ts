@@ -40,6 +40,7 @@ import {
     buildSelectionRanges,
     GO_TO_BLOCK_END_COMMAND,
     GO_TO_BLOCK_START_COMMAND,
+    resolveCurrentBlockRange,
     resolveBlockNavigationPosition
 } from "./blockNavigation";
 import type { IRslFoldingRange } from "../folding";
@@ -79,6 +80,12 @@ import {
     buildRslSourceCodeActions,
     RSL_FIX_ALL_KIND
 } from "./sourceCodeActions";
+
+interface IRslCurrentBlockRangeParams {
+    textDocument: { uri: string };
+    position: { line: number; character: number };
+    currentRange?: Range;
+}
 
 export interface IRslLanguageFeatureEnvironment {
     connection: Connection;
@@ -574,6 +581,27 @@ export class RslLanguageFeatureRegistry {
                 ? buildSelectionRanges(module, params.positions)
                 : [];
         });
+
+        connection.onRequest(
+            "rsl/currentBlockRange",
+            async (params: IRslCurrentBlockRangeParams) => {
+                const document = documents.get(params.textDocument.uri);
+                if (!document) {
+                    return null;
+                }
+
+                this.environment.noteInteractiveActivity?.();
+                await ensureDocumentParsed(document);
+                const module = index.getModule(document.uri);
+                return module
+                    ? resolveCurrentBlockRange(
+                        module,
+                        params.position,
+                        params.currentRange
+                    ) || null
+                    : null;
+            }
+        );
 
         connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
             const direction = params.command === GO_TO_BLOCK_START_COMMAND

@@ -118,6 +118,89 @@ export function resolveBlockNavigationPosition(
     return positionAt(module, endKeyword ? endKeyword.start : block.end);
 }
 
+/**
+ * Возвращает ближайший структурный блок целиком. Если текущий диапазон уже
+ * совпадает с блоком, выбирается следующий внешний блок — команда может
+ * последовательно расширять выделение If -> Macro -> Class.
+ */
+export function resolveCurrentBlockRange(
+    module: IIndexedModule,
+    position: Position,
+    currentRange?: Range
+): Range | undefined {
+    const offset = offsetAt(module, position);
+    const hasSelection = !!currentRange && !rangesAreEmpty(currentRange);
+    const selectionStart = currentRange
+        ? offsetAt(module, currentRange.start)
+        : offset;
+    const selectionEnd = currentRange
+        ? offsetAt(module, currentRange.end)
+        : offset;
+    const blocks = (hasSelection
+        ? collectBlockNodes(module.syntax.root).filter(node => {
+            const range = fullLineRange(module, node);
+            return offsetAt(module, range.start) <= selectionStart &&
+                selectionEnd <= offsetAt(module, range.end);
+        })
+        : collectContainingNodes(module.syntax.root, offset)
+            .filter(node => BLOCK_KINDS.has(node.kind)))
+        .sort((left, right) => span(left) - span(right));
+
+    if (blocks.length === 0) {
+        return undefined;
+    }
+
+    if (!hasSelection) {
+        return fullLineRange(module, blocks[0]);
+    }
+
+    for (const block of blocks) {
+        const range = fullLineRange(module, block);
+        const start = offsetAt(module, range.start);
+        const end = offsetAt(module, range.end);
+        if (
+            start <= selectionStart &&
+            selectionEnd <= end &&
+            (start < selectionStart || selectionEnd < end)
+        ) {
+            return range;
+        }
+    }
+
+    return fullLineRange(module, blocks[0]);
+}
+
+function collectBlockNodes(
+    node: IRslSyntaxNode,
+    result: IRslSyntaxNode[] = []
+): IRslSyntaxNode[] {
+    if (BLOCK_KINDS.has(node.kind)) {
+        result.push(node);
+    }
+    node.children.forEach(child => collectBlockNodes(child, result));
+    return result;
+}
+
+function rangesAreEmpty(range: Range): boolean {
+    return range.start.line === range.end.line &&
+        range.start.character === range.end.character;
+}
+
+function fullLineRange(module: IIndexedModule, node: IRslSyntaxNode): Range {
+    const startPosition = positionAt(module, node.start);
+    const endPosition = positionAt(module, Math.max(node.start, node.end));
+    const lineStart = module.lex.lineStarts[startPosition.line] || 0;
+    const nextLineStart = endPosition.line + 1 < module.lex.lineStarts.length
+        ? module.lex.lineStarts[endPosition.line + 1]
+        : module.source.length;
+    const lineEnd = trimLineEnd(
+        module.source,
+        module.lex.lineStarts[endPosition.line] || 0,
+        nextLineStart
+    );
+    return offsetRange(module, lineStart, lineEnd);
+}
+
 function findCurrentBlock(
     root: IRslSyntaxNode,
     offset: number

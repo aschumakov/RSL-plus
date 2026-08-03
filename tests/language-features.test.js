@@ -28,6 +28,7 @@ const {
 } = require("../server/out/analysis/references");
 const {
     buildSelectionRanges,
+    resolveCurrentBlockRange,
     resolveBlockNavigationPosition
 } = require("../server/out/features/blockNavigation");
 const {
@@ -123,6 +124,42 @@ test("Quick Fix удаляет один элемент из Import", () => {
     const edit = actions[0].edit.changes[module.uri][0];
     assert.strictEqual(edit.newText, "");
     assert.strictEqual(edit.range.start.line, 0);
+});
+
+test("Quick Fix добавляет '+' после первого строкового литерала", () => {
+    const index = new WorkspaceIndex();
+    const source = [
+        "Macro Test()",
+        "  cmd = RsdCommand(",
+        "      \" select t_enddate from ddscn_cel_dbt \"",
+        "      \" where t_branch = ? \" +",
+        "      \" and t_contractid = ? \");",
+        "End;"
+    ].join("\n");
+    const module = createSyntaxModule(
+        index,
+        "file:///implicit-concat.mac",
+        source
+    );
+    const diagnostic = buildRslDiagnostics(module, index).find(item =>
+        item.code === "implicit-string-concatenation"
+    );
+    assert.ok(diagnostic);
+    assert.strictEqual(diagnostic.range.start.line, 2);
+
+    const actions = buildRslCodeActions(
+        module,
+        paramsFor(module, diagnostic)
+    );
+    assert.strictEqual(actions.length, 1);
+    const edit = actions[0].edit.changes[module.uri][0];
+    assert.strictEqual(edit.newText, " +");
+    assert.strictEqual(edit.range.start.line, 2);
+    assert.strictEqual(
+        edit.range.start.character,
+        source.split("\n")[2].length
+    );
+    assert.deepStrictEqual(edit.range.start, edit.range.end);
 });
 
 test("Find All References находит объявление и вызов", () => {
@@ -366,6 +403,45 @@ test("Hover содержит сигнатуру, расположение и б�
     assert.ok(methodHover.includes("Контейнер:** TDocument"));
 });
 
+test("Hover показывает значение локальной и импортированной константы", () => {
+    const index = new WorkspaceIndex();
+    const localUri = "file:///workspace/constants.mac";
+    const local = createSyntaxModule(
+        index,
+        localUri,
+        "Const PDOC_ORIGIN_LOCAL = 2;"
+    );
+    const localConstant = local.object.RecursiveFind("PDOC_ORIGIN_LOCAL");
+    assert.ok(localConstant);
+    const localHover = buildRslHoverContent(
+        index,
+        localUri,
+        localConstant
+    ).value;
+    assert.ok(localHover.includes("Const PDOC_ORIGIN_LOCAL = 2"));
+
+    const importedUri = "file:///workspace/primdocext.mac";
+    const imported = index.updateExternalModule(
+        importedUri,
+        "// constants\nConst PDOC_ORIGIN_SAP = 1;",
+        1
+    );
+    const importedConstant = imported.object.RecursiveFind(
+        "PDOC_ORIGIN_SAP"
+    );
+    assert.ok(importedConstant);
+    const importedHover = buildRslHoverContent(
+        index,
+        importedUri,
+        importedConstant
+    ).value;
+    assert.ok(importedHover.includes("Const PDOC_ORIGIN_SAP = 1"));
+    assert.ok(
+        importedHover.includes("Строка:** 2"),
+        importedHover
+    );
+});
+
 test("Selection Range и переход по блоку используют syntax tree", () => {
     const source = [
         "Class TestClass()",
@@ -397,6 +473,19 @@ test("Selection Range и переход по блоку используют syn
     assert.deepStrictEqual(
         resolveBlockNavigationPosition(module, position, "end"),
         { line: 4, character: 4 }
+    );
+
+    const ifRange = resolveCurrentBlockRange(module, position);
+    assert.deepStrictEqual(ifRange, {
+        start: { line: 2, character: 0 },
+        end: { line: 4, character: 8 }
+    });
+    assert.deepStrictEqual(
+        resolveCurrentBlockRange(module, position, ifRange),
+        {
+            start: { line: 1, character: 0 },
+            end: { line: 5, character: 6 }
+        }
     );
 });
 

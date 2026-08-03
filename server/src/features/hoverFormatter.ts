@@ -14,6 +14,10 @@ interface IClassLike {
     getParentName?(): string;
 }
 
+interface IConstantLike {
+    getValue?(): string;
+}
+
 export function buildRslHoverContent(
     index: WorkspaceIndex,
     uri: string,
@@ -86,7 +90,14 @@ function buildDeclaration(
         return `${object.Name}: ${object.Type || "variant"}`;
     }
 
-    const keyword = kind === CompletionItemKind.Constant ? "Const" : "Var";
+    if (kind === CompletionItemKind.Constant) {
+        const value = (object as unknown as IConstantLike).getValue?.() || "";
+        return value
+            ? `${visibility}Const ${object.Name} = ${value}`
+            : `${visibility}Const ${object.Name}: ${object.Type || "variant"}`;
+    }
+
+    const keyword = "Var";
     return `${visibility}${keyword} ${object.Name}: ${object.Type || "variant"}`;
 }
 

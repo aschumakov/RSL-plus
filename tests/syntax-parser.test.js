@@ -38,6 +38,19 @@ assert.deepStrictEqual(codes([
   "end;"
 ].join("\n")), []);
 
+assert.deepStrictEqual(codes([
+  "Macro SafeCall()",
+  "  Return true;",
+  "OnError()",
+  "  Return false;",
+  "End;"
+].join("\n")), []);
+assert.ok(
+  codes("OnError(")
+    .includes("expected-identifier"),
+  "Незакрытый ONERROR( без имени по-прежнему должен диагностироваться"
+);
+
 assert.ok(codes("import common bankinter;").includes("missing-comma"));
 assert.ok(codes("macro Test(a b)\nend").includes("missing-comma"));
 assert.ok(codes("var a = 1\nvar b = 2;").includes("missing-semicolon"));
@@ -137,6 +150,13 @@ const implicitStringWarning = implicitStringResult.diagnostics
   .find(item => item.code === "implicit-string-concatenation");
 assert.ok(implicitStringWarning);
 assert.strictEqual(implicitStringWarning.severity, "warning");
+assert.strictEqual(
+  implicitStringSource
+    .slice(0, implicitStringWarning.start)
+    .split("\n").length - 1,
+  0,
+  "Предупреждение должно подчёркивать строку, после которой нужен '+'"
+);
 assert.ok(
   findNodes(
     implicitStringResult.root,

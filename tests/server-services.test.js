@@ -322,6 +322,9 @@ async function testOutlineUsesPreparedSnapshotAndReportsTiming() {
         onCodeAction: register("codeAction"),
         onSelectionRanges: register("selectionRanges"),
         onExecuteCommand: register("executeCommand"),
+        onRequest: (method, callback) => {
+            handlers[method] = callback;
+        },
         onDocumentSymbol: register("documentSymbol"),
         onFoldingRanges: register("foldingRanges"),
         onDocumentFormatting: register("documentFormatting"),

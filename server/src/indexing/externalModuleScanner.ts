@@ -167,7 +167,8 @@ export function scanExternalModule(source: string): IExternalModuleScanResult {
         }
 
         const parsedVariables = scanVariableNames(tokens, index + 1, keywordToken.line);
-        for (const nameToken of parsedVariables.names) {
+        for (const parsedVariable of parsedVariables.names) {
+            const nameToken = parsedVariable.token;
             const descriptor: IExternalSymbolDescriptor = {
                 kind: "variable",
                 name: nameToken.value,
@@ -180,6 +181,14 @@ export function scanExternalModule(source: string): IExternalModuleScanResult {
                 startCharacter: nameToken.character,
                 endLine: nameToken.endLine,
                 endCharacter: nameToken.endCharacter,
+                value: keyword === "const"
+                    ? scanInitializerValue(
+                        text,
+                        tokens,
+                        parsedVariable.index,
+                        parsedVariables.lastIndex
+                    )
+                    : undefined,
                 children: []
             };
             addDescriptor(rootSymbols, currentClass?.descriptor, descriptor);
@@ -329,8 +338,8 @@ function scanVariableNames(
     tokens: IRslToken[],
     startIndex: number,
     startLine: number
-): { names: IRslToken[]; lastIndex: number } {
-    const names: IRslToken[] = [];
+): { names: Array<{ token: IRslToken; index: number }>; lastIndex: number } {
+    const names: Array<{ token: IRslToken; index: number }> = [];
     let lastIndex = startIndex - 1;
     let expectName = true;
     let nestedDepth = 0;
@@ -361,13 +370,67 @@ function scanVariableNames(
         }
 
         if (expectName && nestedDepth === 0 && token.kind === "identifier") {
-            names.push(token);
+            names.push({ token, index });
             expectName = false;
         }
         lastIndex = index;
     }
 
     return { names, lastIndex };
+}
+
+function scanInitializerValue(
+    source: string,
+    tokens: IRslToken[],
+    nameIndex: number,
+    declarationEndIndex: number
+): string | undefined {
+    let depth = 0;
+    let valueStart: number | undefined;
+    let valueEnd: number | undefined;
+
+    for (
+        let index = nameIndex + 1;
+        index <= declarationEndIndex && index < tokens.length;
+        index++
+    ) {
+        const token = tokens[index];
+        if (token.kind === "symbol") {
+            if (token.raw === "(" || token.raw === "[") {
+                depth++;
+            } else if (token.raw === ")" || token.raw === "]") {
+                depth = Math.max(0, depth - 1);
+            } else if (depth === 0 && token.raw === "=") {
+                valueStart = undefined;
+                valueEnd = undefined;
+                continue;
+            } else if (
+                depth === 0 &&
+                (token.raw === "," || token.raw === ";")
+            ) {
+                break;
+            }
+        }
+
+        if (valueStart === undefined) {
+            const previous = tokens[index - 1];
+            if (!(previous?.kind === "symbol" && previous.raw === "=")) {
+                continue;
+            }
+            valueStart = token.start;
+        }
+        valueEnd = token.end;
+    }
+
+    if (valueStart === undefined || valueEnd === undefined) {
+        return undefined;
+    }
+    const value = source.substring(valueStart, valueEnd)
+        .replace(/\s+/g, " ")
+        .trim();
+    return value.length > 120
+        ? value.substring(0, 117) + "..."
+        : value || undefined;
 }
 
 function findParameterRange(

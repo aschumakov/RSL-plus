@@ -14,7 +14,9 @@ import {
     DocumentSymbol,
     SymbolInformation,
     SymbolKind,
-    CancellationTokenSource
+    CancellationTokenSource,
+    Range,
+    Selection
 } from "vscode";
 
 import {
@@ -61,6 +63,11 @@ interface IRslClientSettings {
 
 interface IClientPerformanceFields {
     [name: string]: string | number | boolean | null | undefined;
+}
+
+interface IRslBlockRange {
+    start: { line: number; character: number };
+    end: { line: number; character: number };
 }
 
 /**
@@ -510,6 +517,64 @@ async function foldAllMacros(): Promise<void> {
     });
 }
 
+async function selectCurrentBlock(): Promise<void> {
+    const editor = window.activeTextEditor;
+    if (!editor || editor.document.languageId !== "rsl") {
+        return;
+    }
+    if (!languageClientStarted || client === undefined) {
+        window.showInformationMessage(
+            "RSL language server ещё запускается"
+        );
+        return;
+    }
+
+    try {
+        const selected = await client.sendRequest<IRslBlockRange | null>(
+            "rsl/currentBlockRange",
+            {
+                textDocument: {
+                    uri: editor.document.uri.toString()
+                },
+                position: {
+                    line: editor.selection.active.line,
+                    character: editor.selection.active.character
+                },
+                currentRange: {
+                    start: {
+                        line: editor.selection.start.line,
+                        character: editor.selection.start.character
+                    },
+                    end: {
+                        line: editor.selection.end.line,
+                        character: editor.selection.end.character
+                    }
+                }
+            }
+        );
+        if (!selected) {
+            window.showInformationMessage(
+                "В текущей позиции нет блока RSL"
+            );
+            return;
+        }
+
+        const range = new Range(
+            selected.start.line,
+            selected.start.character,
+            selected.end.line,
+            selected.end.character
+        );
+        editor.selection = new Selection(range.start, range.end);
+        editor.revealRange(range);
+    } catch (error) {
+        console.error("RSL: cannot select current block", error);
+        window.showErrorMessage(
+            "Не удалось выделить текущий блок RSL"
+        );
+    }
+}
+
 function collectMacroSymbols(symbols: readonly RslSymbol[]): RslSymbol[] {
     const result: RslSymbol[] = [];
 
@@ -744,6 +809,13 @@ export function activate(context: ExtensionContext): void {
         commands.registerCommand(
             "rsl.foldAllMacros",
             foldAllMacros
+        )
+    );
+
+    context.subscriptions.push(
+        commands.registerCommand(
+            "rsl.selectCurrentBlock",
+            selectCurrentBlock
         )
     );
 

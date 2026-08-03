@@ -227,6 +227,10 @@ export class CVar extends CAbstractBase {
         this.value = value;
     }
 
+    getValue(): string {
+        return this.value;
+    }
+
     updateCIInfo(): void {
         this.detail = `${getStrItemKind(this.objKind)}: ${this.name}`;
 
@@ -266,6 +270,7 @@ export interface IExternalSymbolDescriptor {
     returnType?: string;
     baseClassName?: string;
     typeName?: string;
+    value?: string;
     start: number;
     end: number;
     startLine: number;
@@ -419,6 +424,9 @@ export class CBase extends CAbstractBase {
                 });
                 if (descriptor.typeName) {
                     variable.setType(descriptor.typeName);
+                }
+                if (descriptor.value) {
+                    variable.setValue(descriptor.value);
                 }
                 object = variable as unknown as CBase;
             }
