@@ -73,6 +73,12 @@ import {
 } from "./callHierarchyProvider";
 import { formatRslDocumentRange } from "./rangeFormatting";
 import { buildRslSignatureHelp } from "./signatureHelpProvider";
+import { buildRslContextCompletions } from "./contextCompletionProvider";
+import { findRslWorkspaceSymbols } from "./workspaceSymbolProvider";
+import {
+    buildRslSourceCodeActions,
+    RSL_FIX_ALL_KIND
+} from "./sourceCodeActions";
 
 export interface IRslLanguageFeatureEnvironment {
     connection: Connection;
@@ -169,6 +175,18 @@ export class RslLanguageFeatureRegistry {
             await ensureDocumentParsed(document);
             if (requestIsStale(document, version, cancellationToken)) {
                 return [];
+            }
+            const module = index.getModule(document.uri);
+            if (!module) {
+                return [];
+            }
+            const contextual = buildRslContextCompletions(
+                module,
+                index,
+                document.offsetAt(params.position)
+            );
+            if (contextual !== undefined) {
+                return contextual;
             }
             const context = this.getPositionContext(params);
 
@@ -463,6 +481,10 @@ export class RslLanguageFeatureRegistry {
             }
 
             this.environment.noteInteractiveActivity?.();
+            const sourceActions = buildRslSourceCodeActions(module, params);
+            if (isSourceActionRequest(params)) {
+                return sourceActions;
+            }
             const navigation = supportsRefactorActions(params)
                 ? buildBlockNavigationActions(module, params.range)
                 : [];
@@ -490,8 +512,17 @@ export class RslLanguageFeatureRegistry {
             return [
                 ...buildEnhancedRslCodeActions(module, params),
                 ...navigation,
-                ...autoImports
+                ...autoImports,
+                ...sourceActions
             ];
+        });
+
+        connection.onWorkspaceSymbol((params, cancellationToken) => {
+            this.environment.noteInteractiveActivity?.();
+            if (cancellationToken.isCancellationRequested) {
+                return [];
+            }
+            return findRslWorkspaceSymbols(index, params.query);
         });
 
         connection.languages.callHierarchy.onPrepare(async (
@@ -925,6 +956,15 @@ function supportsRefactorActions(params: CodeActionParams): boolean {
     return !only || only.length === 0 || only.some(kind =>
         kind === CodeActionKind.Refactor ||
         String(kind).startsWith(CodeActionKind.Refactor + ".")
+    );
+}
+
+function isSourceActionRequest(params: CodeActionParams): boolean {
+    const only = params.context.only;
+    return !!only && only.length > 0 && only.every(kind =>
+        String(kind) === CodeActionKind.Source ||
+        String(kind).startsWith(CodeActionKind.Source + ".") ||
+        String(kind) === RSL_FIX_ALL_KIND
     );
 }
 

@@ -318,6 +318,7 @@ async function testOutlineUsesPreparedSnapshotAndReportsTiming() {
         onDocumentHighlight: register("documentHighlight"),
         onDefinition: register("definition"),
         onReferences: register("references"),
+        onWorkspaceSymbol: register("workspaceSymbol"),
         onCodeAction: register("codeAction"),
         onSelectionRanges: register("selectionRanges"),
         onExecuteCommand: register("executeCommand"),

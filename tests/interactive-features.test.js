@@ -25,6 +25,16 @@ const {
     buildRslSignatureHelp
 } = require("../server/out/features/signatureHelpProvider");
 const {
+    buildRslContextCompletions
+} = require("../server/out/features/contextCompletionProvider");
+const {
+    buildRslSourceCodeActions,
+    RSL_FIX_ALL_KIND
+} = require("../server/out/features/sourceCodeActions");
+const {
+    findRslWorkspaceSymbols
+} = require("../server/out/features/workspaceSymbolProvider");
+const {
     ReferenceIndex
 } = require("../server/out/analysis/referenceIndex");
 const { RslScopeResolver } = require("../server/out/scopeResolver");
@@ -158,6 +168,145 @@ function applyTextEdit(document, edit) {
             actions[0].edit.changes[module.uri][0].newText,
             "Import library;\n"
         );
+    });
+
+    await test("Completion подсказывает Import и строковый ExecMacro", () => {
+        const index = new WorkspaceIndex();
+        createModule(
+            index,
+            "file:///workspace/library.mac",
+            "Macro Shared(value)\nEnd;"
+        );
+        const source = [
+            "Import library;",
+            "Macro Test()",
+            "  ExecMacro(\"Sha\");",
+            "End;"
+        ].join("\n");
+        const module = createModule(
+            index,
+            "file:///workspace/main.mac",
+            source
+        );
+        const macroItems = buildRslContextCompletions(
+            module,
+            index,
+            source.indexOf("Sha") + 2
+        );
+        assert.ok(macroItems.some(item => item.label === "Shared"));
+
+        const importSource = "Import lib;\nMacro Test()\nEnd;";
+        const importModule = createModule(
+            index,
+            "file:///workspace/import-test.mac",
+            importSource
+        );
+        const importItems = buildRslContextCompletions(
+            importModule,
+            index,
+            importSource.indexOf("lib") + 2
+        );
+        assert.ok(importItems.some(item => item.label === "library"));
+    });
+
+    await test("Workspace Symbols фильтрует известные Macro для Ctrl+T", () => {
+        const index = new WorkspaceIndex();
+        createModule(
+            index,
+            "file:///workspace/library.mac",
+            "Macro Shared(value)\nEnd;\nMacro Other()\nEnd;"
+        );
+        const symbols = findRslWorkspaceSymbols(index, "sha");
+        assert.deepStrictEqual(symbols.map(item => item.name), ["Shared"]);
+        assert.strictEqual(symbols[0].location.uri, "file:///workspace/library.mac");
+    });
+
+    await test("Organize Imports удаляет только повторы и сохраняет порядок", () => {
+        const index = new WorkspaceIndex();
+        const source = [
+            "Import first, first, second;",
+            "Import second;",
+            "Macro Test()",
+            "End;"
+        ].join("\n");
+        const module = createModule(index, "file:///workspace/main.mac", source);
+        const actions = buildRslSourceCodeActions(module, {
+            textDocument: { uri: module.uri },
+            range: {
+                start: { line: 0, character: 0 },
+                end: { line: 0, character: 0 }
+            },
+            context: {
+                diagnostics: [],
+                only: ["source.organizeImports"]
+            }
+        });
+        assert.strictEqual(actions.length, 1);
+        const document = TextDocument.create(module.uri, "rsl", 1, source);
+        const edits = actions[0].edit.changes[module.uri].slice().sort(
+            (left, right) => document.offsetAt(right.range.start) -
+                document.offsetAt(left.range.start)
+        );
+        let result = source;
+        for (const edit of edits) {
+            const current = TextDocument.create(module.uri, "rsl", 1, result);
+            result = applyTextEdit(current, edit);
+        }
+        assert.strictEqual(
+            result,
+            "Import first, second;\nMacro Test()\nEnd;"
+        );
+    });
+
+    await test("Fix All объединяет только безопасные исправления", () => {
+        const index = new WorkspaceIndex();
+        const source = "DEBUGBREAK;\nMacro Test();;\nEnd;";
+        const module = createModule(index, "file:///workspace/main.mac", source);
+        const duplicateOffset = source.indexOf(";;") + 1;
+        const actions = buildRslSourceCodeActions(module, {
+            textDocument: { uri: module.uri },
+            range: {
+                start: { line: 0, character: 0 },
+                end: { line: 2, character: 4 }
+            },
+            context: {
+                only: [RSL_FIX_ALL_KIND],
+                diagnostics: [
+                    {
+                        code: "debugbreak",
+                        message: "DEBUGBREAK",
+                        range: {
+                            start: positionAt(source, 0),
+                            end: positionAt(source, "DEBUGBREAK".length)
+                        },
+                        data: { start: 0, end: "DEBUGBREAK".length }
+                    },
+                    {
+                        code: "duplicate-semicolon",
+                        message: "Повторная точка с запятой",
+                        range: {
+                            start: positionAt(source, duplicateOffset),
+                            end: positionAt(source, duplicateOffset + 1)
+                        },
+                        data: {
+                            start: duplicateOffset,
+                            end: duplicateOffset + 1
+                        }
+                    },
+                    {
+                        code: "unused-declaration",
+                        message: "Не используется",
+                        range: {
+                            start: { line: 1, character: 6 },
+                            end: { line: 1, character: 10 }
+                        }
+                    }
+                ]
+            }
+        });
+        assert.strictEqual(actions.length, 1);
+        assert.strictEqual(actions[0].kind, RSL_FIX_ALL_KIND);
+        assert.strictEqual(actions[0].edit.changes[module.uri].length, 2);
     });
 
     await test("Call Hierarchy строит входящие и исходящие вызовы", async () => {

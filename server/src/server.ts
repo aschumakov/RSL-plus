@@ -417,7 +417,7 @@ connection.onInitialize((params: InitializeParams) => {
             textDocumentSync: TextDocumentSyncKind.Incremental,
             completionProvider: {
                 resolveProvider: false,
-                triggerCharacters: ["."]
+                triggerCharacters: [".", "\"", "'", "/", "\\"]
             },
             signatureHelpProvider: {
                 triggerCharacters: ["(", ","],
@@ -428,6 +428,7 @@ connection.onInitialize((params: InitializeParams) => {
             selectionRangeProvider: true,
             definitionProvider: true,
             referencesProvider: true,
+            workspaceSymbolProvider: true,
             callHierarchyProvider: true,
             executeCommandProvider: {
                 commands: [
@@ -436,7 +437,13 @@ connection.onInitialize((params: InitializeParams) => {
                 ]
             },
             codeActionProvider: {
-                codeActionKinds: [CodeActionKind.QuickFix, CodeActionKind.Refactor]
+                codeActionKinds: [
+                    CodeActionKind.QuickFix,
+                    CodeActionKind.Refactor,
+                    CodeActionKind.SourceOrganizeImports,
+                    CodeActionKind.SourceFixAll,
+                    `${CodeActionKind.SourceFixAll}.rsl`
+                ]
             },
             semanticTokensProvider: {
                 legend: RSL_SEMANTIC_TOKENS_LEGEND,
