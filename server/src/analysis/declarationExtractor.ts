@@ -1,0 +1,1079 @@
+import { CompletionItemKind } from "vscode-languageserver";
+
+import { lexRsl, normalizeIdentifier, type IRslToken } from "../lexer";
+import { readClassDeclarationHeader } from "../parsing/classDeclarationHeader";
+import {
+    getImportNamesFromSyntax,
+    type IRslParseResult,
+    type IRslSyntaxNode
+} from "../syntaxParser";
+import {
+    createSymbolId,
+    moduleSymbolId,
+    RslSymbol,
+    type RslSymbolVisibility,
+    type SymbolId
+} from "../symbols/rslSymbol";
+
+export interface IExternalLocationRange {
+    start: { line: number; character: number };
+    end: { line: number; character: number };
+}
+
+export interface IRslDeclarationDescriptor {
+    kind: "macro" | "class" | "variable";
+    name: string;
+    visibility: RslSymbolVisibility;
+    isMethod?: boolean;
+    isProperty?: boolean;
+    isConstant?: boolean;
+    parameterText?: string;
+    returnType?: string;
+    baseClassName?: string;
+    typeName?: string;
+    value?: string;
+    start: number;
+    end: number;
+    selectionStart: number;
+    selectionEnd: number;
+    startLine: number;
+    startCharacter: number;
+    endLine: number;
+    endCharacter: number;
+    children: IRslDeclarationDescriptor[];
+}
+
+export interface IRslDeclarationSnapshot {
+    imports: string[];
+    declarations: IRslDeclarationDescriptor[];
+}
+
+interface IBlockFrame {
+    keyword: string;
+    descriptor?: IRslDeclarationDescriptor;
+}
+
+export interface ICompactDeclarationOptions {
+    /** Outline видит private/local, external summary хранит только exports. */
+    includePrivate?: boolean;
+    /** Fast Snapshot передаёт уже готовый lexer result без второго прохода. */
+    tokens?: readonly IRslToken[];
+}
+
+const BLOCK_START = new Set(["macro", "class", "if", "for", "while", "with"]);
+const DECLARATION_KEYWORDS = new Set([
+    "macro", "class", "var", "const", "file", "record", "array"
+]);
+const MODIFIERS = new Set(["private", "local", "public"]);
+
+/**
+ * Однопроходный scanner для закрытых импортируемых модулей.
+ * Не строит statement/expression AST и сохраняет только Import и внешние символы.
+ */
+export function extractCompactDeclarations(
+    source: string,
+    options: ICompactDeclarationOptions = {}
+): IRslDeclarationSnapshot {
+    const text = source || "";
+    const sourceTokens = options.tokens ||
+        lexRsl(text, { includeTrivia: false }).tokens;
+    const tokens = sourceTokens.filter(token =>
+        token.kind !== "comment" &&
+        token.kind !== "square" &&
+        token.kind !== "bom" &&
+        token.kind !== "whitespace" &&
+        token.kind !== "newline"
+    );
+    const imports: string[] = [];
+    const rootSymbols: IRslDeclarationDescriptor[] = [];
+    const blocks: IBlockFrame[] = [];
+    let canStartStatement = true;
+    let currentLine = -1;
+
+    for (let index = 0; index < tokens.length; index++) {
+        const token = tokens[index];
+
+        if (token.line !== currentLine) {
+            currentLine = token.line;
+            canStartStatement = true;
+        }
+
+        if (token.kind === "symbol") {
+            if (token.raw === ";") {
+                canStartStatement = true;
+            } else if (token.raw !== ",") {
+                canStartStatement = false;
+            }
+            continue;
+        }
+
+        if (token.kind !== "identifier") {
+            canStartStatement = false;
+            continue;
+        }
+
+        const word = normalizeIdentifier(token.value);
+
+        if (word === "end") {
+            const closed = blocks.pop();
+            if (closed?.descriptor) {
+                closed.descriptor.end = token.end;
+                closed.descriptor.endLine = token.endLine;
+                closed.descriptor.endCharacter = token.endCharacter;
+            }
+            canStartStatement = false;
+            continue;
+        }
+
+        if (!canStartStatement) {
+            continue;
+        }
+
+        let modifier: string | undefined;
+        let keywordToken = token;
+        let keyword = word;
+
+        if (MODIFIERS.has(keyword)) {
+            modifier = keyword;
+            const next = nextIdentifier(tokens, index + 1, token.line);
+            if (!next) {
+                canStartStatement = false;
+                continue;
+            }
+            keywordToken = next.token;
+            keyword = normalizeIdentifier(next.token.value);
+            index = next.index;
+        }
+
+        if (keyword === "import") {
+            const parsed = scanImportNames(tokens, index + 1, keywordToken.line);
+            parsed.names.forEach(name => {
+                if (name && !imports.some(item => normalizeModuleName(item) === normalizeModuleName(name))) {
+                    imports.push(name);
+                }
+            });
+            index = Math.max(index, parsed.lastIndex);
+            canStartStatement = false;
+            continue;
+        }
+
+        if (!DECLARATION_KEYWORDS.has(keyword)) {
+            if (BLOCK_START.has(keyword)) {
+                blocks.push({ keyword });
+            }
+            canStartStatement = false;
+            continue;
+        }
+
+        const insideMacro = blocks.some(frame => frame.keyword === "macro");
+        const currentClass = findCurrentClass(blocks);
+        const privateModifier = modifier === "private" || modifier === "local";
+        const isExternal = options.includePrivate === true || !privateModifier;
+
+        if (keyword === "macro" || keyword === "class") {
+            const classHeader = keyword === "class"
+                ? readClassDeclarationHeader(tokens, index + 1)
+                : undefined;
+            const nameInfo = keyword === "class"
+                ? classHeader && {
+                    token: classHeader.nameToken,
+                    index: classHeader.nameIndex
+                }
+                : nextIdentifier(tokens, index + 1);
+            const visibleContainer = !insideMacro &&
+                (currentClass === undefined || currentClass.descriptor !== undefined);
+            const descriptor = nameInfo && isExternal && visibleContainer
+                ? createCallableDescriptor(
+                    text,
+                    tokens,
+                    keyword,
+                    keywordToken,
+                    nameInfo.token,
+                    nameInfo.index,
+                    currentClass !== undefined,
+                    privateModifier ? modifier as RslSymbolVisibility : "public",
+                    classHeader?.baseClassToken?.value
+                )
+                : undefined;
+
+            if (descriptor) {
+                addDescriptor(rootSymbols, currentClass?.descriptor, descriptor);
+            }
+
+            blocks.push({ keyword, descriptor });
+            if (nameInfo) {
+                index = nameInfo.index;
+            }
+            canStartStatement = false;
+            continue;
+        }
+
+        /* Локальные объявления внутри Macro не попадают во внешний summary. */
+        if (
+            insideMacro ||
+            !isExternal ||
+            (currentClass !== undefined && currentClass.descriptor === undefined)
+        ) {
+            canStartStatement = false;
+            continue;
+        }
+
+        const parsedVariables = scanVariableNames(tokens, index + 1, keywordToken.line);
+        for (const parsedVariable of parsedVariables.names) {
+            const nameToken = parsedVariable.token;
+            const value = keyword === "const"
+                ? scanInitializerValue(
+                    text,
+                    tokens,
+                    parsedVariable.index,
+                    parsedVariables.lastIndex
+                )
+                : undefined;
+            const descriptor: IRslDeclarationDescriptor = {
+                kind: "variable",
+                name: nameToken.value,
+                visibility: privateModifier ? modifier as RslSymbolVisibility : "public",
+                isProperty: currentClass !== undefined,
+                isConstant: keyword === "const",
+                start: nameToken.start,
+                end: nameToken.end,
+                selectionStart: nameToken.start,
+                selectionEnd: nameToken.end,
+                startLine: nameToken.line,
+                startCharacter: nameToken.character,
+                endLine: nameToken.endLine,
+                endCharacter: nameToken.endCharacter,
+                typeName: scanDeclaredType(
+                    tokens,
+                    parsedVariable.index,
+                    parsedVariables.lastIndex
+                ) || declarationKeywordType(keyword) ||
+                    inferCompactValueType(value, tokens, parsedVariable.index),
+                value,
+                children: []
+            };
+            addDescriptor(rootSymbols, currentClass?.descriptor, descriptor);
+        }
+        index = Math.max(index, parsedVariables.lastIndex);
+        canStartStatement = false;
+    }
+
+    return {
+        imports,
+        declarations: rootSymbols
+    };
+}
+
+function createCallableDescriptor(
+    source: string,
+    tokens: IRslToken[],
+    keyword: string,
+    keywordToken: IRslToken,
+    nameToken: IRslToken,
+    nameIndex: number,
+    insideClass: boolean,
+    visibility: RslSymbolVisibility,
+    baseClassName?: string
+): IRslDeclarationDescriptor {
+    const parameterRange = findParameterRange(tokens, nameIndex);
+    return {
+        kind: keyword === "class" ? "class" : "macro",
+        name: nameToken.value,
+        visibility,
+        isMethod: keyword === "macro" && insideClass,
+        parameterText: parameterRange
+            ? source.substring(parameterRange.start, parameterRange.end)
+            : "",
+        returnType: keyword === "macro"
+            ? scanCallableReturnType(
+                tokens,
+                parameterRange?.endIndex ?? nameIndex
+            )
+            : "variant",
+        baseClassName,
+        start: keywordToken.start,
+        end: nameToken.end,
+        selectionStart: nameToken.start,
+        selectionEnd: nameToken.end,
+        startLine: nameToken.line,
+        startCharacter: nameToken.character,
+        endLine: nameToken.endLine,
+        endCharacter: nameToken.endCharacter,
+        children: parameterRange && keyword === "macro"
+            ? scanParameters(tokens, parameterRange.startIndex, parameterRange.endIndex)
+            : []
+    };
+}
+
+function scanCallableReturnType(
+    tokens: readonly IRslToken[],
+    headerEndIndex: number
+): string {
+    const headerLine = tokens[headerEndIndex]?.line ?? -1;
+    for (let index = headerEndIndex + 1; index < tokens.length; index++) {
+        const token = tokens[index];
+        if (token.line !== headerLine || token.raw === ";") break;
+        if (token.kind === "symbol" && token.raw === ":") {
+            const type = tokens[index + 1];
+            return type?.kind === "identifier" ? type.value : "variant";
+        }
+    }
+    return "variant";
+}
+
+function scanDeclaredType(
+    tokens: readonly IRslToken[],
+    nameIndex: number,
+    declarationEndIndex: number
+): string | undefined {
+    let depth = 0;
+    for (let index = nameIndex + 1; index <= declarationEndIndex; index++) {
+        const token = tokens[index];
+        if (token.kind === "symbol") {
+            if (token.raw === "(" || token.raw === "[") depth++;
+            else if (token.raw === ")" || token.raw === "]") depth--;
+            else if (depth === 0 && [",", ";", "="].includes(token.raw)) break;
+            else if (depth === 0 && token.raw === ":") {
+                let typeIndex = index + 1;
+                if (tokens[typeIndex]?.raw === "@") typeIndex++;
+                const type = tokens[typeIndex];
+                return type?.kind === "identifier"
+                    ? normalizeType(type.value)
+                    : undefined;
+            }
+        }
+    }
+    return undefined;
+}
+
+function declarationKeywordType(keyword: string): string | undefined {
+    return keyword === "array" || keyword === "file" || keyword === "record"
+        ? keyword
+        : undefined;
+}
+
+function inferCompactValueType(
+    value: string | undefined,
+    tokens: readonly IRslToken[],
+    nameIndex: number
+): string {
+    if (!value) return "variant";
+    const equalsIndex = tokens.findIndex((token, index) =>
+        index > nameIndex && token.kind === "symbol" && token.raw === "="
+    );
+    const first = equalsIndex >= 0 ? tokens[equalsIndex + 1] : undefined;
+    if (first?.kind === "number") return "integer";
+    if (first?.kind === "string" || first?.kind === "square") return "string";
+    if (
+        first?.kind === "identifier" &&
+        ["true", "false"].includes(normalizeIdentifier(first.value))
+    ) return "bool";
+    return "variant";
+}
+
+function scanParameters(
+    tokens: IRslToken[],
+    startIndex: number,
+    endIndex: number
+): IRslDeclarationDescriptor[] {
+    const result: IRslDeclarationDescriptor[] = [];
+    let expectName = true;
+    let nestedDepth = 0;
+
+    for (let index = startIndex + 1; index < endIndex; index++) {
+        const token = tokens[index];
+
+        if (token.kind === "symbol") {
+            if (token.raw === "(" || token.raw === "[" || token.raw === "{") {
+                nestedDepth++;
+                continue;
+            }
+            if (token.raw === ")" || token.raw === "]" || token.raw === "}") {
+                nestedDepth = Math.max(0, nestedDepth - 1);
+                continue;
+            }
+            if (token.raw === "," && nestedDepth === 0) {
+                expectName = true;
+                continue;
+            }
+        }
+
+        if (expectName && nestedDepth === 0 && token.kind === "identifier") {
+            result.push({
+                kind: "variable",
+                name: token.value,
+                visibility: "local",
+                isProperty: false,
+                isConstant: false,
+                start: token.start,
+                end: token.end,
+                selectionStart: token.start,
+                selectionEnd: token.end,
+                startLine: token.line,
+                startCharacter: token.character,
+                endLine: token.endLine,
+                endCharacter: token.endCharacter,
+                children: []
+            });
+            expectName = false;
+        }
+    }
+    return result;
+}
+
+function scanImportNames(
+    tokens: IRslToken[],
+    startIndex: number,
+    startLine: number
+): { names: string[]; lastIndex: number } {
+    const names: string[] = [];
+    let current = "";
+    let lastIndex = startIndex - 1;
+
+    const flush = (): void => {
+        const value = stripQuotes(current.trim());
+        if (value) {
+            names.push(value);
+        }
+        current = "";
+    };
+
+    for (let index = startIndex; index < tokens.length; index++) {
+        const token = tokens[index];
+        if (token.kind === "symbol" && token.raw === ";") {
+            flush();
+            lastIndex = index;
+            break;
+        }
+        if (
+            token.line > startLine &&
+            token.kind === "identifier" &&
+            isStatementKeyword(token.value)
+        ) {
+            flush();
+            break;
+        }
+        if (token.kind === "symbol" && token.raw === ",") {
+            flush();
+        } else if (
+            token.kind === "symbol" &&
+            (token.raw === "\\" || token.raw === "/" || token.raw === ".")
+        ) {
+            current += token.raw;
+        } else if (token.kind === "identifier" || token.kind === "string") {
+            current += token.kind === "string"
+                ? stripQuotes(token.value || token.raw)
+                : token.value;
+        }
+        lastIndex = index;
+    }
+
+    flush();
+    return { names, lastIndex };
+}
+
+function scanVariableNames(
+    tokens: IRslToken[],
+    startIndex: number,
+    startLine: number
+): { names: Array<{ token: IRslToken; index: number }>; lastIndex: number } {
+    const names: Array<{ token: IRslToken; index: number }> = [];
+    let lastIndex = startIndex - 1;
+    let expectName = true;
+    let nestedDepth = 0;
+
+    for (let index = startIndex; index < tokens.length; index++) {
+        const token = tokens[index];
+
+        if (token.kind === "symbol") {
+            if (token.raw === "(" || token.raw === "[" || token.raw === "{") {
+                nestedDepth++;
+            } else if (token.raw === ")" || token.raw === "]" || token.raw === "}") {
+                nestedDepth = Math.max(0, nestedDepth - 1);
+            } else if (token.raw === ";" && nestedDepth === 0) {
+                lastIndex = index;
+                break;
+            } else if (token.raw === "," && nestedDepth === 0) {
+                expectName = true;
+            }
+        }
+
+        if (
+            nestedDepth === 0 &&
+            token.line > startLine &&
+            token.kind === "identifier" &&
+            isStatementKeyword(token.value)
+        ) {
+            break;
+        }
+
+        if (expectName && nestedDepth === 0 && token.kind === "identifier") {
+            names.push({ token, index });
+            expectName = false;
+        }
+        lastIndex = index;
+    }
+
+    return { names, lastIndex };
+}
+
+function scanInitializerValue(
+    source: string,
+    tokens: IRslToken[],
+    nameIndex: number,
+    declarationEndIndex: number
+): string | undefined {
+    let depth = 0;
+    let valueStart: number | undefined;
+    let valueEnd: number | undefined;
+
+    for (
+        let index = nameIndex + 1;
+        index <= declarationEndIndex && index < tokens.length;
+        index++
+    ) {
+        const token = tokens[index];
+        if (token.kind === "symbol") {
+            if (token.raw === "(" || token.raw === "[") {
+                depth++;
+            } else if (token.raw === ")" || token.raw === "]") {
+                depth = Math.max(0, depth - 1);
+            } else if (depth === 0 && token.raw === "=") {
+                valueStart = undefined;
+                valueEnd = undefined;
+                continue;
+            } else if (
+                depth === 0 &&
+                (token.raw === "," || token.raw === ";")
+            ) {
+                break;
+            }
+        }
+
+        if (valueStart === undefined) {
+            const previous = tokens[index - 1];
+            if (!(previous?.kind === "symbol" && previous.raw === "=")) {
+                continue;
+            }
+            valueStart = token.start;
+        }
+        valueEnd = token.end;
+    }
+
+    if (valueStart === undefined || valueEnd === undefined) {
+        return undefined;
+    }
+    const value = source.substring(valueStart, valueEnd)
+        .replace(/\s+/g, " ")
+        .trim();
+    return value.length > 120
+        ? value.substring(0, 117) + "..."
+        : value || undefined;
+}
+
+function findParameterRange(
+    tokens: IRslToken[],
+    nameIndex: number
+): {
+    start: number;
+    end: number;
+    startIndex: number;
+    endIndex: number;
+} | undefined {
+    const nameToken = tokens[nameIndex];
+    let depth = 0;
+    let start = -1;
+    let startIndex = -1;
+
+    for (let index = nameIndex + 1; index < tokens.length; index++) {
+        const token = tokens[index];
+        if (token.line > nameToken.line + 20 && start < 0) {
+            return undefined;
+        }
+        if (token.kind !== "symbol") {
+            continue;
+        }
+        if (token.raw === "(") {
+            if (start < 0) {
+                start = token.start;
+                startIndex = index;
+            }
+            depth++;
+        } else if (token.raw === ")" && depth > 0) {
+            depth--;
+            if (depth === 0) {
+                return {
+                    start,
+                    end: token.end,
+                    startIndex,
+                    endIndex: index
+                };
+            }
+        } else if (token.raw === ";" && start < 0) {
+            return undefined;
+        }
+    }
+    return undefined;
+}
+
+function findCurrentClass(blocks: IBlockFrame[]): IBlockFrame | undefined {
+    for (let index = blocks.length - 1; index >= 0; index--) {
+        if (blocks[index].keyword === "macro") {
+            return undefined;
+        }
+        if (blocks[index].keyword === "class") {
+            return blocks[index];
+        }
+    }
+    return undefined;
+}
+
+function addDescriptor(
+    roots: IRslDeclarationDescriptor[],
+    parent: IRslDeclarationDescriptor | undefined,
+    descriptor: IRslDeclarationDescriptor
+): void {
+    if (parent) {
+        parent.children.push(descriptor);
+    } else {
+        roots.push(descriptor);
+    }
+}
+
+function nextIdentifier(
+    tokens: IRslToken[],
+    startIndex: number,
+    maxLine?: number
+): { token: IRslToken; index: number } | undefined {
+    for (let index = startIndex; index < tokens.length; index++) {
+        const token = tokens[index];
+        if (maxLine !== undefined && token.line > maxLine) {
+            return undefined;
+        }
+        if (token.kind === "identifier") {
+            return { token, index };
+        }
+        if (token.kind === "symbol" && token.raw === ";") {
+            return undefined;
+        }
+    }
+    return undefined;
+}
+
+function isStatementKeyword(value: string): boolean {
+    const word = normalizeIdentifier(value);
+    return DECLARATION_KEYWORDS.has(word) || BLOCK_START.has(word) || word === "import" || word === "end";
+}
+
+function stripQuotes(value: string): string {
+    const text = (value || "").trim();
+    if (text.length >= 2) {
+        const first = text.charAt(0);
+        const last = text.charAt(text.length - 1);
+        if ((first === "\"" && last === "\"") || (first === "'" && last === "'")) {
+            return text.substring(1, text.length - 1);
+        }
+    }
+    return text;
+}
+
+function normalizeModuleName(value: string): string {
+    let result = (value || "").trim().replace(/\\/g, "/").toLowerCase();
+    if (!result.endsWith(".mac")) {
+        result += ".mac";
+    }
+    return result;
+}
+
+export interface ISyntaxDeclarationOptions {
+    externalOnly?: boolean;
+}
+
+/** Полный parser и compact scanner сходятся в одном declaration contract. */
+export function extractDeclarationsFromSyntax(
+    source: string,
+    syntax: IRslParseResult,
+    options: ISyntaxDeclarationOptions = {}
+): IRslDeclarationSnapshot {
+    const declarations: IRslDeclarationDescriptor[] = [];
+    const extractor = new SyntaxDeclarationExtractor(
+        source,
+        syntax.lex.tokens,
+        options.externalOnly === true
+    );
+    extractor.populate(declarations, syntax.root, undefined);
+    return {
+        imports: getImportNamesFromSyntax(syntax.root),
+        declarations
+    };
+}
+
+export interface IRslSymbolTreeBuildResult {
+    root: RslSymbol;
+    definitionRanges: Map<RslSymbol, IExternalLocationRange>;
+}
+
+/** Единственное место преобразования деклараций в semantic symbol model. */
+export function buildRslSymbolTree(
+    sourceLength: number,
+    descriptors: readonly IRslDeclarationDescriptor[]
+): IRslSymbolTreeBuildResult {
+    const definitionRanges = new Map<RslSymbol, IExternalLocationRange>();
+    const rootId = moduleSymbolId();
+    const root = new RslSymbol({
+        id: rootId,
+        name: "",
+        kind: CompletionItemKind.Unit,
+        range: { start: 0, end: Math.max(0, sourceLength) },
+        children: buildChildren(descriptors, rootId, definitionRanges)
+    });
+    return { root, definitionRanges };
+}
+
+function buildChildren(
+    descriptors: readonly IRslDeclarationDescriptor[],
+    parentId: SymbolId,
+    definitionRanges: Map<RslSymbol, IExternalLocationRange>
+): RslSymbol[] {
+    const occurrences = new Map<string, number>();
+    return descriptors.map(descriptor => {
+        const kind = descriptorKind(descriptor);
+        const occurrenceKey = `${kind}:${normalizeIdentifier(descriptor.name)}`;
+        const occurrence = occurrences.get(occurrenceKey) || 0;
+        occurrences.set(occurrenceKey, occurrence + 1);
+        const id = createSymbolId(parentId, kind, descriptor.name, occurrence);
+        const symbol = new RslSymbol({
+            id,
+            name: descriptor.name,
+            kind,
+            visibility: descriptor.visibility,
+            range: { start: descriptor.start, end: descriptor.end },
+            selectionRange: {
+                start: descriptor.selectionStart,
+                end: descriptor.selectionEnd
+            },
+            typeName: descriptor.typeName || descriptor.returnType || "variant",
+            value: descriptor.value,
+            parameterText: descriptor.parameterText,
+            baseClassName: descriptor.baseClassName,
+            children: buildChildren(descriptor.children, id, definitionRanges)
+        });
+        definitionRanges.set(symbol, {
+            start: {
+                line: descriptor.startLine,
+                character: descriptor.startCharacter
+            },
+            end: {
+                line: descriptor.endLine,
+                character: descriptor.endCharacter
+            }
+        });
+        return symbol;
+    });
+}
+
+function descriptorKind(
+    descriptor: IRslDeclarationDescriptor
+): CompletionItemKind {
+    if (descriptor.kind === "macro") {
+        return descriptor.isMethod
+            ? CompletionItemKind.Method
+            : CompletionItemKind.Function;
+    }
+    if (descriptor.kind === "class") {
+        return CompletionItemKind.Class;
+    }
+    if (descriptor.isConstant) {
+        return CompletionItemKind.Constant;
+    }
+    if (descriptor.isProperty) {
+        return CompletionItemKind.Property;
+    }
+    return CompletionItemKind.Variable;
+}
+
+class SyntaxDeclarationExtractor {
+    constructor(
+        private source: string,
+        private tokens: readonly IRslToken[],
+        private externalOnly: boolean
+    ) {}
+
+    populate(
+        target: IRslDeclarationDescriptor[],
+        node: IRslSyntaxNode,
+        container: IRslDeclarationDescriptor | undefined
+    ): void {
+        node.children.forEach(child => this.visit(target, child, container));
+    }
+
+    private visit(
+        target: IRslDeclarationDescriptor[],
+        node: IRslSyntaxNode,
+        container: IRslDeclarationDescriptor | undefined
+    ): void {
+        switch (node.kind) {
+            case "VariableDeclaration":
+            case "ArrayDeclaration":
+                this.addVariables(target, node, container);
+                return;
+            case "FileDeclaration":
+            case "RecordDeclaration":
+                this.addDataSymbol(target, node, container);
+                return;
+            case "MacroDeclaration":
+                this.addCallable(target, node, container, false);
+                return;
+            case "ClassDeclaration":
+                this.addCallable(target, node, container, true);
+                return;
+            case "VariableDeclarator":
+                if (!this.externalOnly && (
+                    node.variableRole === "for" ||
+                    node.variableRole === "onerror"
+                )) {
+                    this.append(target, container, this.variableDescriptor(
+                        node,
+                        false,
+                        "local",
+                        false
+                    ));
+                }
+                return;
+            case "ImportDeclaration":
+            case "ImportItem":
+            case "Parameter":
+                return;
+            default:
+                if (!this.externalOnly) {
+                    node.children.forEach(child =>
+                        this.visit(target, child, container)
+                    );
+                }
+        }
+    }
+
+    private addVariables(
+        target: IRslDeclarationDescriptor[],
+        node: IRslSyntaxNode,
+        container: IRslDeclarationDescriptor | undefined
+    ): void {
+        const visibility = nodeVisibility(node);
+        if (this.externalOnly && visibility !== "public") {
+            return;
+        }
+        const isProperty = container?.kind === "class" &&
+            visibility !== "local";
+        node.children
+            .filter(child => child.kind === "VariableDeclarator")
+            .forEach(child => this.append(
+                target,
+                container,
+                this.variableDescriptor(
+                    child,
+                    node.name === "const",
+                    visibility,
+                    isProperty
+                )
+            ));
+    }
+
+    private addDataSymbol(
+        target: IRslDeclarationDescriptor[],
+        node: IRslSyntaxNode,
+        container: IRslDeclarationDescriptor | undefined
+    ): void {
+        const visibility = nodeVisibility(node);
+        if (!node.name || (this.externalOnly && visibility !== "public")) {
+            return;
+        }
+        this.append(target, container, this.variableDescriptor(
+            node,
+            false,
+            visibility,
+            container?.kind === "class" && visibility !== "local"
+        ));
+    }
+
+    private addCallable(
+        target: IRslDeclarationDescriptor[],
+        node: IRslSyntaxNode,
+        container: IRslDeclarationDescriptor | undefined,
+        isClass: boolean
+    ): void {
+        const visibility = nodeVisibility(node);
+        if (!node.name || (this.externalOnly && visibility !== "public")) {
+            return;
+        }
+        const nameToken = this.findNameToken(node);
+        const descriptor: IRslDeclarationDescriptor = {
+            kind: isClass ? "class" : "macro",
+            name: node.name,
+            visibility,
+            isMethod: !isClass && container?.kind === "class" &&
+                visibility !== "local",
+            parameterText: this.parameterText(node),
+            returnType: node.typeName || "variant",
+            baseClassName: node.baseClassName,
+            start: node.start,
+            end: node.end,
+            selectionStart: nameToken?.start ?? node.start,
+            selectionEnd: nameToken?.end ?? node.start + node.name.length,
+            startLine: nameToken?.line ?? 0,
+            startCharacter: nameToken?.character ?? 0,
+            endLine: nameToken?.endLine ?? 0,
+            endCharacter: nameToken?.endCharacter ?? node.name.length,
+            children: []
+        };
+        this.append(target, container, descriptor);
+
+        node.children
+            .filter(child => child.kind === "Parameter")
+            .forEach(parameter => descriptor.children.push(
+                this.variableDescriptor(
+                    parameter,
+                    false,
+                    "local",
+                    false
+                )
+            ));
+
+        node.children
+            .filter(child => child.kind !== "Parameter")
+            .forEach(child => {
+                if (this.externalOnly && !isClass) {
+                    return;
+                }
+                if (this.externalOnly && isClass && !isDeclaration(child)) {
+                    return;
+                }
+                this.visit(target, child, descriptor);
+            });
+    }
+
+    private variableDescriptor(
+        node: IRslSyntaxNode,
+        isConstant: boolean,
+        visibility: RslSymbolVisibility,
+        isProperty: boolean
+    ): IRslDeclarationDescriptor {
+        const name = node.name || "";
+        const nameToken = this.findNameToken(node);
+        return {
+            kind: "variable",
+            name,
+            visibility,
+            isConstant,
+            isProperty,
+            typeName: node.typeName
+                ? normalizeType(node.typeName)
+                : inferInitializerType(node),
+            value: initializerText(this.source, node),
+            start: nameToken?.start ?? node.start,
+            end: nameToken?.end ?? node.end,
+            selectionStart: nameToken?.start ?? node.start,
+            selectionEnd: nameToken?.end ?? node.end,
+            startLine: nameToken?.line ?? 0,
+            startCharacter: nameToken?.character ?? 0,
+            endLine: nameToken?.endLine ?? 0,
+            endCharacter: nameToken?.endCharacter ?? name.length,
+            children: []
+        };
+    }
+
+    private findNameToken(node: IRslSyntaxNode): IRslToken | undefined {
+        const name = normalizeIdentifier(node.name || "");
+        return this.tokens.find(token =>
+            token.start >= node.start &&
+            token.end <= node.end &&
+            token.kind === "identifier" &&
+            normalizeIdentifier(token.value) === name
+        );
+    }
+
+    private parameterText(node: IRslSyntaxNode): string {
+        return node.parameterListStart !== undefined &&
+            node.parameterListEnd !== undefined
+            ? this.source.substring(
+                node.parameterListStart,
+                node.parameterListEnd
+            )
+            : "";
+    }
+
+    private append(
+        roots: IRslDeclarationDescriptor[],
+        parent: IRslDeclarationDescriptor | undefined,
+        descriptor: IRslDeclarationDescriptor
+    ): void {
+        if (!descriptor.name) {
+            return;
+        }
+        if (parent) {
+            parent.children.push(descriptor);
+        } else {
+            roots.push(descriptor);
+        }
+    }
+}
+
+function nodeVisibility(node: IRslSyntaxNode): RslSymbolVisibility {
+    return node.modifier === "local"
+        ? "local"
+        : node.modifier === "private"
+            ? "private"
+            : "public";
+}
+
+function isDeclaration(node: IRslSyntaxNode): boolean {
+    return node.kind === "VariableDeclaration" ||
+        node.kind === "ArrayDeclaration" ||
+        node.kind === "FileDeclaration" ||
+        node.kind === "RecordDeclaration" ||
+        node.kind === "MacroDeclaration" ||
+        node.kind === "ClassDeclaration";
+}
+
+const STANDARD_TYPES = new Set([
+    "variant", "integer", "double", "doublel", "string", "bool", "date",
+    "time", "datetime", "memaddr", "procref", "methodref", "decimal",
+    "numeric", "money", "moneyl", "specval", "object", "r2m"
+]);
+
+function normalizeType(value: string): string {
+    const normalized = normalizeIdentifier(value).replace(/^@/, "");
+    return STANDARD_TYPES.has(normalized)
+        ? normalized
+        : value.replace(/^@/, "");
+}
+
+function inferInitializerType(node: IRslSyntaxNode): string {
+    const first = node.tokens.find(token =>
+        node.valueStart !== undefined &&
+        node.valueEnd !== undefined &&
+        token.start >= node.valueStart &&
+        token.end <= node.valueEnd
+    );
+    if (!first) return "variant";
+    if (first.kind === "string" || first.kind === "square") return "string";
+    if (first.kind === "number") return "integer";
+    if (
+        first.kind === "identifier" &&
+        ["true", "false"].includes(normalizeIdentifier(first.value))
+    ) return "bool";
+    return "variant";
+}
+
+function initializerText(
+    source: string,
+    node: IRslSyntaxNode
+): string | undefined {
+    if (node.valueStart === undefined || node.valueEnd === undefined) {
+        return undefined;
+    }
+    const value = source.substring(node.valueStart, node.valueEnd)
+        .replace(/\s+/g, " ")
+        .trim();
+    if (!value) return undefined;
+    return value.length > 120 ? value.substring(0, 117) + "..." : value;
+}

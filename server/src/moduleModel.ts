@@ -1,31 +1,29 @@
-import { CBase, type IExternalLocationRange } from "./common";
 import type { IRslLexResult } from "./lexer";
 import {
-    getImportNamesFromSyntax,
     type IRslParseResult,
     parseRslSyntax
 } from "./syntaxParser";
 import {
-    scanExternalModule,
-    type IExternalModuleScanResult
-} from "./indexing/externalModuleScanner";
+    buildRslSymbolTree,
+    extractCompactDeclarations,
+    extractDeclarationsFromSyntax,
+    type IExternalLocationRange,
+    type IRslDeclarationSnapshot
+} from "./analysis/declarationExtractor";
+import type { RslSymbol } from "./symbols/rslSymbol";
 
 export type RslModuleModelKind = "open" | "external";
 
-/**
- * Общий контракт модуля. Для external summary поля source/syntax/lex указывают
- * на пустые разделяемые значения и практически не расходуют память.
- */
+/** Полная модель только открытого документа либо компактный external summary. */
 export interface IRslModuleModel {
     kind: RslModuleModelKind;
     source: string;
     sourceLength: number;
-    symbolTree: CBase;
+    symbolTree: RslSymbol;
     syntax: IRslParseResult;
     lex: IRslLexResult;
     imports: string[];
-    /** Готовые line/character позиции внешних символов без повторного чтения файла. */
-    definitionRanges?: Map<CBase, IExternalLocationRange>;
+    definitionRanges?: Map<RslSymbol, IExternalLocationRange>;
 }
 
 const EMPTY_LEX_RESULT = Object.freeze({
@@ -51,73 +49,74 @@ const EMPTY_PARSE_RESULT = Object.freeze({
 
 export function createRslModuleModel(
     source: string,
-    symbolTree: CBase,
-    isOpen: boolean
+    isOpen: boolean,
+    parsedSyntax?: IRslParseResult
 ): IRslModuleModel {
     return isOpen
-        ? createOpenModuleModel(source, symbolTree)
+        ? createOpenModuleModel(source, parsedSyntax)
         : createExternalModuleSummary(source);
 }
 
 export function createOpenModuleModel(
     source: string,
-    symbolTree: CBase,
     parsedSyntax?: IRslParseResult
 ): IRslModuleModel {
-    const syntax = parsedSyntax ||
-        symbolTree.getSyntaxResult() ||
-        parseRslSyntax(source, undefined, { buildExpressionTree: false });
+    const syntax = parsedSyntax || parseRslSyntax(
+        source,
+        undefined,
+        { buildExpressionTree: false }
+    );
+    const declarations = extractDeclarationsFromSyntax(source, syntax);
+    const built = buildRslSymbolTree(source.length, declarations.declarations);
 
     return {
         kind: "open",
         source,
         sourceLength: source.length,
-        symbolTree,
+        symbolTree: built.root,
         syntax,
         lex: syntax.lex,
-        imports: getImportNamesFromSyntax(syntax.root)
+        imports: declarations.imports,
+        definitionRanges: built.definitionRanges
     };
 }
 
-/**
- * Строит компактную модель закрытого файла однопроходным scanner-ом.
- * Statement/expression AST и полный token stream не создаются и не удерживаются.
- */
+/** Закрытый файл не удерживает исходник, AST и token stream. */
 export function createExternalModuleSummary(source: string): IRslModuleModel {
-    const scan = scanExternalModule(source);
-
-    return createExternalModuleSummaryFromScan(source.length, scan);
+    return createExternalModuleSummaryFromDeclarations(
+        source.length,
+        extractCompactDeclarations(source)
+    );
 }
 
-export function createExternalModuleSummaryFromScan(
+export function createExternalModuleSummaryFromDeclarations(
     sourceLength: number,
-    scan: IExternalModuleScanResult
+    declarations: IRslDeclarationSnapshot
 ): IRslModuleModel {
+    const built = buildRslSymbolTree(
+        sourceLength,
+        declarations.declarations
+    );
     return {
         kind: "external",
         source: "",
         sourceLength,
-        symbolTree: scan.symbolTree,
+        symbolTree: built.root,
         syntax: EMPTY_PARSE_RESULT,
         lex: EMPTY_LEX_RESULT,
-        imports: scan.imports,
-        definitionRanges: scan.definitionRanges
+        imports: declarations.imports,
+        definitionRanges: built.definitionRanges
     };
 }
 
-/** Превращает полную модель закрытого редактора в external summary. */
 export function compactOpenModuleModel(
     model: IRslModuleModel
 ): IRslModuleModel {
-    if (model.kind === "external") {
-        return model;
-    }
-
-    return createExternalModuleSummary(model.source);
+    return model.kind === "external"
+        ? model
+        : createExternalModuleSummary(model.source);
 }
 
-export function isOpenModuleModel(
-    model: IRslModuleModel
-): boolean {
+export function isOpenModuleModel(model: IRslModuleModel): boolean {
     return model.kind === "open";
 }

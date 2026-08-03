@@ -6,7 +6,7 @@ import {
     SignatureInformation
 } from "vscode-languageserver";
 
-import type { CBase } from "../common";
+import type { RslSymbol } from "../symbols/rslSymbol";
 import type { IRslToken } from "../lexer";
 import type { RslScopeResolver } from "../scopeResolver";
 import type { IIndexedModule } from "../workspaceIndex";
@@ -30,21 +30,21 @@ export function buildRslSignatureHelp(
 
     const resolved = resolver.resolveAt(
         module.uri,
-        module.object,
+        module.symbolTree,
         call.callee.start
     );
 
     if (
         !resolved ||
         (
-            resolved.object.ObjKind !== CompletionItemKind.Function &&
-            resolved.object.ObjKind !== CompletionItemKind.Method
+            resolved.symbol.kind !== CompletionItemKind.Function &&
+            resolved.symbol.kind !== CompletionItemKind.Method
         )
     ) {
         return null;
     }
 
-    const signature = createSignatureInformation(resolved.object);
+    const signature = createSignatureInformation(resolved.symbol);
     const parameterCount = signature.parameters?.length || 0;
 
     return {
@@ -57,15 +57,15 @@ export function buildRslSignatureHelp(
 }
 
 export function createSignatureInformation(
-    object: CBase
+    symbol: RslSymbol
 ): SignatureInformation {
-    const parameters = extractParameterLabels(object);
-    const returnType = object.Type &&
-        object.Type.toLowerCase() !== "variant"
-        ? `: ${object.Type}`
+    const parameters = extractParameterLabels(symbol);
+    const returnType = symbol.typeName &&
+        symbol.typeName.toLowerCase() !== "variant"
+        ? `: ${symbol.typeName}`
         : "";
-    const label = `${object.Name}(${parameters.join(", ")})${returnType}`;
-    const documentation = object.CIInfo.documentation;
+    const label = `${symbol.name}(${parameters.join(", ")})${returnType}`;
+    const documentation = symbol.completionItem.documentation;
 
     return {
         label,
@@ -154,12 +154,12 @@ function findCallContext(
     return { callee, activeParameter };
 }
 
-function extractParameterLabels(object: CBase): string[] {
-    const detail = String(object.CIInfo.detail || "");
+function extractParameterLabels(symbol: RslSymbol): string[] {
+    const detail = String(symbol.completionItem.detail || "");
     const nameIndex = detail.toLowerCase().indexOf(
-        object.Name.toLowerCase()
+        symbol.name.toLowerCase()
     );
-    const open = detail.indexOf("(", nameIndex + object.Name.length);
+    const open = detail.indexOf("(", nameIndex + symbol.name.length);
 
     if (nameIndex < 0 || open < 0) {
         return [];

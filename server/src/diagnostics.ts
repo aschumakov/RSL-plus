@@ -8,7 +8,8 @@ import {
     DiagnosticTag
 } from "vscode-languageserver";
 
-import { CBase, KEYWORDS, TYPES } from "./common";
+import { RslSymbol } from "./symbols/rslSymbol";
+import { isRslKeyword, isRslType } from "./syntax/rslIdentifiers";
 import { RslScopeResolver } from "./scopeResolver";
 import {
     GetDynamicMacroReferencesFromTokens,
@@ -38,8 +39,8 @@ interface IBlockEntry {
 }
 
 interface IDeclarationInfo {
-    object: CBase;
-    scope: CBase;
+    symbol: RslSymbol;
+    scope: RslSymbol;
     parameter: boolean;
 }
 
@@ -128,7 +129,7 @@ export function normalizeDiagnosticSettings(
  * Единая точка построения диагностик RSL.
  * Проверки используют уже готовые lexer/AST/workspace index и не читают файлы.
  */
-export function buildRslDiagnostics(
+export function buildLocalRslDiagnostics(
     module: IIndexedModule,
     index: WorkspaceIndex,
     settings?: IRslDiagnosticSettings
@@ -162,8 +163,8 @@ export function buildRslDiagnostics(
                 identifierIndex: buildIdentifierIndex(module.syntax.tokens),
                 declarationRangeKeys: new Set(
                     declarations.map(item => offsetRangeKey(
-                        item.object.Range.start,
-                        item.object.Range.end
+                        item.symbol.range.start,
+                        item.symbol.range.end
                     ))
                 )
             };
@@ -222,15 +223,44 @@ export function buildRslDiagnostics(
         );
     }
 
-    if (options.ambiguousReferences && hasCapacity()) {
+    return deduplicateDiagnostics(result).slice(0, options.maxProblems);
+}
+
+/** Workspace-фаза не запускает parser/local rules повторно. */
+export function buildWorkspaceRslDiagnostics(
+    module: IIndexedModule,
+    index: WorkspaceIndex,
+    settings?: IRslDiagnosticSettings
+): Diagnostic[] {
+    const options = normalizeDiagnosticSettings(settings);
+    if (!options.enabled || options.maxProblems === 0) return [];
+    const result: Diagnostic[] = [];
+    if (options.ambiguousReferences) {
         addAmbiguousReferenceDiagnostics(module, index, result);
     }
-
-    if (options.unusedImports && hasCapacity()) {
+    if (options.unusedImports && result.length < options.maxProblems) {
         addUnusedImportDiagnostics(module, index, result);
     }
-
     return deduplicateDiagnostics(result).slice(0, options.maxProblems);
+}
+
+/** Полный результат для unit-тестов и batch-клиентов. */
+export function buildRslDiagnostics(
+    module: IIndexedModule,
+    index: WorkspaceIndex,
+    settings?: IRslDiagnosticSettings
+): Diagnostic[] {
+    const options = normalizeDiagnosticSettings(settings);
+    const local = buildLocalRslDiagnostics(module, index, settings);
+    const remaining = Math.max(0, options.maxProblems - local.length);
+    const workspace = remaining > 0
+        ? buildWorkspaceRslDiagnostics(module, index, {
+            ...(settings || {}),
+            maxProblems: remaining
+        })
+        : [];
+    return deduplicateDiagnostics([...local, ...workspace])
+        .slice(0, options.maxProblems);
 }
 
 
@@ -549,12 +579,12 @@ function addUnusedDeclarationDiagnostics(
             break;
         }
 
-        const object = declaration.object;
+        const symbol = declaration.symbol;
         const scope = declaration.scope;
-        const isLocal = scope.ObjKind === CompletionItemKind.Function ||
-            scope.ObjKind === CompletionItemKind.Method;
+        const isLocal = scope.kind === CompletionItemKind.Function ||
+            scope.kind === CompletionItemKind.Method;
         const isPrivateModuleDeclaration =
-            scope.ObjKind === CompletionItemKind.Unit && object.Private;
+            scope.kind === CompletionItemKind.Unit && symbol.isPrivate;
 
         /*
          * Публичные глобальные объекты и свойства класса могут использоваться
@@ -564,15 +594,15 @@ function addUnusedDeclarationDiagnostics(
             continue;
         }
 
-        const name = normalizeIdentifier(object.Name);
+        const name = normalizeIdentifier(symbol.name);
         const occurrences = facts.identifierIndex.get(name) || [];
         const used = someTokenInRange(
             occurrences,
-            scope.Range.start,
-            scope.Range.end,
+            scope.range.start,
+            scope.range.end,
             token => {
                 if (
-                    token.end > scope.Range.end ||
+                    token.end > scope.range.end ||
                     facts.declarationRangeKeys.has(offsetRangeKey(
                         token.start,
                         token.end
@@ -583,13 +613,13 @@ function addUnusedDeclarationDiagnostics(
 
                 const resolved = resolver.resolveAt(
                     module.uri,
-                    module.object,
+                    module.symbolTree,
                     token.start
                 );
 
                 return !!resolved &&
                     resolved.uri === module.uri &&
-                    resolved.object === object;
+                    resolved.symbol === symbol;
             }
         );
 
@@ -599,24 +629,24 @@ function addUnusedDeclarationDiagnostics(
 
         const kind = declaration.parameter
             ? "Параметр"
-            : object.ObjKind === CompletionItemKind.Constant
+            : symbol.kind === CompletionItemKind.Constant
                 ? "Константа"
                 : "Переменная";
         const declared = kind === "Параметр" ? "объявлен" : "объявлена";
-        const range = findObjectNameRange(module, object);
+        const range = findObjectNameRange(module, symbol);
 
         result.push(createOffsetDiagnostic(
             module,
             range.start,
             range.end,
             DiagnosticSeverity.Warning,
-            `${kind} ${object.Name} ${declared}, но не используется`,
+            `${kind} ${symbol.name} ${declared}, но не используется`,
             "unused-declaration",
             true,
             {
                 start: range.start,
                 end: range.end,
-                name: object.Name,
+                name: symbol.name,
                 parameter: declaration.parameter
             }
         ));
@@ -632,7 +662,7 @@ function addUseBeforeDeclarationDiagnostics(
 ): void {
     const code = module.syntax.tokens;
     const memberNameStarts = collectMemberNameStarts(code);
-    const nestedScopesByScope = new Map<CBase, CBase[]>();
+    const nestedScopesByScope = new Map<RslSymbol, RslSymbol[]>();
 
     for (const declaration of facts.declarations) {
         if (result.length >= maxProblems) {
@@ -644,37 +674,37 @@ function addUseBeforeDeclarationDiagnostics(
         if (
             declaration.parameter ||
             (
-                scope.ObjKind !== CompletionItemKind.Function &&
-                scope.ObjKind !== CompletionItemKind.Method
+                scope.kind !== CompletionItemKind.Function &&
+                scope.kind !== CompletionItemKind.Method
             )
         ) {
             continue;
         }
 
-        const object = declaration.object;
+        const symbol = declaration.symbol;
 
         /*
          * Повреждённое или неоднозначное дерево не должно превращать
          * служебные слова RSL (IF, VAR и т. п.) в объявления переменных.
          */
-        if (isReservedIdentifier(object.Name)) {
+        if (isReservedIdentifier(symbol.name)) {
             continue;
         }
 
-        const name = normalizeIdentifier(object.Name);
+        const name = normalizeIdentifier(symbol.name);
         let nestedScopes = nestedScopesByScope.get(scope);
 
         if (!nestedScopes) {
-            nestedScopes = scope.getChilds()
-                .filter(child => child.isObject());
+            nestedScopes = scope.children
+                .filter(child => child.isContainer);
             nestedScopesByScope.set(scope, nestedScopes);
         }
 
         const occurrences = facts.identifierIndex.get(name) || [];
         const use = findTokenInRange(
             occurrences,
-            scope.Range.start,
-            object.Range.start,
+            scope.range.start,
+            symbol.range.start,
             token => {
                 if (
                     facts.declarationRangeKeys.has(offsetRangeKey(
@@ -684,8 +714,8 @@ function addUseBeforeDeclarationDiagnostics(
                     memberNameStarts.has(token.start) ||
                     nestedScopes.some(child =>
                         child !== scope &&
-                        child.Range.start <= token.start &&
-                        token.end <= child.Range.end
+                        child.range.start <= token.start &&
+                        token.end <= child.range.end
                     )
                 ) {
                     return false;
@@ -693,7 +723,7 @@ function addUseBeforeDeclarationDiagnostics(
 
                 const resolved = resolver.resolveAt(
                     module.uri,
-                    module.object,
+                    module.symbolTree,
                     token.start
                 );
 
@@ -708,13 +738,13 @@ function addUseBeforeDeclarationDiagnostics(
         result.push(createTokenDiagnostic(
             use,
             DiagnosticSeverity.Error,
-            `Переменная ${object.Name} используется до объявления`,
+            `Переменная ${symbol.name} используется до объявления`,
             "use-before-declaration",
             false,
             {
                 start: use.start,
                 end: use.end,
-                name: object.Name
+                name: symbol.name
             }
         ));
     }
@@ -724,11 +754,11 @@ function addDuplicateDeclarationDiagnostics(
     module: IIndexedModule,
     result: Diagnostic[]
 ): void {
-    walkScopes(module.object, scope => {
-        const byName = new Map<string, CBase[]>();
+    walkScopes(module.symbolTree, scope => {
+        const byName = new Map<string, RslSymbol[]>();
 
-        for (const child of scope.getChilds()) {
-            const name = normalizeIdentifier(child.Name);
+        for (const child of scope.children) {
+            const name = normalizeIdentifier(child.name);
 
             if (!name) {
                 continue;
@@ -751,7 +781,7 @@ function addDuplicateDeclarationDiagnostics(
                     nameRange.start,
                     nameRange.end,
                     DiagnosticSeverity.Warning,
-                    `Имя ${item.Name} повторно объявлено в той же области видимости`,
+                    `Имя ${item.name} повторно объявлено в той же области видимости`,
                     "duplicate-declaration"
                 ));
             });
@@ -837,16 +867,16 @@ function addUnusedImportDiagnostics(
         const publicNames = new Set<string>();
 
         closure.forEach(item => {
-            item.object.getChilds()
-                .filter(child => !child.Private)
+            item.symbolTree.children
+                .filter(child => !child.isPrivate)
                 .filter(child =>
-                    child.ObjKind === CompletionItemKind.Variable ||
-                    child.ObjKind === CompletionItemKind.Constant ||
-                    child.ObjKind === CompletionItemKind.Function ||
-                    child.ObjKind === CompletionItemKind.Class
+                    child.kind === CompletionItemKind.Variable ||
+                    child.kind === CompletionItemKind.Constant ||
+                    child.kind === CompletionItemKind.Function ||
+                    child.kind === CompletionItemKind.Class
                 )
                 .forEach(child =>
-                    publicNames.add(normalizeIdentifier(child.Name))
+                    publicNames.add(normalizeIdentifier(child.name))
                 );
         });
 
@@ -888,7 +918,7 @@ function addUnusedImportDiagnostics(
 
             const resolved = resolver.resolveAt(
                 module.uri,
-                module.object,
+                module.symbolTree,
                 token.start
             );
 
@@ -937,21 +967,21 @@ function addAmbiguousReferenceDiagnostics(
     result: Diagnostic[]
 ): void {
     const importedModules = index.getImportedModules(module.uri);
-    const byName = new Map<string, Array<{ uri: string; object: CBase }>>();
+    const byName = new Map<string, Array<{ uri: string; symbol: RslSymbol }>>();
 
     importedModules.forEach(imported => {
-        imported.object.getChilds()
-            .filter(child => !child.Private)
+        imported.symbolTree.children
+            .filter(child => !child.isPrivate)
             .forEach(child => {
-                const name = normalizeIdentifier(child.Name);
+                const name = normalizeIdentifier(child.name);
                 const list = byName.get(name) || [];
 
                 if (!list.some(item =>
-                    item.uri === imported.uri && item.object === child
+                    item.uri === imported.uri && item.symbol === child
                 )) {
                     list.push({
                         uri: imported.uri,
-                        object: child
+                        symbol: child
                     });
                 }
 
@@ -959,7 +989,7 @@ function addAmbiguousReferenceDiagnostics(
             });
     });
 
-    const ambiguous = new Map<string, Array<{ uri: string; object: CBase }>>();
+    const ambiguous = new Map<string, Array<{ uri: string; symbol: RslSymbol }>>();
     byName.forEach((items, name) => {
         if (items.length > 1) {
             ambiguous.set(name, items);
@@ -974,7 +1004,7 @@ function addAmbiguousReferenceDiagnostics(
     const resolver = new RslScopeResolver(index);
     const importReferences = GetImportDefinitionTargetsFromTokens(module.lex.tokens);
     const declarationRangeKeys = new Set(
-        collectAllObjectRanges(module.object).map(range =>
+        collectAllObjectRanges(module.symbolTree).map(range =>
             offsetRangeKey(range.start, range.end)
         )
     );
@@ -1003,7 +1033,7 @@ function addAmbiguousReferenceDiagnostics(
             ) ||
             memberNameStarts.has(token.start) ||
             resolver.resolveInScopeChain(
-                module.object,
+                module.symbolTree,
                 token.value,
                 token.start
             )
@@ -1038,14 +1068,14 @@ function collectDeclarations(
 ): IDeclarationInfo[] {
     const result: IDeclarationInfo[] = [];
     const signatureRanges = new Map<
-        CBase,
+        RslSymbol,
         { start: number; end: number } | undefined
     >();
 
-    walkScopes(module.object, scope => {
+    walkScopes(module.symbolTree, scope => {
         if (
-            scope.ObjKind === CompletionItemKind.Function ||
-            scope.ObjKind === CompletionItemKind.Method
+            scope.kind === CompletionItemKind.Function ||
+            scope.kind === CompletionItemKind.Method
         ) {
             signatureRanges.set(
                 scope,
@@ -1053,10 +1083,10 @@ function collectDeclarations(
             );
         }
 
-        for (const child of scope.getChilds()) {
+        for (const child of scope.children) {
             if (
-                !VARIABLE_KINDS.has(child.ObjKind) ||
-                isReservedIdentifier(child.Name)
+                !VARIABLE_KINDS.has(child.kind) ||
+                isReservedIdentifier(child.name)
             ) {
                 continue;
             }
@@ -1064,11 +1094,11 @@ function collectDeclarations(
             const signature = signatureRanges.get(scope);
 
             result.push({
-                object: child,
+                symbol: child,
                 scope,
                 parameter: !!signature &&
-                    signature.start < child.Range.start &&
-                    child.Range.end <= signature.end
+                    signature.start < child.range.start &&
+                    child.range.end <= signature.end
             });
         }
     });
@@ -1177,24 +1207,24 @@ function isReservedIdentifier(value: string): boolean {
         return true;
     }
 
-    return KEYWORDS.is(normalized).first ||
-        TYPES.is(normalized).first ||
+    return isRslKeyword(normalized) ||
+        isRslType(normalized) ||
         RESERVED_IDENTIFIERS.has(normalized);
 }
 
 
 function findSignatureRange(
     tokens: IRslToken[],
-    scope: CBase
+    scope: RslSymbol
 ): { start: number; end: number } | undefined {
     let start = -1;
     let depth = 0;
-    const firstIndex = lowerBoundByStart(tokens, scope.Range.start);
+    const firstIndex = lowerBoundByStart(tokens, scope.range.start);
 
     for (let index = firstIndex; index < tokens.length; index++) {
         const token = tokens[index];
 
-        if (token.start > scope.Range.end) {
+        if (token.start > scope.range.end) {
             break;
         }
 
@@ -1226,24 +1256,24 @@ function findSignatureRange(
     return undefined;
 }
 
-function walkScopes(root: CBase, action: (scope: CBase) => void): void {
+function walkScopes(root: RslSymbol, action: (scope: RslSymbol) => void): void {
     action(root);
 
-    root.getChilds().forEach(child => {
-        if (child.isObject()) {
+    root.children.forEach(child => {
+        if (child.isContainer) {
             walkScopes(child, action);
         }
     });
 }
 
 function collectAllObjectRanges(
-    root: CBase
+    root: RslSymbol
 ): Array<{ start: number; end: number }> {
     const result: Array<{ start: number; end: number }> = [];
 
     walkScopes(root, scope => {
-        scope.getChilds().forEach(child => {
-            result.push(child.Range);
+        scope.children.forEach(child => {
+            result.push(child.range);
         });
     });
 
@@ -1391,16 +1421,16 @@ function isClosedString(raw: string): boolean {
 
 function findObjectNameRange(
     module: IIndexedModule,
-    object: CBase
+    symbol: RslSymbol
 ): { start: number; end: number } {
-    const normalized = normalizeIdentifier(object.Name);
+    const normalized = normalizeIdentifier(symbol.name);
     const tokens = module.syntax.tokens;
-    const firstIndex = lowerBoundByStart(tokens, object.Range.start);
+    const firstIndex = lowerBoundByStart(tokens, symbol.range.start);
 
     for (let index = firstIndex; index < tokens.length; index++) {
         const token = tokens[index];
 
-        if (token.start > object.Range.end) {
+        if (token.start > symbol.range.end) {
             break;
         }
 
@@ -1412,7 +1442,7 @@ function findObjectNameRange(
         }
     }
 
-    return object.Range;
+    return symbol.range;
 }
 
 function createImportDiagnostic(

@@ -10,7 +10,7 @@ const { TextDocument } = require(path.join(
     "node_modules",
     "vscode-languageserver-textdocument"
 ));
-const { CBase } = require("../server/out/common");
+const { createSymbolTree } = require("./test-helpers");
 const {
     buildKnownAutoImportCompletions,
     buildMissingImportActions
@@ -64,8 +64,7 @@ function createModule(index, uri, source) {
     const syntax = parseRslSyntax(source, undefined, {
         buildExpressionTree: false
     });
-    const tree = CBase.fromSyntax(source, 0, syntax, true, false);
-    return index.updateOpenModule(uri, source, tree, 1, syntax);
+    return index.updateOpenModule(uri, source, 1, syntax);
 }
 
 function positionAt(source, offset) {

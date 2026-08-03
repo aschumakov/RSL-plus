@@ -28,17 +28,17 @@ export function buildRslDocumentHighlights(
         return [];
     }
 
-    const target = resolver.resolveAt(module.uri, module.object, offset);
+    const target = resolver.resolveAt(module.uri, module.symbolTree, offset);
     if (!target) {
         return [];
     }
 
-    const targetName = normalizeIdentifier(target.object.Name);
+    const targetName = normalizeIdentifier(target.symbol.name);
     const declarationStart = findDeclarationStart(
         index.getModule(target.uri),
         targetName,
-        target.object.Range.start,
-        target.object.Range.end
+        target.symbol.range.start,
+        target.symbol.range.end
     );
     const result: DocumentHighlight[] = [];
     const tokens = module.syntax.tokens;
@@ -55,13 +55,13 @@ export function buildRslDocumentHighlights(
 
         const resolved = resolver.resolveAt(
             module.uri,
-            module.object,
+            module.symbolTree,
             token.start
         );
         if (
             !resolved ||
             resolved.uri !== target.uri ||
-            resolved.object !== target.object
+            resolved.symbol !== target.symbol
         ) {
             continue;
         }

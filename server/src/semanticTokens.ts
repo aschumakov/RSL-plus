@@ -4,7 +4,7 @@ import {
     SemanticTokensLegend
 } from "vscode-languageserver";
 
-import { CBase } from "./common";
+import { RslSymbol } from "./symbols/rslSymbol";
 import {
     IRslToken,
     normalizeIdentifier
@@ -59,8 +59,8 @@ interface ISemanticEntry {
 }
 
 interface IObjectInfo {
-    object: CBase;
-    scope: CBase;
+    symbol: RslSymbol;
+    scope: RslSymbol;
     parameter: boolean;
 }
 
@@ -78,12 +78,12 @@ export function buildRslSemanticTokens(
     const resolver = sharedResolver || new RslScopeResolver(index);
     const tokens = module.syntax.tokens;
     const objects = collectObjects(module, tokens);
-    const objectInfoByObject = new Map<CBase, IObjectInfo>();
+    const objectInfoByObject = new Map<RslSymbol, IObjectInfo>();
     const declarationByRange = new Map<string, IObjectInfo>();
 
     objects.forEach(info => {
-        objectInfoByObject.set(info.object, info);
-        const token = findDeclarationToken(tokens, info.object);
+        objectInfoByObject.set(info.symbol, info);
+        const token = findDeclarationToken(tokens, info.symbol);
 
         if (token) {
             declarationByRange.set(
@@ -133,7 +133,7 @@ export function buildRslSemanticTokens(
         );
 
         if (declaration) {
-            const encoded = encodeObject(declaration.object, declaration.parameter);
+            const encoded = encodeObject(declaration.symbol, declaration.parameter);
 
             if (encoded) {
                 entries.push({
@@ -147,7 +147,7 @@ export function buildRslSemanticTokens(
 
         const resolved = resolver.resolveAt(
             module.uri,
-            module.object,
+            module.symbolTree,
             token.start
         );
 
@@ -155,9 +155,9 @@ export function buildRslSemanticTokens(
             continue;
         }
 
-        const resolvedInfo = objectInfoByObject.get(resolved.object);
+        const resolvedInfo = objectInfoByObject.get(resolved.symbol);
         const encoded = encodeObject(
-            resolved.object,
+            resolved.symbol,
             !!resolvedInfo?.parameter
         );
 
@@ -287,22 +287,22 @@ function collectObjects(
 ): IObjectInfo[] {
     const result: IObjectInfo[] = [];
 
-    walk(module.object, scope => {
+    walk(module.symbolTree, scope => {
         const signature = isCallable(scope)
             ? findSignatureRange(code, scope)
             : undefined;
 
-        scope.getChilds().forEach(child => {
+        scope.children.forEach(child => {
             result.push({
-                object: child,
+                symbol: child,
                 scope,
                 parameter:
                     !!signature &&
-                    signature.start < child.Range.start &&
-                    child.Range.end <= signature.end &&
+                    signature.start < child.range.start &&
+                    child.range.end <= signature.end &&
                     (
-                        child.ObjKind === CompletionItemKind.Variable ||
-                        child.ObjKind === CompletionItemKind.Constant
+                        child.kind === CompletionItemKind.Variable ||
+                        child.kind === CompletionItemKind.Constant
                     )
             });
         });
@@ -312,7 +312,7 @@ function collectObjects(
 }
 
 function encodeObject(
-    object: CBase,
+    symbol: RslSymbol,
     parameter: boolean
 ): { type: number; modifiers: number } | undefined {
     let typeName: string;
@@ -320,7 +320,7 @@ function encodeObject(
     if (parameter) {
         typeName = "parameter";
     } else {
-        switch (object.ObjKind) {
+        switch (symbol.kind) {
             case CompletionItemKind.Class:
                 typeName = "class";
                 break;
@@ -345,7 +345,7 @@ function encodeObject(
 
     let modifiers = 0;
 
-    if (object.ObjKind === CompletionItemKind.Constant) {
+    if (symbol.kind === CompletionItemKind.Constant) {
         modifiers |= modifierBit("readonly");
     }
 
@@ -389,33 +389,33 @@ function modifierBit(name: string): number {
     return index < 0 ? 0 : (1 << index);
 }
 
-function walk(root: CBase, action: (scope: CBase) => void): void {
+function walk(root: RslSymbol, action: (scope: RslSymbol) => void): void {
     action(root);
 
-    root.getChilds().forEach(child => {
-        if (child.isObject()) {
+    root.children.forEach(child => {
+        if (child.isContainer) {
             walk(child, action);
         }
     });
 }
 
-function isCallable(scope: CBase): boolean {
-    return scope.ObjKind === CompletionItemKind.Function ||
-        scope.ObjKind === CompletionItemKind.Method;
+function isCallable(scope: RslSymbol): boolean {
+    return scope.kind === CompletionItemKind.Function ||
+        scope.kind === CompletionItemKind.Method;
 }
 
 function findSignatureRange(
     tokens: IRslToken[],
-    scope: CBase
+    scope: RslSymbol
 ): { start: number; end: number } | undefined {
     let start = -1;
     let depth = 0;
-    const firstIndex = lowerBoundByStart(tokens, scope.Range.start);
+    const firstIndex = lowerBoundByStart(tokens, scope.range.start);
 
     for (let index = firstIndex; index < tokens.length; index++) {
         const token = tokens[index];
 
-        if (token.start > scope.Range.end) {
+        if (token.start > scope.range.end) {
             break;
         }
 
@@ -449,15 +449,15 @@ function findSignatureRange(
 
 function findDeclarationToken(
     tokens: IRslToken[],
-    object: CBase
+    symbol: RslSymbol
 ): IRslToken | undefined {
-    const name = normalizeIdentifier(object.Name);
-    const firstIndex = lowerBoundByStart(tokens, object.Range.start);
+    const name = normalizeIdentifier(symbol.name);
+    const firstIndex = lowerBoundByStart(tokens, symbol.range.start);
 
     for (let index = firstIndex; index < tokens.length; index++) {
         const token = tokens[index];
 
-        if (token.start > object.Range.end) {
+        if (token.start > symbol.range.end) {
             break;
         }
 

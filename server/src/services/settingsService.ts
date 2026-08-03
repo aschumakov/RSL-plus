@@ -23,9 +23,7 @@ export class RslSettingsService {
         const root = isRecord(settingsRoot) ? settingsRoot : {};
         const value = isRecord(root.rslPlus)
             ? root.rslPlus
-            : isRecord(root.RSLanguageServer)
-                ? root.RSLanguageServer
-                : root;
+            : root;
 
         this.workspaceSettings = mergeSettings(this.defaults, value);
     }
@@ -95,15 +93,11 @@ function mergeSettings(
         ? input.semanticHighlighting
         : {};
 
-    const legacyImport = typeof input.import === "string"
-        ? input.import.toLocaleUpperCase() === "ДА"
-        : undefined;
-
     return {
         imports: {
             enabled: typeof imports.enabled === "boolean"
                 ? imports.enabled
-                : legacyImport ?? defaults.imports.enabled
+                : defaults.imports.enabled
         },
         autoImport: {
             enabled: typeof autoImport.enabled === "boolean"

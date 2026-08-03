@@ -15,6 +15,9 @@ const {
     RslLanguageFeatureRegistry
 } = require("../server/out/features/languageFeatureRegistry");
 const {
+    CompletionTransport
+} = require("../server/out/features/completionTransport");
+const {
     createFastDocumentSnapshot,
     getFastDocumentSymbols,
     getFastFoldingRanges
@@ -43,8 +46,8 @@ const defaults = {
 async function testAvailableSettingsDoNotWaitForVsCode() {
     const service = new RslSettingsService(defaults);
     service.updateFromConfiguration({
-        RSLanguageServer: {
-            import: "НЕТ",
+        rslPlus: {
+            imports: { enabled: false },
             diagnostics: {
                 maxProblems: 75
             }
@@ -313,6 +316,7 @@ async function testOutlineUsesPreparedSnapshotAndReportsTiming() {
     };
     const connection = {
         onCompletion: register("completion"),
+        onCompletionResolve: register("completionResolve"),
         onSignatureHelp: register("signatureHelp"),
         onHover: register("hover"),
         onDocumentHighlight: register("documentHighlight"),
@@ -501,6 +505,28 @@ async function testOutlineIsReadyBeforeDiagnostics() {
     coordinator.close(uri);
 }
 
+function testCompletionPayloadIsBoundedAndResolvedLazily() {
+    const transport = new CompletionTransport({
+        maxItems: 3,
+        cacheEntries: 8
+    });
+    const prepared = transport.prepare(Array.from({ length: 5 }, (_, index) => ({
+        label: `Item${index}`,
+        detail: `Detail${index}`,
+        documentation: `Documentation${index}`,
+        data: { source: "test" }
+    })));
+
+    assert.strictEqual(prepared.items.length, 3);
+    assert.strictEqual(prepared.isIncomplete, true);
+    assert.strictEqual(prepared.items[0].detail, undefined);
+    assert.strictEqual(prepared.items[0].documentation, undefined);
+    const resolved = transport.resolve(prepared.items[0]);
+    assert.strictEqual(resolved.detail, "Detail0");
+    assert.strictEqual(resolved.documentation, "Documentation0");
+    assert.strictEqual(resolved.data.source, "test");
+}
+
 async function waitFor(predicate, timeoutMs) {
     const started = Date.now();
     while (!predicate()) {
@@ -529,6 +555,9 @@ async function waitFor(predicate, timeoutMs) {
 
     await testOutlineIsReadyBeforeDiagnostics();
     console.log("[OK] document.open и Outline завершаются раньше diagnostics");
+
+    testCompletionPayloadIsBoundedAndResolvedLazily();
+    console.log("[OK] Completion ограничен и догружает detail через resolve");
 })().catch(error => {
     console.error(error);
     process.exitCode = 1;

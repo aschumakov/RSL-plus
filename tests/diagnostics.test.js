@@ -13,10 +13,14 @@ require.cache[serverModulePath] = {
     }
 };
 
-const { CBase } = require("../server/out/common");
+const { createSymbolTree } = require("./test-helpers");
 const { getDefaults } = require("../server/out/defaults");
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
-const { buildRslDiagnostics } = require("../server/out/diagnostics");
+const {
+    buildLocalRslDiagnostics,
+    buildRslDiagnostics,
+    buildWorkspaceRslDiagnostics
+} = require("../server/out/diagnostics");
 const {
     RslDiagnosticEngine
 } = require("../server/out/diagnostics/diagnosticEngine");
@@ -37,13 +41,9 @@ function test(name, action) {
 }
 
 function createModule(index, uri, source, open = true) {
-    return index.updateModule(
-        uri,
-        source,
-        new CBase(source, 0),
-        1,
-        open
-    );
+    return open
+        ? index.updateOpenModule(uri, source, 1)
+        : index.updateExternalModule(uri, source, 1);
 }
 
 function diagnosticsFor(source, setup, settings) {
@@ -235,8 +235,8 @@ test("Общесистемные спецпеременные имеют док�
     for (const [name, expectedType] of expectedTypes) {
         const variable = getDefaults().find(name);
         assert.ok(variable, `Не найдена спецпеременная ${name}`);
-        assert.strictEqual(variable.returnType(), expectedType);
-        assert.strictEqual(variable.CIInfo().insertText, `{${name}}`);
+        assert.strictEqual(variable.typeName, expectedType);
+        assert.strictEqual(variable.completionItem.insertText, `{${name}}`);
     }
 });
 
@@ -584,6 +584,20 @@ test("Diagnostic engine подключает правила через реес�
     assert.throws(() =>
         engine.register({ id: "custom-test", run: () => [] })
     );
+});
+
+test("Workspace-фаза не повторяет parser и локальные диагностики", () => {
+    const index = new WorkspaceIndex();
+    const module = index.updateOpenModule(
+        "file:///split.mac",
+        "Macro Broken()\n  Var unused;",
+        1
+    );
+    const local = buildLocalRslDiagnostics(module, index);
+    const workspaceOnly = buildWorkspaceRslDiagnostics(module, index);
+    assert.ok(local.some(item => item.code === "missing-end"));
+    assert.ok(!workspaceOnly.some(item => item.code === "missing-end"));
+    assert.ok(!workspaceOnly.some(item => item.code === "unused-declaration"));
 });
 
 console.log("");

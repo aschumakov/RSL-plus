@@ -4,10 +4,7 @@ const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
 
-/*
- * common.js импортирует ./server для getTree(). В unit-тесте подменяем
- * настоящий language server минимальной заглушкой.
- */
+/* Language server подменяется, чтобы unit-тест не запускал IPC transport. */
 const serverModulePath = require.resolve("../server/out/server");
 require.cache[serverModulePath] = {
     id: serverModulePath,
@@ -19,9 +16,9 @@ require.cache[serverModulePath] = {
     }
 };
 
-const { CBase } = require("../server/out/common");
+const { createSymbolTree } = require("./test-helpers");
+const { lexRsl, tokenAtOffset } = require("../server/out/lexer");
 const { GetFoldingRanges } = require("../server/out/folding");
-const { lexRsl } = require("../server/out/lexer");
 
 function testSqlInjectionGrammar() {
     const grammarPath = path.join(
@@ -114,16 +111,17 @@ function testOptimizedTokenLookup() {
         "    End;",
         "End;"
     ].join("\n");
-    const tree = new CBase(source, 0);
+    const tree = createSymbolTree(source);
+    const tokens = lexRsl(source).tokens;
     const classNode = tree
-        .getChilds()
-        .find(node => node.Name === "CTransactionW4Service");
+        .children
+        .find(node => node.name === "CTransactionW4Service");
 
     assert.ok(classNode, "Класс не найден");
     const methodNames = classNode
-        .getChilds()
-        .filter(node => node.isObject())
-        .map(node => node.Name);
+        .children
+        .filter(node => node.isContainer)
+        .map(node => node.name);
     assert.ok(methodNames.includes("init"));
     assert.ok(methodNames.includes("makeTemplateRequest"));
 
@@ -131,20 +129,20 @@ function testOptimizedTokenLookup() {
         const offset =
             source.indexOf(fragment) +
             Math.floor(fragment.length / 2);
-        return tree.getCurrentToken(offset);
+        return tokenAtOffset(tokens, offset, true);
     }
 
     assert.strictEqual(tokenAt("select * from").kind, "string");
-    assert.strictEqual(tokenAt("BCLinkWWay4").kind, "code");
+    assert.strictEqual(tokenAt("BCLinkWWay4").kind, "identifier");
     assert.strictEqual(tokenAt("begin").kind, "square");
     assert.strictEqual(
-        tree.getCurrentToken(source.indexOf("foo+bar") + 3).str,
+        tokenAtOffset(tokens, source.indexOf("foo+bar") + 3, false).raw,
         "+"
     );
 
     const startedAt = Date.now();
     for (let index = 0; index < 100000; index++) {
-        tree.getCurrentToken(source.length - 10);
+        tokenAtOffset(tokens, source.length - 10, true);
     }
     const elapsed = Date.now() - startedAt;
     assert.ok(

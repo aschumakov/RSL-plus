@@ -11,7 +11,7 @@ import {
     WorkspaceEdit
 } from "vscode-languageserver";
 
-import type { CBase } from "../common";
+import type { RslSymbol } from "../symbols/rslSymbol";
 import { normalizeIdentifier, tokenAtOffset } from "../lexer";
 import type { RslScopeResolver } from "../scopeResolver";
 import type {
@@ -30,7 +30,7 @@ const NON_IMPORT_IDENTIFIERS = new Set([
 
 export interface IAutoImportCandidate {
     uri: string;
-    object: CBase;
+    symbol: RslSymbol;
 }
 
 /** Completion с additionalTextEdits, не запускающий полный workspace scan. */
@@ -47,11 +47,11 @@ export function buildKnownAutoImportCompletions(
     const seen = new Set<string>();
 
     for (const symbol of index.findUnimportedSymbols(module.uri)) {
-        if (!completionLabelMatchesPrefix(symbol.object.Name, prefix)) {
+        if (!completionLabelMatchesPrefix(symbol.symbol.name, prefix)) {
             continue;
         }
         const key = [
-            normalizeIdentifier(symbol.object.Name),
+            normalizeIdentifier(symbol.symbol.name),
             symbol.uri
         ].join(":");
 
@@ -65,7 +65,7 @@ export function buildKnownAutoImportCompletions(
         }
 
         seen.add(key);
-        const source = symbol.object.CIInfo;
+        const source = symbol.symbol.completionItem;
         result.push({
             ...source,
             detail: [
@@ -105,7 +105,7 @@ export async function buildMissingImportActions(
         !token ||
         token.kind !== "identifier" ||
         NON_IMPORT_IDENTIFIERS.has(normalizeIdentifier(token.value)) ||
-        resolver.resolveAt(module.uri, module.object, token.start)
+        resolver.resolveAt(module.uri, module.symbolTree, token.start)
     ) {
         return [];
     }
@@ -122,15 +122,16 @@ export async function buildMissingImportActions(
             continue;
         }
 
-        for (const object of candidateModule.object.getChilds()) {
+        for (const object of candidateModule.symbolTree.children) {
             if (
-                !object.Private &&
-                normalizeIdentifier(object.Name) ===
+                !object.isPrivate &&
+                normalizeIdentifier(object.name) ===
                     normalizeIdentifier(token.value)
             ) {
                 candidates.push({
                     uri: candidateModule.uri,
-                    object
+                    symbolId: object.id,
+                    symbol: object
                 });
             }
         }

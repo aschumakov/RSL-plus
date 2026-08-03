@@ -13,7 +13,7 @@ require.cache[serverModulePath] = {
     }
 };
 
-const { CBase } = require("../server/out/common");
+const { createSymbolTree } = require("./test-helpers");
 const { buildRslCodeActions } = require("../server/out/codeActions");
 const { buildRslDiagnostics } = require("../server/out/diagnostics");
 const {
@@ -63,21 +63,16 @@ function test(name, action) {
 }
 
 function createModule(index, uri, source, open = true) {
-    return index.updateModule(
-        uri,
-        source,
-        new CBase(source, 0),
-        1,
-        open
-    );
+    return open
+        ? index.updateOpenModule(uri, source, 1)
+        : index.updateExternalModule(uri, source, 1);
 }
 
 function createSyntaxModule(index, uri, source, version = 1) {
     const syntax = parseRslSyntax(source, undefined, {
         buildExpressionTree: false
     });
-    const tree = CBase.fromSyntax(source, 0, syntax, true, false);
-    return index.updateOpenModule(uri, source, tree, version, syntax);
+    return index.updateOpenModule(uri, source, version, syntax);
 }
 
 function paramsFor(module, diagnostic) {
@@ -385,8 +380,8 @@ test("Hover содержит сигнатуру, расположение и б�
     const uri = "file:///workspace/MC_lib.mac";
     const index = new WorkspaceIndex();
     const module = createSyntaxModule(index, uri, source);
-    const classObject = module.object.RecursiveFind("TDocument");
-    const method = classObject.RecursiveFind("Build");
+    const classObject = module.symbolTree.find("TDocument");
+    const method = classObject.find("Build");
     const classHover = buildRslHoverContent(index, uri, classObject).value;
     const methodHover = buildRslHoverContent(index, uri, method).value;
 
@@ -411,7 +406,7 @@ test("Hover показывает значение локальной и импо
         localUri,
         "Const PDOC_ORIGIN_LOCAL = 2;"
     );
-    const localConstant = local.object.RecursiveFind("PDOC_ORIGIN_LOCAL");
+    const localConstant = local.symbolTree.find("PDOC_ORIGIN_LOCAL");
     assert.ok(localConstant);
     const localHover = buildRslHoverContent(
         index,
@@ -426,7 +421,7 @@ test("Hover показывает значение локальной и импо
         "// constants\nConst PDOC_ORIGIN_SAP = 1;",
         1
     );
-    const importedConstant = imported.object.RecursiveFind(
+    const importedConstant = imported.symbolTree.find(
         "PDOC_ORIGIN_SAP"
     );
     assert.ok(importedConstant);

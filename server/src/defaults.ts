@@ -3,66 +3,50 @@
  * которые могут использоваться в любом месте кода без подгрузки какого-либо макроса или интера
  */
 
-import {CNodeClass, CNode, CNodeFunc} from './extended_h'
-import { InsertTextFormat, CompletionItemKind, CompletionItem, MarkupKind } from 'vscode-languageserver';
+import {
+    BuiltinClassSymbol,
+    BuiltinFunctionSymbol,
+    BuiltinSymbol
+} from "./builtins/builtinSymbol";
+import { InsertTextFormat, CompletionItemKind, MarkupKind } from 'vscode-languageserver';
 import { RSL_SYSTEM_SPECIAL_VARIABLES } from "./systemSpecialVariables";
 
 
 /**
  * Массив дефолтных классов, функций, переменных
  */
-export class ArrayClass {
-    private _arr : Array<CNode>;
-    public constructor() {this._arr = new Array();}
-    public push(node:CNode) {this._arr.push(node)}
-    public upsert(node:CNode) {
-        const index = this._arr.findIndex(current =>
-            current.Name().toLowerCase() === node.Name().toLowerCase()
-        );
+export class BuiltinCatalog {
+    private items: BuiltinSymbol[] = [];
 
-        if (index >= 0) {
-            this._arr[index] = node;
-        } else {
-            this._arr.push(node);
-        }
+    add(symbol: BuiltinSymbol): void { this.items.push(symbol); }
+    upsert(symbol: BuiltinSymbol): void {
+        const index = this.items.findIndex(current =>
+            current.name.toLowerCase() === symbol.name.toLowerCase()
+        );
+        if (index >= 0) this.items[index] = symbol;
+        else this.items.push(symbol);
     }
-    public find(name:string):CNode {
-        let res:CNode;
-        for (let index = 0; index < this._arr.length; index++) {
-            if (this._arr[index].Name().toLowerCase() == name.toLowerCase()) {
-                res = this._arr[index];
-                break;
-            }
-        }
-        return res;
+    find(name: string): BuiltinSymbol | undefined {
+        const normalized = name.toLowerCase();
+        return this.items.find(item => item.name.toLowerCase() === normalized);
     }
-    public getChilds():Array<CNode> {
-        return this._arr;
-    }
+    get completionItems() { return this.items.map(item => item.completionItem); }
 }
 
 /**
  * Возвращает дефолтные функции, классы, переменные
  */
-export function getDefaults() {	return DefaultsArray; }
-export function getCIInfoForArray(inputArr: ArrayClass):Array<CompletionItem> {
-    let CIArray:Array<CompletionItem> = new Array();
-    let CNodeArray:Array<CNode> = inputArr.getChilds();
-    CNodeArray.forEach(element => {
-        CIArray.push(element.CIInfo())
-    });
-    return CIArray;
-}
+export function getDefaults(): BuiltinCatalog { return DefaultsArray; }
 
 /**
  * Содержит дефолтные функции, классы, переменные
  */
-let DefaultsArray: ArrayClass = new ArrayClass();
+const DefaultsArray = new BuiltinCatalog();
 
 
 /*───────────────────────────────────────────────────────────────────────────────────────────────────*/
 /* Описание Класса TBFile*/
-let TBfile: CNodeClass = new CNodeClass(
+let TBfile: BuiltinClassSymbol = new BuiltinClassSymbol(
     "TBFile",
     "tbfile",
     "Класс TBFile",
@@ -76,7 +60,7 @@ getdirect getpos rewind dropFilter getEQ insert SetRecordAddr FileName
 GetFldInfo next UnPackVarBuff fldindex getGE Nrecords update fldname
 getGT PackVarBuff VarSize fldnumber GetKeyInfo prev WriteBlob */
 
-TBfile.addChild(new CNodeFunc(
+TBfile.addChild(new BuiltinFunctionSymbol(
     "Update",
     "integer",
     "Метод класса TBFile: bFile.Update();",
@@ -86,7 +70,7 @@ TBfile.addChild(new CNodeFunc(
     CompletionItemKind.Method
 ));
 
-TBfile.addChild(new CNodeFunc(
+TBfile.addChild(new BuiltinFunctionSymbol(
     "Insert",
     "integer",
     "Метод класса TBFile: bFile.Insert();",
@@ -97,7 +81,7 @@ TBfile.addChild(new CNodeFunc(
     CompletionItemKind.Method
 ));
 
-TBfile.addChild(new CNodeFunc(
+TBfile.addChild(new BuiltinFunctionSymbol(
     "ReWind",
     "integer",
     "Метод класса TBFile: bFile.ReWind();",
@@ -108,7 +92,7 @@ TBfile.addChild(new CNodeFunc(
     CompletionItemKind.Method
 ));
 
-TBfile.addChild(new CNodeFunc(
+TBfile.addChild(new BuiltinFunctionSymbol(
     "Prev",
     "integer",
     "Метод класса TBFile: bFile.Prev();",
@@ -118,7 +102,7 @@ TBfile.addChild(new CNodeFunc(
     CompletionItemKind.Method
 ));
 
-TBfile.addChild(new CNodeFunc(
+TBfile.addChild(new BuiltinFunctionSymbol(
     "Next",
     "integer",
     "Метод класса TBFile: bFile.Next();",
@@ -128,7 +112,7 @@ TBfile.addChild(new CNodeFunc(
     CompletionItemKind.Method
 ));
 
-TBfile.addChild(new CNodeFunc(
+TBfile.addChild(new BuiltinFunctionSymbol(
     "getLE",
     "integer",
     "Метод класса TBFile: bFile.getLE();",
@@ -138,7 +122,7 @@ TBfile.addChild(new CNodeFunc(
     CompletionItemKind.Method
 ));
 
-TBfile.addChild(new CNodeFunc(
+TBfile.addChild(new BuiltinFunctionSymbol(
     "getLT",
     "integer",
     "Метод класса TBFile: bFile.getLT();",
@@ -148,7 +132,7 @@ TBfile.addChild(new CNodeFunc(
     CompletionItemKind.Method
     ));
 
-TBfile.addChild(new CNodeFunc(
+TBfile.addChild(new BuiltinFunctionSymbol(
     "getEQ",
     "integer",
     "Метод класса TBFile: bFile.getEQ();",
@@ -158,7 +142,7 @@ TBfile.addChild(new CNodeFunc(
     CompletionItemKind.Method
     ));
 
-TBfile.addChild(new CNodeFunc(
+TBfile.addChild(new BuiltinFunctionSymbol(
     "getGE",
     "integer",
     "Метод класса TBFile: bFile.getGE()",
@@ -168,7 +152,7 @@ TBfile.addChild(new CNodeFunc(
     CompletionItemKind.Method
     ));
 
-TBfile.addChild(new CNodeFunc(
+TBfile.addChild(new BuiltinFunctionSymbol(
     "getGT",
     "integer",
     "Метод класса TBFile: bFile.getGT()",
@@ -178,7 +162,7 @@ TBfile.addChild(new CNodeFunc(
     CompletionItemKind.Method
     ));
 
-TBfile.addChild(new CNodeFunc(
+TBfile.addChild(new BuiltinFunctionSymbol(
     "Clear",
     "integer",
     "Метод класса TBFile: bFile.Clear()",
@@ -188,7 +172,7 @@ TBfile.addChild(new CNodeFunc(
     CompletionItemKind.Method
     ));
 
-TBfile.addChild(new CNodeFunc(
+TBfile.addChild(new BuiltinFunctionSymbol(
     "Delete",
     "integer",
     "Метод класса TBFile: bFile.Delete();",
@@ -198,7 +182,7 @@ TBfile.addChild(new CNodeFunc(
     CompletionItemKind.Method
     ));
 
-TBfile.addChild(new CNode(
+TBfile.addChild(new BuiltinSymbol(
     "Rec",
     "variable",
     "Свойство класса TBFile: bFile.Rec",
@@ -206,7 +190,7 @@ TBfile.addChild(new CNode(
     "Rec.$0"
     ));
 
-TBfile.addChild(new CNode(
+TBfile.addChild(new BuiltinSymbol(
     "KeyNum",
     "integer",
     "Свойство класса TBFile: bFile.KeyNum",
@@ -215,13 +199,13 @@ TBfile.addChild(new CNode(
     InsertTextFormat.Snippet
     ));
 
-DefaultsArray.push(TBfile);
+DefaultsArray.add(TBfile);
 
 /*───────────────────────────────────────────────────────────────────────────────────────────────────*/
 /*Конец описания класса TBFile*/
 
 /* Описание Класса TArray*/
-let TArray: CNodeClass = new CNodeClass(
+let TArray: BuiltinClassSymbol = new BuiltinClassSymbol(
     "TArray",
     "tarray",
     "Класс TArray",
@@ -229,7 +213,7 @@ let TArray: CNodeClass = new CNodeClass(
     "TArray ($0);" /*подставляемый текст*/
 );
 
-TArray.addChild(new CNode(
+TArray.addChild(new BuiltinSymbol(
     "MarshalByVal",
     "bool",
     "Свойство класса TArray",
@@ -237,7 +221,7 @@ TArray.addChild(new CNode(
     "MarshalByVal(${1|true,false|});$0"
     ));
 
-TArray.addChild(new CNodeFunc(
+TArray.addChild(new BuiltinFunctionSymbol(
     "Sort",
     "integer",
     "Метод класса TArray",
@@ -245,47 +229,47 @@ TArray.addChild(new CNodeFunc(
     "Sort(${1:callback}, ${2:data});$0"
     ));
 
-DefaultsArray.push(TArray);
+DefaultsArray.add(TArray);
 /*───────────────────────────────────────────────────────────────────────────────────────────────────*/
 /*Конец описания класса TArray*/
 
 
 /* Описание стандартных фунций*/
-let func: CNodeFunc = new CNodeFunc(
+let func: BuiltinFunctionSymbol = new BuiltinFunctionSymbol(
     "GetInt",
     "integer",
     "Функция GetInt ( id [, prompt, len [, hide ] ] )",
     {kind: MarkupKind.Markdown, value: "Процедура присваивает введенное пользователем значение переменной типа Integer с именем ```id```. По умолчанию ширина поля ввода равна 12 символам."},
     "GetInt ( ${1:id} ${2:, prompt, len ${3:, hide}} );$0" /*подставляемый текст*/
 );
-DefaultsArray.push(func);
+DefaultsArray.add(func);
 
-func = new CNodeFunc(
+func = new BuiltinFunctionSymbol(
     "GetDouble",
     "double",
     "Функция GetDouble ( id [, prompt, len [, hide [, pos ] ] ] )",
     {kind: MarkupKind.Markdown, value: "Процедура присваивает введенное пользователем значение переменной типа Double с именем ```id```. По умолчанию ширина поля ввода равна 24 символам."},
     "GetDouble ( ${1:id} ${2:, prompt, len ${3:, hide ${4:, pos}}});$0" /*подставляемый текст*/
 );
-DefaultsArray.push(func);
+DefaultsArray.add(func);
 
-func = new CNodeFunc(
+func = new BuiltinFunctionSymbol(
 	"GetValue",
 	"variable",
 	"Функция GetValue(param.ReqFindClient.AddressFIAS.RegionCode, \"\");",
 	{kind: MarkupKind.Markdown, value: "Получить значение параметра"},
 	"GetValue( ${1:value}, ${2:\"\"} );$0" /*подставляемый текст*/
 );
-DefaultsArray.push(func);
+DefaultsArray.add(func);
 
-func = new CNodeFunc(
+func = new BuiltinFunctionSymbol(
 	"StrSubst",
 	"variable",
 	"Функция StrSubst ( sourse, strToFind, strToReplace)",
 	{kind: MarkupKind.Markdown, value: "Процедура ищет в строке source подстроки strToFind и заменяет их строками strToReplace. Возвращаемым значением является результирующая строка."},
 	"StrSubst( ${1:sourse}, ${2:\"\"}, ${3:\"\"} );$0" /*подставляемый текст*/
 );
-DefaultsArray.push(func);
+DefaultsArray.add(func);
 
 /*ListChapter */
 
@@ -314,7 +298,7 @@ DefaultsArray.push(func);
 
 
 /* Описание спецпеременных*/
-let specVar: CNode = new CNode(
+let specVar: BuiltinSymbol = new BuiltinSymbol(
     "MFO_Bank",
     "integer",
     "Спецпеременная {MFO_Bank}",
@@ -322,9 +306,9 @@ let specVar: CNode = new CNode(
     "{MFO_Bank}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "KU_Bank",
     "integer",
     "Спецпеременная {KU_Bank}",
@@ -332,9 +316,9 @@ specVar = new CNode(
     "{KU_Bank}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "CORAC_Bank",
     "integer",
     "Спецпеременная {CORAC_Bank}",
@@ -342,9 +326,9 @@ specVar = new CNode(
     "{CORAC_Bank}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "NumDprt",
     "integer",
     "Спецпеременная {NumDprt}",
@@ -352,9 +336,9 @@ specVar = new CNode(
     "{NumDprt}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "MFO_RCC",
     "integer",
     "Спецпеременная {MFO_RCC}",
@@ -362,9 +346,9 @@ specVar = new CNode(
     "{MFO_RCC}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "KU_RCC",
     "integer",
     "Спецпеременная {KU_RCC}",
@@ -372,9 +356,9 @@ specVar = new CNode(
     "{KU_RCC}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "Name_Bank",
     "string",
     "Спецпеременная {Name_Bank}",
@@ -382,9 +366,9 @@ specVar = new CNode(
     "{Name_Bank}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "DEBETRATE",
     "integer",
     "Спецпеременная {DEBETRATE}",
@@ -392,9 +376,9 @@ specVar = new CNode(
     "{DEBETRATE}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "KREDITRATE",
     "integer",
     "Спецпеременная {KREDITRATE}",
@@ -402,9 +386,9 @@ specVar = new CNode(
     "{KREDITRATE}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "CALCRATE",
     "integer",
     "Спецпеременная {CALCRATE}",
@@ -412,9 +396,9 @@ specVar = new CNode(
     "{CALCRATE}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "BASECASH",
     "integer",
     "Спецпеременная {BASECASH}",
@@ -422,9 +406,9 @@ specVar = new CNode(
     "{BASECASH}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "CASHDEP",
     "integer",
     "Спецпеременная {CASHDEP}",
@@ -432,9 +416,9 @@ specVar = new CNode(
     "{CASHDEP}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "TRANDEP",
     "integer",
     "Спецпеременная {TRANDEP}",
@@ -442,9 +426,9 @@ specVar = new CNode(
     "{TRANDEP}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "IOBAccount",
     "integer",
     "Спецпеременная {IOBAccount}",
@@ -452,9 +436,9 @@ specVar = new CNode(
     "{IOBAccount}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "OBalance_Index1",
     "integer",
     "Спецпеременная {OBalance_Index1}",
@@ -462,9 +446,9 @@ specVar = new CNode(
     "{OBalance_Index1}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "OBalance_Index2",
     "integer",
     "Спецпеременная {OBalance_Index2}",
@@ -472,9 +456,9 @@ specVar = new CNode(
     "{OBalance_Index2}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "OBalance_IndexU",
     "integer",
     "Спецпеременная {OBalance_IndexU}",
@@ -482,9 +466,9 @@ specVar = new CNode(
     "{OBalance_IndexU}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "OBalance_Sys",
     "integer",
     "Спецпеременная {OBalance_Sys}",
@@ -492,9 +476,9 @@ specVar = new CNode(
     "{OBalance_Sys}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "FIO_Book",
     "string",
     "Спецпеременная {FIO_Book}",
@@ -502,9 +486,9 @@ specVar = new CNode(
     "{FIO_Book}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "Name_Boss",
     "string",
     "Спецпеременная {Name_Boss}",
@@ -512,9 +496,9 @@ specVar = new CNode(
     "{Name_Boss}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "FIO_Boss",
     "string",
     "Спецпеременная {FIO_Boss}",
@@ -522,9 +506,9 @@ specVar = new CNode(
     "{FIO_Boss}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "curdate",
     "date",
     "Спецпеременная {curdate}",
@@ -532,9 +516,9 @@ specVar = new CNode(
     "{curdate}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "oper",
     "integer",
     "Спецпеременная {oper}",
@@ -542,9 +526,9 @@ specVar = new CNode(
     "{oper}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "Version",
     "integer",
     "Спецпеременная {Version}",
@@ -552,9 +536,9 @@ specVar = new CNode(
     "{Version}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "ModuleNum",
     "integer",
     "Спецпеременная {ModuleNum}",
@@ -562,9 +546,9 @@ specVar = new CNode(
     "{ModuleNum}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "BatchMode",
     "bool",
     "Спецпеременная {BatchMode}",
@@ -572,9 +556,9 @@ specVar = new CNode(
     "{BatchMode}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "OperDprt",
     "integer",
     "Спецпеременная {OperDprt}",
@@ -582,9 +566,9 @@ specVar = new CNode(
     "{OperDprt}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "Post_Addr",
     "string",
     "Спецпеременная {Post_Addr}",
@@ -592,9 +576,9 @@ specVar = new CNode(
     "{Post_Addr}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
-specVar = new CNode(
+specVar = new BuiltinSymbol(
     "CreditsOn",
     "bool",
     "Спецпеременная {CreditsOn}",
@@ -602,7 +586,7 @@ specVar = new CNode(
     "{CreditsOn}", /*подставляемый текст*/
     InsertTextFormat.PlainText
 );
-DefaultsArray.push(specVar);
+DefaultsArray.add(specVar);
 
 /*
  * Официальный список общесистемных переменных является источником истины.
@@ -610,7 +594,7 @@ DefaultsArray.push(specVar);
  * типы старых записей и добавляет отсутствующие системные имена.
  */
 RSL_SYSTEM_SPECIAL_VARIABLES.forEach(variable => {
-    DefaultsArray.upsert(new CNode(
+    DefaultsArray.upsert(new BuiltinSymbol(
         variable.name,
         variable.type,
         `Спецпеременная {${variable.name}}`,

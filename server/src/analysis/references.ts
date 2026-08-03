@@ -7,7 +7,7 @@ import {
     Range
 } from "vscode-languageserver";
 
-import { CBase } from "../common";
+import { RslSymbol } from "../symbols/rslSymbol";
 import {
     normalizeIdentifier,
     normalizeReferenceIdentifier
@@ -33,14 +33,14 @@ export function findRslReferences(
         return [];
     }
 
-    const target = resolver.resolveAt(uri, sourceModule.object, offset);
+    const target = resolver.resolveAt(uri, sourceModule.symbolTree, offset);
 
     if (!target || isCancelled()) {
         return [];
     }
 
-    const targetName = normalizeIdentifier(target.object.Name);
-    const targetKey = symbolKey(target.uri, target.object);
+    const targetName = normalizeIdentifier(target.symbol.name);
+    const targetKey = symbolKey(target.uri, target.symbol);
     const result: Location[] = [];
     const seen = new Set<string>();
 
@@ -79,7 +79,7 @@ export async function findRslReferencesInWorkspace(
         return [];
     }
 
-    const target = resolver.resolveAt(uri, sourceModule.object, offset);
+    const target = resolver.resolveAt(uri, sourceModule.symbolTree, offset);
 
     if (!target || isCancelled()) {
         return [];
@@ -90,7 +90,7 @@ export async function findRslReferencesInWorkspace(
         resolver,
         referenceIndex,
         target.uri,
-        target.object,
+        target.symbol,
         includeDeclaration,
         isCancelled
     );
@@ -106,7 +106,7 @@ export async function findRslReferencesForSymbol(
     resolver: RslScopeResolver,
     referenceIndex: ReferenceIndex,
     targetUri: string,
-    targetObject: CBase,
+    targetObject: RslSymbol,
     includeDeclaration: boolean,
     isCancelled: () => boolean = () => false
 ): Promise<Location[]> {
@@ -116,12 +116,12 @@ export async function findRslReferencesForSymbol(
         return [];
     }
 
-    const targetName = normalizeIdentifier(targetObject.Name);
+    const targetName = normalizeIdentifier(targetObject.name);
     const targetKey = symbolKey(targetUri, targetObject);
     const result: Location[] = [];
     const seen = new Set<string>();
 
-    if (isLocalReferenceTarget(sourceModule.object, targetObject)) {
+    if (isLocalReferenceTarget(sourceModule.symbolTree, targetObject)) {
         collectModuleReferences(
             sourceModule,
             resolver,
@@ -231,11 +231,11 @@ function collectModuleReferences(
 
         const resolved = resolver.resolveAt(
             module.uri,
-            module.object,
+            module.symbolTree,
             token.start
         );
 
-        if (!resolved || symbolKey(resolved.uri, resolved.object) !== targetKey) {
+        if (!resolved || symbolKey(resolved.uri, resolved.symbol) !== targetKey) {
             continue;
         }
 
@@ -271,8 +271,8 @@ function findDeclarationTokenByKey(
     normalizedName: string,
     targetKey: string
 ): { start: number; end: number } | undefined {
-    const objects = findObjectsByName(module.object, normalizedName)
-        .filter(object => symbolKey(module.uri, object) === targetKey);
+    const objects = findObjectsByName(module.symbolTree, normalizedName)
+        .filter(symbol => symbolKey(module.uri, symbol) === targetKey);
 
     if (objects.length === 0) {
         return undefined;
@@ -286,8 +286,8 @@ function findDeclarationTokenByKey(
             continue;
         }
 
-        if (objects.some(object =>
-            object.Range.start <= token.start && token.end <= object.Range.end
+        if (objects.some(symbol =>
+            symbol.range.start <= token.start && token.end <= symbol.range.end
         )) {
             return token;
         }
@@ -296,20 +296,20 @@ function findDeclarationTokenByKey(
     return undefined;
 }
 
-function findObjectsByName(root: CBase, name: string): CBase[] {
-    const result: CBase[] = [];
-    const queue: CBase[] = [root];
+function findObjectsByName(root: RslSymbol, name: string): RslSymbol[] {
+    const result: RslSymbol[] = [];
+    const queue: RslSymbol[] = [root];
     let position = 0;
 
     while (position < queue.length) {
         const current = queue[position++];
 
         for (const child of getReferenceTreeChildren(current)) {
-            if (normalizeIdentifier(child.Name) === name) {
+            if (normalizeIdentifier(child.name) === name) {
                 result.push(child);
             }
 
-            if (child.isObject()) {
+            if (child.isContainer) {
                 queue.push(child);
             }
         }
@@ -319,8 +319,8 @@ function findObjectsByName(root: CBase, name: string): CBase[] {
 }
 
 /** Символ внутри Macro/Method не может иметь использования в другом файле. */
-export function isLocalReferenceTarget(root: CBase, target: CBase): boolean {
-    if (target.Private) {
+export function isLocalReferenceTarget(root: RslSymbol, target: RslSymbol): boolean {
+    if (target.isPrivate) {
         return true;
     }
 
@@ -330,17 +330,17 @@ export function isLocalReferenceTarget(root: CBase, target: CBase): boolean {
         return false;
     }
 
-    return path.slice(0, -1).some(object =>
-        object.ObjKind === CompletionItemKind.Function ||
-        object.ObjKind === CompletionItemKind.Method
+    return path.slice(0, -1).some(symbol =>
+        symbol.kind === CompletionItemKind.Function ||
+        symbol.kind === CompletionItemKind.Method
     );
 }
 
 function findObjectPath(
-    current: CBase,
-    target: CBase,
-    path: CBase[] = []
-): CBase[] | undefined {
+    current: RslSymbol,
+    target: RslSymbol,
+    path: RslSymbol[] = []
+): RslSymbol[] | undefined {
     const currentPath = [...path, current];
 
     if (current === target) {
@@ -352,7 +352,7 @@ function findObjectPath(
             return [...currentPath, child];
         }
 
-        if (!child.isObject()) {
+        if (!child.isContainer) {
             continue;
         }
 
@@ -365,26 +365,17 @@ function findObjectPath(
     return undefined;
 }
 
-function getReferenceTreeChildren(current: CBase): CBase[] {
-    const candidate = current as unknown as {
-        getChilds?: () => unknown;
-    };
-
-    if (typeof candidate.getChilds !== "function") {
-        return [];
-    }
-
-    const children = candidate.getChilds.call(current);
-    return Array.isArray(children) ? children as CBase[] : [];
+function getReferenceTreeChildren(current: RslSymbol): RslSymbol[] {
+    return [...current.children];
 }
 
-function symbolKey(uri: string, object: CBase): string {
+function symbolKey(uri: string, symbol: RslSymbol): string {
     return [
         uri,
-        normalizeIdentifier(object.Name),
-        object.ObjKind,
-        object.Range.start,
-        object.Range.end
+        normalizeIdentifier(symbol.name),
+        symbol.kind,
+        symbol.range.start,
+        symbol.range.end
     ].join(":");
 }
 

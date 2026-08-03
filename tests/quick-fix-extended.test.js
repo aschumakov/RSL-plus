@@ -13,7 +13,7 @@ require.cache[serverModulePath] = {
   }
 };
 
-const { CBase } = require("../server/out/common");
+const { createSymbolTree } = require("./test-helpers");
 const {
   applyProjectDiagnosticRules
 } = require("../server/out/diagnostics/diagnosticPostProcessor");
@@ -44,13 +44,7 @@ function test(name, action) {
 function createModule(source) {
   const index = new WorkspaceIndex();
   const uri = "file:///main.mac";
-  const module = index.updateModule(
-    uri,
-    source,
-    new CBase(source, 0),
-    1,
-    true
-  );
+  const module = index.updateOpenModule(uri, source, 1);
   return { index, module };
 }
 

@@ -9,14 +9,7 @@ import {
     StatusBarAlignment,
     QuickPickItem,
     Uri,
-    env,
-    TextEditor,
-    DocumentSymbol,
-    SymbolInformation,
-    SymbolKind,
-    CancellationTokenSource,
-    Range,
-    Selection
+    TextEditor
 } from "vscode";
 
 import {
@@ -26,49 +19,21 @@ import {
     TransportKind
 } from "vscode-languageclient/node";
 
+import { readRslSettings, readSetting } from "./clientSettings";
+import { registerEditorCommands } from "./editorCommands";
+import { WorkspaceInventoryController } from "./workspaceInventoryController";
+
 
 let client: LanguageClient;
 let languageClientStarted = false;
 let activeEditor: TextEditor | undefined = window.activeTextEditor;
 let myStatusBarItem: StatusBarItem;
-let workspaceInventoryTimer: NodeJS.Timeout | undefined;
-let workspaceInventoryRunning = false;
-let workspaceInventoryCompleted = false;
-let workspaceInventoryRevision = 0;
-let workspaceInventoryCancellation: CancellationTokenSource | undefined;
-
-const WORKSPACE_INVENTORY_IDLE_MS = 15000;
-const WORKSPACE_EXCLUDE =
-    "**/{.git,node_modules,out,dist,build,archive,backup,.history}/**";
-
-interface IRslClientSettings {
-    imports: { enabled: boolean };
-    autoImport: { enabled: boolean };
-    analysis: {
-        workspaceIndexing: "activeImports" | "workspaceIdle" | "full";
-    };
-    semanticHighlighting: { maxFileSizeKb: number };
-    diagnostics: {
-        enabled: boolean;
-        deprecatedDeclarations: boolean;
-        structure: boolean;
-        unusedVariables: boolean;
-        unusedImports: boolean;
-        debugBreak: boolean;
-        useBeforeDeclaration: boolean;
-        ambiguousReferences: boolean;
-        maxProblems: number;
-    };
-}
+let workspaceInventory: WorkspaceInventoryController;
 
 interface IClientPerformanceFields {
     [name: string]: string | number | boolean | null | undefined;
 }
 
-interface IRslBlockRange {
-    start: { line: number; character: number };
-    end: { line: number; character: number };
-}
 
 /**
  * Элемент списка открытых/загруженных макросов.
@@ -161,155 +126,6 @@ function activeRslDocumentUri(): string | null {
     return activeEditor.document.uri.toString();
 }
 
-function readRslSettings(resource?: Uri): IRslClientSettings {
-    return {
-        imports: {
-            enabled: readSetting(
-                "imports.enabled",
-                "import",
-                true,
-                resource,
-                value => typeof value === "string"
-                    ? value.toLocaleUpperCase() === "ДА"
-                    : Boolean(value)
-            )
-        },
-        autoImport: {
-            enabled: readSetting(
-                "autoImport.enabled",
-                undefined,
-                true,
-                resource
-            )
-        },
-        analysis: {
-            workspaceIndexing: readSetting(
-                "analysis.workspaceIndexing",
-                undefined,
-                "activeImports" as const,
-                resource
-            )
-        },
-        semanticHighlighting: {
-            maxFileSizeKb: readSetting(
-                "semanticHighlighting.maxFileSizeKb",
-                undefined,
-                512,
-                resource
-            )
-        },
-        diagnostics: {
-            enabled: readSetting(
-                "diagnostics.enabled",
-                "diagnostics.enabled",
-                true,
-                resource
-            ),
-            deprecatedDeclarations: readSetting(
-                "diagnostics.deprecatedDeclarations",
-                "diagnostics.deprecatedDeclarations",
-                true,
-                resource
-            ),
-            structure: readSetting(
-                "diagnostics.structure",
-                "diagnostics.structure",
-                true,
-                resource
-            ),
-            unusedVariables: readSetting(
-                "diagnostics.unusedVariables",
-                "diagnostics.unusedVariables",
-                true,
-                resource
-            ),
-            unusedImports: readSetting(
-                "diagnostics.unusedImports",
-                "diagnostics.unusedImports",
-                true,
-                resource
-            ),
-            debugBreak: readSetting(
-                "diagnostics.debugBreak",
-                "diagnostics.debugBreak",
-                true,
-                resource
-            ),
-            useBeforeDeclaration: readSetting(
-                "diagnostics.useBeforeDeclaration",
-                "diagnostics.useBeforeDeclaration",
-                true,
-                resource
-            ),
-            ambiguousReferences: readSetting(
-                "diagnostics.ambiguousReferences",
-                "diagnostics.ambiguousReferences",
-                true,
-                resource
-            ),
-            maxProblems: readSetting(
-                "diagnostics.maxProblems",
-                "diagnostics.maxProblems",
-                200,
-                resource
-            )
-        }
-    };
-}
-
-function readSetting<T>(
-    key: string,
-    legacyKey: string | undefined,
-    fallback: T,
-    resource?: Uri,
-    convertLegacy?: (value: unknown) => T
-): T {
-    const current = workspace.getConfiguration("rslPlus", resource);
-    const currentExplicit = explicitConfigurationValue<T>(current.inspect(key));
-    if (currentExplicit !== undefined) {
-        return currentExplicit;
-    }
-
-    if (legacyKey) {
-        const legacy = workspace.getConfiguration(
-            "RSLanguageServer",
-            resource
-        );
-        const legacyValue = explicitConfigurationValue<unknown>(
-            legacy.inspect(legacyKey)
-        );
-        if (legacyValue !== undefined) {
-            return convertLegacy
-                ? convertLegacy(legacyValue)
-                : legacyValue as T;
-        }
-    }
-
-    return current.get<T>(key, fallback);
-}
-
-function explicitConfigurationValue<T>(inspection: unknown): T | undefined {
-    if (!inspection || typeof inspection !== "object") {
-        return undefined;
-    }
-
-    const values = inspection as Record<string, unknown>;
-    const keys = [
-        "workspaceFolderLanguageValue",
-        "workspaceLanguageValue",
-        "globalLanguageValue",
-        "workspaceFolderValue",
-        "workspaceValue",
-        "globalValue"
-    ];
-    for (const key of keys) {
-        if (values[key] !== undefined) {
-            return values[key] as T;
-        }
-    }
-    return undefined;
-}
-
 function sendClientPerformance(
     event: string,
     fields: IClientPerformanceFields = {}
@@ -352,85 +168,6 @@ async function notifyActiveDocument(): Promise<void> {
         clientAtMs
     });
 }
-
-function scheduleWorkspaceInventory(
-    delayMs: number = WORKSPACE_INVENTORY_IDLE_MS
-): void {
-    if (
-        !languageClientStarted ||
-        workspaceInventoryCompleted ||
-        workspaceInventoryRunning
-    ) {
-        return;
-    }
-
-    if (workspaceInventoryTimer) {
-        clearTimeout(workspaceInventoryTimer);
-    }
-
-    workspaceInventoryTimer = setTimeout(() => {
-        workspaceInventoryTimer = undefined;
-        runWorkspaceInventory().catch(error => {
-            workspaceInventoryRunning = false;
-            console.error("RSL workspace inventory failed", error);
-            scheduleWorkspaceInventory(WORKSPACE_INVENTORY_IDLE_MS);
-        });
-    }, Math.max(0, delayMs));
-}
-
-function postponeWorkspaceInventory(): void {
-    workspaceInventoryCancellation?.cancel();
-    scheduleWorkspaceInventory(WORKSPACE_INVENTORY_IDLE_MS);
-}
-
-async function runWorkspaceInventory(): Promise<void> {
-    if (workspaceInventoryRunning || workspaceInventoryCompleted) {
-        return;
-    }
-
-    workspaceInventoryRunning = true;
-    const cancellation = new CancellationTokenSource();
-    workspaceInventoryCancellation = cancellation;
-    const inventoryRevision = workspaceInventoryRevision;
-    const startedAtMs = Date.now();
-    sendClientPerformance("client.workspaceInventory.start");
-
-    try {
-        const workspaceFiles = await workspace.findFiles(
-            "**/*.mac",
-            WORKSPACE_EXCLUDE,
-            undefined,
-            cancellation.token
-        );
-        const stale = cancellation.token.isCancellationRequested ||
-            inventoryRevision !== workspaceInventoryRevision;
-
-        if (!stale) {
-            await client.sendNotification(
-                "workspaceFiles",
-                workspaceFiles.map(uri => uri.toString())
-            );
-            workspaceInventoryCompleted = true;
-        }
-
-        sendClientPerformance("client.workspaceInventory.end", {
-            durationMs: Date.now() - startedAtMs,
-            files: workspaceFiles.length,
-            stale,
-            cancelled: cancellation.token.isCancellationRequested
-        });
-    } finally {
-        if (workspaceInventoryCancellation === cancellation) {
-            workspaceInventoryCancellation = undefined;
-        }
-        cancellation.dispose();
-        workspaceInventoryRunning = false;
-        if (!workspaceInventoryCompleted) {
-            scheduleWorkspaceInventory(WORKSPACE_INVENTORY_IDLE_MS);
-        }
-    }
-}
-
 
 async function showQuickPick(): Promise<void> {
     if (client === undefined) {
@@ -487,125 +224,6 @@ async function showQuickPick(): Promise<void> {
     }
 }
 
-type RslSymbol = DocumentSymbol | SymbolInformation;
-
-async function foldAllMacros(): Promise<void> {
-    const editor = window.activeTextEditor;
-
-    if (!editor || editor.document.languageId !== "rsl") {
-        return;
-    }
-
-    const symbols = await commands.executeCommand<RslSymbol[]>(
-        "vscode.executeDocumentSymbolProvider",
-        editor.document.uri
-    ) || [];
-    const macroSymbols = collectMacroSymbols(symbols);
-    const lines = Array.from(new Set(macroSymbols.map(symbol =>
-        symbolRange(symbol).start.line
-    )));
-
-    if (lines.length === 0) {
-        window.showInformationMessage(
-            "В файле нет Macro для сворачивания"
-        );
-        return;
-    }
-
-    await commands.executeCommand("editor.fold", {
-        selectionLines: lines
-    });
-}
-
-async function selectCurrentBlock(): Promise<void> {
-    const editor = window.activeTextEditor;
-    if (!editor || editor.document.languageId !== "rsl") {
-        return;
-    }
-    if (!languageClientStarted || client === undefined) {
-        window.showInformationMessage(
-            "RSL language server ещё запускается"
-        );
-        return;
-    }
-
-    try {
-        const selected = await client.sendRequest<IRslBlockRange | null>(
-            "rsl/currentBlockRange",
-            {
-                textDocument: {
-                    uri: editor.document.uri.toString()
-                },
-                position: {
-                    line: editor.selection.active.line,
-                    character: editor.selection.active.character
-                },
-                currentRange: {
-                    start: {
-                        line: editor.selection.start.line,
-                        character: editor.selection.start.character
-                    },
-                    end: {
-                        line: editor.selection.end.line,
-                        character: editor.selection.end.character
-                    }
-                }
-            }
-        );
-        if (!selected) {
-            window.showInformationMessage(
-                "В текущей позиции нет блока RSL"
-            );
-            return;
-        }
-
-        const range = new Range(
-            selected.start.line,
-            selected.start.character,
-            selected.end.line,
-            selected.end.character
-        );
-        editor.selection = new Selection(range.start, range.end);
-        editor.revealRange(range);
-    } catch (error) {
-        console.error("RSL: cannot select current block", error);
-        window.showErrorMessage(
-            "Не удалось выделить текущий блок RSL"
-        );
-    }
-}
-
-function collectMacroSymbols(symbols: readonly RslSymbol[]): RslSymbol[] {
-    const result: RslSymbol[] = [];
-
-    const visit = (symbol: RslSymbol): void => {
-        if (
-            symbol.kind === SymbolKind.Function ||
-            symbol.kind === SymbolKind.Method
-        ) {
-            result.push(symbol);
-        }
-
-        if (isDocumentSymbol(symbol)) {
-            symbol.children.forEach(visit);
-        }
-    };
-
-    symbols.forEach(visit);
-    return result;
-}
-
-function symbolRange(symbol: RslSymbol) {
-    return isDocumentSymbol(symbol)
-        ? symbol.range
-        : symbol.location.range;
-}
-
-function isDocumentSymbol(symbol: RslSymbol): symbol is DocumentSymbol {
-    return "range" in symbol && "selectionRange" in symbol;
-}
-
-
 /**
  * Точка входа расширения.
  */
@@ -642,7 +260,6 @@ export function activate(context: ExtensionContext): void {
         workspace.createFileSystemWatcher("**/*.mac");
     const performanceLogFile = readSetting(
         "performance.logFile",
-        "performanceLogFile",
         ""
     ).trim();
     const initialSettings = readRslSettings();
@@ -661,7 +278,7 @@ export function activate(context: ExtensionContext): void {
         },
         middleware: {
             provideDocumentSymbols: async (document, token, next) => {
-                postponeWorkspaceInventory();
+                workspaceInventory.postpone();
                 const startedAtMs = Date.now();
                 sendClientPerformance("client.outline.request", {
                     uri: document.uri.toString()
@@ -692,6 +309,15 @@ export function activate(context: ExtensionContext): void {
         serverOptions,
         clientOptions
     );
+    workspaceInventory = new WorkspaceInventoryController({
+        getClient: () => client,
+        isClientReady: () => languageClientStarted,
+        performance: sendClientPerformance
+    });
+    registerEditorCommands(context, {
+        getClient: () => client,
+        isClientReady: () => languageClientStarted
+    });
 
     /*
      * Начиная с vscode-languageclient 8.x обработчики можно и нужно
@@ -708,7 +334,7 @@ export function activate(context: ExtensionContext): void {
             await notifyActiveDocument();
 
             await client.sendNotification("clientReady");
-            scheduleWorkspaceInventory();
+            workspaceInventory.schedule();
         },
         error => {
             console.error(
@@ -740,7 +366,7 @@ export function activate(context: ExtensionContext): void {
     context.subscriptions.push(
         window.onDidChangeActiveTextEditor(editor => {
             activeEditor = editor;
-            postponeWorkspaceInventory();
+            workspaceInventory.postpone();
             notifyActiveDocument().then(
                 undefined,
                 error => console.error(
@@ -750,13 +376,10 @@ export function activate(context: ExtensionContext): void {
             );
         }),
         workspace.onDidChangeTextDocument(() => {
-            postponeWorkspaceInventory();
+            workspaceInventory.postpone();
         }),
         workspace.onDidChangeConfiguration(event => {
-            if (
-                !event.affectsConfiguration("rslPlus") &&
-                !event.affectsConfiguration("RSLanguageServer")
-            ) {
+            if (!event.affectsConfiguration("rslPlus")) {
                 return;
             }
             notifyActiveDocument().then(
@@ -768,21 +391,10 @@ export function activate(context: ExtensionContext): void {
             );
         }),
         workspace.onDidChangeWorkspaceFolders(() => {
-            workspaceInventoryRevision++;
-            workspaceInventoryCompleted = false;
-            workspaceInventoryCancellation?.cancel();
-            scheduleWorkspaceInventory(WORKSPACE_INVENTORY_IDLE_MS);
+            workspaceInventory.reset();
         }),
         {
-            dispose: () => {
-                if (workspaceInventoryTimer) {
-                    clearTimeout(workspaceInventoryTimer);
-                    workspaceInventoryTimer = undefined;
-                }
-                workspaceInventoryCancellation?.cancel();
-                workspaceInventoryCancellation?.dispose();
-                workspaceInventoryCancellation = undefined;
-            }
+            dispose: () => workspaceInventory.dispose()
         }
     );
 
@@ -805,20 +417,6 @@ export function activate(context: ExtensionContext): void {
         )
     );
 
-    context.subscriptions.push(
-        commands.registerCommand(
-            "rsl.foldAllMacros",
-            foldAllMacros
-        )
-    );
-
-    context.subscriptions.push(
-        commands.registerCommand(
-            "rsl.selectCurrentBlock",
-            selectCurrentBlock
-        )
-    );
-
     myStatusBarItem =
         window.createStatusBarItem(
             StatusBarAlignment.Right,
@@ -833,105 +431,6 @@ export function activate(context: ExtensionContext): void {
 
     updateStatusBarItem(0);
 
-    context.subscriptions.push(
-        commands.registerCommand(
-            "extension.insertQueryFromClipboard",
-            async () => {
-                const clipboardText =
-                    await env.clipboard.readText();
-
-                const editor =
-                    window.activeTextEditor;
-
-                if (editor === undefined) {
-                    return;
-                }
-
-                await editor.edit(editBuilder => {
-                    const indent = "  ";
-                    let output =
-                        indent +
-                        "cmd = RSDCommand (String (" +
-                        "\r\n";
-
-                    const lines =
-                        clipboardText.split(/\r?\n/);
-
-                    for (
-                        let index = 0;
-                        index < lines.length;
-                        index++
-                    ) {
-                        if (index > 0) {
-                            output += " \",\r\n";
-                        }
-
-                        output +=
-                            indent +
-                            "\" " +
-                            lines[index];
-                    }
-
-                    output +=
-                        " \"\r\n" +
-                        indent +
-                        "));";
-
-                    editBuilder.insert(
-                        editor.selection.start,
-                        output
-                    );
-                });
-
-                window.showInformationMessage(
-                    "Запрос из буфера вставлен"
-                );
-            }
-        )
-    );
-
-    context.subscriptions.push(
-        commands.registerCommand(
-            "extension.copyQueryToClipboard",
-            async () => {
-                const editor =
-                    window.activeTextEditor;
-
-                if (editor === undefined) {
-                    return;
-                }
-
-                const selectedText =
-                    editor.document.getText(
-                        editor.selection
-                    );
-
-                const lines =
-                    selectedText.split(/\r?\n/);
-
-                let output = "";
-
-                for (
-                    let index = 0;
-                    index < lines.length;
-                    index++
-                ) {
-                    let line = lines[index];
-
-                    line = line.replace('",', "");
-                    line = line.replace(/"/g, "");
-
-                    output += line + "\r\n";
-                }
-
-                await env.clipboard.writeText(output);
-
-                window.showInformationMessage(
-                    "Запрос скопирован в буфер обмена"
-                );
-            }
-        )
-    );
 }
 
 

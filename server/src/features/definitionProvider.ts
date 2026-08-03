@@ -10,9 +10,9 @@ import {
 
 import { TextDocument } from "vscode-languageserver-textdocument";
 
-import { CBase } from "../common";
-import { IFAStruct } from "../interfaces";
-import type { ModuleResolution } from "../workspaceIndex";
+import { RslSymbol } from "../symbols/rslSymbol";
+import { createExternalModuleSummary } from "../moduleModel";
+import type { IIndexedModule, ModuleResolution } from "../workspaceIndex";
 import { IRslToken } from "../lexer";
 import {
     GetDynamicDefinitionTargetFromTokens,
@@ -21,7 +21,7 @@ import {
 
 export interface IRslDefinitionContext {
     document: TextDocument;
-    tree: CBase;
+    tree: RslSymbol;
     offset: number;
     tokens: IRslToken[];
 }
@@ -30,15 +30,15 @@ export interface IDefinitionEnvironment {
     getOpenDocument(uri: string): TextDocument | undefined;
     ensureDocumentParsed(
         document: TextDocument
-    ): Promise<CBase | undefined>;
-    getLoadedModules(): IFAStruct[];
-    getImportedModules(uri: string): IFAStruct[];
+    ): Promise<RslSymbol | undefined>;
+    getLoadedModules(): IIndexedModule[];
+    getImportedModules(uri: string): IIndexedModule[];
     findWorkspaceFileUri(moduleName: string): string | undefined;
     resolveWorkspaceFileUri?(moduleName: string): ModuleResolution<string>;
-    ensureModuleByName?(moduleName: string): Promise<IFAStruct | undefined>;
+    ensureModuleByName?(moduleName: string): Promise<IIndexedModule | undefined>;
     getDefinitionRange?(
         uri: string,
-        object: CBase
+        symbol: RslSymbol
     ): {
         start: { line: number; character: number };
         end: { line: number; character: number };
@@ -48,7 +48,7 @@ export interface IDefinitionEnvironment {
 
 interface IDefinitionModule {
     uri: string;
-    object: CBase;
+    symbol: RslSymbol;
 }
 
 /**
@@ -145,19 +145,19 @@ export class RslDefinitionProvider {
 
             for (const imported of this.environment
                 .getImportedModules(context.document.uri)) {
-                const object = findTopLevelMacro(
-                    imported.object,
+                const symbol = findTopLevelMacro(
+                    imported.symbolTree,
                     target.macroName,
                     false
                 );
 
-                if (!object) {
+                if (!symbol) {
                     continue;
                 }
 
                 return this.createObjectLocationByUri(
                     imported.uri,
-                    object
+                    symbol
                 );
             }
 
@@ -187,14 +187,14 @@ export class RslDefinitionProvider {
             target.kind === "fileMacro" &&
             target.macroName
         ) {
-            const object = findTopLevelMacro(
-                module.object,
+            const symbol = findTopLevelMacro(
+                module.symbol,
                 target.macroName,
                 true
             );
 
-            return object
-                ? this.createObjectLocationByUri(module.uri, object)
+            return symbol
+                ? this.createObjectLocationByUri(module.uri, symbol)
                 : null;
         }
 
@@ -209,7 +209,7 @@ export class RslDefinitionProvider {
      */
     async createObjectLocationByUri(
         uri: string,
-        object: CBase
+        symbol: RslSymbol
     ): Promise<Location | null> {
         const openedDocument =
             this.environment.getOpenDocument(uri);
@@ -217,11 +217,11 @@ export class RslDefinitionProvider {
         if (openedDocument) {
             return this.createObjectLocation(
                 openedDocument,
-                object
+                symbol
             );
         }
 
-        const indexedRange = this.environment.getDefinitionRange?.(uri, object);
+        const indexedRange = this.environment.getDefinitionRange?.(uri, symbol);
 
         if (indexedRange) {
             return Location.create(uri, indexedRange);
@@ -247,7 +247,7 @@ export class RslDefinitionProvider {
 
             return this.createObjectLocation(
                 document,
-                object
+                symbol
             );
         } catch (error) {
             this.environment.log(
@@ -261,11 +261,11 @@ export class RslDefinitionProvider {
 
     createObjectLocation(
         document: TextDocument,
-        object: CBase
+        symbol: RslSymbol
     ): Location {
         const offsets = findObjectNameOffsets(
             document,
-            object
+            symbol
         );
 
         return Location.create(document.uri, {
@@ -290,18 +290,18 @@ export class RslDefinitionProvider {
                 );
 
                 if (parsedTree) {
-                    return { uri: loaded.uri, object: parsedTree };
+                    return { uri: loaded.uri, symbol: parsedTree };
                 }
             }
 
-            return { uri: loaded.uri, object: loaded.object };
+            return { uri: loaded.uri, symbol: loaded.symbolTree };
         }
 
         /* Единственным владельцем external summary остаётся WorkspaceIndex. */
         const ensured = await this.environment.ensureModuleByName?.(moduleName);
 
         if (ensured) {
-            return { uri: ensured.uri, object: ensured.object };
+            return { uri: ensured.uri, symbol: ensured.symbolTree };
         }
 
         /* Fallback для unit-тестов/клиентов без WorkspaceModuleLoader: без кэша. */
@@ -314,7 +314,10 @@ export class RslDefinitionProvider {
         try {
             const uri = pathToFileURL(filePath).toString();
             const text = await fs.promises.readFile(filePath, "utf8");
-            return { uri, object: CBase.forExternalModule(text) };
+            return {
+                uri,
+                symbol: createExternalModuleSummary(text).symbolTree
+            };
         } catch (error) {
             this.environment.log(
                 `Definition module read failed: ${filePath}\n` +
@@ -491,27 +494,27 @@ function moduleMatchesUri(
 }
 
 function findTopLevelMacro(
-    tree: CBase,
+    tree: RslSymbol,
     macroName: string,
     includePrivate: boolean
-): CBase | undefined {
-    return tree.getChilds().find(child =>
-        namesEqual(child.Name, macroName) &&
+): RslSymbol | undefined {
+    return tree.children.find(child =>
+        namesEqual(child.name, macroName) &&
         (
-            child.ObjKind === CompletionItemKind.Function ||
-            child.ObjKind === CompletionItemKind.Method
+            child.kind === CompletionItemKind.Function ||
+            child.kind === CompletionItemKind.Method
         ) &&
-        (includePrivate || !child.Private)
+        (includePrivate || !child.isPrivate)
     );
 }
 
 function findObjectNameOffsets(
     document: TextDocument,
-    object: CBase
+    symbol: RslSymbol
 ): { start: number; end: number } {
     const source = document.getText();
-    const range = object.Range;
-    const name = object.Name;
+    const range = symbol.range;
+    const name = symbol.name;
 
     if (
         source.substr(range.start, name.length)

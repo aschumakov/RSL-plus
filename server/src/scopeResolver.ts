@@ -3,7 +3,7 @@ import {
     CompletionItemKind
 } from "vscode-languageserver";
 
-import { CBase } from "./common";
+import { RslSymbol } from "./symbols/rslSymbol";
 import {
     IRslToken,
     tokenAtOffset,
@@ -18,7 +18,7 @@ import {
 
 export interface IResolvedSymbol {
     uri: string;
-    object: CBase;
+    symbol: RslSymbol;
     token: IRslToken;
 }
 
@@ -28,11 +28,11 @@ interface IResolutionCache {
 }
 
 /*
- * CBase после построения syntax tree фактически неизменяем. Кэши WeakMap
+ * RslSymbol после построения syntax tree фактически неизменяем. Кэши WeakMap
  * не удерживают старые деревья после обновления документа.
  */
-const objectChildrenCache = new WeakMap<CBase, CBase[]>();
-const childrenByNameCache = new WeakMap<CBase, Map<string, CBase[]>>();
+const objectChildrenCache = new WeakMap<RslSymbol, RslSymbol[]>();
+const childrenByNameCache = new WeakMap<RslSymbol, Map<string, RslSymbol[]>>();
 
 /**
  * Разрешает имена с учётом областей видимости RSL.
@@ -51,7 +51,7 @@ export class RslScopeResolver {
 
     resolveAt(
         uri: string,
-        tree: CBase,
+        tree: RslSymbol,
         offset: number
     ): IResolvedSymbol | undefined {
         const module = this.index.getModule(uri);
@@ -118,7 +118,7 @@ export class RslScopeResolver {
 
     private resolveTokenAt(
         uri: string,
-        tree: CBase,
+        tree: RslSymbol,
         offset: number,
         token: IRslToken,
         tokens: IRslToken[]
@@ -139,7 +139,7 @@ export class RslScopeResolver {
             if (member) {
                 return {
                     uri: member.uri,
-                    object: member.object,
+                    symbol: member.symbol,
                     token
                 };
             }
@@ -152,7 +152,7 @@ export class RslScopeResolver {
         );
 
         if (local) {
-            return { uri, object: local, token };
+            return { uri, symbol: local, token };
         }
 
         const imported = this.index.findImportedSymbols(
@@ -163,7 +163,7 @@ export class RslScopeResolver {
         return imported
             ? {
                 uri: imported.uri,
-                object: imported.object,
+                symbol: imported.symbol,
                 token
             }
             : undefined;
@@ -171,7 +171,7 @@ export class RslScopeResolver {
 
     getCompletions(
         uri: string,
-        tree: CBase,
+        tree: RslSymbol,
         offset: number
     ): CompletionItem[] {
         const module = this.index.getModule(uri);
@@ -203,13 +203,13 @@ export class RslScopeResolver {
                     );
 
                     return deduplicateCompletionItems(
-                        classObject.object
-                            .getChilds()
+                        classObject.symbol
+                            .children
                             .filter(child =>
-                                allowPrivate || !child.Private
+                                allowPrivate || !child.isPrivate
                             )
                             .map(child => withCompletionPriority(
-                                child.CIInfo,
+                                child.completionItem,
                                 "0"
                             ))
                     );
@@ -227,13 +227,13 @@ export class RslScopeResolver {
                 : scope === tree
                     ? "2"
                     : "1";
-            for (const child of scope.getChilds()) {
+            for (const child of scope.children) {
                 if (!isVisibleAt(child, offset)) {
                     continue;
                 }
 
                 result.push(withCompletionPriority(
-                    child.CIInfo,
+                    child.completionItem,
                     priority
                 ));
             }
@@ -244,10 +244,10 @@ export class RslScopeResolver {
     }
 
     resolveInScopeChain(
-        tree: CBase,
+        tree: RslSymbol,
         name: string,
         offset: number
-    ): CBase | undefined {
+    ): RslSymbol | undefined {
         const normalized = normalizeIdentifier(name);
         const scopes = getScopeChain(tree, offset).reverse();
 
@@ -284,7 +284,7 @@ export class RslScopeResolver {
 
     private resolveMember(
         uri: string,
-        tree: CBase,
+        tree: RslSymbol,
         offset: number,
         receiver: IRslToken,
         memberName: string
@@ -306,21 +306,21 @@ export class RslScopeResolver {
             offset,
             classSymbol
         );
-        const candidates = getChildrenByName(classSymbol.object).get(
+        const candidates = getChildrenByName(classSymbol.symbol).get(
             normalizeIdentifier(memberName)
         );
         const member = candidates
-            ? candidates.find(child => allowPrivate || !child.Private)
+            ? candidates.find(child => allowPrivate || !child.isPrivate)
             : undefined;
 
         return member
-            ? { uri: classSymbol.uri, object: member }
+            ? { uri: classSymbol.uri, symbolId: member.id, symbol: member }
             : undefined;
     }
 
     private resolveReceiverClass(
         uri: string,
-        tree: CBase,
+        tree: RslSymbol,
         offset: number,
         receiver: IRslToken
     ): IIndexedSymbol | undefined {
@@ -330,11 +330,11 @@ export class RslScopeResolver {
             const currentClass = getScopeChain(tree, offset)
                 .reverse()
                 .find(scope =>
-                    scope.ObjKind === CompletionItemKind.Class
+                    scope.kind === CompletionItemKind.Class
                 );
 
             return currentClass
-                ? { uri, object: currentClass }
+                ? { uri, symbolId: currentClass.id, symbol: currentClass }
                 : undefined;
         }
 
@@ -348,7 +348,7 @@ export class RslScopeResolver {
             return undefined;
         }
 
-        let typeName = normalizeIdentifier(receiverObject.Type);
+        let typeName = normalizeIdentifier(receiverObject.typeName);
 
         if (!typeName || typeName === "variant") {
             const module = this.index.getModule(uri);
@@ -363,16 +363,16 @@ export class RslScopeResolver {
 
         const localClass = (getChildrenByName(tree).get(typeName) || [])
             .find(child =>
-                child.ObjKind === CompletionItemKind.Class
+                child.kind === CompletionItemKind.Class
             );
 
         if (localClass) {
-            return { uri, object: localClass };
+            return { uri, symbolId: localClass.id, symbol: localClass };
         }
 
         const imported = this.index.findImportedSymbols(uri, typeName)
             .find(symbol =>
-                symbol.object.ObjKind === CompletionItemKind.Class
+                symbol.symbol.kind === CompletionItemKind.Class
             );
 
         if (imported) {
@@ -381,13 +381,13 @@ export class RslScopeResolver {
 
         return this.index.findSymbols(typeName)
             .find(symbol =>
-                symbol.object.ObjKind === CompletionItemKind.Class
+                symbol.symbol.kind === CompletionItemKind.Class
             );
     }
 
     private canAccessPrivateMembers(
         uri: string,
-        tree: CBase,
+        tree: RslSymbol,
         offset: number,
         classSymbol: IIndexedSymbol
     ): boolean {
@@ -398,10 +398,10 @@ export class RslScopeResolver {
         const currentClass = getScopeChain(tree, offset)
             .reverse()
             .find(scope =>
-                scope.ObjKind === CompletionItemKind.Class
+                scope.kind === CompletionItemKind.Class
             );
 
-        return currentClass === classSymbol.object;
+        return currentClass === classSymbol.symbol;
     }
 
     private getReceiverToken(
@@ -475,10 +475,10 @@ function withCompletionPriority(
 }
 
 export function getScopeChain(
-    root: CBase,
+    root: RslSymbol,
     offset: number
-): CBase[] {
-    const result: CBase[] = [root];
+): RslSymbol[] {
+    const result: RslSymbol[] = [root];
     let current = root;
 
     while (true) {
@@ -498,14 +498,14 @@ export function getScopeChain(
     return result;
 }
 
-function getObjectChildren(scope: CBase): CBase[] {
+function getObjectChildren(scope: RslSymbol): RslSymbol[] {
     let result = objectChildrenCache.get(scope);
 
     if (!result) {
-        result = scope.getChilds()
-            .filter(child => child.isObject())
+        result = scope.children
+            .filter(child => child.isContainer)
             .sort((left, right) =>
-                left.Range.start - right.Range.start
+                left.range.start - right.range.start
             );
         objectChildrenCache.set(scope, result);
     }
@@ -515,9 +515,9 @@ function getObjectChildren(scope: CBase): CBase[] {
 
 
 function findContainingObject(
-    objects: CBase[],
+    objects: RslSymbol[],
     offset: number
-): CBase | undefined {
+): RslSymbol | undefined {
     let left = 0;
     let right = objects.length - 1;
     let candidate = -1;
@@ -525,7 +525,7 @@ function findContainingObject(
     while (left <= right) {
         const middle = (left + right) >>> 1;
 
-        if (objects[middle].Range.start <= offset) {
+        if (objects[middle].range.start <= offset) {
             candidate = middle;
             left = middle + 1;
         } else {
@@ -537,18 +537,18 @@ function findContainingObject(
         return undefined;
     }
 
-    const object = objects[candidate];
-    return offset <= object.Range.end ? object : undefined;
+    const symbol = objects[candidate];
+    return offset <= symbol.range.end ? symbol : undefined;
 }
 
-function getChildrenByName(scope: CBase): Map<string, CBase[]> {
+function getChildrenByName(scope: RslSymbol): Map<string, RslSymbol[]> {
     let result = childrenByNameCache.get(scope);
 
     if (!result) {
-        result = new Map<string, CBase[]>();
+        result = new Map<string, RslSymbol[]>();
 
-        for (const child of scope.getChilds()) {
-            const name = normalizeIdentifier(child.Name);
+        for (const child of scope.children) {
+            const name = normalizeIdentifier(child.name);
             let values = result.get(name);
 
             if (!values) {
@@ -567,13 +567,13 @@ function getChildrenByName(scope: CBase): Map<string, CBase[]> {
 
 function inferDeclaredType(
     tokens: IRslToken[],
-    object: CBase
+    symbol: RslSymbol
 ): string {
-    const nameIndex = lowerBoundByStart(tokens, object.Range.start);
+    const nameIndex = lowerBoundByStart(tokens, symbol.range.start);
 
     if (
         nameIndex >= tokens.length ||
-        tokens[nameIndex].start !== object.Range.start
+        tokens[nameIndex].start !== symbol.range.start
     ) {
         return "";
     }
@@ -612,25 +612,25 @@ function inferDeclaredType(
     return "";
 }
 
-function isVisibleAt(object: CBase, offset: number): boolean {
+function isVisibleAt(symbol: RslSymbol, offset: number): boolean {
     if (
-        object.ObjKind === CompletionItemKind.Variable ||
-        object.ObjKind === CompletionItemKind.Constant ||
-        object.ObjKind === CompletionItemKind.Property ||
-        object.ObjKind === CompletionItemKind.Field
+        symbol.kind === CompletionItemKind.Variable ||
+        symbol.kind === CompletionItemKind.Constant ||
+        symbol.kind === CompletionItemKind.Property ||
+        symbol.kind === CompletionItemKind.Field
     ) {
-        return object.Range.start <= offset;
+        return symbol.range.start <= offset;
     }
 
     return true;
 }
 
 function selectBestVisibleCandidate(
-    candidates: CBase[],
+    candidates: RslSymbol[],
     offset: number
-): CBase | undefined {
-    let firstVisible: CBase | undefined;
-    let nearestPreceding: CBase | undefined;
+): RslSymbol | undefined {
+    let firstVisible: RslSymbol | undefined;
+    let nearestPreceding: RslSymbol | undefined;
 
     for (const candidate of candidates) {
         if (!isVisibleAt(candidate, offset)) {
@@ -642,10 +642,10 @@ function selectBestVisibleCandidate(
         }
 
         if (
-            candidate.Range.start <= offset &&
+            candidate.range.start <= offset &&
             (
                 !nearestPreceding ||
-                candidate.Range.start > nearestPreceding.Range.start
+                candidate.range.start > nearestPreceding.range.start
             )
         ) {
             nearestPreceding = candidate;

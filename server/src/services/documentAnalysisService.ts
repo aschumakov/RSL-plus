@@ -1,7 +1,7 @@
 import type { TextDocuments } from "vscode-languageserver/node";
 import type { TextDocument } from "vscode-languageserver-textdocument";
 
-import { CBase } from "../common";
+import { RslSymbol } from "../symbols/rslSymbol";
 import { parseRslSyntax } from "../syntaxParser";
 import type { RslSettingsService } from "./settingsService";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
@@ -228,9 +228,9 @@ export class DocumentAnalysisService {
         return this.refreshFastSnapshot(document);
     }
 
-    async ensureParsed(document: TextDocument): Promise<CBase | undefined> {
+    async ensureParsed(document: TextDocument): Promise<RslSymbol | undefined> {
         if (this.isCurrent(document)) {
-            return this.index.getModule(document.uri)?.object;
+            return this.index.getModule(document.uri)?.symbolTree;
         }
 
         this.cancelTimer(document.uri);
@@ -239,13 +239,13 @@ export class DocumentAnalysisService {
         if (active) {
             await active;
             if (this.isCurrent(document)) {
-                return this.index.getModule(document.uri)?.object;
+                return this.index.getModule(document.uri)?.symbolTree;
             }
         }
 
         const generation = this.nextGeneration(document.uri);
         await this.startValidation(document, generation, "foreground");
-        return this.index.getModule(document.uri)?.object;
+        return this.index.getModule(document.uri)?.symbolTree;
     }
 
     close(uri: string): void {
@@ -287,7 +287,7 @@ export class DocumentAnalysisService {
     }
 
     /**
-     * Отдельная presentation-фаза: не строит CBase и не зависит от настроек,
+     * Отдельная presentation-фаза: не строит RslSymbol и не зависит от настроек,
      * Import-графа или диагностики.
      */
     private prepareOutline(
@@ -517,13 +517,6 @@ export class DocumentAnalysisService {
                 syntaxTokens: syntax.tokens.length
             })
             : undefined;
-        const parsedObject = CBase.fromSyntax(text, 0, syntax, true, false);
-        if (treeSpan) {
-            performance.end(treeSpan, {
-                topLevelSymbols: parsedObject.getChilds().length
-            });
-        }
-
         if (
             this.parseGeneration.get(uri) !== generation ||
             this.documents.get(uri)?.version !== version
@@ -545,10 +538,14 @@ export class DocumentAnalysisService {
         const indexed = this.index.updateOpenModule(
             uri,
             text,
-            parsedObject,
             version,
             syntax
         );
+        if (treeSpan) {
+            performance.end(treeSpan, {
+                topLevelSymbols: indexed.symbolTree.children.length
+            });
+        }
         if (indexSpan) {
             performance.end(indexSpan, {
                 imports: indexed.imports.length
@@ -567,14 +564,14 @@ export class DocumentAnalysisService {
             performance.end(fullSpan, {
                 cancelled: false,
                 imports: indexed.imports.length,
-                topLevelSymbols: parsedObject.getChilds().length
+                topLevelSymbols: indexed.symbolTree.children.length
             });
         }
 
         if (elapsed >= this.slowParseLogMs) {
             this.options.log(
                 `Slow parse: ${uri}; version=${version}; ` +
-                `ms=${elapsed}; symbols=${parsedObject.getChilds().length}`
+                `ms=${elapsed}; symbols=${indexed.symbolTree.children.length}`
             );
         }
 

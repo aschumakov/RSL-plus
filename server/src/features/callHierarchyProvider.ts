@@ -12,7 +12,7 @@ import {
     SymbolKind
 } from "vscode-languageserver";
 
-import type { CBase } from "../common";
+import type { RslSymbol } from "../symbols/rslSymbol";
 import {
     findRslReferencesForSymbol
 } from "../analysis/references";
@@ -46,10 +46,10 @@ export class RslCallHierarchyProvider {
 
         const resolved = this.environment.resolver.resolveAt(
             uri,
-            module.object,
+            module.symbolTree,
             offset
         );
-        if (!resolved || !isCallable(resolved.object)) {
+        if (!resolved || !isCallable(resolved.symbol)) {
             return [];
         }
 
@@ -61,7 +61,7 @@ export class RslCallHierarchyProvider {
         return [createCallHierarchyItem(
             this.environment.index,
             targetModule,
-            resolved.object
+            resolved.symbol
         )];
     }
 
@@ -76,7 +76,7 @@ export class RslCallHierarchyProvider {
 
         const targetModule = this.environment.index.getModule(data.uri);
         const targetObject = targetModule
-            ? findObjectByData(targetModule.object, data)
+            ? findObjectByData(targetModule.symbolTree, data)
             : undefined;
         if (!targetObject) {
             return [];
@@ -112,7 +112,7 @@ export class RslCallHierarchyProvider {
                     }
 
                     const caller = findEnclosingCallable(
-                        module.object,
+                        module.symbolTree,
                         offset
                     );
                     const callerItem = caller
@@ -177,11 +177,11 @@ export class RslCallHierarchyProvider {
 
                 const resolved = this.environment.resolver.resolveAt(
                     module.uri,
-                    module.object,
+                    module.symbolTree,
                     token.start
                 );
 
-                if (!resolved || !isCallable(resolved.object)) {
+                if (!resolved || !isCallable(resolved.symbol)) {
                     continue;
                 }
 
@@ -195,7 +195,7 @@ export class RslCallHierarchyProvider {
                 const targetItem = createCallHierarchyItem(
                     this.environment.index,
                     targetModule,
-                    resolved.object
+                    resolved.symbol
                 );
                 const targetData = getData(targetItem);
                 const key = targetData
@@ -259,23 +259,23 @@ export class RslCallHierarchyProvider {
 function createCallHierarchyItem(
     index: WorkspaceIndex,
     module: IIndexedModule,
-    object: CBase
+    symbol: RslSymbol
 ): CallHierarchyItem {
-    const selectionRange = findNameRange(index, module, object);
+    const selectionRange = findNameRange(index, module, symbol);
     const range = module.kind === "open"
-        ? offsetRange(module, object.Range.start, object.Range.end)
+        ? offsetRange(module, symbol.range.start, symbol.range.end)
         : selectionRange;
     const data: ICallHierarchyData = {
         uri: module.uri,
-        name: object.Name,
-        start: object.Range.start,
-        end: object.Range.end,
-        declarationOffset: nameOffset(module, object)
+        name: symbol.name,
+        start: symbol.range.start,
+        end: symbol.range.end,
+        declarationOffset: nameOffset(module, symbol)
     };
 
     return {
-        name: object.Name,
-        kind: object.ObjKind === CompletionItemKind.Method
+        name: symbol.name,
+        kind: symbol.kind === CompletionItemKind.Method
             ? SymbolKind.Method
             : SymbolKind.Function,
         detail: displayFile(module.uri),
@@ -312,21 +312,21 @@ function createFileCallHierarchyItem(
 }
 
 function findEnclosingCallable(
-    root: CBase,
+    root: RslSymbol,
     offset: number
-): CBase | undefined {
-    let result: CBase | undefined;
+): RslSymbol | undefined {
+    let result: RslSymbol | undefined;
 
-    const visit = (node: CBase): void => {
-        for (const child of node.getChilds()) {
+    const visit = (node: RslSymbol): void => {
+        for (const child of node.children) {
             if (
-                child.Range.start <= offset &&
-                offset <= child.Range.end
+                child.range.start <= offset &&
+                offset <= child.range.end
             ) {
                 if (isCallable(child)) {
                     result = child;
                 }
-                if (child.isObject()) {
+                if (child.isContainer) {
                     visit(child);
                 }
             }
@@ -338,26 +338,26 @@ function findEnclosingCallable(
 }
 
 function findObjectByData(
-    root: CBase,
+    root: RslSymbol,
     data: ICallHierarchyData
-): CBase | undefined {
+): RslSymbol | undefined {
     const normalizedName = normalizeIdentifier(data.name);
     const queue = [root];
 
     for (let position = 0; position < queue.length; position++) {
         const current = queue[position];
 
-        for (const child of current.getChilds()) {
+        for (const child of current.children) {
             if (
                 isCallable(child) &&
-                normalizeIdentifier(child.Name) === normalizedName &&
-                child.Range.start === data.start &&
-                child.Range.end === data.end
+                normalizeIdentifier(child.name) === normalizedName &&
+                child.range.start === data.start &&
+                child.range.end === data.end
             ) {
                 return child;
             }
 
-            if (child.isObject()) {
+            if (child.isContainer) {
                 queue.push(child);
             }
         }
@@ -369,33 +369,33 @@ function findObjectByData(
 function findNameRange(
     index: WorkspaceIndex,
     module: IIndexedModule,
-    object: CBase
+    symbol: RslSymbol
 ): Range {
-    const external = index.getDefinitionRange(module.uri, object);
+    const external = index.getDefinitionRange(module.uri, symbol);
     if (external) {
         return external;
     }
 
-    const offset = nameOffset(module, object);
+    const offset = nameOffset(module, symbol);
     const token = module.syntax.tokens.find(candidate =>
         candidate.start === offset
     );
 
     return token
         ? tokenRange(token)
-        : offsetRange(module, object.Range.start, object.Range.start);
+        : offsetRange(module, symbol.range.start, symbol.range.start);
 }
 
-function nameOffset(module: IIndexedModule, object: CBase): number {
-    const normalized = normalizeIdentifier(object.Name);
+function nameOffset(module: IIndexedModule, symbol: RslSymbol): number {
+    const normalized = normalizeIdentifier(symbol.name);
     const token = module.syntax.tokens.find(candidate =>
         candidate.kind === "identifier" &&
-        object.Range.start <= candidate.start &&
-        candidate.end <= object.Range.end &&
+        symbol.range.start <= candidate.start &&
+        candidate.end <= symbol.range.end &&
         normalizeIdentifier(candidate.value) === normalized
     );
 
-    return token?.start ?? object.Range.start;
+    return token?.start ?? symbol.range.start;
 }
 
 function findTokenIndexAt(
@@ -419,9 +419,9 @@ function isCallToken(
         next.raw === "(";
 }
 
-function isCallable(object: CBase): boolean {
-    return object.ObjKind === CompletionItemKind.Function ||
-        object.ObjKind === CompletionItemKind.Method;
+function isCallable(symbol: RslSymbol): boolean {
+    return symbol.kind === CompletionItemKind.Function ||
+        symbol.kind === CompletionItemKind.Method;
 }
 
 function groupLocationsByUri(

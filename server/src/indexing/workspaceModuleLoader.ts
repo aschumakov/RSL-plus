@@ -4,7 +4,7 @@ import { fileURLToPath } from "url";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 import { ReferenceIndex } from "../analysis/referenceIndex";
 import type { PerformanceLogger } from "../performanceLogger";
-import { scanExternalModule } from "./externalModuleScanner";
+import { extractCompactDeclarations } from "../analysis/declarationExtractor";
 import { normalizeIdentifier } from "../lexer";
 
 export type ModuleLoadPriority = "foreground" | "background";
@@ -396,7 +396,7 @@ export class WorkspaceModuleLoader {
         }
 
         const known = this.index.findSymbols(normalized)
-            .filter(symbol => !symbol.object.Private)
+            .filter(symbol => !symbol.symbol.isPrivate)
             .map(symbol => this.index.getModule(symbol.uri))
             .filter((module): module is IIndexedModule => !!module);
         const uniqueKnown = uniqueModules(known);
@@ -638,7 +638,7 @@ export class WorkspaceModuleLoader {
         if (indexSpan) {
             performance.end(indexSpan, {
                 imports: module.imports.length,
-                topLevelSymbols: module.object.getChilds().length
+                topLevelSymbols: module.symbolTree.children.length
             });
         }
         this.indexedUris.add(uri);
@@ -698,20 +698,20 @@ export class WorkspaceModuleLoader {
                 return undefined;
             }
 
-            const scan = scanExternalModule(source);
-            const exported = scan.symbolTree.getChilds().some(object =>
-                !object.Private &&
-                normalizeIdentifier(object.Name) === normalizedName
+            const declarations = extractCompactDeclarations(source);
+            const exported = declarations.declarations.some(symbol =>
+                symbol.visibility === "public" &&
+                normalizeIdentifier(symbol.name) === normalizedName
             );
 
             if (!exported) {
                 return undefined;
             }
 
-            const module = this.index.updateExternalModuleFromScan(
+            const module = this.index.updateExternalModuleFromDeclarations(
                 uri,
                 source.length,
-                scan,
+                declarations,
                 Math.floor(stat.mtimeMs)
             );
             this.indexedUris.add(uri);

@@ -14,7 +14,7 @@ require.cache[serverModulePath] = {
     }
 };
 
-const { CBase } = require("../server/out/common");
+const { createSymbolTree } = require("./test-helpers");
 const { parseRslSyntax } = require("../server/out/syntaxParser");
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
 const { RslScopeResolver } = require("../server/out/scopeResolver");
@@ -51,9 +51,7 @@ function offsetInside(source, value, occurrence = 0) {
 }
 
 function createModule(index, uri, source) {
-    const tree = new CBase(source, 0);
-    index.updateModule(uri, source, tree, 1, true);
-    return tree;
+    return index.updateOpenModule(uri, source, 1).symbolTree;
 }
 
 test("Локальная переменная другого Macro не видна", () => {
@@ -96,7 +94,7 @@ test("Ближайшая локальная переменная имеет пр
     );
 
     assert.ok(resolved);
-    assert.strictEqual(resolved.object.Range.start, source.indexOf("result", 5));
+    assert.strictEqual(resolved.symbol.range.start, source.indexOf("result", 5));
 });
 
 test("Метод разрешается по типу объекта слева от точки", () => {
@@ -121,7 +119,7 @@ test("Метод разрешается по типу объекта слева 
     );
 
     assert.ok(resolved);
-    assert.strictEqual(resolved.object.Name, "Run");
+    assert.strictEqual(resolved.symbol.name, "Run");
 });
 
 test("Completion после частично введённого метода остаётся объектным", () => {
@@ -213,7 +211,7 @@ test("Private-метод доступен через this внутри свое�
     );
 
     assert.ok(resolved);
-    assert.strictEqual(resolved.object.Name, "Hidden");
+    assert.strictEqual(resolved.symbol.name, "Hidden");
 });
 
 test("Поиск идёт только по графу Import", () => {
@@ -303,16 +301,16 @@ test("ResolveAt кэшируется, Semantic Tokens Range не выходит 
     const syntax = parseRslSyntax(source, undefined, {
         buildExpressionTree: false
     });
-    const tree = CBase.fromSyntax(source, 0, syntax, true, false);
+    const tree = createSymbolTree(source, syntax);
     const index = new WorkspaceIndex();
-    index.updateOpenModule(uri, source, tree, 1, syntax);
+    index.updateOpenModule(uri, source, 1, syntax);
     const resolver = new RslScopeResolver(index);
     const offset = source.indexOf("localValue = pValue") + 2;
 
     const first = resolver.resolveAt(uri, tree, offset);
     const second = resolver.resolveAt(uri, tree, offset);
     assert.ok(first);
-    assert.strictEqual(second && second.object, first.object);
+    assert.strictEqual(second && second.symbol, first.symbol);
     const stats = resolver.getCacheStats();
     assert.ok(stats.misses >= 1);
     assert.ok(

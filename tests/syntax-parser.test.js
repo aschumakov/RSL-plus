@@ -10,9 +10,9 @@ const {
   getImportNamesFromSyntax
 } = require("../server/out/syntaxParser");
 const {
-  CBase,
   RSL_PARSER_VERSION
-} = require("../server/out/common");
+} = require("../server/out/syntax/rslIdentifiers");
+const { createSymbolTree } = require("./test-helpers");
 
 function codes(source) {
   return parseRslSyntax(source).diagnostics.map(item => item.code);
@@ -255,7 +255,7 @@ assert.ok(codes("If (true)\n  Var value;").includes("missing-end"));
 
 console.log("[OK] ONERROR верхнего уровня не скрывает missing END");
 
-const adaptedTree = new CBase([
+const adaptedTreeSource = [
   "var globalValue: integer = 1;",
   "macro Test(p1, p2:@integer): string",
   "  for (var i: numeric, 1, 10)",
@@ -269,31 +269,31 @@ const adaptedTree = new CBase([
   "  macro Method(mp)",
   "  end;",
   "end;"
-].join("\n"), 0);
+].join("\n");
+const adaptedTree = createSymbolTree(adaptedTreeSource);
 
-assert.ok(RSL_PARSER_VERSION.includes("syntax-tree-adapter"));
-assert.ok(adaptedTree.getSyntaxResult());
-const adaptedMacro = adaptedTree.getChilds().find(
-  item => item.Name === "Test"
+assert.ok(RSL_PARSER_VERSION.includes("semantic-symbols"));
+const adaptedMacro = adaptedTree.children.find(
+  item => item.name === "Test"
 );
-const adaptedClass = adaptedTree.getChilds().find(
-  item => item.Name === "DemoClass"
+const adaptedClass = adaptedTree.children.find(
+  item => item.name === "DemoClass"
 );
-assert.strictEqual(adaptedMacro.ObjKind, CompletionItemKind.Function);
+assert.strictEqual(adaptedMacro.kind, CompletionItemKind.Function);
 assert.ok(
   ["p1", "p2", "i", "er"].every(name =>
-    adaptedMacro.getChilds().some(item => item.Name === name)
+    adaptedMacro.children.some(item => item.name === name)
   )
 );
-assert.strictEqual(adaptedClass.ObjKind, CompletionItemKind.Class);
+assert.strictEqual(adaptedClass.kind, CompletionItemKind.Class);
 assert.ok(
-  adaptedClass.getChilds().some(item =>
-    item.Name === "Method" &&
-    item.ObjKind === CompletionItemKind.Method
+  adaptedClass.children.some(item =>
+    item.name === "Method" &&
+    item.kind === CompletionItemKind.Method
   )
 );
 
-const documentedTree = new CBase([
+const documentedTree = createSymbolTree([
   "array GlobalArray;",
   "file GlobalFile(account) write;",
   "record GlobalRecord(account) mem;",
@@ -307,34 +307,34 @@ const documentedTree = new CBase([
   "  macro PublicMethod()",
   "  end;",
   "end;"
-].join("\n"), 0);
-const documentedRoot = documentedTree.getChilds();
+].join("\n"));
+const documentedRoot = documentedTree.children;
 assert.strictEqual(
-  documentedRoot.find(item => item.Name === "GlobalArray").Type.toLowerCase(),
+  documentedRoot.find(item => item.name === "GlobalArray").typeName.toLowerCase(),
   "array"
 );
 assert.strictEqual(
-  documentedRoot.find(item => item.Name === "GlobalFile").Type.toLowerCase(),
+  documentedRoot.find(item => item.name === "GlobalFile").typeName.toLowerCase(),
   "file"
 );
 assert.strictEqual(
-  documentedRoot.find(item => item.Name === "GlobalRecord").Type.toLowerCase(),
+  documentedRoot.find(item => item.name === "GlobalRecord").typeName.toLowerCase(),
   "record"
 );
 const documentedMembers = documentedRoot
-  .find(item => item.Name === "Demo")
-  .getChilds();
+  .find(item => item.name === "Demo")
+  .children;
 assert.strictEqual(
-  documentedMembers.find(item => item.Name === "Items").ObjKind,
+  documentedMembers.find(item => item.name === "Items").kind,
   CompletionItemKind.Property
 );
 assert.strictEqual(
-  documentedMembers.find(item => item.Name === "Helper").ObjKind,
+  documentedMembers.find(item => item.name === "Helper").kind,
   CompletionItemKind.Function
 );
 assert.strictEqual(
-  documentedMembers.find(item => item.Name === "PublicMethod").ObjKind,
+  documentedMembers.find(item => item.name === "PublicMethod").kind,
   CompletionItemKind.Method
 );
 
-console.log("[OK] syntax-tree adapter сохраняет legacy symbol tree");
+console.log("[OK] semantic symbol tree сохраняет объявления RSL");

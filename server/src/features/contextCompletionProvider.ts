@@ -4,7 +4,7 @@ import {
     TextEdit
 } from "vscode-languageserver";
 
-import type { CBase } from "../common";
+import type { RslSymbol } from "../symbols/rslSymbol";
 import { significantTokens, type IRslToken } from "../lexer";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 
@@ -158,12 +158,12 @@ function buildMacroItems(
     const normalizedPrefix = typedPrefix.toLowerCase();
 
     for (const module of modules) {
-        for (const object of module.object.getChilds()) {
-            if (!isCallable(object) || object.Private) {
+        for (const symbol of module.symbolTree.children) {
+            if (!isCallable(symbol) || symbol.isPrivate) {
                 continue;
             }
 
-            const key = object.Name.toLowerCase();
+            const key = symbol.name.toLowerCase();
             if (
                 seen.has(key) ||
                 (normalizedPrefix && !key.includes(normalizedPrefix))
@@ -172,10 +172,10 @@ function buildMacroItems(
             }
             seen.add(key);
             result.push({
-                ...object.CIInfo,
-                label: object.Name,
-                insertText: object.Name,
-                textEdit: TextEdit.replace(replacement, object.Name)
+                ...symbol.completionItem,
+                label: symbol.name,
+                insertText: symbol.name,
+                textEdit: TextEdit.replace(replacement, symbol.name)
             });
         }
     }
@@ -218,9 +218,9 @@ function stringPrefixAt(
     return source.slice(Math.min(token.start + 1, offset), offset);
 }
 
-function isCallable(object: CBase): boolean {
-    return object.ObjKind === CompletionItemKind.Function ||
-        object.ObjKind === CompletionItemKind.Method;
+function isCallable(symbol: RslSymbol): boolean {
+    return symbol.kind === CompletionItemKind.Function ||
+        symbol.kind === CompletionItemKind.Method;
 }
 
 function isImportContext(tokens: readonly IRslToken[], offset: number): boolean {

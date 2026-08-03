@@ -5,33 +5,21 @@ import {
     CodeActionTriggerKind,
     CompletionItem,
     Definition,
-    DocumentFormattingParams,
     DocumentHighlightParams,
-    DocumentRangeFormattingParams,
-    DocumentSymbol,
-    DocumentSymbolParams,
     ExecuteCommandParams,
-    FoldingRangeParams,
-    FormattingOptions,
     Hover,
     Range,
     ReferenceParams,
     SelectionRangeParams,
-    SemanticTokens,
-    SemanticTokensDelta,
-    SemanticTokensDeltaParams,
-    SemanticTokensParams,
-    SemanticTokensRangeParams,
     TextDocumentPositionParams,
-    TextEdit,
     type Connection,
     type TextDocuments
 } from "vscode-languageserver/node";
 import type { TextDocument } from "vscode-languageserver-textdocument";
 
-import { CBase } from "../common";
+import { RslSymbol } from "../symbols/rslSymbol";
 import { RslDefinitionProvider } from "./definitionProvider";
-import { getCIInfoForArray, getDefaults } from "../defaults";
+import { getDefaults } from "../defaults";
 import { buildEnhancedRslCodeActions } from "./enhancedCodeActions";
 import { buildRslDocumentHighlights } from "./documentHighlights";
 import { buildRslHoverContent } from "./hoverFormatter";
@@ -43,12 +31,7 @@ import {
     resolveCurrentBlockRange,
     resolveBlockNavigationPosition
 } from "./blockNavigation";
-import type { IRslFoldingRange } from "../folding";
-import {
-    FORMATTER_REVISION,
-    FormatCode
-} from "../format";
-import type { IRslSettings, IToken } from "../interfaces";
+import type { IRslSettings } from "../interfaces";
 import { tokenAtOffset, type IRslToken } from "../lexer";
 import {
     describeFormatSpecifier,
@@ -56,13 +39,8 @@ import {
 } from "../parsing/outputFormParser";
 import { findRslReferencesInWorkspace } from "../analysis/references";
 import { ReferenceIndex } from "../analysis/referenceIndex";
-import {
-    getFastDocumentSymbols,
-    getFastFoldingRanges,
-    type IFastDocumentSnapshot
-} from "../services/fastDocumentSnapshot";
+import type { IFastDocumentSnapshot } from "../services/fastDocumentSnapshot";
 import { RslScopeResolver } from "../scopeResolver";
-import { buildRslSemanticTokens } from "../semanticTokens";
 import type { WorkspaceIndex } from "../workspaceIndex";
 import type { PerformanceLogger } from "../performanceLogger";
 import {
@@ -72,7 +50,6 @@ import {
 import {
     RslCallHierarchyProvider
 } from "./callHierarchyProvider";
-import { formatRslDocumentRange } from "./rangeFormatting";
 import { buildRslSignatureHelp } from "./signatureHelpProvider";
 import { buildRslContextCompletions } from "./contextCompletionProvider";
 import {
@@ -84,6 +61,9 @@ import {
     buildRslSourceCodeActions,
     RSL_FIX_ALL_KIND
 } from "./sourceCodeActions";
+import { CompletionTransport } from "./completionTransport";
+import { PresentationFeatureRegistry } from "./presentationFeatureRegistry";
+import { SemanticTokensFeatureRegistry } from "./semanticTokensFeatureRegistry";
 
 interface IRslCurrentBlockRangeParams {
     textDocument: { uri: string };
@@ -99,7 +79,7 @@ export interface IRslLanguageFeatureEnvironment {
     definitionProvider: RslDefinitionProvider;
     referenceIndex?: ReferenceIndex;
     getFastDocumentSnapshot(document: TextDocument): IFastDocumentSnapshot;
-    ensureDocumentParsed(document: TextDocument): Promise<CBase | undefined>;
+    ensureDocumentParsed(document: TextDocument): Promise<RslSymbol | undefined>;
     ensureImportedSymbol?(
         fromUri: string,
         symbolName: string
@@ -119,32 +99,21 @@ export interface IRslLanguageFeatureEnvironment {
 
 interface IPositionContext {
     document: TextDocument;
-    tree: CBase;
+    tree: RslSymbol;
     offset: number;
-    token?: IToken;
+    token?: IRslToken;
     tokens: IRslToken[];
 }
 
 /** Регистрирует LSP provider-ы и владеет их versioned-кэшами. */
 export class RslLanguageFeatureRegistry {
-    private semanticTokensCache = new Map<string, {
-        version: number;
-        resultId: string;
-        value: SemanticTokens;
-    }>();
-    private semanticResultSequence = 0;
-    private foldingRangesCache = new Map<string, {
-        version: number;
-        value: IRslFoldingRange[];
-    }>();
-    private documentSymbolsCache = new Map<string, {
-        version: number;
-        value: DocumentSymbol[];
-    }>();
-    private defaultCompletionItems = getCIInfoForArray(getDefaults());
+    private defaultCompletionItems = getDefaults().completionItems;
     private registered = false;
     private referenceIndex: ReferenceIndex;
     private callHierarchyProvider: RslCallHierarchyProvider;
+    private completionTransport = new CompletionTransport();
+    private presentationFeatures: PresentationFeatureRegistry;
+    private semanticTokensFeatures: SemanticTokensFeatureRegistry;
 
     constructor(private environment: IRslLanguageFeatureEnvironment) {
         this.referenceIndex = environment.referenceIndex || new ReferenceIndex();
@@ -153,6 +122,8 @@ export class RslLanguageFeatureRegistry {
             resolver: environment.resolver,
             referenceIndex: this.referenceIndex
         });
+        this.presentationFeatures = new PresentationFeatureRegistry(environment);
+        this.semanticTokensFeatures = new SemanticTokensFeatureRegistry(environment);
     }
 
     register(): void {
@@ -161,13 +132,14 @@ export class RslLanguageFeatureRegistry {
         }
 
         this.registered = true;
+        this.presentationFeatures.register();
+        this.semanticTokensFeatures.register();
         const {
             connection,
             documents,
             index,
             resolver,
             definitionProvider,
-            getFastDocumentSnapshot,
             ensureDocumentParsed
         } = this.environment;
 
@@ -178,18 +150,18 @@ export class RslLanguageFeatureRegistry {
             const document = documents.get(params.textDocument.uri);
 
             if (!document) {
-                return [];
+                return { isIncomplete: false, items: [] };
             }
 
             this.environment.noteInteractiveActivity?.();
             const version = document.version;
             await ensureDocumentParsed(document);
             if (requestIsStale(document, version, cancellationToken)) {
-                return [];
+                return { isIncomplete: false, items: [] };
             }
             const module = index.getModule(document.uri);
             if (!module) {
-                return [];
+                return { isIncomplete: false, items: [] };
             }
             const contextual = buildRslContextCompletions(
                 module,
@@ -197,12 +169,12 @@ export class RslLanguageFeatureRegistry {
                 document.offsetAt(params.position)
             );
             if (contextual !== undefined) {
-                return contextual;
+                return this.completionTransport.prepare(contextual);
             }
             const context = this.getPositionContext(params);
 
             if (!context || isBlockedToken(context.token)) {
-                return [];
+                return { isIncomplete: false, items: [] };
             }
 
             const prefix = completionPrefixAt(
@@ -224,8 +196,14 @@ export class RslLanguageFeatureRegistry {
                     )
                     : []
             );
-            return rankCompletionItemsForPrefix(items, prefix);
+            return this.completionTransport.prepare(
+                rankCompletionItemsForPrefix(items, prefix)
+            );
         });
+
+        connection.onCompletionResolve(item =>
+            this.completionTransport.resolve(item)
+        );
 
         connection.onSignatureHelp(async (params, cancellationToken) => {
             const document = documents.get(params.textDocument.uri);
@@ -304,7 +282,7 @@ export class RslLanguageFeatureRegistry {
                 contents: buildRslHoverContent(
                     index,
                     resolved.uri,
-                    resolved.object
+                    resolved.symbol
                 ),
                 range: {
                     start: document.positionAt(resolved.token.start),
@@ -442,7 +420,7 @@ export class RslLanguageFeatureRegistry {
                     : "imported";
                 return definitionProvider.createObjectLocationByUri(
                     resolved.uri,
-                    resolved.object
+                    resolved.symbol
                 );
             } finally {
                 if (span) {
@@ -651,314 +629,16 @@ export class RslLanguageFeatureRegistry {
             return null;
         });
 
-        connection.languages.semanticTokens.on(async (
-            params: SemanticTokensParams,
-            cancellationToken: CancellationToken
-        ): Promise<SemanticTokens> => {
-            return this.getSemanticTokens(
-                params.textDocument.uri,
-                cancellationToken
-            );
-        });
-
-        connection.languages.semanticTokens.onDelta(async (
-            params: SemanticTokensDeltaParams,
-            cancellationToken: CancellationToken
-        ): Promise<SemanticTokens | SemanticTokensDelta> => {
-            const previous = this.semanticTokensCache.get(
-                params.textDocument.uri
-            );
-            const current = await this.getSemanticTokens(
-                params.textDocument.uri,
-                cancellationToken
-            );
-
-            if (
-                previous &&
-                previous.resultId === params.previousResultId &&
-                previous.resultId === current.resultId
-            ) {
-                return { resultId: current.resultId, edits: [] };
-            }
-
-            if (!previous || previous.resultId !== params.previousResultId) {
-                return current;
-            }
-
-            return {
-                resultId: current.resultId,
-                edits: semanticTokenEdits(previous.value.data, current.data)
-            };
-        });
-
-        connection.languages.semanticTokens.onRange(async (
-            params: SemanticTokensRangeParams,
-            cancellationToken: CancellationToken
-        ): Promise<SemanticTokens> => {
-            const document = documents.get(params.textDocument.uri);
-            if (!document) {
-                return { data: [] };
-            }
-
-            this.environment.noteInteractiveActivity?.();
-            const version = document.version;
-            await ensureDocumentParsed(document);
-            const module = index.getModule(document.uri);
-            if (
-                !module ||
-                module.version !== document.version ||
-                requestIsStale(document, version, cancellationToken) ||
-                this.semanticHighlightingIsTooLarge(module)
-            ) {
-                return { data: [] };
-            }
-
-            return buildRslSemanticTokens(
-                module,
-                index,
-                resolver,
-                {
-                    startLine: params.range.start.line,
-                    startCharacter: params.range.start.character,
-                    endLine: params.range.end.line,
-                    endCharacter: params.range.end.character
-                }
-            );
-        });
-
-        connection.onDocumentSymbol(async (params: DocumentSymbolParams) => {
-            this.environment.noteInteractiveActivity?.();
-            const performance = this.environment.performance;
-            const span = performance?.enabled
-                ? performance.start("outline.resolve", {
-                    uri: params.textDocument.uri
-                })
-                : undefined;
-            const document = documents.get(params.textDocument.uri);
-            if (!document) {
-                if (span) {
-                    performance.end(span, {
-                        outcome: "documentMissing",
-                        topLevelSymbols: 0
-                    });
-                }
-                return [];
-            }
-
-            const cached = this.documentSymbolsCache.get(document.uri);
-            if (cached && cached.version === document.version) {
-                if (span) {
-                    performance.end(span, {
-                        version: document.version,
-                        outcome: "providerCache",
-                        topLevelSymbols: cached.value.length
-                    });
-                }
-                return cached.value;
-            }
-
-            const snapshot = getFastDocumentSnapshot(document);
-            const wasPrepared = snapshot.symbols !== undefined;
-            const value = getFastDocumentSymbols(document, snapshot).slice();
-            const outcome = wasPrepared
-                ? "preparedFastSnapshot"
-                : "onDemandFastSnapshot";
-            const snapshotAgeMs = Math.max(
-                0,
-                Date.now() - snapshot.createdAtMs
-            );
-            const outlineReadyAgeMs = Math.max(
-                0,
-                Date.now() - (
-                    snapshot.symbolsPreparedAtMs ??
-                    snapshot.createdAtMs
-                )
-            );
-
-            this.documentSymbolsCache.set(document.uri, {
-                version: document.version,
-                value
-            });
-            if (span) {
-                performance.end(span, {
-                    version: document.version,
-                    outcome,
-                    snapshotAgeMs,
-                    outlineReadyAgeMs,
-                    topLevelSymbols: value.length
-                });
-            }
-            return value;
-        });
-
-        connection.onFoldingRanges(async (params: FoldingRangeParams) => {
-            const document = documents.get(params.textDocument.uri);
-            if (!document) {
-                return [];
-            }
-
-            const cached = this.foldingRangesCache.get(document.uri);
-            if (cached && cached.version === document.version) {
-                return cached.value;
-            }
-
-            const snapshot = getFastDocumentSnapshot(document);
-            const value: IRslFoldingRange[] =
-                getFastFoldingRanges(document, snapshot).slice();
-
-            this.foldingRangesCache.set(document.uri, {
-                version: document.version,
-                value
-            });
-            return value;
-        });
-
-        connection.onDocumentFormatting((params: DocumentFormattingParams) => {
-            const document = documents.get(params.textDocument.uri);
-
-            if (!document) {
-                return [];
-            }
-
-            const source = document.getText();
-            const performance = this.environment.performance;
-            const span = performance?.enabled
-                ? performance.start("format.document", {
-                    uri: document.uri,
-                    version: document.version,
-                    chars: source.length
-                })
-                : undefined;
-
-            try {
-                const formatted = formattingFunction(source, params.options);
-                if (span) {
-                    performance.end(span, {
-                        changed: formatted !== source,
-                        failed: false,
-                        formatterRevision: FORMATTER_REVISION
-                    });
-                }
-
-                if (formatted === source) {
-                    return [];
-                }
-
-                return [
-                    TextEdit.replace(fullDocumentRange(document), formatted)
-                ];
-            } catch (error) {
-                if (span) {
-                    performance.end(span, {
-                        failed: true
-                    });
-                }
-                this.environment.log(
-                    `Formatting failed: ${document.uri}\n` +
-                    errorToString(error)
-                );
-                return [];
-            }
-        });
-
-        connection.onDocumentRangeFormatting((
-            params: DocumentRangeFormattingParams
-        ) => {
-            const document = documents.get(params.textDocument.uri);
-
-            if (!document) {
-                return [];
-            }
-
-            try {
-                return formatRslDocumentRange(document, params);
-            } catch (error) {
-                this.environment.log(
-                    `Range formatting failed: ${document.uri}\n` +
-                    errorToString(error)
-                );
-                return [];
-            }
-        });
-    }
-
-    private async getSemanticTokens(
-        uri: string,
-        cancellationToken?: CancellationToken
-    ): Promise<SemanticTokens> {
-        const document = this.environment.documents.get(uri);
-
-        if (!document) {
-            return { data: [] };
-        }
-
-        this.environment.noteInteractiveActivity?.();
-        const version = document.version;
-        await this.environment.ensureDocumentParsed(document);
-        const module = this.environment.index.getModule(uri);
-
-        if (
-            !module ||
-            requestIsStale(document, version, cancellationToken) ||
-            this.semanticHighlightingIsTooLarge(module)
-        ) {
-            return { data: [] };
-        }
-
-        const cached = this.semanticTokensCache.get(uri);
-        if (cached && cached.version === module.version) {
-            return cached.value;
-        }
-
-        const built = buildRslSemanticTokens(
-            module,
-            this.environment.index,
-            this.environment.resolver
-        );
-        const resultId = `${module.version}:${++this.semanticResultSequence}`;
-        const value: SemanticTokens = {
-            data: built.data,
-            resultId
-        };
-        this.semanticTokensCache.set(uri, {
-            version: module.version,
-            resultId,
-            value
-        });
-        return value;
-    }
-
-    private semanticHighlightingIsTooLarge(
-        module: import("../workspaceIndex").IIndexedModule
-    ): boolean {
-        const maxFileSizeKb = this.environment
-            .getSettings(module.uri)
-            .semanticHighlighting
-            .maxFileSizeKb;
-        const tooLarge = maxFileSizeKb > 0 &&
-            module.sourceLength > maxFileSizeKb * 1024;
-
-        if (tooLarge) {
-            this.environment.performance?.mark("semanticTokens.skipped", {
-                uri: module.uri,
-                chars: module.sourceLength,
-                maxFileSizeKb,
-                reason: "fileSize"
-            });
-        }
-        return tooLarge;
     }
 
     invalidate(uri: string): void {
-        /* Старый semantic result нужен клиенту для следующего delta-запроса. */
-        this.foldingRangesCache.delete(uri);
-        this.documentSymbolsCache.delete(uri);
+        this.presentationFeatures.invalidate(uri);
+        this.semanticTokensFeatures.invalidate(uri);
     }
 
     forget(uri: string): void {
-        this.semanticTokensCache.delete(uri);
-        this.foldingRangesCache.delete(uri);
-        this.documentSymbolsCache.delete(uri);
+        this.presentationFeatures.forget(uri);
+        this.semanticTokensFeatures.forget(uri);
     }
 
     private getPositionContext(
@@ -970,7 +650,7 @@ export class RslLanguageFeatureRegistry {
         const module = this.environment.index.getModule(
             params.textDocument.uri
         );
-        const tree = module?.object;
+        const tree = module?.symbolTree;
 
         if (!document || !module || !tree) {
             return undefined;
@@ -982,7 +662,7 @@ export class RslLanguageFeatureRegistry {
             document,
             tree,
             offset,
-            token: tree.getCurrentToken(offset),
+            token: tokenAtOffset(module.lex.tokens, offset, true),
             tokens: module.lex.tokens
         };
     }
@@ -1006,40 +686,7 @@ function isSourceActionRequest(params: CodeActionParams): boolean {
     );
 }
 
-function semanticTokenEdits(
-    previous: number[],
-    current: number[]
-): Array<{ start: number; deleteCount: number; data?: number[] }> {
-    let start = 0;
-    const commonLimit = Math.min(previous.length, current.length);
-    while (start < commonLimit && previous[start] === current[start]) {
-        start++;
-    }
-
-    if (start === previous.length && start === current.length) {
-        return [];
-    }
-
-    let previousEnd = previous.length - 1;
-    let currentEnd = current.length - 1;
-    while (
-        previousEnd >= start &&
-        currentEnd >= start &&
-        previous[previousEnd] === current[currentEnd]
-    ) {
-        previousEnd--;
-        currentEnd--;
-    }
-
-    const data = current.slice(start, currentEnd + 1);
-    return [{
-        start,
-        deleteCount: previousEnd - start + 1,
-        ...(data.length > 0 ? { data } : {})
-    }];
-}
-
-function isBlockedToken(token?: IToken): boolean {
+function isBlockedToken(token?: IRslToken): boolean {
     return !!token && (
         token.kind === "string" ||
         token.kind === "square" ||
@@ -1054,20 +701,6 @@ function requestIsStale(
 ): boolean {
     return document.version !== version ||
         cancellationToken?.isCancellationRequested === true;
-}
-
-function formattingFunction(
-    text: string,
-    options: FormattingOptions
-): string {
-    return FormatCode(text, options.tabSize);
-}
-
-function fullDocumentRange(document: TextDocument): Range {
-    return {
-        start: { line: 0, character: 0 },
-        end: document.positionAt(document.getText().length)
-    };
 }
 
 function deduplicateCompletionItems(
@@ -1095,12 +728,4 @@ function deduplicateCompletionItems(
     }
 
     return result;
-}
-
-function errorToString(error: unknown): string {
-    if (error instanceof Error) {
-        return `${error.name}: ${error.message}\n${error.stack || ""}`;
-    }
-
-    return String(error);
 }

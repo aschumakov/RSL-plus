@@ -6,7 +6,7 @@ import {
 import * as path from "path";
 import { fileURLToPath } from "url";
 
-import type { CBase } from "../common";
+import type { RslSymbol } from "../symbols/rslSymbol";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 
 const MAX_WORKSPACE_SYMBOLS = 200;
@@ -20,17 +20,17 @@ export function findRslWorkspaceSymbols(
     const result: SymbolInformation[] = [];
 
     for (const module of index.getIndexedModules()) {
-        for (const object of module.object.getChilds()) {
-            appendSymbol(result, module, index, object, normalizedQuery);
-            if (object.ObjKind === CompletionItemKind.Class) {
-                for (const member of object.getChilds()) {
+        for (const symbol of module.symbolTree.children) {
+            appendSymbol(result, module, index, symbol, normalizedQuery);
+            if (symbol.kind === CompletionItemKind.Class) {
+                for (const member of symbol.children) {
                     appendSymbol(
                         result,
                         module,
                         index,
                         member,
                         normalizedQuery,
-                        object.Name
+                        symbol.name
                     );
                 }
             }
@@ -46,25 +46,25 @@ function appendSymbol(
     result: SymbolInformation[],
     module: IIndexedModule,
     index: WorkspaceIndex,
-    object: CBase,
+    symbol: RslSymbol,
     query: string,
     parentName?: string
 ): void {
-    if (query && !object.Name.toLowerCase().includes(query)) {
+    if (query && !symbol.name.toLowerCase().includes(query)) {
         return;
     }
 
-    const externalRange = index.getDefinitionRange(module.uri, object);
+    const externalRange = index.getDefinitionRange(module.uri, symbol);
     const range = externalRange || {
-        start: positionAt(module, object.Range.start),
+        start: positionAt(module, symbol.range.start),
         end: positionAt(module, Math.max(
-            object.Range.start,
-            Math.min(object.Range.end, object.Range.start + object.Name.length)
+            symbol.range.start,
+            Math.min(symbol.range.end, symbol.range.start + symbol.name.length)
         ))
     };
     result.push(SymbolInformation.create(
-        object.Name,
-        symbolKind(object.ObjKind),
+        symbol.name,
+        symbolKind(symbol.kind),
         range,
         module.uri,
         parentName || displayModule(module.uri)

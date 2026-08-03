@@ -10,7 +10,7 @@ import {
 
 import { TextDocument } from "vscode-languageserver-textdocument";
 
-import { CBase, configureSymbolTreeProvider } from "./common";
+import { RslSymbol } from "./symbols/rslSymbol";
 import { RslDiagnosticEngine } from "./diagnostics/diagnosticEngine";
 import { DiagnosticsCoordinator } from "./diagnostics/diagnosticsCoordinator";
 import { DocumentAnalysisService } from "./services/documentAnalysisService";
@@ -22,10 +22,10 @@ import {
     GO_TO_BLOCK_START_COMMAND
 } from "./features/blockNavigation";
 import { RslScopeResolver } from "./scopeResolver";
-import { IFAStruct, IRslSettings } from "./interfaces";
+import { IRslSettings } from "./interfaces";
 import { RSL_SEMANTIC_TOKENS_LEGEND } from "./semanticTokens";
 import { RslSettingsService } from "./services/settingsService";
-import { WorkspaceIndex } from "./workspaceIndex";
+import { IIndexedModule, WorkspaceIndex } from "./workspaceIndex";
 import { WorkspaceModuleLoader } from "./indexing/workspaceModuleLoader";
 import { ReferenceIndex } from "./analysis/referenceIndex";
 import {
@@ -36,7 +36,6 @@ import {
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments<TextDocument>(TextDocument);
 const workspaceIndex = new WorkspaceIndex();
-configureSymbolTreeProvider(() => workspaceIndex.getModules());
 const scopeResolver = new RslScopeResolver(workspaceIndex);
 
 const defaultSettings: IRslSettings = {
@@ -331,7 +330,7 @@ export function GetFileRequest(filePath: string): void {
     }
 }
 
-export function getTree(): IFAStruct[] {
+export function getTree(): IIndexedModule[] {
     return workspaceIndex.getModules();
 }
 
@@ -343,11 +342,7 @@ const definitionProvider = new RslDefinitionProvider({
     getOpenDocument: getCurDoc,
     ensureDocumentParsed,
     getLoadedModules: () => workspaceIndex.getModules(),
-    getImportedModules: uri =>
-        workspaceIndex.getImportedModules(uri).map(module => ({
-            uri: module.uri,
-            object: module.object
-        })),
+    getImportedModules: uri => workspaceIndex.getImportedModules(uri),
     findWorkspaceFileUri: name =>
         workspaceIndex.findWorkspaceFileUri(name),
     resolveWorkspaceFileUri: name =>
@@ -416,7 +411,7 @@ connection.onInitialize((params: InitializeParams) => {
         capabilities: {
             textDocumentSync: TextDocumentSyncKind.Incremental,
             completionProvider: {
-                resolveProvider: false,
+                resolveProvider: true,
                 triggerCharacters: [".", "\"", "'", "/", "\\"]
             },
             signatureHelpProvider: {
@@ -495,7 +490,7 @@ documents.onDidChangeContent(change => {
 
 async function ensureDocumentParsed(
     document: TextDocument
-): Promise<CBase | undefined> {
+): Promise<RslSymbol | undefined> {
     /* Интерактивный LSP-запрос не должен отменять уже запланированные Problems. */
     return documentAnalysis.ensureParsed(document);
 }

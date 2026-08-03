@@ -2,7 +2,8 @@ import type { Diagnostic } from "vscode-languageserver";
 
 import { applyProjectDiagnosticRules } from "./diagnosticPostProcessor";
 import {
-    buildRslDiagnostics,
+    buildLocalRslDiagnostics,
+    buildWorkspaceRslDiagnostics,
     normalizeDiagnosticSettings
 } from "../diagnostics";
 import { buildImportResolutionDiagnostics } from "./importResolutionDiagnostics";
@@ -35,19 +36,19 @@ export class RslDiagnosticEngine {
         this.register({
             id: "core-local",
             phase: "local",
-            run: context => buildRslDiagnostics(
+            run: context => buildLocalRslDiagnostics(
                 context.module,
                 context.index,
-                localSettings(context.settings)
+                context.settings
             )
         });
         this.register({
             id: "core-workspace",
             phase: "workspace",
-            run: context => buildRslDiagnostics(
+            run: context => buildWorkspaceRslDiagnostics(
                 context.module,
                 context.index,
-                workspaceSettings(context.settings)
+                context.settings
             )
         });
         this.register({
@@ -198,33 +199,6 @@ export function filterClosedOutputFormDiagnostics(
     });
 }
 
-
-function localSettings(
-    settings?: IRslDiagnosticSettings
-): IRslDiagnosticSettings {
-    return {
-        ...(settings || {}),
-        unusedImports: false,
-        ambiguousReferences: false
-    };
-}
-
-function workspaceSettings(
-    settings?: IRslDiagnosticSettings
-): IRslDiagnosticSettings {
-    const options = normalizeDiagnosticSettings(settings);
-    return {
-        enabled: options.enabled,
-        deprecatedDeclarations: false,
-        structure: false,
-        unusedVariables: false,
-        unusedImports: options.unusedImports,
-        debugBreak: false,
-        useBeforeDeclaration: false,
-        ambiguousReferences: options.ambiguousReferences,
-        maxProblems: options.maxProblems
-    };
-}
 
 function deduplicate(items: Diagnostic[]): Diagnostic[] {
     const result: Diagnostic[] = [];

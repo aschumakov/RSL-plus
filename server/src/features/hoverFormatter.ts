@@ -7,52 +7,44 @@ import {
     MarkupKind
 } from "vscode-languageserver/node";
 
-import type { CBase } from "../common";
+import type { RslSymbol } from "../symbols/rslSymbol";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
-
-interface IClassLike {
-    getParentName?(): string;
-}
-
-interface IConstantLike {
-    getValue?(): string;
-}
 
 export function buildRslHoverContent(
     index: WorkspaceIndex,
     uri: string,
-    object: CBase
+    symbol: RslSymbol
 ): MarkupContent {
     const module = index.getModule(uri);
-    const parent = module ? findParent(module.object, object) : undefined;
-    const parameter = module ? isParameterNode(module, object) : false;
+    const parent = module ? findParent(module.symbolTree, symbol) : undefined;
+    const parameter = module ? isParameterNode(module, symbol) : false;
     const lines: string[] = [];
-    const declaration = buildDeclaration(object, parameter);
+    const declaration = buildDeclaration(symbol, parameter);
 
     lines.push("```rsl", declaration, "```");
 
-    if (object.Private && !parameter) {
+    if (symbol.isPrivate && !parameter) {
         lines.push("", "**Видимость:** Private");
     }
 
-    if (parent && parent.Name) {
-        lines.push("", `**Контейнер:** ${escapeMarkdown(parent.Name)}`);
+    if (parent && parent.name) {
+        lines.push("", `**Контейнер:** ${escapeMarkdown(parent.name)}`);
     }
 
-    if (object.ObjKind === CompletionItemKind.Class) {
-        const parentName = (object as unknown as IClassLike).getParentName?.();
+    if (symbol.kind === CompletionItemKind.Class) {
+        const parentName = symbol.baseClassName;
         if (parentName) {
             lines.push("", `**Базовый класс:** ${escapeMarkdown(parentName)}`);
         }
     }
 
     lines.push("", `**Файл:** ${escapeMarkdown(displayFile(uri))}`);
-    const line = declarationLine(index, module, uri, object);
+    const line = declarationLine(index, module, uri, symbol);
     if (line !== undefined) {
         lines.push(`**Строка:** ${line + 1}`);
     }
 
-    const documentation = normalizeDocumentation(object.CIInfo.documentation);
+    const documentation = normalizeDocumentation(symbol.completionItem.documentation);
     if (documentation) {
         lines.push("", documentation);
     }
@@ -64,51 +56,51 @@ export function buildRslHoverContent(
 }
 
 function buildDeclaration(
-    object: CBase,
+    symbol: RslSymbol,
     parameter: boolean
 ): string {
-    const visibility = object.Private ? "Private " : "";
-    const kind = object.ObjKind;
+    const visibility = symbol.isPrivate ? "Private " : "";
+    const kind = symbol.kind;
 
     if (
         kind === CompletionItemKind.Function ||
         kind === CompletionItemKind.Method
     ) {
-        const signature = extractSignature(object);
-        const returnType = object.Type && object.Type.toLowerCase() !== "variant"
-            ? `: ${object.Type}`
+        const signature = extractSignature(symbol);
+        const returnType = symbol.typeName && symbol.typeName.toLowerCase() !== "variant"
+            ? `: ${symbol.typeName}`
             : "";
-        return `${visibility}Macro ${object.Name}${signature}${returnType}`;
+        return `${visibility}Macro ${symbol.name}${signature}${returnType}`;
     }
 
     if (kind === CompletionItemKind.Class) {
-        const base = (object as unknown as IClassLike).getParentName?.();
-        return `${visibility}Class ${base ? `(${base}) ` : ""}${object.Name}`;
+        const base = symbol.baseClassName;
+        return `${visibility}Class ${base ? `(${base}) ` : ""}${symbol.name}`;
     }
 
     if (parameter) {
-        return `${object.Name}: ${object.Type || "variant"}`;
+        return `${symbol.name}: ${symbol.typeName || "variant"}`;
     }
 
     if (kind === CompletionItemKind.Constant) {
-        const value = (object as unknown as IConstantLike).getValue?.() || "";
+        const value = symbol.value;
         return value
-            ? `${visibility}Const ${object.Name} = ${value}`
-            : `${visibility}Const ${object.Name}: ${object.Type || "variant"}`;
+            ? `${visibility}Const ${symbol.name} = ${value}`
+            : `${visibility}Const ${symbol.name}: ${symbol.typeName || "variant"}`;
     }
 
     const keyword = "Var";
-    return `${visibility}${keyword} ${object.Name}: ${object.Type || "variant"}`;
+    return `${visibility}${keyword} ${symbol.name}: ${symbol.typeName || "variant"}`;
 }
 
-function extractSignature(object: CBase): string {
-    const detail = String(object.CIInfo.detail || "");
-    const nameIndex = detail.toLowerCase().indexOf(object.Name.toLowerCase());
+function extractSignature(symbol: RslSymbol): string {
+    const detail = String(symbol.completionItem.detail || "");
+    const nameIndex = detail.toLowerCase().indexOf(symbol.name.toLowerCase());
     if (nameIndex < 0) {
         return "()";
     }
 
-    const open = detail.indexOf("(", nameIndex + object.Name.length);
+    const open = detail.indexOf("(", nameIndex + symbol.name.length);
     if (open < 0) {
         return "()";
     }
@@ -130,13 +122,13 @@ function extractSignature(object: CBase): string {
 
 function isParameterNode(
     module: IIndexedModule,
-    object: CBase
+    symbol: RslSymbol
 ): boolean {
     const visit = (node: IIndexedModule["syntax"]["root"]): boolean => {
         if (
             node.kind === "Parameter" &&
-            node.start === object.Range.start &&
-            node.name?.toLowerCase() === object.Name.toLowerCase()
+            node.start === symbol.range.start &&
+            node.name?.toLowerCase() === symbol.name.toLowerCase()
         ) {
             return true;
         }
@@ -146,12 +138,12 @@ function isParameterNode(
     return visit(module.syntax.root);
 }
 
-function findParent(root: CBase, target: CBase): CBase | undefined {
-    for (const child of root.getChilds()) {
+function findParent(root: RslSymbol, target: RslSymbol): RslSymbol | undefined {
+    for (const child of root.children) {
         if (child === target) {
             return root;
         }
-        if (child.isObject()) {
+        if (child.isContainer) {
             const nested = findParent(child, target);
             if (nested) {
                 return nested;
@@ -165,9 +157,9 @@ function declarationLine(
     index: WorkspaceIndex,
     module: IIndexedModule | undefined,
     uri: string,
-    object: CBase
+    symbol: RslSymbol
 ): number | undefined {
-    const external = index.getDefinitionRange(uri, object);
+    const external = index.getDefinitionRange(uri, symbol);
     if (external) {
         return external.start.line;
     }
@@ -175,7 +167,7 @@ function declarationLine(
         return undefined;
     }
 
-    const offset = object.Range.start;
+    const offset = symbol.range.start;
     let left = 0;
     let right = module.lex.lineStarts.length - 1;
     let line = 0;

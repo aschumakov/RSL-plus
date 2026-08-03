@@ -6,7 +6,10 @@ const os = require("os");
 const path = require("path");
 const { pathToFileURL } = require("url");
 
-const { CBase } = require("../server/out/common");
+const {
+    createExternalSymbolTree,
+    createSymbolTree
+} = require("./test-helpers");
 const {
     ReferenceIndex,
     referenceIndexTesting
@@ -21,8 +24,11 @@ const {
     DocumentAnalysisService
 } = require("../server/out/services/documentAnalysisService");
 const {
-    scanExternalModule
-} = require("../server/out/indexing/externalModuleScanner");
+    createExternalModuleSummary
+} = require("../server/out/moduleModel");
+const {
+    createOpenModuleModel
+} = require("../server/out/moduleModel");
 const {
     isLocalReferenceTarget
 } = require("../server/out/analysis/references");
@@ -106,12 +112,10 @@ function testAmbiguousImportDiagnostic() {
         "file:///workspace/corporate/common.mac"
     ]);
     const source = "Import common;\nMacro Test()\nEnd;";
-    const indexedModule = index.updateModule(
+    const indexedModule = index.updateOpenModule(
         "file:///workspace/main.mac",
         source,
-        new CBase(source, 0),
-        1,
-        true
+        1
     );
     const diagnostics = buildImportResolutionDiagnostics(
         indexedModule,
@@ -138,26 +142,26 @@ function testExternalSummaryAndReferenceBoundaries() {
         "  End;",
         "End;"
     ].join("\n");
-    const external = scanExternalModule(source);
+    const external = createExternalModuleSummary(source);
 
     assert.deepStrictEqual(
         external.imports.map(value => value.toLowerCase()),
         ["common", "helpers"]
     );
-    assert.ok(external.symbolTree.RecursiveFind("PublicMacro"));
-    assert.ok(external.symbolTree.RecursiveFind("Customer"));
-    assert.ok(external.symbolTree.RecursiveFind("Load"));
+    assert.ok(external.symbolTree.find("PublicMacro"));
+    assert.ok(external.symbolTree.find("Customer"));
+    assert.ok(external.symbolTree.find("Load"));
     assert.strictEqual(
-        external.symbolTree.RecursiveFind("TRecHandler"),
+        external.symbolTree.find("TRecHandler"),
         undefined,
         "Базовый класс не должен становиться объявлением модуля"
     );
     assert.strictEqual(
-        external.symbolTree.RecursiveFind("localValue"),
+        external.symbolTree.find("localValue"),
         undefined
     );
     assert.strictEqual(
-        external.symbolTree.RecursiveFind("localInMethod"),
+        external.symbolTree.find("localInMethod"),
         undefined
     );
 
@@ -170,13 +174,7 @@ function testExternalSummaryAndReferenceBoundaries() {
         "End;"
     ].join("\n");
     const consumerUri = "file:///workspace/consumer.mac";
-    inheritanceIndex.updateModule(
-        consumerUri,
-        consumerSource,
-        new CBase(consumerSource, 0),
-        1,
-        true
-    );
+    inheritanceIndex.updateOpenModule(consumerUri, consumerSource, 1);
     assert.strictEqual(
         inheritanceIndex.findImportedSymbols(
             consumerUri,
@@ -192,7 +190,7 @@ function testExternalSummaryAndReferenceBoundaries() {
         1
     );
 
-    const tree = new CBase([
+    const tree = createSymbolTree([
         "Macro Test(p)",
         "  Var localValue: Integer;",
         "End;",
@@ -200,19 +198,60 @@ function testExternalSummaryAndReferenceBoundaries() {
         "End;",
         "Macro PublicMacro()",
         "End;"
-    ].join("\n"), 0);
+    ].join("\n"));
     assert.strictEqual(
-        isLocalReferenceTarget(tree, tree.RecursiveFind("localValue")),
+        isLocalReferenceTarget(tree, tree.find("localValue")),
         true
     );
     assert.strictEqual(
-        isLocalReferenceTarget(tree, tree.RecursiveFind("Hidden")),
+        isLocalReferenceTarget(tree, tree.find("Hidden")),
         true
     );
     assert.strictEqual(
-        isLocalReferenceTarget(tree, tree.RecursiveFind("PublicMacro")),
+        isLocalReferenceTarget(tree, tree.find("PublicMacro")),
         false
     );
+}
+
+function testFullAndCompactModelsShareDeclarationContract() {
+    const source = [
+        "Import globals, helpers;",
+        "Const Answer = 42;",
+        "Macro Load(value:Integer):String",
+        "End;",
+        "Class (BaseHandler) Customer",
+        "  Var Code:String;",
+        "  Macro Save(id:Integer):Bool",
+        "  End;",
+        "End;",
+        "Private Macro Hidden()",
+        "End;"
+    ].join("\n");
+    const full = createOpenModuleModel(source).symbolTree;
+    const compact = createExternalModuleSummary(source).symbolTree;
+
+    const flattenPublic = root => {
+        const result = [];
+        const visit = symbol => {
+            if (!symbol.isPrivate) {
+                result.push({
+                    id: symbol.id,
+                    name: symbol.name,
+                    kind: symbol.kind,
+                    typeName: symbol.typeName,
+                    value: symbol.value,
+                    parameterText: symbol.parameterText,
+                    baseClassName: symbol.baseClassName
+                });
+                symbol.children.forEach(visit);
+            }
+        };
+        root.children.forEach(visit);
+        return result;
+    };
+
+    assert.deepStrictEqual(flattenPublic(compact), flattenPublic(full));
+    assert.strictEqual(compact.find("Hidden"), undefined);
 }
 
 async function testWorkspaceLoaderUsesActiveImports() {
@@ -681,13 +720,7 @@ async function testImportedSymbolLoadsOnDemand() {
 
         const index = new WorkspaceIndex();
         const source = "Import library;\nMacro Test()\n Shared();\nEnd;";
-        index.updateModule(
-            mainUri,
-            source,
-            new CBase(source, 0),
-            1,
-            true
-        );
+        index.updateOpenModule(mainUri, source, 1);
         const loader = new WorkspaceModuleLoader(index, {
             log: message => {
                 throw new Error(message);
@@ -795,6 +828,9 @@ async function testAutoImportSearchLoadsOnlyExporter() {
 
     testExternalSummaryAndReferenceBoundaries();
     console.log("[OK] external summary не смешивает публичные и локальные символы");
+
+    testFullAndCompactModelsShareDeclarationContract();
+    console.log("[OK] full и compact модели используют единый declaration contract");
 
     await testWorkspaceLoaderUsesActiveImports();
     console.log("[OK] загружается только активный Import-граф");
