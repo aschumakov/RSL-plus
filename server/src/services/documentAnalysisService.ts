@@ -66,7 +66,7 @@ export class DocumentAnalysisService {
         this.changeDebounceMs = options.changeDebounceMs ?? 90;
         this.slowParseLogMs = options.slowParseLogMs ?? 75;
         this.initialParseDelayMs = options.initialParseDelayMs ?? 50;
-        this.inactiveParseDelayMs = options.inactiveParseDelayMs ?? 500;
+        this.inactiveParseDelayMs = options.inactiveParseDelayMs ?? 5000;
     }
 
     get isBusy(): boolean {
@@ -169,6 +169,22 @@ export class DocumentAnalysisService {
             this.backgroundQueue.push(task);
         }
         this.foregroundQueue = [];
+
+        /*
+         * Восстановленные VS Code вкладки получают быстрый Outline, но не
+         * конкурируют с активным файлом за parser slot и память. Полный AST
+         * будет построен при активации вкладки или явном LSP-запросе.
+         */
+        for (const candidate of Array.from(this.parseTimers.keys())) {
+            if (candidate !== uri) {
+                this.cancelTimer(candidate);
+            }
+        }
+        for (const [candidate, task] of Array.from(this.queued.entries())) {
+            if (candidate !== uri && task.priority === "background") {
+                this.cancelQueued(candidate);
+            }
+        }
 
         if (!uri) {
             return;
@@ -602,14 +618,14 @@ export class DocumentAnalysisService {
             current.version === version &&
             this.parseGeneration.get(uri) === generation;
 
-        if (isCurrent && settings.import === "ДА") {
+        if (isCurrent && settings.imports.enabled) {
             this.options.onImports(uri, imports);
         }
 
         if (span) {
             performance.end(span, {
                 current: isCurrent,
-                importsEnabled: settings.import === "ДА",
+                importsEnabled: settings.imports.enabled,
                 source: "availableSnapshot"
             });
         }

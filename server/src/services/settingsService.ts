@@ -21,9 +21,11 @@ export class RslSettingsService {
 
     updateFromConfiguration(settingsRoot: unknown): void {
         const root = isRecord(settingsRoot) ? settingsRoot : {};
-        const value = isRecord(root.RSLanguageServer)
-            ? root.RSLanguageServer
-            : root;
+        const value = isRecord(root.rslPlus)
+            ? root.rslPlus
+            : isRecord(root.RSLanguageServer)
+                ? root.RSLanguageServer
+                : root;
 
         this.workspaceSettings = mergeSettings(this.defaults, value);
     }
@@ -86,11 +88,40 @@ function mergeSettings(
     const diagnostics = isRecord(input.diagnostics)
         ? input.diagnostics
         : {};
+    const imports = isRecord(input.imports) ? input.imports : {};
+    const autoImport = isRecord(input.autoImport) ? input.autoImport : {};
+    const analysis = isRecord(input.analysis) ? input.analysis : {};
+    const semanticHighlighting = isRecord(input.semanticHighlighting)
+        ? input.semanticHighlighting
+        : {};
+
+    const legacyImport = typeof input.import === "string"
+        ? input.import.toLocaleUpperCase() === "ДА"
+        : undefined;
 
     return {
-        import: typeof input.import === "string"
-            ? input.import
-            : defaults.import,
+        imports: {
+            enabled: typeof imports.enabled === "boolean"
+                ? imports.enabled
+                : legacyImport ?? defaults.imports.enabled
+        },
+        autoImport: {
+            enabled: typeof autoImport.enabled === "boolean"
+                ? autoImport.enabled
+                : defaults.autoImport.enabled
+        },
+        analysis: {
+            workspaceIndexing: isWorkspaceIndexingMode(
+                analysis.workspaceIndexing
+            )
+                ? analysis.workspaceIndexing
+                : defaults.analysis.workspaceIndexing
+        },
+        semanticHighlighting: {
+            maxFileSizeKb: typeof semanticHighlighting.maxFileSizeKb === "number"
+                ? Math.max(0, semanticHighlighting.maxFileSizeKb)
+                : defaults.semanticHighlighting.maxFileSizeKb
+        },
         diagnostics: {
             ...(defaults.diagnostics || {}),
             ...diagnostics
@@ -100,7 +131,10 @@ function mergeSettings(
 
 function cloneSettings(value: IRslSettings): IRslSettings {
     return {
-        import: value.import,
+        imports: { ...value.imports },
+        autoImport: { ...value.autoImport },
+        analysis: { ...value.analysis },
+        semanticHighlighting: { ...value.semanticHighlighting },
         diagnostics: {
             ...(value.diagnostics || {})
         }
@@ -111,9 +145,21 @@ function settingsEqual(
     left: IRslSettings,
     right: IRslSettings
 ): boolean {
-    return left.import === right.import &&
+    return left.imports.enabled === right.imports.enabled &&
+        left.autoImport.enabled === right.autoImport.enabled &&
+        left.analysis.workspaceIndexing === right.analysis.workspaceIndexing &&
+        left.semanticHighlighting.maxFileSizeKb ===
+            right.semanticHighlighting.maxFileSizeKb &&
         JSON.stringify(left.diagnostics || {}) ===
         JSON.stringify(right.diagnostics || {});
+}
+
+function isWorkspaceIndexingMode(
+    value: unknown
+): value is IRslSettings["analysis"]["workspaceIndexing"] {
+    return value === "activeImports" ||
+        value === "workspaceIdle" ||
+        value === "full";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -141,78 +141,98 @@
       },
       "configuration": {
          "type": "object",
-         "title": "RSL configuration",
+         "title": "RSL Plus",
          "properties": {
-            "RSLanguageServer.import": {
+            "rslPlus.imports.enabled": {
+               "scope": "resource",
+               "type": "boolean",
+               "default": true,
+               "description": "Анализировать символы и ошибки в модулях из Import. Отключение ускоряет работу, но ограничивает навигацию текущим файлом."
+            },
+            "rslPlus.autoImport.enabled": {
+               "scope": "resource",
+               "type": "boolean",
+               "default": true,
+               "description": "Предлагать Auto Import в автодополнении и Quick Fix для неизвестных символов."
+            },
+            "rslPlus.analysis.workspaceIndexing": {
                "scope": "window",
                "type": "string",
                "enum": [
-                  "ДА",
-                  "НЕТ"
+                  "activeImports",
+                  "workspaceIdle",
+                  "full"
                ],
-               "default": "ДА",
-               "description": "Подгружать импортируемые макросы."
+               "enumDescriptions": [
+                  "Рекомендуется: индексировать только открытые файлы и их цепочки Import.",
+                  "Дополнительно индексировать весь проект после паузы в работе.",
+                  "Индексировать весь проект сразу; повышает нагрузку на процессор и память."
+               ],
+               "default": "activeImports",
+               "description": "Глубина фонового анализа проекта. На навигацию по Import выбранный режим не влияет."
             },
-            "RSLanguageServer.performanceLogFile": {
+            "rslPlus.semanticHighlighting.maxFileSizeKb": {
+               "scope": "resource",
+               "type": "integer",
+               "minimum": 0,
+               "default": 512,
+               "description": "Максимальный размер файла для семантической подсветки, КБ. Для больших файлов остаётся обычная подсветка синтаксиса. 0 — без ограничения."
+            },
+            "rslPlus.performance.logFile": {
                "scope": "window",
                "type": "string",
                "default": "",
                "description": "Абсолютный путь к JSONL-файлу профилирования. Пустое значение полностью отключает замеры. После изменения перезапустите окно VS Code."
             },
-            "rsl-plus.programmerName": {
-               "type": "string",
-               "default": "RS Programmer",
-               "description": "Имя разработчика для заголовков RSL-файлов"
-            },
-            "RSLanguageServer.diagnostics.enabled": {
+            "rslPlus.diagnostics.enabled": {
                "scope": "resource",
                "type": "boolean",
                "default": true,
-               "description": "Включить диагностику RSL в панели Problems."
+               "description": "Показывать найденные проблемы RSL в панели Problems."
             },
-            "RSLanguageServer.diagnostics.deprecatedDeclarations": {
+            "rslPlus.diagnostics.deprecatedDeclarations": {
                "scope": "resource",
                "type": "boolean",
                "default": true,
                "description": "Показывать устаревшие объявления RECORD и ARRAY."
             },
-            "RSLanguageServer.diagnostics.structure": {
+            "rslPlus.diagnostics.structure": {
                "scope": "resource",
                "type": "boolean",
                "default": true,
                "description": "Проверять скобки, END, ELSE, повторные объявления и Import."
             },
-            "RSLanguageServer.diagnostics.unusedVariables": {
+            "rslPlus.diagnostics.unusedVariables": {
                "scope": "resource",
                "type": "boolean",
                "default": true,
                "description": "Предупреждать о неиспользуемых локальных объявлениях."
             },
-            "RSLanguageServer.diagnostics.unusedImports": {
+            "rslPlus.diagnostics.unusedImports": {
                "scope": "resource",
                "type": "boolean",
                "default": true,
                "description": "Предупреждать о неиспользуемых известных модулях."
             },
-            "RSLanguageServer.diagnostics.debugBreak": {
+            "rslPlus.diagnostics.debugBreak": {
                "scope": "resource",
                "type": "boolean",
                "default": true,
                "description": "Предупреждать об оставленном DEBUGBREAK."
             },
-            "RSLanguageServer.diagnostics.useBeforeDeclaration": {
+            "rslPlus.diagnostics.useBeforeDeclaration": {
                "scope": "resource",
                "type": "boolean",
                "default": true,
                "description": "Проверять использование локальной переменной до объявления."
             },
-            "RSLanguageServer.diagnostics.ambiguousReferences": {
+            "rslPlus.diagnostics.ambiguousReferences": {
                "scope": "resource",
                "type": "boolean",
                "default": true,
                "description": "Проверять неоднозначные ссылки из импортированных модулей."
             },
-            "RSLanguageServer.diagnostics.maxProblems": {
+            "rslPlus.diagnostics.maxProblems": {
                "scope": "resource",
                "type": "integer",
                "minimum": 0,

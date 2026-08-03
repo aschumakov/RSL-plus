@@ -372,7 +372,10 @@ async function testActiveDocumentPreemptsQueuedParses() {
         new WorkspaceIndex(),
         {
             getAvailable: () => ({
-                import: "ДА",
+                imports: { enabled: true },
+                autoImport: { enabled: true },
+                analysis: { workspaceIndexing: "activeImports" },
+                semanticHighlighting: { maxFileSizeKb: 512 },
                 diagnostics: {}
             })
         },
@@ -424,7 +427,10 @@ async function testParseReadinessDoesNotWaitForSettings() {
         index,
         {
             getAvailable: () => ({
-                import: "ДА",
+                imports: { enabled: true },
+                autoImport: { enabled: true },
+                analysis: { workspaceIndexing: "activeImports" },
+                semanticHighlighting: { maxFileSizeKb: 512 },
                 diagnostics: {}
             })
         },
@@ -750,6 +756,18 @@ async function testAutoImportSearchLoadsOnlyExporter() {
             onModuleCountChanged: () => undefined
         });
         loader.registerWorkspaceFiles(uris);
+
+        const automatic = await loader.findModulesExportingSymbol(
+            "Shared",
+            10,
+            { scanWorkspace: false }
+        );
+        assert.deepStrictEqual(automatic, []);
+        assert.strictEqual(
+            index.size,
+            0,
+            "Автоматический Quick Fix не должен читать workspace"
+        );
 
         const modules = await loader.findModulesExportingSymbol("Shared");
 

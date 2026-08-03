@@ -24,6 +24,12 @@ export interface IWorkspaceModuleLoaderOptions {
     onIndexProgress?(loaded: number, total: number): void;
     requestMissingImport?(name: string): void;
     idleDelayMs?: number;
+    interactivePauseMs?: number;
+}
+
+export interface IExportSearchOptions {
+    scanWorkspace?: boolean;
+    isCancelled?(): boolean;
 }
 
 /**
@@ -49,6 +55,9 @@ export class WorkspaceModuleLoader {
     private indexingMode: WorkspaceIndexingMode = "activeImports";
     private idleTimer: NodeJS.Timeout | undefined;
     private idleDelayMs: number;
+    private interactivePauseMs: number;
+    private interactiveUntilMs = 0;
+    private backgroundResumeTimer: NodeJS.Timeout | undefined;
 
     private referenceIndex: ReferenceIndex;
 
@@ -61,6 +70,10 @@ export class WorkspaceModuleLoader {
             log: options.log
         });
         this.idleDelayMs = Math.max(1000, options.idleDelayMs ?? 10000);
+        this.interactivePauseMs = Math.max(
+            0,
+            options.interactivePauseMs ?? 350
+        );
     }
 
     registerWorkspaceFiles(uris: readonly string[]): void {
@@ -161,6 +174,20 @@ export class WorkspaceModuleLoader {
         }
 
         this.rebuildQueuedMap();
+    }
+
+    /** Фоновая индексация уступает короткому всплеску запросов редактора. */
+    noteInteractiveActivity(): void {
+        this.interactiveUntilMs = Date.now() + this.interactivePauseMs;
+
+        if (this.indexingMode === "workspaceIdle") {
+            this.clearIdleTimer();
+            this.applyIndexingMode();
+        }
+
+        if (!this.running && this.backgroundQueue.length > 0) {
+            this.scheduleBackgroundResume();
+        }
     }
 
     enqueueImports(
@@ -360,7 +387,8 @@ export class WorkspaceModuleLoader {
      */
     async findModulesExportingSymbol(
         symbolName: string,
-        maxResults: number = 10
+        maxResults: number = 10,
+        options: IExportSearchOptions = {}
     ): Promise<IIndexedModule[]> {
         const normalized = normalizeIdentifier(symbolName);
         if (!normalized) {
@@ -373,12 +401,21 @@ export class WorkspaceModuleLoader {
             .filter((module): module is IIndexedModule => !!module);
         const uniqueKnown = uniqueModules(known);
 
+        if (options.isCancelled?.()) {
+            return uniqueKnown.slice(0, maxResults);
+        }
+
         const cachedUris = this.exportSearchCache.get(normalized);
         if (cachedUris) {
             return cachedUris
                 .map(uri => this.index.getModule(uri))
                 .filter((module): module is IIndexedModule => !!module)
                 .slice(0, maxResults);
+        }
+
+        /* Автоматический lightbulb не имеет права сканировать весь проект. */
+        if (options.scanWorkspace === false) {
+            return uniqueKnown.slice(0, maxResults);
         }
 
         const candidates = Array.from(this.workspaceUris).filter(uri =>
@@ -392,6 +429,9 @@ export class WorkspaceModuleLoader {
             start < candidates.length && result.length < maxResults;
             start += batchSize
         ) {
+            if (options.isCancelled?.()) {
+                return result;
+            }
             const batch = candidates.slice(start, start + batchSize);
             const matches = await Promise.all(batch.map(uri =>
                 this.inspectExport(uri, normalized)
@@ -407,6 +447,10 @@ export class WorkspaceModuleLoader {
             }
 
             await yieldToInteractiveRequests();
+        }
+
+        if (options.isCancelled?.()) {
+            return result;
         }
 
         this.exportSearchCache.set(
@@ -480,8 +524,17 @@ export class WorkspaceModuleLoader {
             return;
         }
 
-        const item = this.foregroundQueue.shift() ||
-            this.backgroundQueue.shift();
+        const foreground = this.foregroundQueue.shift();
+        if (
+            !foreground &&
+            this.backgroundQueue.length > 0 &&
+            Date.now() < this.interactiveUntilMs
+        ) {
+            this.scheduleBackgroundResume();
+            return;
+        }
+
+        const item = foreground || this.backgroundQueue.shift();
 
         if (!item) {
             this.reportProgress();
@@ -508,6 +561,18 @@ export class WorkspaceModuleLoader {
                 this.processQueue();
             });
         });
+    }
+
+    private scheduleBackgroundResume(): void {
+        if (this.backgroundResumeTimer) {
+            clearTimeout(this.backgroundResumeTimer);
+        }
+
+        const delay = Math.max(1, this.interactiveUntilMs - Date.now());
+        this.backgroundResumeTimer = setTimeout(() => {
+            this.backgroundResumeTimer = undefined;
+            this.processQueue();
+        }, delay);
     }
 
     private loadOnce(

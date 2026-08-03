@@ -29,7 +29,10 @@ const { RslScopeResolver } = require("../server/out/scopeResolver");
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
 
 const defaults = {
-    import: "ДА",
+    imports: { enabled: true },
+    autoImport: { enabled: true },
+    analysis: { workspaceIndexing: "activeImports" },
+    semanticHighlighting: { maxFileSizeKb: 512 },
     diagnostics: {
         enabled: true,
         structure: true,
@@ -50,9 +53,23 @@ async function testAvailableSettingsDoNotWaitForVsCode() {
 
     const available = service.getAvailable("file:///slow.mac");
 
-    assert.strictEqual(available.import, "НЕТ");
+    assert.strictEqual(available.imports.enabled, false);
     assert.strictEqual(available.diagnostics.maxProblems, 75);
     assert.strictEqual(available.diagnostics.enabled, true);
+
+    service.updateFromConfiguration({
+        rslPlus: {
+            imports: { enabled: true },
+            autoImport: { enabled: false },
+            analysis: { workspaceIndexing: "workspaceIdle" },
+            semanticHighlighting: { maxFileSizeKb: 256 }
+        }
+    });
+    const migrated = service.getAvailable("file:///new-settings.mac");
+    assert.strictEqual(migrated.imports.enabled, true);
+    assert.strictEqual(migrated.autoImport.enabled, false);
+    assert.strictEqual(migrated.analysis.workspaceIndexing, "workspaceIdle");
+    assert.strictEqual(migrated.semanticHighlighting.maxFileSizeKb, 256);
     assert.strictEqual(
         typeof service.get,
         "undefined",
@@ -176,7 +193,7 @@ async function testProblemsDoNotWaitForConfigurationRequest() {
         },
         {
             getAvailable: () => ({
-                import: "ДА",
+                ...defaults,
                 diagnostics: {
                     enabled: true,
                     maxProblems: 200
@@ -337,6 +354,7 @@ async function testOutlineUsesPreparedSnapshotAndReportsTiming() {
         ensureDocumentParsed: async () => {
             throw new Error("Outline не должен запускать полный parser");
         },
+        getSettings: () => defaults,
         log: () => undefined,
         performance: {
             enabled: true,
@@ -453,7 +471,8 @@ async function testOutlineIsReadyBeforeDiagnostics() {
                 coordinator.setActiveDocument(uri);
             },
             onImports: () => undefined,
-            initialParseDelayMs: 0
+            initialParseDelayMs: 0,
+            inactiveParseDelayMs: 0
         }
     );
 

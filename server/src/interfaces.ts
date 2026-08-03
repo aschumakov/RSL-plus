@@ -77,12 +77,28 @@ export interface IRslDiagnosticSettings {
     maxProblems?: number;
 }
 
+export type RslWorkspaceIndexingMode =
+    "activeImports" |
+    "workspaceIdle" |
+    "full";
+
 
 /**
  * Настройки language server.
  */
 export interface IRslSettings {
-    import: string;
+    imports: {
+        enabled: boolean;
+    };
+    autoImport: {
+        enabled: boolean;
+    };
+    analysis: {
+        workspaceIndexing: RslWorkspaceIndexingMode;
+    };
+    semanticHighlighting: {
+        maxFileSizeKb: number;
+    };
     diagnostics?: IRslDiagnosticSettings;
 }
 

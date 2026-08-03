@@ -2,6 +2,7 @@ import {
     CancellationToken,
     CodeActionKind,
     CodeActionParams,
+    CodeActionTriggerKind,
     CompletionItem,
     Definition,
     DocumentFormattingParams,
@@ -46,7 +47,7 @@ import {
     FORMATTER_REVISION,
     FormatCode
 } from "../format";
-import type { IToken } from "../interfaces";
+import type { IRslSettings, IToken } from "../interfaces";
 import { tokenAtOffset, type IRslToken } from "../lexer";
 import {
     describeFormatSpecifier,
@@ -87,8 +88,14 @@ export interface IRslLanguageFeatureEnvironment {
         symbolName: string
     ): Promise<boolean>;
     findAutoImportModules?(
-        symbolName: string
+        symbolName: string,
+        options: {
+            scanWorkspace: boolean;
+            isCancelled(): boolean;
+        }
     ): Promise<import("../workspaceIndex").IIndexedModule[]>;
+    getSettings(uri: string): IRslSettings;
+    noteInteractiveActivity?(): void;
     log(message: string): void;
     performance?: PerformanceLogger;
 }
@@ -147,14 +154,22 @@ export class RslLanguageFeatureRegistry {
             ensureDocumentParsed
         } = this.environment;
 
-        connection.onCompletion(async (params: TextDocumentPositionParams) => {
+        connection.onCompletion(async (
+            params: TextDocumentPositionParams,
+            cancellationToken: CancellationToken
+        ) => {
             const document = documents.get(params.textDocument.uri);
 
             if (!document) {
                 return [];
             }
 
+            this.environment.noteInteractiveActivity?.();
+            const version = document.version;
             await ensureDocumentParsed(document);
+            if (requestIsStale(document, version, cancellationToken)) {
+                return [];
+            }
             const context = this.getPositionContext(params);
 
             if (!context || isBlockedToken(context.token)) {
@@ -168,20 +183,27 @@ export class RslLanguageFeatureRegistry {
                     context.offset
                 ),
                 this.defaultCompletionItems,
-                buildKnownAutoImportCompletions(
-                    index.getModule(document.uri)!,
-                    index
-                )
+                this.environment.getSettings(document.uri).autoImport.enabled
+                    ? buildKnownAutoImportCompletions(
+                        index.getModule(document.uri)!,
+                        index
+                    )
+                    : []
             );
         });
 
-        connection.onSignatureHelp(async params => {
+        connection.onSignatureHelp(async (params, cancellationToken) => {
             const document = documents.get(params.textDocument.uri);
             if (!document) {
                 return null;
             }
 
+            this.environment.noteInteractiveActivity?.();
+            const version = document.version;
             await ensureDocumentParsed(document);
+            if (requestIsStale(document, version, cancellationToken)) {
+                return null;
+            }
             const module = index.getModule(document.uri);
             return module
                 ? buildRslSignatureHelp(
@@ -193,7 +215,8 @@ export class RslLanguageFeatureRegistry {
         });
 
         connection.onHover(async (
-            params: TextDocumentPositionParams
+            params: TextDocumentPositionParams,
+            cancellationToken: CancellationToken
         ): Promise<Hover | null> => {
             const document = documents.get(params.textDocument.uri);
 
@@ -201,7 +224,12 @@ export class RslLanguageFeatureRegistry {
                 return null;
             }
 
+            this.environment.noteInteractiveActivity?.();
+            const version = document.version;
             await ensureDocumentParsed(document);
+            if (requestIsStale(document, version, cancellationToken)) {
+                return null;
+            }
             const context = this.getPositionContext(params);
 
             if (!context || isBlockedToken(context.token)) {
@@ -251,14 +279,20 @@ export class RslLanguageFeatureRegistry {
         });
 
         connection.onDocumentHighlight(async (
-            params: DocumentHighlightParams
+            params: DocumentHighlightParams,
+            cancellationToken: CancellationToken
         ) => {
             const document = documents.get(params.textDocument.uri);
             if (!document) {
                 return [];
             }
 
+            this.environment.noteInteractiveActivity?.();
+            const version = document.version;
             await ensureDocumentParsed(document);
+            if (requestIsStale(document, version, cancellationToken)) {
+                return [];
+            }
             const context = this.getPositionContext(params);
             const module = index.getModule(document.uri);
             if (!context || !module || isBlockedToken(context.token)) {
@@ -274,7 +308,8 @@ export class RslLanguageFeatureRegistry {
         });
 
         connection.onDefinition(async (
-            params: TextDocumentPositionParams
+            params: TextDocumentPositionParams,
+            cancellationToken: CancellationToken
         ): Promise<Definition | null> => {
             const document = documents.get(params.textDocument.uri);
 
@@ -293,7 +328,13 @@ export class RslLanguageFeatureRegistry {
             let loadedOnDemand = false;
 
             try {
+                this.environment.noteInteractiveActivity?.();
+                const version = document.version;
                 await ensureDocumentParsed(document);
+                if (requestIsStale(document, version, cancellationToken)) {
+                    outcome = "cancelled";
+                    return null;
+                }
                 const context = this.getPositionContext(params);
 
                 if (!context || !context.token) {
@@ -388,7 +429,12 @@ export class RslLanguageFeatureRegistry {
                 return [];
             }
 
+            this.environment.noteInteractiveActivity?.();
+            const version = document.version;
             await ensureDocumentParsed(document);
+            if (requestIsStale(document, version, cancellationToken)) {
+                return [];
+            }
             const context = this.getPositionContext(params);
 
             if (!context || isBlockedToken(context.token)) {
@@ -407,24 +453,40 @@ export class RslLanguageFeatureRegistry {
             );
         });
 
-        connection.onCodeAction(async (params: CodeActionParams) => {
+        connection.onCodeAction(async (
+            params: CodeActionParams,
+            cancellationToken: CancellationToken
+        ) => {
             const module = index.getModule(params.textDocument.uri);
             if (!module) {
                 return [];
             }
 
+            this.environment.noteInteractiveActivity?.();
             const navigation = supportsRefactorActions(params)
                 ? buildBlockNavigationActions(module, params.range)
                 : [];
-            const autoImports = this.environment.findAutoImportModules
+            const settings = this.environment.getSettings(module.uri);
+            const scanWorkspace =
+                params.context.triggerKind === CodeActionTriggerKind.Invoked;
+            const autoImports =
+                settings.autoImport.enabled &&
+                this.environment.findAutoImportModules
                 ? await buildMissingImportActions(
                     module,
                     index,
                     resolver,
                     params.range,
-                    this.environment.findAutoImportModules
+                    name => this.environment.findAutoImportModules!(name, {
+                        scanWorkspace,
+                        isCancelled: () =>
+                            cancellationToken.isCancellationRequested
+                    })
                 )
                 : [];
+            if (cancellationToken.isCancellationRequested) {
+                return [];
+            }
             return [
                 ...buildEnhancedRslCodeActions(module, params),
                 ...navigation,
@@ -432,13 +494,21 @@ export class RslLanguageFeatureRegistry {
             ];
         });
 
-        connection.languages.callHierarchy.onPrepare(async params => {
+        connection.languages.callHierarchy.onPrepare(async (
+            params,
+            cancellationToken
+        ) => {
             const document = documents.get(params.textDocument.uri);
             if (!document) {
                 return [];
             }
 
+            this.environment.noteInteractiveActivity?.();
+            const version = document.version;
             await ensureDocumentParsed(document);
+            if (requestIsStale(document, version, cancellationToken)) {
+                return [];
+            }
             return this.callHierarchyProvider.prepare(
                 document.uri,
                 document.offsetAt(params.position)
@@ -513,19 +583,25 @@ export class RslLanguageFeatureRegistry {
         });
 
         connection.languages.semanticTokens.on(async (
-            params: SemanticTokensParams
+            params: SemanticTokensParams,
+            cancellationToken: CancellationToken
         ): Promise<SemanticTokens> => {
-            return this.getSemanticTokens(params.textDocument.uri);
+            return this.getSemanticTokens(
+                params.textDocument.uri,
+                cancellationToken
+            );
         });
 
         connection.languages.semanticTokens.onDelta(async (
-            params: SemanticTokensDeltaParams
+            params: SemanticTokensDeltaParams,
+            cancellationToken: CancellationToken
         ): Promise<SemanticTokens | SemanticTokensDelta> => {
             const previous = this.semanticTokensCache.get(
                 params.textDocument.uri
             );
             const current = await this.getSemanticTokens(
-                params.textDocument.uri
+                params.textDocument.uri,
+                cancellationToken
             );
 
             if (
@@ -547,16 +623,24 @@ export class RslLanguageFeatureRegistry {
         });
 
         connection.languages.semanticTokens.onRange(async (
-            params: SemanticTokensRangeParams
+            params: SemanticTokensRangeParams,
+            cancellationToken: CancellationToken
         ): Promise<SemanticTokens> => {
             const document = documents.get(params.textDocument.uri);
             if (!document) {
                 return { data: [] };
             }
 
+            this.environment.noteInteractiveActivity?.();
+            const version = document.version;
             await ensureDocumentParsed(document);
             const module = index.getModule(document.uri);
-            if (!module || module.version !== document.version) {
+            if (
+                !module ||
+                module.version !== document.version ||
+                requestIsStale(document, version, cancellationToken) ||
+                this.semanticHighlightingIsTooLarge(module)
+            ) {
                 return { data: [] };
             }
 
@@ -574,6 +658,7 @@ export class RslLanguageFeatureRegistry {
         });
 
         connection.onDocumentSymbol(async (params: DocumentSymbolParams) => {
+            this.environment.noteInteractiveActivity?.();
             const performance = this.environment.performance;
             const span = performance?.enabled
                 ? performance.start("outline.resolve", {
@@ -728,17 +813,26 @@ export class RslLanguageFeatureRegistry {
         });
     }
 
-    private async getSemanticTokens(uri: string): Promise<SemanticTokens> {
+    private async getSemanticTokens(
+        uri: string,
+        cancellationToken?: CancellationToken
+    ): Promise<SemanticTokens> {
         const document = this.environment.documents.get(uri);
 
         if (!document) {
             return { data: [] };
         }
 
+        this.environment.noteInteractiveActivity?.();
+        const version = document.version;
         await this.environment.ensureDocumentParsed(document);
         const module = this.environment.index.getModule(uri);
 
-        if (!module) {
+        if (
+            !module ||
+            requestIsStale(document, version, cancellationToken) ||
+            this.semanticHighlightingIsTooLarge(module)
+        ) {
             return { data: [] };
         }
 
@@ -763,6 +857,27 @@ export class RslLanguageFeatureRegistry {
             value
         });
         return value;
+    }
+
+    private semanticHighlightingIsTooLarge(
+        module: import("../workspaceIndex").IIndexedModule
+    ): boolean {
+        const maxFileSizeKb = this.environment
+            .getSettings(module.uri)
+            .semanticHighlighting
+            .maxFileSizeKb;
+        const tooLarge = maxFileSizeKb > 0 &&
+            module.sourceLength > maxFileSizeKb * 1024;
+
+        if (tooLarge) {
+            this.environment.performance?.mark("semanticTokens.skipped", {
+                uri: module.uri,
+                chars: module.sourceLength,
+                maxFileSizeKb,
+                reason: "fileSize"
+            });
+        }
+        return tooLarge;
     }
 
     invalidate(uri: string): void {
@@ -852,6 +967,15 @@ function isBlockedToken(token?: IToken): boolean {
         token.kind === "square" ||
         token.kind === "comment"
     );
+}
+
+function requestIsStale(
+    document: TextDocument,
+    version: number,
+    cancellationToken?: CancellationToken
+): boolean {
+    return document.version !== version ||
+        cancellationToken?.isCancellationRequested === true;
 }
 
 function formattingFunction(

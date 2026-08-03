@@ -13,7 +13,8 @@ import {
     TextEditor,
     DocumentSymbol,
     SymbolInformation,
-    SymbolKind
+    SymbolKind,
+    CancellationTokenSource
 } from "vscode";
 
 import {
@@ -32,13 +33,19 @@ let workspaceInventoryTimer: NodeJS.Timeout | undefined;
 let workspaceInventoryRunning = false;
 let workspaceInventoryCompleted = false;
 let workspaceInventoryRevision = 0;
+let workspaceInventoryCancellation: CancellationTokenSource | undefined;
 
-const WORKSPACE_INVENTORY_IDLE_MS = 8000;
+const WORKSPACE_INVENTORY_IDLE_MS = 15000;
 const WORKSPACE_EXCLUDE =
     "**/{.git,node_modules,out,dist,build,archive,backup,.history}/**";
 
 interface IRslClientSettings {
-    import: string;
+    imports: { enabled: boolean };
+    autoImport: { enabled: boolean };
+    analysis: {
+        workspaceIndexing: "activeImports" | "workspaceIdle" | "full";
+    };
+    semanticHighlighting: { maxFileSizeKb: number };
     diagnostics: {
         enabled: boolean;
         deprecatedDeclarations: boolean;
@@ -148,52 +155,152 @@ function activeRslDocumentUri(): string | null {
 }
 
 function readRslSettings(resource?: Uri): IRslClientSettings {
-    const configuration = workspace.getConfiguration(
-        "RSLanguageServer",
-        resource
-    );
-
     return {
-        import: configuration.get<string>("import", "ДА"),
+        imports: {
+            enabled: readSetting(
+                "imports.enabled",
+                "import",
+                true,
+                resource,
+                value => typeof value === "string"
+                    ? value.toLocaleUpperCase() === "ДА"
+                    : Boolean(value)
+            )
+        },
+        autoImport: {
+            enabled: readSetting(
+                "autoImport.enabled",
+                undefined,
+                true,
+                resource
+            )
+        },
+        analysis: {
+            workspaceIndexing: readSetting(
+                "analysis.workspaceIndexing",
+                undefined,
+                "activeImports" as const,
+                resource
+            )
+        },
+        semanticHighlighting: {
+            maxFileSizeKb: readSetting(
+                "semanticHighlighting.maxFileSizeKb",
+                undefined,
+                512,
+                resource
+            )
+        },
         diagnostics: {
-            enabled: configuration.get<boolean>(
+            enabled: readSetting(
                 "diagnostics.enabled",
-                true
+                "diagnostics.enabled",
+                true,
+                resource
             ),
-            deprecatedDeclarations: configuration.get<boolean>(
+            deprecatedDeclarations: readSetting(
                 "diagnostics.deprecatedDeclarations",
-                true
+                "diagnostics.deprecatedDeclarations",
+                true,
+                resource
             ),
-            structure: configuration.get<boolean>(
+            structure: readSetting(
                 "diagnostics.structure",
-                true
+                "diagnostics.structure",
+                true,
+                resource
             ),
-            unusedVariables: configuration.get<boolean>(
+            unusedVariables: readSetting(
                 "diagnostics.unusedVariables",
-                true
+                "diagnostics.unusedVariables",
+                true,
+                resource
             ),
-            unusedImports: configuration.get<boolean>(
+            unusedImports: readSetting(
                 "diagnostics.unusedImports",
-                true
+                "diagnostics.unusedImports",
+                true,
+                resource
             ),
-            debugBreak: configuration.get<boolean>(
+            debugBreak: readSetting(
                 "diagnostics.debugBreak",
-                true
+                "diagnostics.debugBreak",
+                true,
+                resource
             ),
-            useBeforeDeclaration: configuration.get<boolean>(
+            useBeforeDeclaration: readSetting(
                 "diagnostics.useBeforeDeclaration",
-                true
+                "diagnostics.useBeforeDeclaration",
+                true,
+                resource
             ),
-            ambiguousReferences: configuration.get<boolean>(
+            ambiguousReferences: readSetting(
                 "diagnostics.ambiguousReferences",
-                true
+                "diagnostics.ambiguousReferences",
+                true,
+                resource
             ),
-            maxProblems: configuration.get<number>(
+            maxProblems: readSetting(
                 "diagnostics.maxProblems",
-                200
+                "diagnostics.maxProblems",
+                200,
+                resource
             )
         }
     };
+}
+
+function readSetting<T>(
+    key: string,
+    legacyKey: string | undefined,
+    fallback: T,
+    resource?: Uri,
+    convertLegacy?: (value: unknown) => T
+): T {
+    const current = workspace.getConfiguration("rslPlus", resource);
+    const currentExplicit = explicitConfigurationValue<T>(current.inspect(key));
+    if (currentExplicit !== undefined) {
+        return currentExplicit;
+    }
+
+    if (legacyKey) {
+        const legacy = workspace.getConfiguration(
+            "RSLanguageServer",
+            resource
+        );
+        const legacyValue = explicitConfigurationValue<unknown>(
+            legacy.inspect(legacyKey)
+        );
+        if (legacyValue !== undefined) {
+            return convertLegacy
+                ? convertLegacy(legacyValue)
+                : legacyValue as T;
+        }
+    }
+
+    return current.get<T>(key, fallback);
+}
+
+function explicitConfigurationValue<T>(inspection: unknown): T | undefined {
+    if (!inspection || typeof inspection !== "object") {
+        return undefined;
+    }
+
+    const values = inspection as Record<string, unknown>;
+    const keys = [
+        "workspaceFolderLanguageValue",
+        "workspaceLanguageValue",
+        "globalLanguageValue",
+        "workspaceFolderValue",
+        "workspaceValue",
+        "globalValue"
+    ];
+    for (const key of keys) {
+        if (values[key] !== undefined) {
+            return values[key] as T;
+        }
+    }
+    return undefined;
 }
 
 function sendClientPerformance(
@@ -264,37 +371,56 @@ function scheduleWorkspaceInventory(
     }, Math.max(0, delayMs));
 }
 
+function postponeWorkspaceInventory(): void {
+    workspaceInventoryCancellation?.cancel();
+    scheduleWorkspaceInventory(WORKSPACE_INVENTORY_IDLE_MS);
+}
+
 async function runWorkspaceInventory(): Promise<void> {
     if (workspaceInventoryRunning || workspaceInventoryCompleted) {
         return;
     }
 
     workspaceInventoryRunning = true;
+    const cancellation = new CancellationTokenSource();
+    workspaceInventoryCancellation = cancellation;
     const inventoryRevision = workspaceInventoryRevision;
     const startedAtMs = Date.now();
     sendClientPerformance("client.workspaceInventory.start");
 
-    const workspaceFiles = await workspace.findFiles(
-        "**/*.mac",
-        WORKSPACE_EXCLUDE
-    );
+    try {
+        const workspaceFiles = await workspace.findFiles(
+            "**/*.mac",
+            WORKSPACE_EXCLUDE,
+            undefined,
+            cancellation.token
+        );
+        const stale = cancellation.token.isCancellationRequested ||
+            inventoryRevision !== workspaceInventoryRevision;
 
-    await client.sendNotification(
-        "workspaceFiles",
-        workspaceFiles.map(uri => uri.toString())
-    );
+        if (!stale) {
+            await client.sendNotification(
+                "workspaceFiles",
+                workspaceFiles.map(uri => uri.toString())
+            );
+            workspaceInventoryCompleted = true;
+        }
 
-    workspaceInventoryRunning = false;
-    workspaceInventoryCompleted =
-        inventoryRevision === workspaceInventoryRevision;
-    sendClientPerformance("client.workspaceInventory.end", {
-        durationMs: Date.now() - startedAtMs,
-        files: workspaceFiles.length,
-        stale: !workspaceInventoryCompleted
-    });
-
-    if (!workspaceInventoryCompleted) {
-        scheduleWorkspaceInventory(2000);
+        sendClientPerformance("client.workspaceInventory.end", {
+            durationMs: Date.now() - startedAtMs,
+            files: workspaceFiles.length,
+            stale,
+            cancelled: cancellation.token.isCancellationRequested
+        });
+    } finally {
+        if (workspaceInventoryCancellation === cancellation) {
+            workspaceInventoryCancellation = undefined;
+        }
+        cancellation.dispose();
+        workspaceInventoryRunning = false;
+        if (!workspaceInventoryCompleted) {
+            scheduleWorkspaceInventory(WORKSPACE_INVENTORY_IDLE_MS);
+        }
     }
 }
 
@@ -449,11 +575,11 @@ export function activate(context: ExtensionContext): void {
 
     const macroFileWatcher =
         workspace.createFileSystemWatcher("**/*.mac");
-    const rslConfiguration = workspace
-        .getConfiguration("RSLanguageServer");
-    const performanceLogFile = rslConfiguration
-        .get<string>("performanceLogFile", "")
-        .trim();
+    const performanceLogFile = readSetting(
+        "performance.logFile",
+        "performanceLogFile",
+        ""
+    ).trim();
     const initialSettings = readRslSettings();
 
     context.subscriptions.push(macroFileWatcher);
@@ -470,6 +596,7 @@ export function activate(context: ExtensionContext): void {
         },
         middleware: {
             provideDocumentSymbols: async (document, token, next) => {
+                postponeWorkspaceInventory();
                 const startedAtMs = Date.now();
                 sendClientPerformance("client.outline.request", {
                     uri: document.uri.toString()
@@ -548,7 +675,7 @@ export function activate(context: ExtensionContext): void {
     context.subscriptions.push(
         window.onDidChangeActiveTextEditor(editor => {
             activeEditor = editor;
-            scheduleWorkspaceInventory();
+            postponeWorkspaceInventory();
             notifyActiveDocument().then(
                 undefined,
                 error => console.error(
@@ -558,10 +685,13 @@ export function activate(context: ExtensionContext): void {
             );
         }),
         workspace.onDidChangeTextDocument(() => {
-            scheduleWorkspaceInventory();
+            postponeWorkspaceInventory();
         }),
         workspace.onDidChangeConfiguration(event => {
-            if (!event.affectsConfiguration("RSLanguageServer")) {
+            if (
+                !event.affectsConfiguration("rslPlus") &&
+                !event.affectsConfiguration("RSLanguageServer")
+            ) {
                 return;
             }
             notifyActiveDocument().then(
@@ -575,7 +705,8 @@ export function activate(context: ExtensionContext): void {
         workspace.onDidChangeWorkspaceFolders(() => {
             workspaceInventoryRevision++;
             workspaceInventoryCompleted = false;
-            scheduleWorkspaceInventory(2000);
+            workspaceInventoryCancellation?.cancel();
+            scheduleWorkspaceInventory(WORKSPACE_INVENTORY_IDLE_MS);
         }),
         {
             dispose: () => {
@@ -583,6 +714,9 @@ export function activate(context: ExtensionContext): void {
                     clearTimeout(workspaceInventoryTimer);
                     workspaceInventoryTimer = undefined;
                 }
+                workspaceInventoryCancellation?.cancel();
+                workspaceInventoryCancellation?.dispose();
+                workspaceInventoryCancellation = undefined;
             }
         }
     );

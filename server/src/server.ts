@@ -40,7 +40,10 @@ configureSymbolTreeProvider(() => workspaceIndex.getModules());
 const scopeResolver = new RslScopeResolver(workspaceIndex);
 
 const defaultSettings: IRslSettings = {
-    import: "ДА",
+    imports: { enabled: true },
+    autoImport: { enabled: true },
+    analysis: { workspaceIndexing: "activeImports" },
+    semanticHighlighting: { maxFileSizeKb: 512 },
     diagnostics: DEFAULT_DIAGNOSTIC_SETTINGS
 };
 const settingsService = new RslSettingsService(defaultSettings);
@@ -209,7 +212,8 @@ settingsService.onDidResolve((uri, settings) => {
     const document = documents.get(uri);
     const module = workspaceIndex.getModule(uri);
 
-    workspaceIndex.setImportsEnabled(settings.import === "ДА");
+    workspaceIndex.setImportsEnabled(settings.imports.enabled);
+    moduleLoader.setIndexingMode(settings.analysis.workspaceIndexing);
 
     if (
         !document ||
@@ -219,7 +223,7 @@ settingsService.onDidResolve((uri, settings) => {
         return;
     }
 
-    if (uri === activeDocumentUri && settings.import === "ДА") {
+    if (uri === activeDocumentUri && settings.imports.enabled) {
         moduleLoader.enqueueImports(module.imports, "foreground");
     }
 
@@ -261,13 +265,15 @@ connection.onNotification(
         const settings = uri
             ? settingsService.getAvailable(uri)
             : settingsService.getWorkspaceSnapshot();
-        workspaceIndex.setImportsEnabled(settings.import === "ДА");
+        workspaceIndex.setImportsEnabled(settings.imports.enabled);
+        moduleLoader.setIndexingMode(settings.analysis.workspaceIndexing);
         moduleLoader.beginForegroundGeneration();
+        moduleLoader.noteInteractiveActivity();
         documentAnalysis.setActiveDocument(uri);
         diagnosticsCoordinator.setActiveDocument(uri);
 
         const module = uri ? workspaceIndex.getModule(uri) : undefined;
-        if (module && settings.import === "ДА") {
+        if (module && settings.imports.enabled) {
             moduleLoader.enqueueImports(module.imports, "foreground");
         }
 
@@ -364,8 +370,10 @@ languageFeatures = new RslLanguageFeatureRegistry({
     ensureDocumentParsed,
     ensureImportedSymbol: (uri, symbolName) =>
         moduleLoader.ensureImportedSymbol(uri, symbolName),
-    findAutoImportModules: symbolName =>
-        moduleLoader.findModulesExportingSymbol(symbolName),
+    findAutoImportModules: (symbolName, options) =>
+        moduleLoader.findModulesExportingSymbol(symbolName, 10, options),
+    getSettings: uri => settingsService.getAvailable(uri),
+    noteInteractiveActivity: () => moduleLoader.noteInteractiveActivity(),
     log: logMessage,
     performance: performanceLogger
 });
@@ -396,8 +404,13 @@ connection.onInitialize((params: InitializeParams) => {
         capabilities.workspace.workspaceFolders
     );
     settingsService.updateFromConfiguration({
-        RSLanguageServer: initializationOptions?.initialSettings
+        rslPlus: initializationOptions?.initialSettings
     });
+    const initialSettings = settingsService.getWorkspaceSnapshot();
+    workspaceIndex.setImportsEnabled(initialSettings.imports.enabled);
+    moduleLoader.setIndexingMode(
+        initialSettings.analysis.workspaceIndexing
+    );
 
     return {
         capabilities: {

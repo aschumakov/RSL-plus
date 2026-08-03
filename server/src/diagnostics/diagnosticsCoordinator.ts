@@ -244,7 +244,7 @@ export class DiagnosticsCoordinator {
 
         this.staleLocal.delete(uri);
         this.publishCombined(uri);
-        if (state.settings.import === "ДА") {
+        if (state.settings.imports.enabled) {
             this.options.onImports(uri, state.module.imports);
         }
     }
