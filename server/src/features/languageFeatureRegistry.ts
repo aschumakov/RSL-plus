@@ -75,6 +75,10 @@ import {
 import { formatRslDocumentRange } from "./rangeFormatting";
 import { buildRslSignatureHelp } from "./signatureHelpProvider";
 import { buildRslContextCompletions } from "./contextCompletionProvider";
+import {
+    completionPrefixAt,
+    rankCompletionItemsForPrefix
+} from "./completionRanking";
 import { findRslWorkspaceSymbols } from "./workspaceSymbolProvider";
 import {
     buildRslSourceCodeActions,
@@ -201,7 +205,11 @@ export class RslLanguageFeatureRegistry {
                 return [];
             }
 
-            return deduplicateCompletionItems(
+            const prefix = completionPrefixAt(
+                module.source,
+                context.offset
+            );
+            const items = deduplicateCompletionItems(
                 resolver.getCompletions(
                     document.uri,
                     context.tree,
@@ -211,10 +219,12 @@ export class RslLanguageFeatureRegistry {
                 this.environment.getSettings(document.uri).autoImport.enabled
                     ? buildKnownAutoImportCompletions(
                         index.getModule(document.uri)!,
-                        index
+                        index,
+                        prefix
                     )
                     : []
             );
+            return rankCompletionItemsForPrefix(items, prefix);
         });
 
         connection.onSignatureHelp(async (params, cancellationToken) => {

@@ -208,7 +208,10 @@ export class RslScopeResolver {
                             .filter(child =>
                                 allowPrivate || !child.Private
                             )
-                            .map(child => child.CIInfo)
+                            .map(child => withCompletionPriority(
+                                child.CIInfo,
+                                "0"
+                            ))
                     );
                 }
             }
@@ -217,17 +220,22 @@ export class RslScopeResolver {
         const result: CompletionItem[] = [];
         const scopes = getScopeChain(tree, offset).reverse();
 
-        for (const scope of scopes) {
+        for (let scopeIndex = 0; scopeIndex < scopes.length; scopeIndex++) {
+            const scope = scopes[scopeIndex];
+            const priority = scopeIndex === 0
+                ? "0"
+                : scope === tree
+                    ? "2"
+                    : "1";
             for (const child of scope.getChilds()) {
-                if (child.Private && scope === tree) {
-                    continue;
-                }
-
                 if (!isVisibleAt(child, offset)) {
                     continue;
                 }
 
-                result.push(child.CIInfo);
+                result.push(withCompletionPriority(
+                    child.CIInfo,
+                    priority
+                ));
             }
         }
 
@@ -454,6 +462,16 @@ export class RslScopeResolver {
             ? previous
             : undefined;
     }
+}
+
+function withCompletionPriority(
+    item: CompletionItem,
+    priority: string
+): CompletionItem {
+    return {
+        ...item,
+        sortText: `${priority}_${normalizeIdentifier(String(item.label))}`
+    };
 }
 
 export function getScopeChain(

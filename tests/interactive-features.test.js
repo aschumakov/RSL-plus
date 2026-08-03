@@ -28,6 +28,10 @@ const {
     buildRslContextCompletions
 } = require("../server/out/features/contextCompletionProvider");
 const {
+    completionPrefixAt,
+    rankCompletionItemsForPrefix
+} = require("../server/out/features/completionRanking");
+const {
     buildRslSourceCodeActions,
     RSL_FIX_ALL_KIND
 } = require("../server/out/features/sourceCodeActions");
@@ -119,7 +123,7 @@ function applyTextEdit(document, edit) {
         createModule(
             index,
             "file:///workspace/library.mac",
-            "Macro Shared(value)\nEnd;"
+            "Macro Shared(value)\nEnd;\nMacro Unrelated()\nEnd;"
         );
         const main = "Macro Test()\n  Sha\nEnd;";
         const module = createModule(
@@ -135,6 +139,11 @@ function applyTextEdit(document, edit) {
         assert.strictEqual(
             completion.additionalTextEdits[0].newText,
             "Import library;\n"
+        );
+        assert.deepStrictEqual(
+            buildKnownAutoImportCompletions(module, index, "Sha")
+                .map(item => item.label),
+            ["Shared"]
         );
     });
 
@@ -207,6 +216,31 @@ function applyTextEdit(document, edit) {
             importSource.indexOf("lib") + 2
         );
         assert.ok(importItems.some(item => item.label === "library"));
+    });
+
+    await test("Completion фильтрует по префиксу и сохраняет приоритет области", () => {
+        const source = "Macro Test()\n  GetOr\nEnd;";
+        const prefix = completionPrefixAt(
+            source,
+            source.indexOf("GetOr") + "GetOr".length
+        );
+        assert.strictEqual(prefix, "GetOr");
+
+        const items = rankCompletionItemsForPrefix([
+            { label: "GetOrderFromImport", sortText: "5_getorderfromimport" },
+            { label: "UnrelatedImported", sortText: "5_unrelatedimported" },
+            { label: "GetOrigin", sortText: "2_getorigin" }
+        ], prefix);
+        assert.deepStrictEqual(
+            items.map(item => item.label),
+            ["GetOrderFromImport", "GetOrigin"]
+        );
+        const own = items.find(item => item.label === "GetOrigin");
+        const imported = items.find(item =>
+            item.label === "GetOrderFromImport"
+        );
+        assert.ok(String(own.sortText) < String(imported.sortText));
+        assert.strictEqual(own.preselect, true);
     });
 
     await test("Workspace Symbols фильтрует известные Macro для Ctrl+T", () => {

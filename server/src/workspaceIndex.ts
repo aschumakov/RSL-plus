@@ -308,7 +308,15 @@ export class WorkspaceIndex {
                 const key = normalizeName(child.Name);
                 if (!seen.has(key)) {
                     seen.add(key);
-                    result.push(child.CIInfo);
+                    const item = child.CIInfo;
+                    result.push({
+                        ...item,
+                        detail: [
+                            item.detail || "",
+                            `Import: ${this.getImportNameForUri(module.uri)}`
+                        ].filter(value => !!value).join("\n"),
+                        sortText: `5_${normalizeName(child.Name)}`
+                    });
                 }
             }
         }

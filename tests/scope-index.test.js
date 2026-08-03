@@ -147,6 +147,52 @@ test("Completion после частично введённого метода �
     assert.ok(completions.some(item => item.label === "Run"));
 });
 
+test("Completion видит Private Macro своего файла и ставит его выше Import", () => {
+    const index = new WorkspaceIndex();
+    createModule(
+        index,
+        "file:///library.mac",
+        [
+            "Macro GetOrderFromImport()",
+            "End;",
+            "Private Macro HiddenImport()",
+            "End;"
+        ].join("\n")
+    );
+    const source = [
+        "Import library;",
+        "Private Macro GetOrigin()",
+        "End;",
+        "Macro Caller()",
+        "    Var localOnly;",
+        "    GetOr",
+        "End;",
+        "Macro Other()",
+        "    Var foreignLocal;",
+        "End;"
+    ].join("\n");
+    const tree = createModule(index, "file:///main.mac", source);
+    const resolver = new RslScopeResolver(index);
+    const completions = resolver.getCompletions(
+        "file:///main.mac",
+        tree,
+        source.indexOf("GetOr") + "GetOr".length
+    );
+    const ownPrivate = completions.find(item =>
+        item.label === "GetOrigin"
+    );
+    const imported = completions.find(item =>
+        item.label === "GetOrderFromImport"
+    );
+
+    assert.ok(ownPrivate, "Private Macro текущего файла должен быть виден");
+    assert.ok(imported);
+    assert.ok(String(ownPrivate.sortText).startsWith("2_"));
+    assert.ok(String(imported.sortText).startsWith("5_"));
+    assert.ok(!completions.some(item => item.label === "HiddenImport"));
+    assert.ok(!completions.some(item => item.label === "foreignLocal"));
+});
+
 test("Private-метод доступен через this внутри своего класса", () => {
     const source = [
         "Class Service",

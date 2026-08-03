@@ -19,6 +19,7 @@ import type {
     IIndexedSymbol,
     WorkspaceIndex
 } from "../workspaceIndex";
+import { completionLabelMatchesPrefix } from "./completionRanking";
 
 const NON_IMPORT_IDENTIFIERS = new Set([
     "and", "array", "break", "class", "const", "continue", "elif", "else",
@@ -35,7 +36,8 @@ export interface IAutoImportCandidate {
 /** Completion с additionalTextEdits, не запускающий полный workspace scan. */
 export function buildKnownAutoImportCompletions(
     module: IIndexedModule,
-    index: WorkspaceIndex
+    index: WorkspaceIndex,
+    prefix = ""
 ): CompletionItem[] {
     if (!index.areImportsEnabled) {
         return [];
@@ -45,6 +47,9 @@ export function buildKnownAutoImportCompletions(
     const seen = new Set<string>();
 
     for (const symbol of index.findUnimportedSymbols(module.uri)) {
+        if (!completionLabelMatchesPrefix(symbol.object.Name, prefix)) {
+            continue;
+        }
         const key = [
             normalizeIdentifier(symbol.object.Name),
             symbol.uri
