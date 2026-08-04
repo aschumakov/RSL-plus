@@ -1,6 +1,7 @@
 import type { TextDocuments } from "vscode-languageserver/node";
 import type { TextDocument } from "vscode-languageserver-textdocument";
 
+import { createOpenModuleModel } from "../moduleModel";
 import { RslSymbol } from "../symbols/rslSymbol";
 import { parseRslSyntax } from "../syntaxParser";
 import type { RslSettingsService } from "./settingsService";
@@ -529,23 +530,24 @@ export class DocumentAnalysisService {
             return;
         }
 
+        const model = createOpenModuleModel(text, syntax);
+        if (treeSpan) {
+            performance.end(treeSpan, {
+                topLevelSymbols: model.symbolTree.children.length
+            });
+        }
+
         const indexSpan = performance?.enabled
             ? performance.start("analysis.index", {
                 uri,
                 version
             })
             : undefined;
-        const indexed = this.index.updateOpenModule(
+        const indexed = this.index.updateOpenModuleModel(
             uri,
-            text,
-            version,
-            syntax
+            model,
+            version
         );
-        if (treeSpan) {
-            performance.end(treeSpan, {
-                topLevelSymbols: indexed.symbolTree.children.length
-            });
-        }
         if (indexSpan) {
             performance.end(indexSpan, {
                 imports: indexed.imports.length

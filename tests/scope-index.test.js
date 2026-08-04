@@ -122,6 +122,50 @@ test("Метод разрешается по типу объекта слева 
     assert.strictEqual(resolved.symbol.name, "Run");
 });
 
+test("Тип объекта выводится из отдельного присваивания конструктора", () => {
+    const source = [
+        "Class Service",
+        "    Macro Run()",
+        "    End;",
+        "End;",
+        "Macro Test()",
+        "    Var service;",
+        "    service = Service();",
+        "    service.Run();",
+        "End;"
+    ].join("\n");
+    const index = new WorkspaceIndex();
+    const tree = createModule(index, "file:///main.mac", source);
+    const resolver = new RslScopeResolver(index);
+    const resolved = resolver.resolveAt(
+        "file:///main.mac",
+        tree,
+        offsetInside(source, "Run", 1)
+    );
+
+    assert.ok(resolved);
+    assert.strictEqual(resolved.symbol.name, "Run");
+
+    const semantic = buildRslSemanticTokens(
+        index.getModule("file:///main.mac"),
+        index,
+        resolver
+    ).data;
+    let line = 0;
+    let character = 0;
+    const methodTokens = [];
+    for (let offset = 0; offset < semantic.length; offset += 5) {
+        line += semantic[offset];
+        character = semantic[offset] === 0
+            ? character + semantic[offset + 1]
+            : semantic[offset + 1];
+        if (semantic[offset + 3] === 1) {
+            methodTokens.push({ line, character });
+        }
+    }
+    assert.ok(methodTokens.some(token => token.line === 7));
+});
+
 test("Completion после частично введённого метода остаётся объектным", () => {
     const source = [
         "Class Service",

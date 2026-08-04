@@ -983,12 +983,24 @@ class SyntaxDeclarationExtractor {
 
     private findNameToken(node: IRslSyntaxNode): IRslToken | undefined {
         const name = normalizeIdentifier(node.name || "");
-        return this.tokens.find(token =>
-            token.start >= node.start &&
-            token.end <= node.end &&
-            token.kind === "identifier" &&
-            normalizeIdentifier(token.value) === name
-        );
+        const firstIndex = lowerBoundTokenStart(this.tokens, node.start);
+
+        for (let index = firstIndex; index < this.tokens.length; index++) {
+            const token = this.tokens[index];
+
+            if (token.start > node.end) {
+                break;
+            }
+            if (
+                token.end <= node.end &&
+                token.kind === "identifier" &&
+                normalizeIdentifier(token.value) === name
+            ) {
+                return token;
+            }
+        }
+
+        return undefined;
     }
 
     private parameterText(node: IRslSyntaxNode): string {
@@ -1015,6 +1027,31 @@ class SyntaxDeclarationExtractor {
             roots.push(descriptor);
         }
     }
+}
+
+/**
+ * SyntaxDeclarationExtractor вызывается для каждого объявления. Поиск от
+ * начала общего token stream превращал построение symbol tree в O(D * T).
+ * Нижняя граница оставляет поиск локальным диапазону конкретного AST-узла.
+ */
+function lowerBoundTokenStart(
+    tokens: readonly IRslToken[],
+    offset: number
+): number {
+    let left = 0;
+    let right = tokens.length;
+
+    while (left < right) {
+        const middle = (left + right) >>> 1;
+
+        if (tokens[middle].start < offset) {
+            left = middle + 1;
+        } else {
+            right = middle;
+        }
+    }
+
+    return left;
 }
 
 function nodeVisibility(node: IRslSyntaxNode): RslSymbolVisibility {

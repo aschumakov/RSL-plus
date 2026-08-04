@@ -35,9 +35,13 @@ function testSqlInjectionGrammar() {
     assert.strictEqual(grammar.injectionSelector, "L:source.mac");
     assert.ok(begin.test("   ["));
     assert.ok(end.test("   ];"));
-    assert.ok(!end.test("'[^[[:digit:]]]*'"));
-    assert.ok(!end.test("value := arr[index];"));
-    assert.ok(!end.test("-- ] внутри комментария"));
+    assert.ok(end.test("] (Account, Summa:l);"));
+    assert.ok(block.patterns.some(item =>
+        item.include === "#sqlSingleQuotedString"
+    ));
+    assert.ok(block.patterns.some(item =>
+        item.include === "#sqlLineComment"
+    ));
     assert.strictEqual(block.name, "meta.embedded.block.sql.rsl");
 }
 
@@ -151,6 +155,28 @@ function testOptimizedTokenLookup() {
     );
 }
 
+function testLinearDeclarationExtraction() {
+    const source = Array.from(
+        { length: 2000 },
+        (_value, index) => [
+            `Macro Procedure${index}(value: Integer)`,
+            "  Var result;",
+            `  result = value + ${index};`,
+            "End;"
+        ].join("\n")
+    ).join("\n");
+    const startedAt = Date.now();
+    const tree = createSymbolTree(source);
+    const elapsed = Date.now() - startedAt;
+
+    assert.strictEqual(tree.children.length, 2000);
+    assert.ok(
+        elapsed < 500,
+        `Построение 2000 деклараций заняло ${elapsed} мс; ` +
+        "возможен возврат квадратичного поиска токенов"
+    );
+}
+
 testSqlInjectionGrammar();
 console.log("[OK] grammar корректно ограничивает SQL-блок");
 
@@ -159,3 +185,6 @@ console.log("[OK] большой макрос с SQL разбирается");
 
 testOptimizedTokenLookup();
 console.log("[OK] поиск токена использует оптимизированный индекс");
+
+testLinearDeclarationExtraction();
+console.log("[OK] извлечение деклараций остаётся линейным");

@@ -71,6 +71,18 @@ export class WorkspaceIndex {
         );
     }
 
+    /** Регистрирует заранее построенную полную модель открытого документа. */
+    updateOpenModuleModel(
+        uri: string,
+        model: IRslModuleModel,
+        version: number
+    ): IIndexedModule {
+        if (model.kind !== "open") {
+            throw new Error("Expected an open RSL module model");
+        }
+        return this.replace(uri, model, version, true);
+    }
+
     updateExternalModule(
         uri: string,
         source: string,

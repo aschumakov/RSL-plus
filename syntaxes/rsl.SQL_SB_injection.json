@@ -9,7 +9,7 @@
                "name": "punctuation.section.embedded.begin.rsl"
             }
          },
-         "end": "^\\s*(\\])\\s*;?\\s*$",
+         "end": "(\\])",
          "endCaptures": {
             "1": {
                "name": "punctuation.section.embedded.end.rsl"

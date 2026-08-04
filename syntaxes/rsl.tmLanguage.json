@@ -89,8 +89,12 @@
          "include": "#logical_types"
       },
       {
-         "match": "(?i)([а-яa-z0-9_]*)\\.",
-         "name": "variable.class.object.rsl"
+         "match": "(?i)\\b([а-яёa-z_][а-яёa-z0-9_]*)(?=\\s*\\.)",
+         "captures": {
+            "1": {
+               "name": "variable.other.object.rsl"
+            }
+         }
       }
    ],
    "repository": {
@@ -126,7 +130,7 @@
       "output_string": {
          "patterns": [
             {
-               "begin": "(\\s|^)\\[",
+               "begin": "(?<!\\S)\\[",
                "beginCaptures": {
                   "0": {
                      "name": "string.quoted.single.rsl"

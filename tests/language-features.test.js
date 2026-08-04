@@ -43,7 +43,10 @@ const {
     parseOutputForms
 } = require("../server/out/parsing/outputFormParser");
 const { RslScopeResolver } = require("../server/out/scopeResolver");
-const { buildRslSemanticTokens } = require("../server/out/semanticTokens");
+const {
+    buildRslSemanticTokens,
+    RSL_SEMANTIC_TOKENS_LEGEND
+} = require("../server/out/semanticTokens");
 const { parseRslSyntax } = require("../server/out/syntaxParser");
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
 
@@ -217,6 +220,54 @@ test("Semantic Tokens помечают параметр отдельно от п
     }
 
     assert.ok(tokenTypes.includes(4));
+});
+
+test("Semantic Tokens не смещаются после многострочных квадратных блоков", () => {
+    for (const eol of ["\n", "\r\n"]) {
+        const source = [
+            "[",
+            "select '[^[[:digit:]]]*' from dual",
+            "]",
+            "[ Заголовок ####",
+            "  продолжение #### ]",
+            "(Account);",
+            "Macro Real(value)",
+            "  Var result;",
+            "  result = value;",
+            "End;"
+        ].join(eol);
+        const index = new WorkspaceIndex();
+        const module = createModule(index, "file:///square.mac", source);
+        const data = buildRslSemanticTokens(module, index).data;
+        const lines = source.split(/\r\n|\n|\r/);
+        let line = 0;
+        let character = 0;
+        const decoded = [];
+
+        for (let offset = 0; offset < data.length; offset += 5) {
+            line += data[offset];
+            character = data[offset] === 0
+                ? character + data[offset + 1]
+                : data[offset + 1];
+            decoded.push({
+                line,
+                character,
+                text: lines[line].substring(
+                    character,
+                    character + data[offset + 2]
+                ),
+                type: RSL_SEMANTIC_TOKENS_LEGEND.tokenTypes[data[offset + 3]]
+            });
+        }
+
+        assert.ok(decoded.some(token =>
+            token.line === 6 && token.text === "Real" &&
+            token.type === "function"
+        ));
+        assert.ok(decoded.every(token =>
+            token.line < lines.length && token.character >= 0 && token.text
+        ));
+    }
 });
 
 test("Output forms классифицируются и формат-спецификаторы разбираются", () => {

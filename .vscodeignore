@@ -10,6 +10,8 @@ server/src/**
 **/*.tsbuildinfo
 **/node_modules/.package-lock.json
 /node_modules/**
+**/*.patch
+patches/**
 client/node_modules/@types/**
 client/node_modules/undici-types/**
 server/node_modules/@types/**

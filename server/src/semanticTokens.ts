@@ -128,6 +128,23 @@ export function buildRslSemanticTokens(
             continue;
         }
 
+        if (isDeclaredTypeToken(tokens, tokenIndex)) {
+            const typeSymbol = resolver.resolveTypeName(
+                module.uri,
+                module.symbolTree,
+                token.value
+            );
+
+            if (typeSymbol) {
+                entries.push({
+                    token,
+                    type: TOKEN_TYPES.indexOf("class"),
+                    modifiers: 0
+                });
+                continue;
+            }
+        }
+
         const declaration = declarationByRange.get(
             rangeKey(token.start, token.end)
         );
@@ -530,4 +547,16 @@ function lowerBoundByLine(tokens: IRslToken[], line: number): number {
 
 function rangeKey(start: number, end: number): string {
     return `${start}:${end}`;
+}
+
+function isDeclaredTypeToken(
+    tokens: readonly IRslToken[],
+    index: number
+): boolean {
+    if (index <= 0) {
+        return false;
+    }
+
+    const previous = tokens[index - 1];
+    return previous.kind === "symbol" && previous.raw === ":";
 }

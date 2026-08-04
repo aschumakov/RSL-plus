@@ -27,6 +27,11 @@ interface IResolutionCache {
     byTokenStart: Map<number, IResolvedSymbol | null>;
 }
 
+interface IConstructorAssignment {
+    offset: number;
+    typeName: string;
+}
+
 /*
  * RslSymbol после построения syntax tree фактически неизменяем. Кэши WeakMap
  * не удерживают старые деревья после обновления документа.
@@ -44,6 +49,10 @@ const childrenByNameCache = new WeakMap<RslSymbol, Map<string, RslSymbol[]>>();
 export class RslScopeResolver {
     private tokensByModule = new WeakMap<IIndexedModule, IRslToken[]>();
     private resolutionByModule = new WeakMap<IIndexedModule, IResolutionCache>();
+    private constructorAssignmentsByModule = new WeakMap<
+        IIndexedModule,
+        Map<string, IConstructorAssignment[]>
+    >();
     private resolutionCacheHits = 0;
     private resolutionCacheMisses = 0;
 
@@ -114,6 +123,15 @@ export class RslScopeResolver {
             hits: this.resolutionCacheHits,
             misses: this.resolutionCacheMisses
         };
+    }
+
+    /** Разрешает имя в позиции типа, не позволяя переменной затенить CLASS. */
+    resolveTypeName(
+        uri: string,
+        tree: RslSymbol,
+        name: string
+    ): IIndexedSymbol | undefined {
+        return this.findClassSymbol(uri, tree, name);
     }
 
     private resolveTokenAt(
@@ -355,13 +373,31 @@ export class RslScopeResolver {
             typeName = module
                 ? inferDeclaredType(this.getTokens(module), receiverObject)
                 : "";
+
+            if (module && (!typeName || typeName === "variant")) {
+                typeName = this.inferAssignedType(
+                    module,
+                    tree,
+                    receiverObject,
+                    offset
+                );
+            }
         }
 
         if (!typeName || typeName === "variant") {
             return undefined;
         }
 
-        const localClass = (getChildrenByName(tree).get(typeName) || [])
+        return this.findClassSymbol(uri, tree, typeName);
+    }
+
+    private findClassSymbol(
+        uri: string,
+        tree: RslSymbol,
+        typeName: string
+    ): IIndexedSymbol | undefined {
+        const normalizedType = normalizeIdentifier(typeName);
+        const localClass = (getChildrenByName(tree).get(normalizedType) || [])
             .find(child =>
                 child.kind === CompletionItemKind.Class
             );
@@ -370,7 +406,7 @@ export class RslScopeResolver {
             return { uri, symbolId: localClass.id, symbol: localClass };
         }
 
-        const imported = this.index.findImportedSymbols(uri, typeName)
+        const imported = this.index.findImportedSymbols(uri, normalizedType)
             .find(symbol =>
                 symbol.symbol.kind === CompletionItemKind.Class
             );
@@ -379,10 +415,91 @@ export class RslScopeResolver {
             return imported;
         }
 
-        return this.index.findSymbols(typeName)
+        return this.index.findSymbols(normalizedType)
             .find(symbol =>
                 symbol.symbol.kind === CompletionItemKind.Class
             );
+    }
+
+    /**
+     * Поддерживает распространённый RSL-шаблон:
+     *     Var command;
+     *     command = RsdCommand(...);
+     *     command.Execute();
+     *
+     * Индекс присваиваний строится один раз на immutable module model, поэтому
+     * Semantic Tokens не сканирует весь Macro заново для каждого вызова.
+     */
+    private inferAssignedType(
+        module: IIndexedModule,
+        tree: RslSymbol,
+        receiverObject: RslSymbol,
+        offset: number
+    ): string {
+        const assignments = this.getConstructorAssignments(module).get(
+            normalizeIdentifier(receiverObject.name)
+        );
+        if (!assignments || assignments.length === 0) {
+            return "";
+        }
+
+        const scopeChain = getScopeChain(tree, offset);
+        const scope = scopeChain[scopeChain.length - 1] || tree;
+        const lowerBound = Math.max(
+            receiverObject.range.start,
+            scope.range.start
+        );
+        let index = upperBoundAssignmentOffset(assignments, offset) - 1;
+
+        while (index >= 0) {
+            const assignment = assignments[index--];
+            if (assignment.offset < lowerBound) {
+                break;
+            }
+            return assignment.typeName;
+        }
+
+        return "";
+    }
+
+    private getConstructorAssignments(
+        module: IIndexedModule
+    ): Map<string, IConstructorAssignment[]> {
+        let result = this.constructorAssignmentsByModule.get(module);
+        if (result) {
+            return result;
+        }
+
+        result = new Map<string, IConstructorAssignment[]>();
+        const tokens = this.getTokens(module);
+
+        for (let index = 0; index + 3 < tokens.length; index++) {
+            const target = tokens[index];
+            const equals = tokens[index + 1];
+            const constructor = tokens[index + 2];
+            const open = tokens[index + 3];
+
+            if (
+                target.kind !== "identifier" ||
+                (index > 0 && tokens[index - 1].raw === ".") ||
+                equals.kind !== "symbol" || equals.raw !== "=" ||
+                constructor.kind !== "identifier" ||
+                open.kind !== "symbol" || open.raw !== "("
+            ) {
+                continue;
+            }
+
+            const name = normalizeIdentifier(target.value);
+            const values = result.get(name) || [];
+            values.push({
+                offset: target.start,
+                typeName: normalizeIdentifier(constructor.value)
+            });
+            result.set(name, values);
+        }
+
+        this.constructorAssignmentsByModule.set(module, result);
+        return result;
     }
 
     private canAccessPrivateMembers(
@@ -601,9 +718,18 @@ function inferDeclaredType(
             break;
         }
 
-        if (depth === 0 && (token.raw === ":" || token.raw === "=")) {
+        if (depth === 0 && token.raw === ":") {
             const typeToken = tokens[index + 1];
             return typeToken && typeToken.kind === "identifier"
+                ? normalizeIdentifier(typeToken.value)
+                : "";
+        }
+
+        if (depth === 0 && token.raw === "=") {
+            const typeToken = tokens[index + 1];
+            const openToken = tokens[index + 2];
+            return typeToken?.kind === "identifier" &&
+                openToken?.kind === "symbol" && openToken.raw === "("
                 ? normalizeIdentifier(typeToken.value)
                 : "";
         }
@@ -701,6 +827,26 @@ function upperBoundByStart(tokens: IRslToken[], start: number): number {
         const middle = (left + right) >>> 1;
 
         if (tokens[middle].start <= start) {
+            left = middle + 1;
+        } else {
+            right = middle;
+        }
+    }
+
+    return left;
+}
+
+function upperBoundAssignmentOffset(
+    assignments: readonly IConstructorAssignment[],
+    offset: number
+): number {
+    let left = 0;
+    let right = assignments.length;
+
+    while (left < right) {
+        const middle = (left + right) >>> 1;
+
+        if (assignments[middle].offset <= offset) {
             left = middle + 1;
         } else {
             right = middle;
