@@ -2,6 +2,7 @@
 .github/**
 .vscode/**
 .gitignore
+BnRsl.pdf
 tests/**
 client/src/**
 server/src/**

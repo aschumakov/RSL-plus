@@ -552,6 +552,29 @@ test("Верхнеуровневый ONERROR не скрывает структ�
     ));
 });
 
+test("ONERROR проверяется по допустимой области и количеству", () => {
+    const nested = diagnosticsFor([
+        "Macro Test()",
+        "  If (true)",
+        "    OnError()",
+        "  End;",
+        "End;"
+    ].join("\n"));
+    assert.ok(nested.some(item =>
+        item.code === "invalid-onerror-context"
+    ));
+
+    const duplicate = diagnosticsFor([
+        "Macro Test()",
+        "OnError(first)",
+        "  OnError(second)",
+        "End;"
+    ].join("\n"));
+    assert.ok(duplicate.some(item =>
+        item.code === "duplicate-onerror"
+    ));
+});
+
 test("Diagnostic engine подключает правила через реестр и применяет лимит", () => {
     const source = "Macro Test()\nEnd;";
     const index = new WorkspaceIndex();

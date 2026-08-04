@@ -108,6 +108,32 @@ export function buildRslCodeActions(
                 );
                 break;
 
+            case "missing-semicolon":
+                action = createInsertAfterPreviousTokenAction(
+                    module,
+                    diagnostic,
+                    "Добавить пропущенную ';'",
+                    ";"
+                );
+                break;
+
+            case "missing-comma":
+                action = createInsertAfterPreviousTokenAction(
+                    module,
+                    diagnostic,
+                    "Добавить пропущенную ','",
+                    ","
+                );
+                break;
+
+            case "trailing-comma":
+                action = createDeleteTokenAction(
+                    module,
+                    diagnostic,
+                    "Удалить лишнюю ','"
+                );
+                break;
+
             default:
                 break;
         }
@@ -175,6 +201,39 @@ function createInsertAfterDiagnosticAction(
         title,
         {
             range: offsetRange(module, offsets.end, offsets.end),
+            newText
+        }
+    );
+}
+
+function createInsertAfterPreviousTokenAction(
+    module: IIndexedModule,
+    diagnostic: Diagnostic,
+    title: string,
+    newText: string
+): CodeAction | undefined {
+    const offsets = getDiagnosticOffsets(module, diagnostic);
+    let previousEnd = -1;
+
+    for (const token of module.syntax.tokens) {
+        if (token.start >= offsets.start) {
+            break;
+        }
+        if (token.end <= offsets.start) {
+            previousEnd = token.end;
+        }
+    }
+
+    if (previousEnd < 0) {
+        return undefined;
+    }
+
+    return createAction(
+        module.uri,
+        diagnostic,
+        title,
+        {
+            range: offsetRange(module, previousEnd, previousEnd),
             newText
         }
     );

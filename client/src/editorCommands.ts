@@ -1,15 +1,20 @@
 import {
     commands,
     DocumentSymbol,
+    EndOfLine,
     env,
     ExtensionContext,
     Range,
     Selection,
+    SnippetString,
     SymbolInformation,
     SymbolKind,
-    window
+    window,
+    workspace
 } from "vscode";
 import type { LanguageClient } from "vscode-languageclient/node";
+
+import { buildRslSmartEnterSnippet } from "./smartEnter";
 
 interface IRslBlockRange {
     start: { line: number; character: number };
@@ -33,6 +38,7 @@ export function registerEditorCommands(
             "rsl.selectCurrentBlock",
             () => selectCurrentBlock(environment)
         ),
+        commands.registerCommand("rsl.smartEnter", smartEnter),
         commands.registerCommand(
             "extension.insertQueryFromClipboard",
             insertQueryFromClipboard
@@ -42,6 +48,77 @@ export function registerEditorCommands(
             copyQueryToClipboard
         )
     );
+}
+
+async function smartEnter(): Promise<void> {
+    const editor = window.activeTextEditor;
+    if (!editor || editor.document.languageId !== "rsl") {
+        return;
+    }
+
+    const enabled = workspace.getConfiguration(
+        "rslPlus",
+        editor.document.uri
+    ).get<boolean>("editor.completeBlocksOnEnter", true);
+    const selection = editor.selection;
+
+    if (
+        !enabled ||
+        !selection.isEmpty ||
+        editor.selections.length !== 1
+    ) {
+        await defaultEnter(editor.document.eol);
+        return;
+    }
+
+    const position = selection.active;
+    const line = editor.document.lineAt(position.line);
+    const beforeCursor = line.text.substring(0, position.character);
+    const afterCursor = line.text.substring(position.character);
+    const tabSize = typeof editor.options.tabSize === "number"
+        ? Math.max(1, editor.options.tabSize)
+        : 4;
+    const indentUnit = editor.options.insertSpaces === false
+        ? "\t"
+        : " ".repeat(tabSize);
+    const eol = editor.document.eol === EndOfLine.CRLF ? "\r\n" : "\n";
+    const snippet = buildRslSmartEnterSnippet({
+        beforeCursor,
+        afterCursor,
+        indentUnit,
+        eol,
+        nextNonEmptyLine: findNextNonEmptyLine(editor, position.line + 1)
+    });
+
+    if (!snippet) {
+        await defaultEnter(editor.document.eol);
+        return;
+    }
+
+    await editor.insertSnippet(
+        new SnippetString(snippet),
+        new Range(position, line.range.end),
+        { undoStopBefore: true, undoStopAfter: true }
+    );
+}
+
+function findNextNonEmptyLine(
+    editor: NonNullable<typeof window.activeTextEditor>,
+    startLine: number
+): string | undefined {
+    for (let line = startLine; line < editor.document.lineCount; line++) {
+        const text = editor.document.lineAt(line).text;
+        if (text.trim().length > 0) {
+            return text;
+        }
+    }
+    return undefined;
+}
+
+async function defaultEnter(eol: EndOfLine): Promise<void> {
+    await commands.executeCommand("default:type", {
+        text: eol === EndOfLine.CRLF ? "\r\n" : "\n"
+    });
 }
 
 async function foldAllMacros(): Promise<void> {

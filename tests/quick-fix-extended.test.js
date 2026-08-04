@@ -150,6 +150,36 @@ test("Quick Fix удаляет повторную точку с запятой",
   assert.strictEqual(updated, source.replace(";;", ";"));
 });
 
+test("Quick Fix добавляет пропущенные разделители", () => {
+  for (const [source, code, expected] of [
+    ["Var first second;", "missing-comma", "Var first, second;"],
+    [
+      "Macro Test()\n  first = 1\n  second = 2;\nEnd;",
+      "missing-semicolon",
+      "Macro Test()\n  first = 1;\n  second = 2;\nEnd;"
+    ]
+  ]) {
+    const { module, diagnostics } = diagnosticsFor(source);
+    const diagnostic = diagnostics.find(item => item.code === code);
+    assert.ok(diagnostic, `Не найдена диагностика ${code}`);
+    assert.strictEqual(
+      applyFirstAction(source, module, diagnostic),
+      expected
+    );
+  }
+});
+
+test("Quick Fix удаляет завершающую запятую", () => {
+  const source = "Macro Test(first,)\nEnd;";
+  const { module, diagnostics } = diagnosticsFor(source);
+  const diagnostic = diagnostics.find(item => item.code === "trailing-comma");
+  assert.ok(diagnostic);
+  assert.strictEqual(
+    applyFirstAction(source, module, diagnostic),
+    "Macro Test(first)\nEnd;"
+  );
+});
+
 test("Если последний параметр обработчика используется, остальные не проверяются", () => {
   const source = [
     "Macro ExecuteStep(doc, payorder, DocKind, IdOperation, NumberStep)",

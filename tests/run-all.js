@@ -8,6 +8,7 @@ const tests = [
     "syntax-conformance.test.js",
     "syntax-parser.test.js",
     "parser-regressions.test.js",
+    "smart-enter.test.js",
     "formatter.test.js",
     "folding.test.js",
     "definition.test.js",

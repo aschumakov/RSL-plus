@@ -122,6 +122,17 @@
          {
             "command": "rsl.selectCurrentBlock",
             "title": "RSL: Выделить текущий блок"
+         },
+         {
+            "command": "rsl.smartEnter",
+            "title": "RSL: Новая строка с завершением блока"
+         }
+      ],
+      "keybindings": [
+         {
+            "command": "rsl.smartEnter",
+            "key": "enter",
+            "when": "editorTextFocus && editorLangId == rsl && !editorHasSelection && !editorHasMultipleSelections && !suggestWidgetVisible && !inlineSuggestionVisible && !renameInputVisible && !inSnippetMode"
          }
       ],
       "menus": {
@@ -186,6 +197,12 @@
                "minimum": 0,
                "default": 512,
                "description": "Максимальный размер файла для семантической подсветки, КБ. Для больших файлов остаётся обычная подсветка синтаксиса. 0 — без ограничения."
+            },
+            "rslPlus.editor.completeBlocksOnEnter": {
+               "scope": "resource",
+               "type": "boolean",
+               "default": true,
+               "description": "При Enter после заголовка IF, WHILE, FOR, WITH, MACRO или CLASS создать строку с отступом и добавить закрывающий END."
             },
             "rslPlus.performance.logFile": {
                "scope": "window",

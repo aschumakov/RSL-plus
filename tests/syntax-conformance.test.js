@@ -60,6 +60,52 @@ assert.ok(parseRslSyntax("var Broken =;").diagnostics.some(item =>
     item.code === "expected-initializer-expression"
 ));
 
+for (const source of ["Var;", "Const;", "Array;", "Import;"]) {
+    assert.ok(
+        parseRslSyntax(source).diagnostics.some(item =>
+            item.code.startsWith("expected-")
+        ),
+        `${source} не должен компилироваться без имени`
+    );
+}
+
+for (const source of [
+    "Var value,;",
+    "Const value = 1,;",
+    "Array values,;",
+    "Import globals,;",
+    "Macro Test(value,)\nEnd;"
+]) {
+    assert.ok(
+        parseRslSyntax(source).diagnostics.some(item =>
+            item.code === "trailing-comma"
+        ),
+        `${source} должен диагностировать лишнюю запятую`
+    );
+}
+
+assert.ok(parseRslSyntax("If ()\nEnd;").diagnostics.some(item =>
+    item.code === "expected-condition"
+));
+assert.ok(parseRslSyntax("While (value ==)\nEnd;").diagnostics.some(item =>
+    item.code === "expected-expression-operand"
+));
+assert.ok(parseRslSyntax("While (value ==").diagnostics.some(item =>
+    item.code === "expected-expression-operand"
+));
+assert.ok(parseRslSyntax("For\nEnd;").diagnostics.some(item =>
+    item.code === "missing-opening-parenthesis"
+));
+assert.ok(parseRslSyntax("For ()\nEnd;").diagnostics.some(item =>
+    item.code === "expected-for-header"
+));
+assert.ok(parseRslSyntax("Break;").diagnostics.some(item =>
+    item.code === "loop-control-outside-loop"
+));
+assert.ok(!parseRslSyntax("While (true)\n Break;\nEnd;").diagnostics.some(item =>
+    item.code === "loop-control-outside-loop"
+));
+
 const typedArrays = parseRslSyntax(
     "array Values: Integer, Names: String;"
 );

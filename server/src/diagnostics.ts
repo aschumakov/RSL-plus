@@ -438,6 +438,7 @@ function addEndDiagnostics(
 ): void {
     const tokens = module.syntax.tokens;
     const stack: IBlockEntry[] = [];
+    const onErrorOwners = new Set<string>();
     const unitEndStarts = new Set(
         module.syntax.root.tokens
             .filter(token =>
@@ -534,6 +535,37 @@ function addEndDiagnostics(
 
         /* ONERROR открывает обработчик до END родительского MACRO или EOF. */
         if (canStartBlock && word === "onerror") {
+            const owner = stack.length > 0
+                ? stack[stack.length - 1]
+                : undefined;
+
+            if (
+                owner &&
+                owner.keyword !== "macro" &&
+                owner.keyword !== "class"
+            ) {
+                result.push(createTokenDiagnostic(
+                    token,
+                    DiagnosticSeverity.Error,
+                    "ONERROR допустим только на уровне файла, MACRO или CLASS",
+                    "invalid-onerror-context"
+                ));
+            } else {
+                const ownerKey = owner
+                    ? `${owner.keyword}:${owner.token.start}`
+                    : "unit";
+
+                if (onErrorOwners.has(ownerKey)) {
+                    result.push(createTokenDiagnostic(
+                        token,
+                        DiagnosticSeverity.Error,
+                        "Для одной области допускается только один ONERROR",
+                        "duplicate-onerror"
+                    ));
+                } else {
+                    onErrorOwners.add(ownerKey);
+                }
+            }
             canStartBlock = false;
             continue;
         }

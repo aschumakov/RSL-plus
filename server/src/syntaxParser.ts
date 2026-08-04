@@ -107,6 +107,10 @@ const SYMBOL_OPERATORS = new Set([
     "=", "==", "!=", "<", ">", "<=", ">=", "+", "-", "*", "/", "@",
     "%", "&", "|", "^", "~", "?", ":", ".", ",", "("
 ]);
+const OPERATORS_REQUIRING_RIGHT_OPERAND = new Set([
+    "=", "==", "!=", "<", ">", "<=", ">=", "+", "-", "*", "/",
+    "%", "&", "|", "^", "and", "or", "not", "@", "~", "."
+]);
 
 /**
  * Строит tolerant syntax tree RSL на единственном общем потоке токенов.
@@ -570,6 +574,7 @@ function createExpressionNode(
 class Parser {
     private index = 0;
     private diagnostics: IRslSyntaxDiagnostic[] = [];
+    private loopDepth = 0;
 
     constructor(
         private tokens: IRslToken[],
@@ -761,6 +766,7 @@ class Parser {
         const start = modifier ? modifier.start : this.current().start;
         const items: IRslSyntaxNode[] = [];
         const used: IRslToken[] = modifier ? [modifier] : [];
+        let reportedItemError = false;
         used.push(this.take());
 
         while (
@@ -777,6 +783,7 @@ class Parser {
                     "Ожидается имя импортируемого модуля",
                     token
                 );
+                reportedItemError = true;
                 this.take();
                 continue;
             }
@@ -793,7 +800,20 @@ class Parser {
             ));
 
             if (this.isSymbol(",")) {
-                used.push(this.take());
+                const comma = this.take();
+                used.push(comma);
+                if (
+                    this.isSymbol(";") ||
+                    BLOCK_BOUNDARIES.has(this.word()) ||
+                    this.atEnd()
+                ) {
+                    this.error(
+                        "trailing-comma",
+                        "После ',' ожидается имя импортируемого модуля",
+                        comma
+                    );
+                    break;
+                }
                 continue;
             }
 
@@ -820,6 +840,14 @@ class Parser {
             }
 
             break;
+        }
+
+        if (items.length === 0 && !reportedItemError) {
+            this.error(
+                "expected-import-name",
+                "Ожидается имя импортируемого модуля",
+                used[0]
+            );
         }
 
         const node = this.node(
@@ -903,8 +931,10 @@ class Parser {
     ): IRslSyntaxNode {
         const start = modifier ? modifier.start : this.current().start;
         const used: IRslToken[] = modifier ? [modifier] : [];
-        used.push(this.take());
+        const declarationKeyword = this.take();
+        used.push(declarationKeyword);
         const children: IRslSyntaxNode[] = [];
+        let reportedNameError = false;
 
         while (
             !this.atEnd() &&
@@ -922,6 +952,7 @@ class Parser {
                     "Ожидается имя переменной",
                     name
                 );
+                reportedNameError = true;
                 break;
             }
 
@@ -996,7 +1027,22 @@ class Parser {
             used.push(...declTokens.slice(1));
 
             if (this.isSymbol(",")) {
-                used.push(this.take());
+                const comma = this.take();
+                used.push(comma);
+                if (
+                    this.isSymbol(";") ||
+                    BLOCK_BOUNDARIES.has(this.word()) ||
+                    this.atEnd()
+                ) {
+                    this.error(
+                        "trailing-comma",
+                        `После ',' ожидается имя ${
+                            isConst ? "константы" : "переменной"
+                        }`,
+                        comma
+                    );
+                    break;
+                }
                 continue;
             }
 
@@ -1010,6 +1056,16 @@ class Parser {
             }
 
             break;
+        }
+
+        if (children.length === 0 && !reportedNameError) {
+            this.error(
+                "expected-variable-name",
+                isConst
+                    ? "Ожидается имя константы"
+                    : "Ожидается имя переменной",
+                declarationKeyword
+            );
         }
 
         const node = this.node(
@@ -1027,8 +1083,10 @@ class Parser {
     private parseArray(modifier?: IRslToken): IRslSyntaxNode {
         const start = modifier ? modifier.start : this.current().start;
         const used: IRslToken[] = modifier ? [modifier] : [];
-        used.push(this.take());
+        const declarationKeyword = this.take();
+        used.push(declarationKeyword);
         const children: IRslSyntaxNode[] = [];
+        let reportedNameError = false;
 
         while (
             !this.atEnd() &&
@@ -1046,6 +1104,7 @@ class Parser {
                     "Ожидается имя массива",
                     name
                 );
+                reportedNameError = true;
                 break;
             }
 
@@ -1093,7 +1152,20 @@ class Parser {
             used.push(...declTokens.slice(1));
 
             if (this.isSymbol(",")) {
-                used.push(this.take());
+                const comma = this.take();
+                used.push(comma);
+                if (
+                    this.isSymbol(";") ||
+                    BLOCK_BOUNDARIES.has(this.word()) ||
+                    this.atEnd()
+                ) {
+                    this.error(
+                        "trailing-comma",
+                        "После ',' ожидается имя массива",
+                        comma
+                    );
+                    break;
+                }
                 continue;
             }
 
@@ -1107,6 +1179,14 @@ class Parser {
             }
 
             break;
+        }
+
+        if (children.length === 0 && !reportedNameError) {
+            this.error(
+                "expected-array-name",
+                "Ожидается имя массива",
+                declarationKeyword
+            );
         }
 
         const node = this.node(
@@ -1473,7 +1553,9 @@ class Parser {
         const keyword = this.take();
         const used = [keyword];
         const condition = this.parseRequiredCondition(used, "WHILE");
+        this.loopDepth++;
         const body = this.parseStatementList(new Set(["end"]));
+        this.loopDepth--;
         const endToken = this.expectWord("end", "Для WHILE не найден END");
 
         if (endToken) {
@@ -1498,9 +1580,17 @@ class Parser {
             const header = this.consumeBalanced("(", ")", used);
             this.validateForHeader(header);
             headerChildren.push(...this.parseForHeaderNodes(header));
+        } else {
+            this.missing(
+                "missing-opening-parenthesis",
+                "После FOR пропущена '('",
+                this.current().start
+            );
         }
 
+        this.loopDepth++;
         const body = this.parseStatementList(new Set(["end"]));
+        this.loopDepth--;
         const endToken = this.expectWord("end", "Для FOR не найден END");
 
         if (endToken) {
@@ -1705,6 +1795,17 @@ class Parser {
         const keyword = this.take();
         const used = [keyword];
 
+        if (
+            (kind === "BreakStatement" || kind === "ContinueStatement") &&
+            this.loopDepth === 0
+        ) {
+            this.error(
+                "loop-control-outside-loop",
+                `${keyword.raw.toUpperCase()} допустим только внутри FOR или WHILE`,
+                keyword
+            );
+        }
+
         let expression: IRslSyntaxNode | undefined;
 
         if (kind === "ReturnStatement") {
@@ -1809,7 +1910,15 @@ class Parser {
             result.push(parameter);
 
             if (this.isSymbol(",")) {
-                this.take();
+                const comma = this.take();
+                if (this.isSymbol(")") || this.atEnd()) {
+                    this.error(
+                        "trailing-comma",
+                        "После ',' ожидается имя параметра",
+                        comma
+                    );
+                    break;
+                }
                 continue;
             }
 
@@ -1929,6 +2038,7 @@ class Parser {
         }
 
         this.addImplicitStringConcatenationDiagnostics(result);
+        this.validateExpressionEnding(result);
         return result;
     }
 
@@ -2049,11 +2159,44 @@ class Parser {
         }
 
         const clause = this.consumeBalanced("(", ")", used);
-        const inner = clause.slice(
-            1,
-            clause.length > 1 ? clause.length - 1 : 1
-        );
+        const closingParenthesis = clause[clause.length - 1];
+        const hasClosingParenthesis = closingParenthesis?.kind === "symbol" &&
+            closingParenthesis.raw === ")";
+        const inner = clause.slice(1, hasClosingParenthesis ? -1 : undefined);
+
+        if (inner.length === 0) {
+            this.error(
+                "expected-condition",
+                `В ${owner} ожидается условие`,
+                clause[clause.length - 1] || clause[0]
+            );
+        } else {
+            this.validateExpressionEnding(inner);
+        }
         return this.parseExpression(inner);
+    }
+
+    private validateExpressionEnding(tokens: IRslToken[]): void {
+        if (tokens.length === 0) {
+            return;
+        }
+
+        const last = tokens[tokens.length - 1];
+        const operator = last.kind === "identifier"
+            ? normalizeIdentifier(last.value)
+            : last.kind === "symbol"
+                ? last.raw
+                : "";
+
+        if (!OPERATORS_REQUIRING_RIGHT_OPERAND.has(operator)) {
+            return;
+        }
+
+        this.error(
+            "expected-expression-operand",
+            `После оператора '${last.raw}' ожидается операнд`,
+            last
+        );
     }
 
     private consumeBalanced(
@@ -2172,6 +2315,18 @@ class Parser {
     private validateForHeader(tokens: IRslToken[]): void {
         let depth = 0;
         let commas = 0;
+        const inner = tokens.filter(token =>
+            !(token.kind === "symbol" && (token.raw === "(" || token.raw === ")"))
+        );
+
+        if (inner.length === 0) {
+            this.error(
+                "expected-for-header",
+                "В FOR ожидаются параметры цикла",
+                tokens[tokens.length - 1] || tokens[0]
+            );
+            return;
+        }
 
         for (const token of tokens) {
             if (token.kind !== "symbol") {
