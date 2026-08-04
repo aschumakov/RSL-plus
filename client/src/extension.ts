@@ -228,6 +228,16 @@ async function showQuickPick(): Promise<void> {
  * Точка входа расширения.
  */
 export function activate(context: ExtensionContext): void {
+    /*
+     * Локальные команды редактора регистрируются до создания language
+     * client. Enter не должен зависеть от запуска сервера или фоновой
+     * инвентаризации workspace.
+     */
+    registerEditorCommands(context, {
+        getClient: () => client,
+        isClientReady: () => languageClientStarted
+    });
+
     const serverModule = context.asAbsolutePath(
         path.join("server", "out", "server.js")
     );
@@ -314,11 +324,6 @@ export function activate(context: ExtensionContext): void {
         isClientReady: () => languageClientStarted,
         performance: sendClientPerformance
     });
-    registerEditorCommands(context, {
-        getClient: () => client,
-        isClientReady: () => languageClientStarted
-    });
-
     /*
      * Начиная с vscode-languageclient 8.x обработчики можно и нужно
      * регистрировать до запуска клиента. Это исключает потерю ранних

@@ -1,10 +1,22 @@
 "use strict";
 
 const assert = require("assert");
+const extensionManifest = require("../package.json");
 const {
     buildRslSmartEnterSnippet,
     isRslBlockHeader
 } = require("../client/out/smartEnter");
+
+assert.ok(
+    extensionManifest.activationEvents.includes("onCommand:rsl.smartEnter"),
+    "rsl.smartEnter должна явно активировать расширение"
+);
+assert.ok(
+    extensionManifest.contributes.commands.some(item =>
+        item.command === "rsl.smartEnter"
+    ),
+    "rsl.smartEnter должна быть объявлена в contributes.commands"
+);
 
 for (const header of [
     "If (1 == 1)",

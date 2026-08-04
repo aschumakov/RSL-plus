@@ -274,7 +274,8 @@
       }
    },
    "activationEvents": [
-      "onLanguage:rsl"
+      "onLanguage:rsl",
+      "onCommand:rsl.smartEnter"
    ],
    "scripts": {
       "vscode:prepublish": "npm test",
