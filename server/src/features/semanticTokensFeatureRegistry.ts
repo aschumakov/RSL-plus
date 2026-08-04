@@ -27,6 +27,7 @@ export interface ISemanticTokensFeatureEnvironment {
 
 /** Владеет semantic-token lifecycle, resultId и delta-кэшем. */
 export class SemanticTokensFeatureRegistry {
+    private static readonly MAX_CACHED_DOCUMENTS = 4;
     private cache = new Map<string, {
         version: number;
         resultId: string;
@@ -65,20 +66,27 @@ export class SemanticTokensFeatureRegistry {
             if (!document) return { data: [] };
             this.environment.noteInteractiveActivity?.();
             const version = document.version;
+            const span = this.startSpan("semanticTokens.range", document);
             await this.environment.ensureDocumentParsed(document);
+            await yieldToEventLoop();
             const module = index.getModule(document.uri);
             if (
                 !module ||
                 module.version !== document.version ||
                 requestIsStale(document, version, token) ||
                 this.isTooLarge(module)
-            ) return { data: [] };
-            return buildRslSemanticTokens(module, index, resolver, {
+            ) {
+                this.endSpan(span, { cancelled: true, dataInts: 0 });
+                return { data: [] };
+            }
+            const result = buildRslSemanticTokens(module, index, resolver, {
                 startLine: params.range.start.line,
                 startCharacter: params.range.start.character,
                 endLine: params.range.end.line,
                 endCharacter: params.range.end.character
             });
+            this.endSpan(span, { cancelled: false, dataInts: result.data.length });
+            return result;
         });
     }
 
@@ -95,16 +103,30 @@ export class SemanticTokensFeatureRegistry {
         if (!document) return { data: [] };
         this.environment.noteInteractiveActivity?.();
         const version = document.version;
+        const span = this.startSpan("semanticTokens.full", document);
         await this.environment.ensureDocumentParsed(document);
+        /* Outline/hover/completion, уже стоящие в IPC-очереди, идут первыми. */
+        await yieldToEventLoop();
         const module = this.environment.index.getModule(uri);
         if (
             !module ||
             requestIsStale(document, version, cancellationToken) ||
             this.isTooLarge(module)
-        ) return { data: [] };
+        ) {
+            this.endSpan(span, { cancelled: true, dataInts: 0 });
+            return { data: [] };
+        }
 
         const cached = this.cache.get(uri);
-        if (cached?.version === module.version) return cached.value;
+        if (cached?.version === module.version) {
+            this.touchCache(uri, cached);
+            this.endSpan(span, {
+                cacheHit: true,
+                cancelled: false,
+                dataInts: cached.value.data.length
+            });
+            return cached.value;
+        }
         const built = buildRslSemanticTokens(
             module,
             this.environment.index,
@@ -112,8 +134,43 @@ export class SemanticTokensFeatureRegistry {
         );
         const resultId = `${module.version}:${++this.sequence}`;
         const value = { data: built.data, resultId };
-        this.cache.set(uri, { version: module.version, resultId, value });
+        this.touchCache(uri, { version: module.version, resultId, value });
+        while (this.cache.size > SemanticTokensFeatureRegistry.MAX_CACHED_DOCUMENTS) {
+            const oldest = this.cache.keys().next().value as string | undefined;
+            if (!oldest) break;
+            this.cache.delete(oldest);
+        }
+        this.endSpan(span, {
+            cacheHit: false,
+            cancelled: false,
+            dataInts: value.data.length
+        });
         return value;
+    }
+
+    private touchCache(
+        uri: string,
+        entry: { version: number; resultId: string; value: SemanticTokens }
+    ): void {
+        this.cache.delete(uri);
+        this.cache.set(uri, entry);
+    }
+
+    private startSpan(event: string, document: TextDocument) {
+        return this.environment.performance?.enabled
+            ? this.environment.performance.start(event, {
+                uri: document.uri,
+                version: document.version,
+                chars: document.getText().length
+            })
+            : undefined;
+    }
+
+    private endSpan(
+        span: ReturnType<PerformanceLogger["start"]> | undefined,
+        fields: Record<string, string | number | boolean | null | undefined>
+    ): void {
+        if (span) this.environment.performance!.end(span, fields);
     }
 
     private isTooLarge(module: IIndexedModule): boolean {
@@ -131,6 +188,10 @@ export class SemanticTokensFeatureRegistry {
         }
         return tooLarge;
     }
+}
+
+function yieldToEventLoop(): Promise<void> {
+    return new Promise(resolve => setImmediate(resolve));
 }
 
 function requestIsStale(

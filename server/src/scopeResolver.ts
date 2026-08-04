@@ -15,6 +15,10 @@ import {
     IIndexedSymbol,
     WorkspaceIndex
 } from "./workspaceIndex";
+import { getDefaults } from "./defaults";
+import type { BuiltinCatalog } from "./builtins/builtinSymbol";
+
+export const RSL_BUILTIN_URI = "rsl-builtin:/standard-library";
 
 export interface IResolvedSymbol {
     uri: string;
@@ -56,7 +60,10 @@ export class RslScopeResolver {
     private resolutionCacheHits = 0;
     private resolutionCacheMisses = 0;
 
-    constructor(private index: WorkspaceIndex) {}
+    constructor(
+        private index: WorkspaceIndex,
+        private builtins: BuiltinCatalog = getDefaults()
+    ) {}
 
     resolveAt(
         uri: string,
@@ -134,6 +141,40 @@ export class RslScopeResolver {
         return this.findClassSymbol(uri, tree, name);
     }
 
+    /**
+     * Разрешает имя метода, переданное строкой в R2M(object, "Method").
+     * Обычный resolveAt здесь неприменим: строковый token не является NAME,
+     * но тип receiver определяется тем же способом, что для object.Method().
+     */
+    resolveMemberReference(
+        uri: string,
+        tree: RslSymbol,
+        receiverOffset: number,
+        memberName: string
+    ): IIndexedSymbol | undefined {
+        const module = this.index.getModule(uri);
+        if (!module) {
+            return undefined;
+        }
+
+        const receiver = tokenAtOffset(
+            this.getTokens(module),
+            receiverOffset,
+            true
+        );
+        if (!receiver || receiver.kind !== "identifier") {
+            return undefined;
+        }
+
+        return this.resolveMember(
+            uri,
+            tree,
+            receiverOffset,
+            receiver,
+            memberName
+        );
+    }
+
     private resolveTokenAt(
         uri: string,
         tree: RslSymbol,
@@ -178,12 +219,17 @@ export class RslScopeResolver {
             referenceName
         )[0];
 
-        return imported
-            ? {
+        if (imported) {
+            return {
                 uri: imported.uri,
                 symbol: imported.symbol,
                 token
-            }
+            };
+        }
+
+        const builtin = this.builtins.findSymbol(referenceName);
+        return builtin
+            ? { uri: RSL_BUILTIN_URI, symbol: builtin, token }
             : undefined;
     }
 
@@ -415,10 +461,22 @@ export class RslScopeResolver {
             return imported;
         }
 
-        return this.index.findSymbols(normalizedType)
+        const workspace = this.index.findSymbols(normalizedType)
             .find(symbol =>
                 symbol.symbol.kind === CompletionItemKind.Class
             );
+        if (workspace) {
+            return workspace;
+        }
+
+        const builtin = this.builtins.findClass(normalizedType);
+        return builtin
+            ? {
+                uri: RSL_BUILTIN_URI,
+                symbolId: builtin.id,
+                symbol: builtin
+            }
+            : undefined;
     }
 
     /**
@@ -493,13 +551,34 @@ export class RslScopeResolver {
             const values = result.get(name) || [];
             values.push({
                 offset: target.start,
-                typeName: normalizeIdentifier(constructor.value)
+                typeName: this.getCallableResultType(constructor.value)
             });
             result.set(name, values);
         }
 
         this.constructorAssignmentsByModule.set(module, result);
         return result;
+    }
+
+    private getCallableResultType(name: string): string {
+        const builtin = this.builtins.findSymbol(name);
+        if (builtin) {
+            return builtin.kind === CompletionItemKind.Class
+                ? builtin.name
+                : builtin.typeName;
+        }
+
+        const workspace = this.index.findSymbols(name).find(item =>
+            item.symbol.kind === CompletionItemKind.Class ||
+            item.symbol.kind === CompletionItemKind.Function ||
+            item.symbol.kind === CompletionItemKind.Method
+        );
+        if (!workspace) {
+            return normalizeIdentifier(name);
+        }
+        return workspace.symbol.kind === CompletionItemKind.Class
+            ? workspace.symbol.name
+            : workspace.symbol.typeName;
     }
 
     private canAccessPrivateMembers(

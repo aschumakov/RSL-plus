@@ -866,16 +866,27 @@ class SyntaxDeclarationExtractor {
             visibility !== "local";
         node.children
             .filter(child => child.kind === "VariableDeclarator")
-            .forEach(child => this.append(
-                target,
-                container,
-                this.variableDescriptor(
+            .forEach(child => {
+                const descriptor = this.variableDescriptor(
                     child,
                     node.name === "const",
                     visibility,
                     isProperty
-                )
-            ));
+                );
+                /*
+                 * SPNAME — общая специальная переменная RSL. Руководство
+                 * определяет её видимость на уровне всего unit независимо от
+                 * места объявления, поэтому локальный Macro не должен
+                 * становиться контейнером такого имени.
+                 */
+                this.append(
+                    target,
+                    isSpecialVariableName(descriptor.name)
+                        ? undefined
+                        : container,
+                    descriptor
+                );
+            });
     }
 
     private addDataSymbol(
@@ -1027,6 +1038,10 @@ class SyntaxDeclarationExtractor {
             roots.push(descriptor);
         }
     }
+}
+
+function isSpecialVariableName(name: string): boolean {
+    return /^\{[^}\r\n]+\}$/u.test(name);
 }
 
 /**

@@ -1,89 +1,151 @@
 import {
     CompletionItemKind,
     InsertTextFormat,
-    type CompletionItem,
-    type MarkupContent
+    MarkupKind,
+    type CompletionItem
 } from "vscode-languageserver";
 
-import type { ObjInfo } from "../enums";
+import { normalizeIdentifier } from "../lexer";
+import {
+    createSymbolId,
+    RslSymbol,
+    type SymbolId
+} from "../symbols/rslSymbol";
+import type { IRslBuiltinDefinition } from "./standardLibraryData";
 
-/** Описание встроенного символа, не привязанного к исходному RSL-файлу. */
+/** Семантический символ стандартной библиотеки, не связанный с файлом. */
 export class BuiltinSymbol {
-    readonly children: BuiltinSymbol[] = [];
+    readonly name: string;
+    readonly typeName: string;
+    readonly kind: CompletionItemKind;
+    readonly signature: string;
+    readonly summary: string;
+    readonly insertText: string;
+    readonly children: readonly BuiltinSymbol[];
 
-    constructor(
-        readonly name: string,
-        readonly typeName: string,
-        readonly detail: string,
-        readonly documentation: MarkupContent,
-        readonly insertText: string,
-        readonly insertTextFormat: InsertTextFormat = InsertTextFormat.Snippet,
-        readonly kind: CompletionItemKind = CompletionItemKind.Variable
-    ) {}
-
-    addChild(symbol: BuiltinSymbol): void {
-        this.children.push(symbol);
-    }
-
-    get info(): ObjInfo {
-        return { name: this.name, valueType: this.typeName };
+    constructor(definition: IRslBuiltinDefinition) {
+        this.name = definition.name;
+        this.typeName = definition.typeName || "Variant";
+        this.kind = definition.kind;
+        this.signature = definition.signature || definition.name;
+        this.summary = definition.summary || "";
+        this.insertText = definition.insertText || "";
+        this.children = Object.freeze(
+            (definition.children || []).map(item => new BuiltinSymbol(item))
+        );
+        Object.freeze(this);
     }
 
     get completionItem(): CompletionItem {
+        const callable = this.kind === CompletionItemKind.Function ||
+            this.kind === CompletionItemKind.Method ||
+            this.kind === CompletionItemKind.Class;
         return {
             label: this.name,
-            documentation: this.documentation,
-            insertTextFormat: this.insertTextFormat,
+            documentation: this.summary
+                ? { kind: MarkupKind.Markdown, value: this.summary }
+                : undefined,
+            insertTextFormat: callable
+                ? InsertTextFormat.Snippet
+                : InsertTextFormat.PlainText,
             kind: this.kind,
             detail: this.detail,
-            insertText: this.insertText
+            insertText: this.insertText ||
+                (callable && this.signature.includes("(")
+                    ? `${this.name}($0)`
+                    : this.name),
+            data: { rslBuiltin: true }
         };
     }
 
-    get childCompletionItems(): CompletionItem[] {
-        return this.children.map(child => child.completionItem);
+    get detail(): string {
+        if (
+            this.kind === CompletionItemKind.Function ||
+            this.kind === CompletionItemKind.Method
+        ) {
+            const suffix = /\)\s*:\s*\w+\s*$/u.test(this.signature)
+                ? ""
+                : `: ${this.typeName}`;
+            return `${this.signature}${suffix}`;
+        }
+        return this.kind === CompletionItemKind.Class
+            ? `Class ${this.name}`
+            : `${this.name}: ${this.typeName}`;
+    }
+
+    toRslSymbol(parentId?: SymbolId): RslSymbol {
+        const id = createSymbolId(parentId, this.kind, this.name);
+        return new RslSymbol({
+            id,
+            name: this.name,
+            kind: this.kind,
+            range: { start: 0, end: 0 },
+            selectionRange: { start: 0, end: 0 },
+            typeName: this.typeName,
+            parameterText: parameterText(this.signature, this.name),
+            documentation: this.summary,
+            builtin: true,
+            children: this.children.map(child => child.toRslSymbol(id))
+        });
     }
 }
 
-export class BuiltinFunctionSymbol extends BuiltinSymbol {
-    constructor(
-        name: string,
-        typeName: string,
-        detail: string,
-        documentation: MarkupContent,
-        insertText: string,
-        insertTextFormat: InsertTextFormat = InsertTextFormat.Snippet,
-        kind: CompletionItemKind = CompletionItemKind.Function
-    ) {
-        super(
-            name,
-            typeName,
-            detail,
-            documentation,
-            insertText,
-            insertTextFormat,
-            kind
+/** Неизменяемый O(1)-индекс стандартных символов. */
+export class BuiltinCatalog {
+    private readonly items: readonly BuiltinSymbol[];
+    private readonly byName: ReadonlyMap<string, BuiltinSymbol>;
+    private readonly semanticByName: ReadonlyMap<string, RslSymbol>;
+    private readonly completionCache: readonly CompletionItem[];
+
+    constructor(definitions: readonly IRslBuiltinDefinition[]) {
+        this.items = Object.freeze(definitions.map(item => new BuiltinSymbol(item)));
+        const byName = new Map<string, BuiltinSymbol>();
+        const semantic = new Map<string, RslSymbol>();
+        for (const item of this.items) {
+            const key = normalizeIdentifier(item.name);
+            byName.set(key, item);
+            semantic.set(key, item.toRslSymbol());
+        }
+        this.byName = byName;
+        this.semanticByName = semantic;
+        this.completionCache = Object.freeze(
+            this.items.map(item => Object.freeze(item.completionItem))
         );
+    }
+
+    find(name: string): BuiltinSymbol | undefined {
+        return this.byName.get(normalizeIdentifier(name));
+    }
+
+    findSymbol(name: string): RslSymbol | undefined {
+        return this.semanticByName.get(normalizeIdentifier(name));
+    }
+
+    findClass(name: string): RslSymbol | undefined {
+        const symbol = this.findSymbol(name);
+        return symbol?.kind === CompletionItemKind.Class ? symbol : undefined;
+    }
+
+    get completionItems(): readonly CompletionItem[] {
+        return this.completionCache;
+    }
+
+    get size(): number {
+        return this.items.length;
     }
 }
 
-export class BuiltinClassSymbol extends BuiltinSymbol {
-    constructor(
-        name: string,
-        typeName: string,
-        detail: string,
-        documentation: MarkupContent,
-        insertText: string,
-        insertTextFormat: InsertTextFormat = InsertTextFormat.Snippet
-    ) {
-        super(
-            name,
-            typeName,
-            detail,
-            documentation,
-            insertText,
-            insertTextFormat,
-            CompletionItemKind.Class
-        );
+function parameterText(signature: string, name: string): string {
+    const nameIndex = signature.toLowerCase().indexOf(name.toLowerCase());
+    const open = signature.indexOf("(", nameIndex + name.length);
+    if (open < 0) return "()";
+    let depth = 0;
+    for (let index = open; index < signature.length; index++) {
+        const character = signature.charAt(index);
+        if (character === "(") depth++;
+        else if (character === ")" && --depth === 0) {
+            return signature.substring(open, index + 1);
+        }
     }
+    return signature.substring(open);
 }

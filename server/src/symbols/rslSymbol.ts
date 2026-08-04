@@ -21,6 +21,8 @@ export interface IRslSymbolInit {
     selectionRange?: IRange;
     typeName?: string;
     value?: string;
+    documentation?: string;
+    builtin?: boolean;
     parameterText?: string;
     baseClassName?: string;
     children?: RslSymbol[];
@@ -42,6 +44,8 @@ export class RslSymbol {
     readonly selectionRange: IRange;
     readonly typeName: string;
     readonly value: string;
+    readonly documentation: string;
+    readonly isBuiltin: boolean;
     readonly parameterText: string;
     readonly baseClassName: string;
     readonly children: readonly RslSymbol[];
@@ -57,6 +61,8 @@ export class RslSymbol {
         });
         this.typeName = init.typeName || "variant";
         this.value = init.value || "";
+        this.documentation = init.documentation || "";
+        this.isBuiltin = init.builtin === true;
         this.parameterText = init.parameterText || "";
         this.baseClassName = init.baseClassName || "";
         this.children = Object.freeze([...(init.children || [])]);
@@ -123,7 +129,7 @@ export class RslSymbol {
             this.kind === CompletionItemKind.Method;
         return {
             label: this.name,
-            documentation: "",
+            documentation: this.documentation,
             insertTextFormat: InsertTextFormat.PlainText,
             kind: this.kind,
             detail,

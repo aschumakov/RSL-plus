@@ -92,8 +92,13 @@ function mergeSettings(
     const semanticHighlighting = isRecord(input.semanticHighlighting)
         ? input.semanticHighlighting
         : {};
+    const language = isRecord(input.language) ? input.language : {};
+    const dialect = isLanguageDialect(language.dialect)
+        ? language.dialect
+        : defaults.language?.dialect || "rsBank";
 
     return {
+        language: { dialect },
         imports: {
             enabled: typeof imports.enabled === "boolean"
                 ? imports.enabled
@@ -118,13 +123,15 @@ function mergeSettings(
         },
         diagnostics: {
             ...(defaults.diagnostics || {}),
-            ...diagnostics
+            ...diagnostics,
+            dialect
         }
     };
 }
 
 function cloneSettings(value: IRslSettings): IRslSettings {
     return {
+        language: { dialect: value.language?.dialect || "rsBank" },
         imports: { ...value.imports },
         autoImport: { ...value.autoImport },
         analysis: { ...value.analysis },
@@ -140,12 +147,19 @@ function settingsEqual(
     right: IRslSettings
 ): boolean {
     return left.imports.enabled === right.imports.enabled &&
+        left.language.dialect === right.language.dialect &&
         left.autoImport.enabled === right.autoImport.enabled &&
         left.analysis.workspaceIndexing === right.analysis.workspaceIndexing &&
         left.semanticHighlighting.maxFileSizeKb ===
             right.semanticHighlighting.maxFileSizeKb &&
         JSON.stringify(left.diagnostics || {}) ===
         JSON.stringify(right.diagnostics || {});
+}
+
+function isLanguageDialect(
+    value: unknown
+): value is IRslSettings["language"]["dialect"] {
+    return value === "rsBank" || value === "coreRsl";
 }
 
 function isWorkspaceIndexingMode(

@@ -4,7 +4,7 @@
    "description": "RSL / Object RSL language support with diagnostics, navigation and Quick Fixes",
    "author": "Veniamin Rakov + AChumakov",
    "license": "SEE LICENSE IN LICENSE.txt",
-   "version": "1.1.7",
+   "version": "1.1.8",
    "icon": "icon.png",
    "bugs": {
       "url": "https://github.com/aschumakov/RSL-plus/issues"
@@ -190,6 +190,20 @@
                ],
                "default": "activeImports",
                "description": "Глубина фонового анализа проекта. На навигацию по Import выбранный режим не влияет."
+            },
+            "rslPlus.language.dialect": {
+               "scope": "resource",
+               "type": "string",
+               "enum": [
+                  "rsBank",
+                  "coreRsl"
+               ],
+               "enumDescriptions": [
+                  "RS-Bank: допускает расширения платформы и общесистемные спецпеременные.",
+                  "Базовый RSL: включает строгие проверки, описанные в руководстве языка."
+               ],
+               "default": "rsBank",
+               "description": "Диалект RSL для анализа текущего проекта."
             },
             "rslPlus.semanticHighlighting.maxFileSizeKb": {
                "scope": "resource",

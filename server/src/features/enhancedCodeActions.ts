@@ -18,6 +18,7 @@ interface IDiagnosticData {
     start?: number;
     end?: number;
     parameter?: boolean;
+    replacement?: string;
 }
 
 interface IVariableDeclarationMatch {
@@ -39,6 +40,10 @@ quickFixRegistry.register(
         diagnostic
     )
 );
+quickFixRegistry.register(
+    "string-literal-too-long",
+    (module, diagnostic) => createSplitLongStringAction(module, diagnostic)
+);
 quickFixRegistry.setFallback((module, diagnostic, params) =>
     buildRslCodeActions(module, {
         ...params,
@@ -54,6 +59,36 @@ export function buildEnhancedRslCodeActions(
     params: CodeActionParams
 ): CodeAction[] {
     return quickFixRegistry.build(module, params);
+}
+
+function createSplitLongStringAction(
+    module: IIndexedModule,
+    diagnostic: Diagnostic
+): CodeAction | undefined {
+    const data = diagnostic.data as IDiagnosticData | undefined;
+    if (!data?.replacement) {
+        return undefined;
+    }
+    const start = typeof data.start === "number"
+        ? data.start
+        : offsetAt(module, diagnostic.range.start);
+    const end = typeof data.end === "number"
+        ? data.end
+        : offsetAt(module, diagnostic.range.end);
+    return {
+        title: "Разбить строковый литерал на допустимые части",
+        kind: CodeActionKind.QuickFix,
+        diagnostics: [diagnostic],
+        isPreferred: true,
+        edit: {
+            changes: {
+                [module.uri]: [{
+                    range: offsetRange(module, start, end),
+                    newText: data.replacement
+                }]
+            }
+        }
+    };
 }
 
 function createRemoveUnusedDeclarationAction(

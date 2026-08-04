@@ -4,6 +4,7 @@ import {
 } from "vscode-languageserver";
 
 import { isStandardHandler } from "../features/standardHandlers";
+import { GetPositionalHandlerNamesFromTokens } from "../execMacroDefinition";
 import type { IRslSyntaxNode } from "../syntaxParser";
 import type { IIndexedModule } from "../workspaceIndex";
 
@@ -61,6 +62,9 @@ function collectSuppressedStandardHandlerParameters(
 ): Set<Diagnostic> {
     const result = new Set<Diagnostic>();
     const unusedByStart = new Map<number, Diagnostic>();
+    const callbackHandlers = GetPositionalHandlerNamesFromTokens(
+        module.lex.tokens
+    );
 
     diagnostics.forEach(diagnostic => {
         if (String(diagnostic.code || "") !== "unused-declaration") {
@@ -81,7 +85,10 @@ function collectSuppressedStandardHandlerParameters(
     walkSyntax(module.syntax.root, node => {
         if (
             node.kind !== "MacroDeclaration" ||
-            !isStandardHandler(node.name)
+            (
+                !isStandardHandler(node.name) &&
+                !callbackHandlers.has(normalizeName(node.name))
+            )
         ) {
             return;
         }
@@ -116,6 +123,10 @@ function collectSuppressedStandardHandlerParameters(
     });
 
     return result;
+}
+
+function normalizeName(value: string | undefined): string {
+    return (value || "").trim().toLowerCase();
 }
 
 function walkSyntax(

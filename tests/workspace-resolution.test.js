@@ -21,6 +21,9 @@ const {
     WorkspaceModuleLoader
 } = require("../server/out/indexing/workspaceModuleLoader");
 const {
+    WorkspaceFileDiscoveryService
+} = require("../server/out/indexing/workspaceFileDiscoveryService");
+const {
     DocumentAnalysisService
 } = require("../server/out/services/documentAnalysisService");
 const {
@@ -492,6 +495,7 @@ async function testParseReadinessDoesNotWaitForSettings() {
         }
     );
 
+    service.setActiveDocument(uri);
     assert.strictEqual(service.open(document), true);
     assert.strictEqual(
         service.open(document),
@@ -819,6 +823,49 @@ async function testAutoImportSearchLoadsOnlyExporter() {
     }
 }
 
+async function testServerSideWorkspaceDiscovery() {
+    const directory = await fs.promises.mkdtemp(
+        path.join(os.tmpdir(), "rsl-discovery-")
+    );
+    try {
+        await fs.promises.mkdir(path.join(directory, "src"));
+        await fs.promises.mkdir(path.join(directory, "node_modules"));
+        await fs.promises.writeFile(path.join(directory, "main.mac"), "", "utf8");
+        await fs.promises.writeFile(path.join(directory, "src", "lib.MAC"), "", "utf8");
+        await fs.promises.writeFile(
+            path.join(directory, "node_modules", "ignored.mac"),
+            "",
+            "utf8"
+        );
+        let discovered;
+        const service = new WorkspaceFileDiscoveryService({
+            log: message => { throw new Error(message); },
+            initialDelayMs: 0,
+            interactivePauseMs: 0,
+            onFiles: uris => { discovered = Array.from(uris); }
+        });
+        service.configure({
+            capabilities: {},
+            rootUri: pathToFileURL(directory).toString()
+        });
+        await waitFor(() => Array.isArray(discovered), 1000);
+        const names = discovered.map(uri => path.basename(new URL(uri).pathname))
+            .sort();
+        assert.deepStrictEqual(names, ["lib.MAC", "main.mac"]);
+        service.dispose();
+    } finally {
+        await fs.promises.rm(directory, { recursive: true, force: true });
+    }
+}
+
+async function waitFor(predicate, timeoutMs) {
+    const started = Date.now();
+    while (!predicate()) {
+        if (Date.now() - started > timeoutMs) throw new Error("timeout");
+        await new Promise(resolve => setTimeout(resolve, 5));
+    }
+}
+
 (async () => {
     testModuleResolution();
     console.log("[OK] workspace различает resolved, ambiguous и missing");
@@ -852,6 +899,9 @@ async function testAutoImportSearchLoadsOnlyExporter() {
 
     await testAutoImportSearchLoadsOnlyExporter();
     console.log("[OK] Auto Import адресно загружает только экспортирующий модуль");
+
+    await testServerSideWorkspaceDiscovery();
+    console.log("[OK] каталог workspace строится в language server и соблюдает exclude");
 })().catch(error => {
     console.error(error);
     process.exitCode = 1;

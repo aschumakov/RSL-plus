@@ -233,7 +233,7 @@ test("Общесистемные спецпеременные имеют док�
     ]);
 
     for (const [name, expectedType] of expectedTypes) {
-        const variable = getDefaults().find(name);
+        const variable = getDefaults().find(`{${name}}`);
         assert.ok(variable, `Не найдена спецпеременная ${name}`);
         assert.strictEqual(variable.typeName, expectedType);
         assert.strictEqual(variable.completionItem.insertText, `{${name}}`);

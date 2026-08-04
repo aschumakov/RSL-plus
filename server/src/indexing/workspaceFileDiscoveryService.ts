@@ -1,0 +1,199 @@
+import * as fs from "fs";
+import * as path from "path";
+import { fileURLToPath, pathToFileURL } from "url";
+
+import type { InitializeParams, WorkspaceFolder } from "vscode-languageserver/node";
+import type { PerformanceLogger } from "../performanceLogger";
+
+export interface IWorkspaceFileDiscoveryOptions {
+    log(message: string): void;
+    performance?: PerformanceLogger;
+    onFiles(uris: readonly string[]): void;
+    initialDelayMs?: number;
+    interactivePauseMs?: number;
+}
+
+const EXCLUDED_DIRECTORIES = new Set([
+    ".git", "node_modules", "out", "dist", "build",
+    "archive", "backup", ".history"
+]);
+
+/**
+ * Строит каталог .mac в отдельном процессе language server.
+ * В Extension Host больше нет глобального workspace.findFiles по .mac, из-за
+ * которого UI и приём LSP-ответов могли останавливаться на несколько секунд.
+ */
+export class WorkspaceFileDiscoveryService {
+    private roots = new Set<string>();
+    private timer: NodeJS.Timeout | undefined;
+    private generation = 0;
+    private running = false;
+    private interactiveUntilMs = 0;
+    private initialDelayMs: number;
+    private interactivePauseMs: number;
+
+    constructor(private options: IWorkspaceFileDiscoveryOptions) {
+        this.initialDelayMs = Math.max(0, options.initialDelayMs ?? 2000);
+        this.interactivePauseMs = Math.max(
+            0,
+            options.interactivePauseMs ?? 500
+        );
+    }
+
+    configure(params: InitializeParams): void {
+        this.roots = new Set(getWorkspaceRoots(params));
+        this.restart();
+    }
+
+    updateWorkspaceFolders(
+        added: readonly WorkspaceFolder[],
+        removed: readonly WorkspaceFolder[]
+    ): void {
+        for (const folder of removed) {
+            const root = uriToPath(folder.uri);
+            if (root) this.roots.delete(normalizePath(root));
+        }
+        for (const folder of added) {
+            const root = uriToPath(folder.uri);
+            if (root) this.roots.add(normalizePath(root));
+        }
+        this.restart();
+    }
+
+    schedule(delayMs: number = this.initialDelayMs): void {
+        if (this.timer || this.running || this.roots.size === 0) {
+            return;
+        }
+        const generation = this.generation;
+        this.timer = setTimeout(() => {
+            this.timer = undefined;
+            this.scan(generation).catch(error => this.options.log(
+                `Workspace discovery failed: ${errorToString(error)}`
+            ));
+        }, Math.max(0, delayMs));
+    }
+
+    noteInteractiveActivity(): void {
+        this.interactiveUntilMs = Math.max(
+            this.interactiveUntilMs,
+            Date.now() + this.interactivePauseMs
+        );
+    }
+
+    dispose(): void {
+        this.generation++;
+        if (this.timer) clearTimeout(this.timer);
+        this.timer = undefined;
+    }
+
+    private restart(): void {
+        this.generation++;
+        if (this.timer) clearTimeout(this.timer);
+        this.timer = undefined;
+        this.schedule();
+    }
+
+    private async scan(generation: number): Promise<void> {
+        if (this.running || generation !== this.generation) return;
+        this.running = true;
+        const startedAt = Date.now();
+        const span = this.options.performance?.enabled
+            ? this.options.performance.start("workspaceInventory.server", {
+                roots: this.roots.size
+            })
+            : undefined;
+        const files: string[] = [];
+        const directories = Array.from(this.roots);
+        let processedSinceYield = 0;
+
+        try {
+            while (directories.length > 0 && generation === this.generation) {
+                await this.waitForInteractiveWindow(generation);
+                const directory = directories.shift()!;
+                let entries: fs.Dirent[];
+                try {
+                    entries = await fs.promises.readdir(directory, {
+                        withFileTypes: true
+                    });
+                } catch (_error) {
+                    continue;
+                }
+
+                for (const entry of entries) {
+                    if (entry.isDirectory()) {
+                        if (!EXCLUDED_DIRECTORIES.has(entry.name.toLowerCase())) {
+                            directories.push(path.join(directory, entry.name));
+                        }
+                    } else if (entry.isFile() && /\.mac$/i.test(entry.name)) {
+                        files.push(pathToFileURL(
+                            path.join(directory, entry.name)
+                        ).toString());
+                    }
+                }
+
+                if (++processedSinceYield >= 8) {
+                    processedSinceYield = 0;
+                    await yieldToEventLoop();
+                }
+            }
+
+            if (generation === this.generation) {
+                this.options.onFiles(files);
+            }
+        } finally {
+            this.running = false;
+            if (span) {
+                this.options.performance!.end(span, {
+                    durationMs: Date.now() - startedAt,
+                    files: files.length,
+                    stale: generation !== this.generation
+                });
+            }
+            if (generation !== this.generation) this.schedule();
+        }
+    }
+
+    private async waitForInteractiveWindow(generation: number): Promise<void> {
+        while (
+            generation === this.generation &&
+            Date.now() < this.interactiveUntilMs
+        ) {
+            await delay(Math.min(100, this.interactiveUntilMs - Date.now()));
+        }
+    }
+}
+
+function getWorkspaceRoots(params: InitializeParams): string[] {
+    const values: string[] = [];
+    for (const folder of params.workspaceFolders || []) {
+        const root = uriToPath(folder.uri);
+        if (root) values.push(root);
+    }
+    if (values.length === 0 && params.rootUri) {
+        const root = uriToPath(params.rootUri);
+        if (root) values.push(root);
+    }
+    if (values.length === 0 && params.rootPath) values.push(params.rootPath);
+    return Array.from(new Set(values.map(normalizePath)));
+}
+
+function normalizePath(value: string): string {
+    const resolved = path.resolve(value);
+    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function uriToPath(uri: string): string | undefined {
+    try { return fileURLToPath(uri); } catch (_error) { return undefined; }
+}
+
+function yieldToEventLoop(): Promise<void> {
+    return new Promise(resolve => setImmediate(resolve));
+}
+
+function delay(milliseconds: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, Math.max(0, milliseconds)));
+}
+
+function errorToString(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+}

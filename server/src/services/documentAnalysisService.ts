@@ -52,10 +52,10 @@ export class DocumentAnalysisService {
     private queueScheduled = false;
     private validationRunning = false;
     private fastSnapshots = new Map<string, IFastDocumentSnapshot>();
+    private openedVersions = new Map<string, number>();
     private changeDebounceMs: number;
     private slowParseLogMs: number;
     private initialParseDelayMs: number;
-    private inactiveParseDelayMs: number;
     private activeDocumentUri: string | undefined;
 
     constructor(
@@ -67,7 +67,6 @@ export class DocumentAnalysisService {
         this.changeDebounceMs = options.changeDebounceMs ?? 90;
         this.slowParseLogMs = options.slowParseLogMs ?? 75;
         this.initialParseDelayMs = options.initialParseDelayMs ?? 50;
-        this.inactiveParseDelayMs = options.inactiveParseDelayMs ?? 5000;
     }
 
     get isBusy(): boolean {
@@ -98,33 +97,35 @@ export class DocumentAnalysisService {
                 chars: document.getText().length
             })
             : undefined;
+        const openedVersion = this.openedVersions.get(document.uri);
         const current = this.fastSnapshots.get(document.uri);
 
-        if (current && current.version === document.version) {
+        if (openedVersion === document.version) {
             if (span) {
                 performance.end(span, {
                     duplicate: true,
-                    outlineReady: current.symbols !== undefined,
-                    topLevelSymbols: current.symbols?.length ?? 0
+                    outlineReady: current?.symbols !== undefined,
+                    topLevelSymbols: current?.symbols?.length ?? 0
                 });
             }
             return false;
         }
 
-        const snapshot = this.refreshFastSnapshot(document);
-        this.prepareOutline(document, snapshot);
-        this.scheduleWithDelay(
-            document,
-            document.uri === this.activeDocumentUri
-                ? this.initialParseDelayMs
-                : this.inactiveParseDelayMs
-        );
+        this.openedVersions.set(document.uri, document.version);
+        const isActive = document.uri === this.activeDocumentUri;
+        const snapshot = isActive
+            ? this.refreshFastSnapshot(document)
+            : undefined;
+        if (snapshot) {
+            this.prepareOutline(document, snapshot);
+            this.scheduleWithDelay(document, this.initialParseDelayMs);
+        }
         if (span) {
             performance.end(span, {
                 duplicate: false,
-                outlineReady: true,
-                tokens: snapshot.lex.tokens.length,
-                topLevelSymbols: snapshot.symbols?.length ?? 0
+                outlineReady: !!snapshot,
+                tokens: snapshot?.lex.tokens.length ?? 0,
+                topLevelSymbols: snapshot?.symbols?.length ?? 0
             });
         }
         return true;
@@ -132,25 +133,23 @@ export class DocumentAnalysisService {
 
     /** Частые изменения текста объединяются; snapshot пересоздаётся лениво. */
     changed(document: TextDocument): void {
-        const current = this.fastSnapshots.get(document.uri);
+        const openedVersion = this.openedVersions.get(document.uri);
 
         /*
          * TextDocuments отправляет onDidChangeContent сразу после onDidOpen.
          * Это не новая версия документа: open() уже построил snapshot и
          * запланировал parse, поэтому повторный lexer здесь не нужен.
          */
-        if (current && current.version === document.version) {
+        if (openedVersion === document.version) {
             return;
         }
 
+        this.openedVersions.set(document.uri, document.version);
         this.fastSnapshots.delete(document.uri);
         this.options.invalidateProviderCaches(document.uri);
-        this.scheduleWithDelay(
-            document,
-            document.uri === this.activeDocumentUri
-                ? this.changeDebounceMs
-                : this.inactiveParseDelayMs
-        );
+        if (document.uri === this.activeDocumentUri) {
+            this.scheduleWithDelay(document, this.changeDebounceMs);
+        }
     }
 
     /** Совместимость со старым API: считается изменением документа. */
@@ -192,8 +191,18 @@ export class DocumentAnalysisService {
         }
 
         const document = this.documents.get(uri);
-        if (!document || this.isCurrent(document)) {
+        if (
+            !document ||
+            !this.openedVersions.has(uri) ||
+            this.isCurrent(document)
+        ) {
             return;
+        }
+
+        /* Восстановленная неактивная вкладка до активации не лексировалась. */
+        const snapshot = this.getFastSnapshot(document);
+        if (snapshot.symbols === undefined) {
+            this.prepareOutline(document, snapshot);
         }
 
         const queued = this.queued.get(uri);
@@ -212,7 +221,7 @@ export class DocumentAnalysisService {
                 );
             });
         }
-        this.options.performance?.mark("analysis.priority", {
+        this.options.performance?.mark?.("analysis.priority", {
             uri,
             priority: "active"
         });
@@ -253,6 +262,7 @@ export class DocumentAnalysisService {
         this.cancelTimer(uri);
         this.cancelQueued(uri);
         this.fastSnapshots.delete(uri);
+        this.openedVersions.delete(uri);
         this.parsedVersions.delete(uri);
         this.nextGeneration(uri);
         this.index.compactModule(uri);

@@ -38,10 +38,12 @@ export function buildRslHoverContent(
         }
     }
 
-    lines.push("", `**Файл:** ${escapeMarkdown(displayFile(uri))}`);
-    const line = declarationLine(index, module, uri, symbol);
-    if (line !== undefined) {
-        lines.push(`**Строка:** ${line + 1}`);
+    if (!symbol.isBuiltin) {
+        lines.push("", `**Файл:** ${escapeMarkdown(displayFile(uri))}`);
+        const line = declarationLine(index, module, uri, symbol);
+        if (line !== undefined) {
+            lines.push(`**Строка:** ${line + 1}`);
+        }
     }
 
     const documentation = normalizeDocumentation(symbol.completionItem.documentation);

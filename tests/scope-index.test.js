@@ -122,6 +122,32 @@ test("Метод разрешается по типу объекта слева 
     assert.strictEqual(resolved.symbol.name, "Run");
 });
 
+test("Строковый метод R2M разрешается по типу receiver", () => {
+    const source = [
+        "Class Service",
+        "    Macro OnEvent(obj, cmd)",
+        "    End;",
+        "End;",
+        "Macro Test()",
+        "    Var service: Service;",
+        '    ref = R2M(service, "OnEvent");',
+        "End;"
+    ].join("\n");
+    const uri = "file:///main.mac";
+    const index = new WorkspaceIndex();
+    const tree = createModule(index, uri, source);
+    const resolver = new RslScopeResolver(index);
+    const resolved = resolver.resolveMemberReference(
+        uri,
+        tree,
+        offsetInside(source, "service", 1),
+        "OnEvent"
+    );
+
+    assert.ok(resolved);
+    assert.strictEqual(resolved.symbol.name, "OnEvent");
+});
+
 test("Тип объекта выводится из отдельного присваивания конструктора", () => {
     const source = [
         "Class Service",

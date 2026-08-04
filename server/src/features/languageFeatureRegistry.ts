@@ -40,7 +40,10 @@ import {
 import { findRslReferencesInWorkspace } from "../analysis/references";
 import { ReferenceIndex } from "../analysis/referenceIndex";
 import type { IFastDocumentSnapshot } from "../services/fastDocumentSnapshot";
-import { RslScopeResolver } from "../scopeResolver";
+import {
+    RSL_BUILTIN_URI,
+    RslScopeResolver
+} from "../scopeResolver";
 import type { WorkspaceIndex } from "../workspaceIndex";
 import type { PerformanceLogger } from "../performanceLogger";
 import {
@@ -64,6 +67,7 @@ import {
 import { CompletionTransport } from "./completionTransport";
 import { PresentationFeatureRegistry } from "./presentationFeatureRegistry";
 import { SemanticTokensFeatureRegistry } from "./semanticTokensFeatureRegistry";
+import { buildRslRenameEdit, prepareRslRename } from "./renameProvider";
 
 interface IRslCurrentBlockRangeParams {
     textDocument: { uri: string };
@@ -415,6 +419,11 @@ export class RslLanguageFeatureRegistry {
                     return null;
                 }
 
+                if (resolved.uri === RSL_BUILTIN_URI) {
+                    outcome = "builtin";
+                    return null;
+                }
+
                 outcome = resolved.uri === document.uri
                     ? "local"
                     : "imported";
@@ -464,6 +473,48 @@ export class RslLanguageFeatureRegistry {
                 params.context.includeDeclaration,
                 () => cancellationToken.isCancellationRequested
             );
+        });
+
+        connection.onPrepareRename?.(async (params, cancellationToken) => {
+            const document = documents.get(params.textDocument.uri);
+            if (!document) return null;
+            this.environment.noteInteractiveActivity?.();
+            const version = document.version;
+            await ensureDocumentParsed(document);
+            if (requestIsStale(document, version, cancellationToken)) {
+                return null;
+            }
+            const module = index.getModule(document.uri);
+            return module
+                ? prepareRslRename(
+                    module,
+                    resolver,
+                    document.offsetAt(params.position)
+                )
+                : null;
+        });
+
+        connection.onRenameRequest?.(async (params, cancellationToken) => {
+            const document = documents.get(params.textDocument.uri);
+            if (!document) return null;
+            this.environment.noteInteractiveActivity?.();
+            const version = document.version;
+            await ensureDocumentParsed(document);
+            if (requestIsStale(document, version, cancellationToken)) {
+                return null;
+            }
+            const module = index.getModule(document.uri);
+            return module
+                ? buildRslRenameEdit(
+                    module,
+                    index,
+                    resolver,
+                    this.referenceIndex,
+                    document.offsetAt(params.position),
+                    params.newName,
+                    () => cancellationToken.isCancellationRequested
+                )
+                : null;
         });
 
         connection.onCodeAction(async (
@@ -704,7 +755,7 @@ function requestIsStale(
 }
 
 function deduplicateCompletionItems(
-    ...groups: CompletionItem[][]
+    ...groups: readonly (readonly CompletionItem[])[]
 ): CompletionItem[] {
     const result: CompletionItem[] = [];
     const seen = new Set<string>();

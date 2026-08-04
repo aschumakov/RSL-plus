@@ -10,7 +10,7 @@ import {
 
 import { RslSymbol } from "./symbols/rslSymbol";
 import { isRslKeyword, isRslType } from "./syntax/rslIdentifiers";
-import { RslScopeResolver } from "./scopeResolver";
+import { getScopeChain, RslScopeResolver } from "./scopeResolver";
 import {
     GetDynamicMacroReferencesFromTokens,
     GetImportDefinitionTargetsFromTokens,
@@ -22,7 +22,8 @@ import {
 import {
     IRslToken,
     normalizeIdentifier,
-    normalizeReferenceIdentifier
+    normalizeReferenceIdentifier,
+    significantTokens
 } from "./lexer";
 import {
     isRslSystemSpecialVariableName
@@ -56,6 +57,7 @@ interface IDiagnosticData {
     name?: string;
     parameter?: boolean;
     moduleName?: string;
+    replacement?: string;
 }
 
 const BLOCK_START = new Set(["macro", "class", "if", "for", "while", "with"]);
@@ -100,6 +102,7 @@ export const DEFAULT_DIAGNOSTIC_SETTINGS: Required<IRslDiagnosticSettings> = {
     debugBreak: true,
     useBeforeDeclaration: true,
     ambiguousReferences: true,
+    dialect: "rsBank",
     maxProblems: 200
 };
 
@@ -118,6 +121,7 @@ export function normalizeDiagnosticSettings(
             settings?.useBeforeDeclaration !== false,
         ambiguousReferences:
             settings?.ambiguousReferences !== false,
+        dialect: settings?.dialect === "coreRsl" ? "coreRsl" : "rsBank",
         maxProblems:
             typeof settings?.maxProblems === "number"
                 ? Math.max(0, Math.floor(settings.maxProblems))
@@ -175,6 +179,10 @@ export function buildLocalRslDiagnostics(
 
     addSyntaxParserDiagnostics(module, result);
 
+    if (hasCapacity()) {
+        addDocumentedLimitDiagnostics(module, result);
+    }
+
     if (options.structure && hasCapacity()) {
         addUnterminatedTokenDiagnostics(module, result);
     }
@@ -189,6 +197,20 @@ export function buildLocalRslDiagnostics(
     }
     if (options.structure && hasCapacity()) {
         addBasicImportDiagnostics(module, index, result);
+    }
+    if (options.structure && hasCapacity()) {
+        addImportPlacementDiagnostics(module, result);
+    }
+    if (options.structure && hasCapacity()) {
+        addConstantAssignmentDiagnostics(module, getResolver(), result);
+    }
+    if (
+        options.structure &&
+        options.dialect === "coreRsl" &&
+        hasCapacity()
+    ) {
+        addCoreDialectDiagnostics(module, getResolver(), result);
+        addReferenceArgumentDiagnostics(module, getResolver(), result);
     }
 
     /*
@@ -280,6 +302,313 @@ function addSyntaxParserDiagnostics(
             item.code
         ));
     });
+}
+
+/** Ограничения из сводки синтаксиса, проверяемые без построения новых AST. */
+function addDocumentedLimitDiagnostics(
+    module: IIndexedModule,
+    result: Diagnostic[]
+): void {
+    for (const token of module.lex.tokens) {
+        if (
+            token.kind === "identifier" &&
+            !isSpecialName(token.value) &&
+            Array.from(token.value).length > 80
+        ) {
+            result.push(createTokenDiagnostic(
+                token,
+                DiagnosticSeverity.Error,
+                "Имя идентификатора длиннее допустимых 80 символов",
+                "identifier-too-long"
+            ));
+        } else if (
+            token.kind === "string" &&
+            Array.from(token.value).length > 2047
+        ) {
+            result.push(createTokenDiagnostic(
+                token,
+                DiagnosticSeverity.Error,
+                "Строковый литерал длиннее допустимых 2047 символов",
+                "string-literal-too-long",
+                false,
+                {
+                    start: token.start,
+                    end: token.end,
+                    replacement: splitLongStringLiteral(token.raw)
+                }
+            ));
+        }
+    }
+
+    const fileName = moduleFileName(module.uri);
+    const extension = path.extname(fileName);
+    const stem = path.basename(fileName, extension);
+    if (/^\.mac$/iu.test(extension) && Array.from(stem).length > 24) {
+        result.push(createOffsetDiagnostic(
+            module,
+            0,
+            Math.min(module.source.length, 1),
+            DiagnosticSeverity.Warning,
+            "Имя macro-файла длиннее рекомендуемых 24 символов",
+            "macro-file-name-too-long"
+        ));
+    }
+}
+
+function addImportPlacementDiagnostics(
+    module: IIndexedModule,
+    result: Diagnostic[]
+): void {
+    for (const reference of GetImportDefinitionTargetsFromTokens(
+        module.lex.tokens
+    )) {
+        const scope = getScopeChain(module.symbolTree, reference.start);
+        const callable = scope.find(item =>
+            item.kind === CompletionItemKind.Function ||
+            item.kind === CompletionItemKind.Method
+        );
+        if (!callable) {
+            continue;
+        }
+        result.push(createImportDiagnostic(
+            module,
+            reference,
+            DiagnosticSeverity.Error,
+            "IMPORT допустим только вне MACRO",
+            "import-inside-macro"
+        ));
+    }
+}
+
+function addConstantAssignmentDiagnostics(
+    module: IIndexedModule,
+    resolver: RslScopeResolver,
+    result: Diagnostic[]
+): void {
+    const tokens = significantTokens(module.lex.tokens);
+    const declarationStarts = new Set<number>();
+    walkScopes(module.symbolTree, scope => {
+        for (const child of scope.children) {
+            if (child.kind === CompletionItemKind.Constant) {
+                declarationStarts.add(findObjectNameRange(module, child).start);
+            }
+        }
+    });
+
+    for (let index = 0; index + 1 < tokens.length; index++) {
+        const token = tokens[index];
+        const next = tokens[index + 1];
+        if (
+            token.kind !== "identifier" ||
+            next.kind !== "symbol" ||
+            next.raw !== "=" ||
+            declarationStarts.has(token.start)
+        ) {
+            continue;
+        }
+        const resolved = resolver.resolveAt(
+            module.uri,
+            module.symbolTree,
+            token.start
+        );
+        if (resolved?.symbol.kind !== CompletionItemKind.Constant) {
+            continue;
+        }
+        result.push(createTokenDiagnostic(
+            token,
+            DiagnosticSeverity.Error,
+            `Константе ${token.value} нельзя присваивать новое значение`,
+            "assignment-to-constant"
+        ));
+    }
+}
+
+function addCoreDialectDiagnostics(
+    module: IIndexedModule,
+    resolver: RslScopeResolver,
+    result: Diagnostic[]
+): void {
+    const tokens = significantTokens(module.lex.tokens);
+    for (let index = 0; index + 2 < tokens.length; index++) {
+        const owner = tokens[index];
+        const dot = tokens[index + 1];
+        const member = tokens[index + 2];
+        if (
+            owner.kind !== "identifier" ||
+            normalizeIdentifier(owner.value) !== "this" ||
+            dot.kind !== "symbol" ||
+            dot.raw !== "." ||
+            member.kind !== "identifier"
+        ) {
+            continue;
+        }
+        const resolved = resolver.resolveAt(
+            module.uri,
+            module.symbolTree,
+            member.start
+        );
+        if (!resolved?.symbol.isPrivate) {
+            continue;
+        }
+        result.push(createTokenDiagnostic(
+            member,
+            DiagnosticSeverity.Error,
+            "В базовом RSL PRIVATE-член нельзя вызывать через THIS",
+            "core-private-member-through-this"
+        ));
+    }
+}
+
+function addReferenceArgumentDiagnostics(
+    module: IIndexedModule,
+    resolver: RslScopeResolver,
+    result: Diagnostic[]
+): void {
+    const tokens = significantTokens(module.lex.tokens);
+    const declarationStarts = new Set<number>();
+    walkScopes(module.symbolTree, scope => {
+        for (const child of scope.children) {
+            if (
+                child.kind === CompletionItemKind.Function ||
+                child.kind === CompletionItemKind.Method
+            ) {
+                declarationStarts.add(findObjectNameRange(module, child).start);
+            }
+        }
+    });
+    for (let index = 0; index + 1 < tokens.length; index++) {
+        const callee = tokens[index];
+        const open = tokens[index + 1];
+        if (
+            callee.kind !== "identifier" ||
+            open.kind !== "symbol" ||
+            open.raw !== "("
+        ) {
+            continue;
+        }
+        if (declarationStarts.has(callee.start)) {
+            continue;
+        }
+        const resolved = resolver.resolveAt(
+            module.uri,
+            module.symbolTree,
+            callee.start
+        );
+        const references = referenceParameterIndexes(
+            resolved?.symbol.parameterText || ""
+        );
+        if (references.size === 0) {
+            continue;
+        }
+        for (const argument of callArguments(tokens, index + 1)) {
+            if (!references.has(argument.index) || argument.tokens.length === 0) {
+                continue;
+            }
+            const first = argument.tokens[0];
+            if (first.kind === "symbol" && first.raw === "@") {
+                continue;
+            }
+            result.push(createTokenDiagnostic(
+                first,
+                DiagnosticSeverity.Error,
+                `Параметр ${argument.index + 1} передаётся по ссылке; ` +
+                    "перед аргументом требуется @",
+                "missing-reference-argument"
+            ));
+        }
+    }
+}
+
+function referenceParameterIndexes(parameterText: string): Set<number> {
+    const body = parameterText.trim().replace(/^\(/u, "").replace(/\)$/u, "");
+    const result = new Set<number>();
+    splitTopLevel(body).forEach((parameter, index) => {
+        if (/(?:^|:)\s*@/u.test(parameter)) {
+            result.add(index);
+        }
+    });
+    return result;
+}
+
+function callArguments(
+    tokens: readonly IRslToken[],
+    openIndex: number
+): Array<{ index: number; tokens: IRslToken[] }> {
+    const result: Array<{ index: number; tokens: IRslToken[] }> = [];
+    let current: IRslToken[] = [];
+    let depth = 0;
+    for (let index = openIndex + 1; index < tokens.length; index++) {
+        const token = tokens[index];
+        if (token.kind === "symbol" && token.raw === "(") {
+            depth++;
+        } else if (token.kind === "symbol" && token.raw === ")") {
+            if (depth === 0) {
+                if (current.length > 0) {
+                    result.push({ index: result.length, tokens: current });
+                }
+                break;
+            }
+            depth--;
+        } else if (
+            token.kind === "symbol" &&
+            token.raw === "," &&
+            depth === 0
+        ) {
+            result.push({ index: result.length, tokens: current });
+            current = [];
+            continue;
+        }
+        current.push(token);
+    }
+    return result;
+}
+
+function splitTopLevel(value: string): string[] {
+    const result: string[] = [];
+    let start = 0;
+    let depth = 0;
+    for (let index = 0; index < value.length; index++) {
+        const char = value.charAt(index);
+        if (char === "(" || char === "[" || char === "{") depth++;
+        else if (char === ")" || char === "]" || char === "}") depth--;
+        else if (char === "," && depth === 0) {
+            result.push(value.slice(start, index));
+            start = index + 1;
+        }
+    }
+    result.push(value.slice(start));
+    return result;
+}
+
+function moduleFileName(uri: string): string {
+    try {
+        return path.basename(fileURLToPath(uri));
+    } catch {
+        return path.basename(uri);
+    }
+}
+
+function isSpecialName(value: string): boolean {
+    return /^\{[^}\r\n]+\}$/u.test(value);
+}
+
+function splitLongStringLiteral(raw: string): string | undefined {
+    if (raw.length < 2050 || (raw[0] !== "\"" && raw[0] !== "'")) {
+        return undefined;
+    }
+    const quote = raw[0];
+    const body = raw.slice(1, raw.endsWith(quote) ? -1 : undefined);
+    const parts: string[] = [];
+    let start = 0;
+    while (body.length - start > 1800) {
+        let end = start + 1800;
+        while (end > start && body.charAt(end - 1) === "\\") end--;
+        if (end === start) return undefined;
+        parts.push(body.slice(start, end));
+        start = end;
+    }
+    parts.push(body.slice(start));
+    return parts.map(part => `${quote}${part}${quote}`).join(" +\n");
 }
 
 function addDeprecatedDeclarationDiagnostics(
@@ -828,6 +1157,7 @@ function addBasicImportDiagnostics(
 ): void {
     const references = GetImportDefinitionTargetsFromTokens(module.lex.tokens);
     const seenImports = new Set<string>();
+    const importedByStem = new Map<string, string>();
 
     for (const reference of references) {
         const normalizedImport = normalizeModuleReference(reference.moduleName);
@@ -848,6 +1178,25 @@ function addBasicImportDiagnostics(
             ));
         } else {
             seenImports.add(normalizedImport);
+        }
+
+        const stem = normalizedImport
+            .replace(/^.*\//u, "")
+            /* Resolver добавляет .mac к неизвестному расширению. */
+            .replace(/\.(?:mac|rsm|d32|dlm)$/iu, "")
+            .replace(/\.(?:mac|rsm|d32|dlm)$/iu, "");
+        const previous = importedByStem.get(stem);
+        if (previous && previous !== normalizedImport) {
+            result.push(createImportDiagnostic(
+                module,
+                reference,
+                DiagnosticSeverity.Error,
+                "Нельзя импортировать файлы с одинаковым именем и " +
+                    "разными расширениями",
+                "duplicate-import-basename"
+            ));
+        } else if (stem) {
+            importedByStem.set(stem, normalizedImport);
         }
 
         const imported = index.findModuleByName(reference.moduleName);

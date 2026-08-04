@@ -21,14 +21,12 @@ import {
 
 import { readRslSettings, readSetting } from "./clientSettings";
 import { registerEditorCommands } from "./editorCommands";
-import { WorkspaceInventoryController } from "./workspaceInventoryController";
 
 
 let client: LanguageClient;
 let languageClientStarted = false;
 let activeEditor: TextEditor | undefined = window.activeTextEditor;
 let myStatusBarItem: StatusBarItem;
-let workspaceInventory: WorkspaceInventoryController;
 
 interface IClientPerformanceFields {
     [name: string]: string | number | boolean | null | undefined;
@@ -288,7 +286,6 @@ export function activate(context: ExtensionContext): void {
         },
         middleware: {
             provideDocumentSymbols: async (document, token, next) => {
-                workspaceInventory.postpone();
                 const startedAtMs = Date.now();
                 sendClientPerformance("client.outline.request", {
                     uri: document.uri.toString()
@@ -309,7 +306,8 @@ export function activate(context: ExtensionContext): void {
                 ).fsPath
                 : undefined,
             performanceLogFile: performanceLogFile || undefined,
-            initialSettings
+            initialSettings,
+            activeDocumentUri: activeRslDocumentUri()
         }
     };
 
@@ -319,11 +317,6 @@ export function activate(context: ExtensionContext): void {
         serverOptions,
         clientOptions
     );
-    workspaceInventory = new WorkspaceInventoryController({
-        getClient: () => client,
-        isClientReady: () => languageClientStarted,
-        performance: sendClientPerformance
-    });
     /*
      * Начиная с vscode-languageclient 8.x обработчики можно и нужно
      * регистрировать до запуска клиента. Это исключает потерю ранних
@@ -339,7 +332,6 @@ export function activate(context: ExtensionContext): void {
             await notifyActiveDocument();
 
             await client.sendNotification("clientReady");
-            workspaceInventory.schedule();
         },
         error => {
             console.error(
@@ -371,7 +363,6 @@ export function activate(context: ExtensionContext): void {
     context.subscriptions.push(
         window.onDidChangeActiveTextEditor(editor => {
             activeEditor = editor;
-            workspaceInventory.postpone();
             notifyActiveDocument().then(
                 undefined,
                 error => console.error(
@@ -379,9 +370,6 @@ export function activate(context: ExtensionContext): void {
                     error
                 )
             );
-        }),
-        workspace.onDidChangeTextDocument(() => {
-            workspaceInventory.postpone();
         }),
         workspace.onDidChangeConfiguration(event => {
             if (!event.affectsConfiguration("rslPlus")) {
@@ -394,13 +382,7 @@ export function activate(context: ExtensionContext): void {
                     error
                 )
             );
-        }),
-        workspace.onDidChangeWorkspaceFolders(() => {
-            workspaceInventory.reset();
-        }),
-        {
-            dispose: () => workspaceInventory.dispose()
-        }
+        })
     );
 
     const showMacrosCommand = "rsl.showMacroFiles";

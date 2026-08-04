@@ -57,8 +57,12 @@ export interface IRslDiagnosticSettings {
     debugBreak?: boolean;
     useBeforeDeclaration?: boolean;
     ambiguousReferences?: boolean;
+    /** Совместимость синтаксиса и семантики с выбранным окружением RSL. */
+    dialect?: RslLanguageDialect;
     maxProblems?: number;
 }
+
+export type RslLanguageDialect = "rsBank" | "coreRsl";
 
 export type RslWorkspaceIndexingMode =
     "activeImports" |
@@ -70,6 +74,9 @@ export type RslWorkspaceIndexingMode =
  * Настройки language server.
  */
 export interface IRslSettings {
+    language: {
+        dialect: RslLanguageDialect;
+    };
     imports: {
         enabled: boolean;
     };
@@ -103,4 +110,3 @@ export interface IArray {
     is(it: string): If_s<number>;
     str(num: varType | number): string;
 }
-

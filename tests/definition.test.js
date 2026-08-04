@@ -14,8 +14,11 @@ const modulePath = path.join(
 const {
     GetDynamicDefinitionTarget,
     GetImportDefinitionTarget,
-    GetImportedMacroFiles
+    GetImportedMacroFiles,
+    GetProcedureReferenceTargetFromTokens,
+    GetPositionalHandlerNamesFromTokens
 } = require(modulePath);
+const { lexRsl } = require("../server/out/lexer");
 
 let passed = 0;
 let failed = 0;
@@ -57,6 +60,54 @@ test("ExecMacro переходит по строковому имени", () => 
             kind: "macro",
             macroName: "ProcessReserveAccount"
         }
+    );
+});
+
+test("Строковые callback-процедуры документированных API поддерживают переход", () => {
+    const cases = [
+        ['RunDialog(dlg, "DialogEvent");', "DialogEvent"],
+        ['RunMenu(menu, "MenuEvent");', "MenuEvent"],
+        ['SetOutHandler("OutputEvent");', "OutputEvent"],
+        ['ProcessTrn(data, "TransactionEvent");', "TransactionEvent"],
+        ['array.Sort("CompareRows");', "CompareRows"]
+    ];
+    for (const [source, name] of cases) {
+        assert.deepStrictEqual(
+            GetProcedureReferenceTargetFromTokens(
+                lexRsl(source).tokens,
+                inside(source, name)
+            ),
+            { kind: "macro", name }
+        );
+    }
+});
+
+test("R2M связывает строку метода с объектом-получателем", () => {
+    const source = 'RunScroll(dlg, data, 4, cols, R2M(this, "OnScroll"));';
+    assert.deepStrictEqual(
+        GetProcedureReferenceTargetFromTokens(
+            lexRsl(source).tokens,
+            inside(source, "OnScroll")
+        ),
+        {
+            kind: "method",
+            name: "OnScroll",
+            receiverOffset: source.indexOf("this")
+        }
+    );
+});
+
+test("Обработчики из строки, @ и R2M распознаются позиционными", () => {
+    const source = [
+        'RunDialog(dlg, "DialogEvent");',
+        "RunMenu(menu, @MenuEvent);",
+        'RunScroll(dlg, data, 4, cols, R2M(this, "ScrollEvent"));'
+    ].join("\n");
+    assert.deepStrictEqual(
+        Array.from(GetPositionalHandlerNamesFromTokens(
+            lexRsl(source).tokens
+        )).sort(),
+        ["dialogevent", "menuevent", "scrollevent"]
     );
 });
 

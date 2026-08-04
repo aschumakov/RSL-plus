@@ -431,7 +431,8 @@ async function testOutlineIsReadyBeforeDiagnostics() {
         },
         end(span) {
             events.push(`end:${span.event}`);
-        }
+        },
+        mark() {}
     };
     const documents = {
         get: requestedUri => requestedUri === uri ? document : undefined,
@@ -484,6 +485,7 @@ async function testOutlineIsReadyBeforeDiagnostics() {
         }
     );
 
+    analysis.setActiveDocument(uri);
     assert.strictEqual(analysis.open(document), true);
     await waitFor(
         () => events.includes("end:diagnostics.local"),
@@ -503,6 +505,53 @@ async function testOutlineIsReadyBeforeDiagnostics() {
 
     analysis.close(uri);
     coordinator.close(uri);
+}
+
+async function testInactiveRestoredTabIsLazy() {
+    const source = "Macro Restored()\nEnd;";
+    const uri = "file:///inactive-restored.mac";
+    const document = {
+        uri,
+        languageId: "rsl",
+        version: 1,
+        getText: () => source,
+        positionAt: () => ({ line: 0, character: 0 }),
+        offsetAt: () => 0
+    };
+    const events = [];
+    const documents = {
+        get: requested => requested === uri ? document : undefined
+    };
+    const index = new WorkspaceIndex();
+    const analysis = new DocumentAnalysisService(
+        documents,
+        index,
+        { getAvailable: () => defaults },
+        {
+            log: message => { throw new Error(message); },
+            performance: {
+                enabled: true,
+                start(event, fields) { return { event, fields }; },
+                end(span) { events.push(span.event); },
+                mark() {}
+            },
+            invalidateProviderCaches: () => undefined,
+            onParsed: () => events.push("parsed"),
+            onImports: () => undefined,
+            initialParseDelayMs: 0
+        }
+    );
+
+    analysis.open(document);
+    await new Promise(resolve => setTimeout(resolve, 25));
+    assert.ok(!events.includes("analysis.fastSnapshot"));
+    assert.ok(!events.includes("parsed"));
+
+    analysis.setActiveDocument(uri);
+    await waitFor(() => events.includes("parsed"), 1000);
+    assert.ok(events.includes("analysis.fastSnapshot"));
+    assert.ok(events.includes("analysis.outlineSnapshot"));
+    analysis.close(uri);
 }
 
 function testCompletionPayloadIsBoundedAndResolvedLazily() {
@@ -555,6 +604,9 @@ async function waitFor(predicate, timeoutMs) {
 
     await testOutlineIsReadyBeforeDiagnostics();
     console.log("[OK] document.open и Outline завершаются раньше diagnostics");
+
+    await testInactiveRestoredTabIsLazy();
+    console.log("[OK] неактивная восстановленная вкладка анализируется лениво");
 
     testCompletionPayloadIsBoundedAndResolvedLazily();
     console.log("[OK] Completion ограничен и догружает detail через resolve");

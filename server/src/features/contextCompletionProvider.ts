@@ -5,6 +5,7 @@ import {
 } from "vscode-languageserver";
 
 import type { RslSymbol } from "../symbols/rslSymbol";
+import { getDefaults } from "../defaults";
 import { significantTokens, type IRslToken } from "../lexer";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 
@@ -15,6 +16,44 @@ interface ICallContext {
 }
 
 const MAX_CONTEXT_COMPLETIONS = 200;
+const RSL_TYPE_NAMES = [
+    "Variant", "Integer", "Money", "Double", "DoubleL", "String",
+    "Bool", "Date", "Time", "Object", "ProcRef", "DateTime", "R2M",
+    "MemAddr"
+];
+const RSL_TYPE_COMPLETIONS: CompletionItem[] = [
+    ...RSL_TYPE_NAMES.map(name => ({
+        label: name,
+        kind: CompletionItemKind.TypeParameter,
+        detail: "Тип RSL",
+        insertText: name
+    })),
+    ...getDefaults().completionItems
+        .filter(item => item.kind === CompletionItemKind.Class)
+        .map(item => ({
+            ...item,
+            insertText: String(item.label),
+            insertTextFormat: undefined
+        }))
+];
+const FILE_MODIFIERS = [
+    "Normal", "Write", "Mem", "Txt", "Btr", "Dbf", "Dialog", "Blob",
+    "Key", "Sort"
+];
+const FORMAT_SPECIFIERS: Array<[string, string]> = [
+    ["l", "выравнивание влево"],
+    ["r", "выравнивание вправо"],
+    ["c", "выравнивание по центру"],
+    ["a", "автоматический формат"],
+    ["t", "формат времени"],
+    ["d", "формат даты"],
+    ["m", "денежный формат"],
+    ["w", "вывод словами"],
+    ["z", "подавление нулевого значения"],
+    ["f", "фиксированный формат"],
+    ["i", "целочисленный формат"],
+    ["iv", "целочисленный формат со знаком"]
+];
 
 /**
  * Контекстные подсказки, которые должны работать внутри строк и Import.
@@ -35,6 +74,11 @@ export function buildRslContextCompletions(
             undefined,
             importPrefixAt(module.source, offset)
         );
+    }
+
+    const staticItems = buildStaticContextItems(module.source, offset);
+    if (staticItems) {
+        return staticItems;
     }
 
     const stringIndex = tokens.findIndex(token =>
@@ -95,6 +139,46 @@ export function buildRslContextCompletions(
     }
 
     return [];
+}
+
+function buildStaticContextItems(
+    source: string,
+    offset: number
+): CompletionItem[] | undefined {
+    const lineStart = Math.max(0, source.lastIndexOf("\n", offset - 1) + 1);
+    const line = source.slice(lineStart, offset);
+
+    if (
+        /(?:^|\b)(?:macro|class|var|const|array)\b[^;\n]*:\s*[\p{L}\p{N}_]*$/iu
+            .test(line)
+    ) {
+        return RSL_TYPE_COMPLETIONS;
+    }
+
+    if (
+        /^\s*(?:(?:private|local)\s+)?(?:file|record)\b[^;\n]*\)[^;\n]*$/iu
+            .test(line)
+    ) {
+        return FILE_MODIFIERS.map(name => ({
+            label: name,
+            kind: CompletionItemKind.Keyword,
+            detail: "Параметр FILE/RECORD",
+            insertText: name
+        }));
+    }
+
+    if (
+        /\([^;\n]*:\s*[a-z]*$/iu.test(line) &&
+        !/(?:macro|class|var|const|array)\b[^;\n]*:/iu.test(line)
+    ) {
+        return FORMAT_SPECIFIERS.map(([name, detail]) => ({
+            label: name,
+            kind: CompletionItemKind.EnumMember,
+            detail: `Формат :${name} — ${detail}`,
+            insertText: name
+        }));
+    }
+    return undefined;
 }
 
 function buildModuleItems(

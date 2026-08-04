@@ -20,12 +20,13 @@ RSL-plus вырос из расширения [alliluja/RSL](https://github.com/
 
 ### IntelliSense и навигация
 
-- автодополнение локальных, глобальных и импортированных символов;
+- автодополнение локальных, глобальных, импортированных и стандартных символов;
 - Auto Import для символов из известных модулей;
 - Signature Help с подсветкой активного параметра;
 - учёт областей видимости, `Private`, классов и наследования;
 - Hover с типом и описанием символа;
-- Go to Definition для объявлений, `Import`, `ExecMacro`, `ExecMacro2` и `ExecMacroFile`;
+- безопасное переименование символа во всех точных ссылках (`F2`);
+- Go to Definition для объявлений, `Import`, `ExecMacro`, `ExecMacro2`, `ExecMacroFile` и callback-процедур, переданных строкой, через `@` или `R2M`;
 - Find All References по загруженному workspace index;
 - Call Hierarchy для входящих и исходящих вызовов `Macro`/`Method`;
 - семантическая подсветка классов, методов, функций, переменных, параметров и свойств;
@@ -45,6 +46,8 @@ RSL-plus вырос из расширения [alliluja/RSL](https://github.com/
 - неоднозначные ссылки и неоднозначные `Import`;
 - оставленный `DEBUGBREAK`;
 - устаревшие объявления `RECORD` и `ARRAY`.
+- ограничения длины имён, строк и имён macro-файлов;
+- `Import` внутри `Macro`, присваивание константе и конфликт расширений `Import`;
 
 Для однозначных случаев доступны Quick Fix: удаление `DEBUGBREAK`, лишнего `END`/`ELSE`/скобки, повторного или неиспользуемого `Import`, неиспользуемого объявления, добавление пропущенных `;`/`,` и вставка `+` между соседними строками.
 
@@ -55,7 +58,7 @@ RSL-plus вырос из расширения [alliluja/RSL](https://github.com/
 
 Некоторые `Macro` вызываются ядром RS-Bank с позиционным набором параметров. Реализация может использовать только часть параметров, но обязана сохранить позиции до последнего используемого аргумента.
 
-Имена таких обработчиков задаются в корневом файле [`standard-handlers.json`](standard-handlers.json):
+Имена постоянно известных обработчиков задаются в корневом файле [`standard-handlers.json`](standard-handlers.json):
 
 ```json
 {
@@ -67,15 +70,19 @@ RSL-plus вырос из расширения [alliluja/RSL](https://github.com/
 }
 ```
 
+Обработчики, переданные в `RunDialog`, `RunScroll`, `AddScroll`, `RunMenu`,
+`SetOutHandler`, `SetTimer`, `SetHandler` и другие документированные API,
+определяются автоматически — в строковой форме, через `@` и `R2M`.
+
 Для стандартного обработчика проверяется только неиспользуемый хвост параметров справа. Параметры слева от последнего используемого не помечаются как ошибки.
 
-## Что изменилось в 1.1.5
+## Что изменилось в 1.1.8
 
-- Signature Help для вызовов `Macro` и методов;
-- Call Hierarchy с входящими и исходящими вызовами;
-- Auto Import в Completion и Quick Fix для отсутствующего `Import`;
-- форматирование только выделенного блока;
-- команды сворачивания текущего или всех `Macro` в файле.
+- встроенный каталог стандартной библиотеки и более точный Completion;
+- безопасный Rename через `F2` и дополнительные проверки компиляции;
+- переходы к callback-процедурам в строках, `@` и `R2M`;
+- позиционная семантика параметров обработчиков событий;
+- серверный отложенный каталог workspace и ленивый анализ неактивных вкладок.
 
 ## Установка
 
@@ -92,7 +99,7 @@ code --install-extension AChumakov.rsl-plus
 ### Из VSIX
 
 ```text
-code --install-extension rsl-plus-1.1.7.vsix
+code --install-extension rsl-plus-1.1.8.vsix
 ```
 
 ## Настройки
@@ -102,6 +109,7 @@ code --install-extension rsl-plus-1.1.7.vsix
 - `rslPlus.imports.enabled` — анализировать цепочки `Import`;
 - `rslPlus.autoImport.enabled` — предлагать Auto Import;
 - `rslPlus.analysis.workspaceIndexing` — выбрать глубину фоновой индексации;
+- `rslPlus.language.dialect` — выбрать совместимость RS-Bank или строгий базовый RSL;
 - `rslPlus.editor.completeBlocksOnEnter` — добавлять `End;` по `Enter` после заголовка блока;
 - `rslPlus.diagnostics.enabled` и `rslPlus.diagnostics.*` — управлять Problems;
 - `rslPlus.semanticHighlighting.maxFileSizeKb` — ограничить семантическую подсветку больших файлов.

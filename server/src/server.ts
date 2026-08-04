@@ -27,6 +27,7 @@ import { RSL_SEMANTIC_TOKENS_LEGEND } from "./semanticTokens";
 import { RslSettingsService } from "./services/settingsService";
 import { IIndexedModule, WorkspaceIndex } from "./workspaceIndex";
 import { WorkspaceModuleLoader } from "./indexing/workspaceModuleLoader";
+import { WorkspaceFileDiscoveryService } from "./indexing/workspaceFileDiscoveryService";
 import { ReferenceIndex } from "./analysis/referenceIndex";
 import {
     PerformanceLogger,
@@ -39,6 +40,7 @@ const workspaceIndex = new WorkspaceIndex();
 const scopeResolver = new RslScopeResolver(workspaceIndex);
 
 const defaultSettings: IRslSettings = {
+    language: { dialect: "rsBank" },
     imports: { enabled: true },
     autoImport: { enabled: true },
     analysis: { workspaceIndexing: "activeImports" },
@@ -160,6 +162,15 @@ const moduleLoader = new WorkspaceModuleLoader(
     referenceIndex
 );
 
+const workspaceDiscovery = new WorkspaceFileDiscoveryService({
+    log: logMessage,
+    performance: performanceLogger,
+    onFiles: uris => {
+        moduleLoader.registerWorkspaceFiles(uris);
+        definitionProvider?.clearCaches();
+    }
+});
+
 const documentAnalysis = new DocumentAnalysisService(
     documents,
     workspaceIndex,
@@ -169,7 +180,7 @@ const documentAnalysis = new DocumentAnalysisService(
         performance: performanceLogger,
         invalidateProviderCaches,
         onParsed: (module, wasKnown) => {
-            diagnosticsCoordinator.scheduleLocal(module.uri);
+            diagnosticsCoordinator.scheduleLocal(module.uri, 0);
             diagnosticsCoordinator.scheduleWorkspace(module.uri);
             notifyModuleCount();
 
@@ -230,16 +241,11 @@ settingsService.onDidResolve((uri, settings) => {
     diagnosticsCoordinator.scheduleWorkspace(uri, 0);
 });
 
-connection.onNotification("workspaceFiles", (uris: string[]) => {
-    const items = Array.isArray(uris) ? uris : [];
-    moduleLoader.registerWorkspaceFiles(items);
-    definitionProvider.clearCaches();
-});
-
 connection.onNotification("clientReady", () => {
     clientReady = true;
     /* По умолчанию загружается только транзитивная цепочка Import открытых файлов. */
     notifyModuleCount(true);
+    workspaceDiscovery.schedule();
 });
 
 connection.onNotification(
@@ -268,6 +274,7 @@ connection.onNotification(
         moduleLoader.setIndexingMode(settings.analysis.workspaceIndexing);
         moduleLoader.beginForegroundGeneration();
         moduleLoader.noteInteractiveActivity();
+        workspaceDiscovery.noteInteractiveActivity();
         documentAnalysis.setActiveDocument(uri);
         diagnosticsCoordinator.setActiveDocument(uri);
 
@@ -348,8 +355,21 @@ const definitionProvider = new RslDefinitionProvider({
     resolveWorkspaceFileUri: name =>
         workspaceIndex.resolveWorkspaceFile(name),
     ensureModuleByName: name => moduleLoader.ensureLoadedByName(name),
+    ensureImportedSymbol: (uri, symbolName) =>
+        moduleLoader.ensureImportedSymbol(uri, symbolName),
     getDefinitionRange: (uri, object) =>
         workspaceIndex.getDefinitionRange(uri, object),
+    resolveMethodReference: (uri, tree, receiverOffset, methodName) => {
+        const resolved = scopeResolver.resolveMemberReference(
+            uri,
+            tree,
+            receiverOffset,
+            methodName
+        );
+        return resolved
+            ? { uri: resolved.uri, symbol: resolved.symbol }
+            : undefined;
+    },
     log: logMessage
 });
 
@@ -368,7 +388,10 @@ languageFeatures = new RslLanguageFeatureRegistry({
     findAutoImportModules: (symbolName, options) =>
         moduleLoader.findModulesExportingSymbol(symbolName, 10, options),
     getSettings: uri => settingsService.getAvailable(uri),
-    noteInteractiveActivity: () => moduleLoader.noteInteractiveActivity(),
+    noteInteractiveActivity: () => {
+        moduleLoader.noteInteractiveActivity();
+        workspaceDiscovery.noteInteractiveActivity();
+    },
     log: logMessage,
     performance: performanceLogger
 });
@@ -381,6 +404,7 @@ connection.onInitialize((params: InitializeParams) => {
             referenceIndexCachePath?: string;
             performanceLogFile?: string;
             initialSettings?: IRslSettings;
+            activeDocumentUri?: string | null;
         } | undefined;
     referenceIndex.configurePersistence(
         initializationOptions?.referenceIndexCachePath
@@ -389,6 +413,9 @@ connection.onInitialize((params: InitializeParams) => {
         initializationOptions?.performanceLogFile
     );
     definitionProvider.configureWorkspace(params);
+    workspaceDiscovery.configure(params);
+    activeDocumentUri = initializationOptions?.activeDocumentUri || undefined;
+    documentAnalysis.setActiveDocument(activeDocumentUri);
     workFolderOpened = !!(
         (params.workspaceFolders && params.workspaceFolders.length > 0) ||
         params.rootUri ||
@@ -423,6 +450,7 @@ connection.onInitialize((params: InitializeParams) => {
             selectionRangeProvider: true,
             definitionProvider: true,
             referencesProvider: true,
+            renameProvider: { prepareProvider: true },
             workspaceSymbolProvider: true,
             callHierarchyProvider: true,
             executeCommandProvider: {
@@ -459,8 +487,12 @@ connection.onInitialized(() => {
     }
 
     if (hasWorkspaceFolderCapability) {
-        connection.workspace.onDidChangeWorkspaceFolders(() => {
+        connection.workspace.onDidChangeWorkspaceFolders(event => {
             definitionProvider.clearCaches();
+            workspaceDiscovery.updateWorkspaceFolders(
+                event.added,
+                event.removed
+            );
         });
     }
 

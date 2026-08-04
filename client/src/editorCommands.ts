@@ -14,7 +14,12 @@ import {
 } from "vscode";
 import type { LanguageClient } from "vscode-languageclient/node";
 
-import { buildRslSmartEnterSnippet } from "./smartEnter";
+import {
+    buildRslSmartEnterSnippet,
+    isRslBlockHeader
+} from "./smartEnter";
+
+const SMART_ENTER_LOOKAHEAD_LINES = 128;
 
 interface IRslBlockRange {
     start: { line: number; character: number };
@@ -75,6 +80,17 @@ async function smartEnter(): Promise<void> {
     const line = editor.document.lineAt(position.line);
     const beforeCursor = line.text.substring(0, position.character);
     const afterCursor = line.text.substring(position.character);
+    /*
+     * Не обходим остаток большого документа на каждом Enter. Поиск уже
+     * существующего END нужен только после действительно полного заголовка.
+     */
+    if (
+        afterCursor.trim().length > 0 ||
+        !isRslBlockHeader(beforeCursor)
+    ) {
+        await defaultEnter(editor.document.eol);
+        return;
+    }
     const tabSize = typeof editor.options.tabSize === "number"
         ? Math.max(1, editor.options.tabSize)
         : 4;
@@ -106,7 +122,11 @@ function findNextNonEmptyLine(
     editor: NonNullable<typeof window.activeTextEditor>,
     startLine: number
 ): string | undefined {
-    for (let line = startLine; line < editor.document.lineCount; line++) {
+    const endLine = Math.min(
+        editor.document.lineCount,
+        startLine + SMART_ENTER_LOOKAHEAD_LINES
+    );
+    for (let line = startLine; line < endLine; line++) {
         const text = editor.document.lineAt(line).text;
         if (text.trim().length > 0) {
             return text;

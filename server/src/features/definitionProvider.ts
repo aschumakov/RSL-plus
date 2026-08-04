@@ -16,8 +16,10 @@ import type { IIndexedModule, ModuleResolution } from "../workspaceIndex";
 import { IRslToken } from "../lexer";
 import {
     GetDynamicDefinitionTargetFromTokens,
-    GetImportDefinitionTargetFromTokens
+    GetImportDefinitionTargetFromTokens,
+    GetProcedureReferenceTargetFromTokens
 } from "../execMacroDefinition";
+import { getScopeChain } from "../scopeResolver";
 
 export interface IRslDefinitionContext {
     document: TextDocument;
@@ -36,6 +38,10 @@ export interface IDefinitionEnvironment {
     findWorkspaceFileUri(moduleName: string): string | undefined;
     resolveWorkspaceFileUri?(moduleName: string): ModuleResolution<string>;
     ensureModuleByName?(moduleName: string): Promise<IIndexedModule | undefined>;
+    ensureImportedSymbol?(
+        uri: string,
+        symbolName: string
+    ): Promise<boolean>;
     getDefinitionRange?(
         uri: string,
         symbol: RslSymbol
@@ -43,6 +49,12 @@ export interface IDefinitionEnvironment {
         start: { line: number; character: number };
         end: { line: number; character: number };
     } | undefined;
+    resolveMethodReference?(
+        uri: string,
+        tree: RslSymbol,
+        receiverOffset: number,
+        methodName: string
+    ): { uri: string; symbol: RslSymbol } | undefined;
     log(message: string): void;
 }
 
@@ -126,7 +138,7 @@ export class RslDefinitionProvider {
         );
 
         if (!target) {
-            return null;
+            return this.findProcedureDefinition(context);
         }
 
         if (target.kind === "macro" && target.macroName) {
@@ -143,22 +155,12 @@ export class RslDefinitionProvider {
                 );
             }
 
-            for (const imported of this.environment
-                .getImportedModules(context.document.uri)) {
-                const symbol = findTopLevelMacro(
-                    imported.symbolTree,
-                    target.macroName,
-                    false
-                );
-
-                if (!symbol) {
-                    continue;
-                }
-
-                return this.createObjectLocationByUri(
-                    imported.uri,
-                    symbol
-                );
+            const imported = await this.findImportedMacroDefinition(
+                context.document.uri,
+                target.macroName
+            );
+            if (imported) {
+                return imported;
             }
 
             return null;
@@ -198,6 +200,83 @@ export class RslDefinitionProvider {
                 : null;
         }
 
+        return null;
+    }
+
+    /** Переход по callback, переданному строкой или через R2M. */
+    private async findProcedureDefinition(
+        context: IRslDefinitionContext
+    ): Promise<Location | null> {
+        const target = GetProcedureReferenceTargetFromTokens(
+            context.tokens,
+            context.offset
+        );
+        if (!target) {
+            return null;
+        }
+
+        if (
+            target.kind === "method" &&
+            typeof target.receiverOffset === "number"
+        ) {
+            const resolved = this.environment.resolveMethodReference?.(
+                context.document.uri,
+                context.tree,
+                target.receiverOffset,
+                target.name
+            );
+            return resolved
+                ? this.createObjectLocationByUri(
+                    resolved.uri,
+                    resolved.symbol
+                )
+                : null;
+        }
+
+        const local = findVisibleMacro(
+            context.tree,
+            target.name,
+            context.offset
+        );
+        if (local) {
+            return this.createObjectLocation(context.document, local);
+        }
+
+        const imported = await this.findImportedMacroDefinition(
+            context.document.uri,
+            target.name
+        );
+        if (imported) {
+            return imported;
+        }
+
+        return null;
+    }
+
+    private async findImportedMacroDefinition(
+        fromUri: string,
+        macroName: string
+    ): Promise<Location | null> {
+        const findKnown = async (): Promise<Location | null> => {
+            for (const imported of this.environment.getImportedModules(fromUri)) {
+                const symbol = findTopLevelMacro(
+                    imported.symbolTree,
+                    macroName,
+                    false
+                );
+                if (symbol) {
+                    return this.createObjectLocationByUri(imported.uri, symbol);
+                }
+            }
+            return null;
+        };
+
+        const known = await findKnown();
+        if (known) return known;
+
+        if (await this.environment.ensureImportedSymbol?.(fromUri, macroName)) {
+            return findKnown();
+        }
         return null;
     }
 
@@ -506,6 +585,26 @@ function findTopLevelMacro(
         ) &&
         (includePrivate || !child.isPrivate)
     );
+}
+
+function findVisibleMacro(
+    tree: RslSymbol,
+    macroName: string,
+    offset: number
+): RslSymbol | undefined {
+    for (const scope of getScopeChain(tree, offset).reverse()) {
+        const found = scope.children.find(child =>
+            namesEqual(child.name, macroName) &&
+            (
+                child.kind === CompletionItemKind.Function ||
+                child.kind === CompletionItemKind.Method
+            )
+        );
+        if (found) {
+            return found;
+        }
+    }
+    return undefined;
 }
 
 function findObjectNameOffsets(

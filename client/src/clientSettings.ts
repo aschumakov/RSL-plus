@@ -1,6 +1,7 @@
 import { Uri, workspace } from "vscode";
 
 export interface IRslClientSettings {
+    language: { dialect: "rsBank" | "coreRsl" };
     imports: { enabled: boolean };
     autoImport: { enabled: boolean };
     analysis: {
@@ -23,6 +24,13 @@ export interface IRslClientSettings {
 /** Единственная точка чтения публичных настроек rslPlus. */
 export function readRslSettings(resource?: Uri): IRslClientSettings {
     return {
+        language: {
+            dialect: readSetting(
+                "language.dialect",
+                "rsBank" as const,
+                resource
+            )
+        },
         imports: { enabled: readSetting("imports.enabled", true, resource) },
         autoImport: {
             enabled: readSetting("autoImport.enabled", true, resource)

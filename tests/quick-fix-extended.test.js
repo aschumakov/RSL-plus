@@ -225,6 +225,39 @@ test("Если параметры стандартного обработчик�
   assert.strictEqual(unusedParameters.length, 5);
 });
 
+test("Callback RunDialog получает позиционную семантику параметров", () => {
+  const source = [
+    'RunDialog(dlg, "DialogEvent");',
+    "Macro DialogEvent(obj, cmd, id, key, tail)",
+    "  Println(key);",
+    "End;"
+  ].join("\n");
+  const { diagnostics } = diagnosticsFor(source);
+  const messages = diagnostics
+    .filter(item => item.code === "unused-declaration" && item.data?.parameter)
+    .map(item => item.message.toLowerCase());
+
+  assert.strictEqual(messages.length, 1);
+  assert.ok(messages[0].includes("tail"));
+  for (const name of ["obj", "cmd", "id"]) {
+    assert.ok(!messages.some(message => message.includes(`параметр ${name}`)));
+  }
+});
+
+test("Callback через @ также получает позиционную семантику", () => {
+  const source = [
+    "RunMenu(menu, @MenuEvent);",
+    "Macro MenuEvent(obj, cmd, id)",
+    "  Println(id);",
+    "End;"
+  ].join("\n");
+  const { diagnostics } = diagnosticsFor(source);
+  const unused = diagnostics.filter(item =>
+    item.code === "unused-declaration" && item.data?.parameter
+  );
+  assert.deepStrictEqual(unused, []);
+});
+
 test("Обычный Macro по-прежнему проверяет каждый неиспользуемый параметр", () => {
   const source = [
     "Macro CustomHandler(a, b, c)",

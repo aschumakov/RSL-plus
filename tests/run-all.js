@@ -17,6 +17,8 @@ const tests = [
     "diagnostics.test.js",
     "language-features.test.js",
     "interactive-features.test.js",
+    "extended-language-features.test.js",
+    "performance-regressions.test.js",
     "quick-fix-extended.test.js",
     "workspace-resolution.test.js",
     "server-services.test.js",

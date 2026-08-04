@@ -3,6 +3,12 @@ import {
     lexRsl,
     significantTokens
 } from "./lexer";
+import {
+    callbackNameFromArgument,
+    getProcedureCallbackSpec,
+    isPositionalHandlerArgument,
+    isProcedureCallbackArgument
+} from "./features/procedureCallbackCatalog";
 
 export type DynamicDefinitionKind =
     | "macro"
@@ -34,6 +40,13 @@ interface IParsedCall {
     arguments: ICallArgument[];
     openIndex: number;
     closeIndex: number;
+}
+
+export interface IProcedureReferenceTarget {
+    kind: "macro" | "method";
+    name: string;
+    /** Позиция объекта в R2M(object, "Method"). */
+    receiverOffset?: number;
 }
 
 const DYNAMIC_CALLS: { [name: string]: boolean } = {
@@ -127,6 +140,82 @@ export function GetDynamicDefinitionTargetFromTokens(
     }
 
     return undefined;
+}
+
+/**
+ * Определяет строковое имя callback-процедуры в документированных API RSL.
+ * Ссылки вида @Proc обслуживает обычный resolver; здесь нужен именно переход
+ * со строки и со второго параметра R2M.
+ */
+export function GetProcedureReferenceTargetFromTokens(
+    sourceTokens: IRslToken[],
+    offset: number
+): IProcedureReferenceTarget | undefined {
+    const tokens = significantTokens(sourceTokens);
+    const calls = findCalls(tokens, name =>
+        name === "r2m" || !!getProcedureCallbackSpec(name)
+    ).sort((left, right) =>
+        (left.closeIndex - left.openIndex) -
+        (right.closeIndex - right.openIndex)
+    );
+
+    for (const call of calls) {
+        const argumentIndex = findSelectedStringArgument(
+            call.arguments,
+            offset
+        );
+        if (argumentIndex < 0) {
+            continue;
+        }
+
+        const name = getStringArgument(call.arguments, argumentIndex);
+        if (!name) {
+            continue;
+        }
+
+        if (call.name === "r2m" && argumentIndex === 1) {
+            const receiver = call.arguments[0]?.tokens.find(token =>
+                token.kind === "identifier"
+            );
+            return receiver
+                ? {
+                    kind: "method",
+                    name,
+                    receiverOffset: receiver.start
+                }
+                : undefined;
+        }
+
+        if (isProcedureCallbackArgument(call.name, argumentIndex)) {
+            return { kind: "macro", name };
+        }
+    }
+
+    return undefined;
+}
+
+/** Имена Macro, фактически переданных как позиционные обработчики. */
+export function GetPositionalHandlerNamesFromTokens(
+    sourceTokens: IRslToken[]
+): Set<string> {
+    const tokens = significantTokens(sourceTokens);
+    const result = new Set<string>();
+
+    for (const call of findCalls(tokens, name =>
+        getProcedureCallbackSpec(name)?.positionalHandler === true
+    )) {
+        for (let index = 0; index < call.arguments.length; index++) {
+            if (!isPositionalHandlerArgument(call.name, index)) {
+                continue;
+            }
+            const name = callbackNameFromArgument(call.arguments[index].tokens);
+            if (name) {
+                result.add(name.trim().toLowerCase());
+            }
+        }
+    }
+
+    return result;
 }
 
 /**
@@ -343,6 +432,13 @@ function addImportReference(
 }
 
 function findDynamicCalls(tokens: IRslToken[]): IParsedCall[] {
+    return findCalls(tokens, name => !!DYNAMIC_CALLS[name]);
+}
+
+function findCalls(
+    tokens: IRslToken[],
+    accepts: (name: string) => boolean
+): IParsedCall[] {
     const result: IParsedCall[] = [];
 
     for (let index = 0; index < tokens.length - 1; index++) {
@@ -359,7 +455,7 @@ function findDynamicCalls(tokens: IRslToken[]): IParsedCall[] {
 
         const name = nameToken.value.toLowerCase();
 
-        if (!DYNAMIC_CALLS[name]) {
+        if (!accepts(name)) {
             continue;
         }
 
