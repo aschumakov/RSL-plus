@@ -1,8 +1,10 @@
 import * as path from "path";
 
 import type { ModuleResolution } from "./indexTypes";
+
 import {
     addUriAlias,
+    getUriIdentity,
     normalizeUriPath,
     removeUriAlias,
     resolveByModuleName
@@ -10,7 +12,11 @@ import {
 
 /** Каталог имён файлов не читает и не индексирует содержимое. */
 export class FileCatalog {
-    private files = new Set<string>();
+    /**
+     * key   — нормализованная идентичность физического файла;
+     * value — исходный URI для отображения и LSP.
+     */
+    private files = new Map<string, string>();
     private byBaseName = new Map<string, Set<string>>();
     private initialized = false;
 
@@ -20,13 +26,39 @@ export class FileCatalog {
     }
 
     register(uri: string): void {
-        if (!uri || this.files.has(uri)) return;
-        this.files.add(uri);
+        if (!uri) {
+            return;
+        }
+
+        const key = getUriIdentity(uri);
+        const previous = this.files.get(key);
+
+        if (previous === uri) {
+            return;
+        }
+
+        /*
+         * Файл уже мог быть зарегистрирован с другим регистром пути.
+         * Заменяем представление URI, не создавая второй файл.
+         */
+        if (previous) {
+            removeUriAlias(this.byBaseName, previous);
+        }
+
+        this.files.set(key, uri);
         addUriAlias(this.byBaseName, uri);
     }
 
     unregister(uri: string): void {
-        if (this.files.delete(uri)) removeUriAlias(this.byBaseName, uri);
+        const key = getUriIdentity(uri);
+        const storedUri = this.files.get(key);
+
+        if (!storedUri) {
+            return;
+        }
+
+        this.files.delete(key);
+        removeUriAlias(this.byBaseName, storedUri);
     }
 
     clear(): void {
@@ -35,10 +67,16 @@ export class FileCatalog {
         this.initialized = false;
     }
 
-    values(): string[] { return Array.from(this.files); }
+    values(): string[] {
+        return Array.from(this.files.values());
+    }
 
     resolve(moduleName: string): ModuleResolution<string> {
-        return resolveByModuleName(moduleName, this.byBaseName, uri => uri);
+        return resolveByModuleName(
+            moduleName,
+            this.byBaseName,
+            uri => this.files.get(getUriIdentity(uri))
+        );
     }
 
     importName(uri: string): string {
@@ -47,17 +85,26 @@ export class FileCatalog {
         const fileName = segments[segments.length - 1] || normalized;
         const baseName = fileName.replace(/\.mac$/i, "");
         const aliases = this.byBaseName.get(fileName.toLowerCase());
-        if (!aliases || aliases.size <= 1) return baseName;
+
+        if (!aliases || aliases.size <= 1) {
+            return baseName;
+        }
 
         for (let count = 2; count <= segments.length; count++) {
             const suffix = segments.slice(-count).join("/");
             const matches = Array.from(aliases).filter(candidate =>
                 normalizeUriPath(candidate).endsWith("/" + suffix)
             );
-            if (matches.length === 1) return suffix.replace(/\.mac$/i, "");
+
+            if (matches.length === 1) {
+                return suffix.replace(/\.mac$/i, "");
+            }
         }
+
         return path.posix.basename(baseName);
     }
 
-    get ready(): boolean { return this.initialized; }
+    get ready(): boolean {
+        return this.initialized;
+    }
 }

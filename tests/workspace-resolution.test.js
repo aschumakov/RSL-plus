@@ -257,6 +257,49 @@ function testFullAndCompactModelsShareDeclarationContract() {
     assert.strictEqual(compact.find("Hidden"), undefined);
 }
 
+function testWindowsUriCaseDoesNotCreateDuplicateModule() {
+    const index = new WorkspaceIndex();
+
+    const discoveredUri =
+        "file:///d:/achumakov/gitlab/rsmacro/custom/bscarddocs.mac";
+    const openedUri =
+        "file:///d:/Achumakov/GITLAB/rsmacro/custom/bscarddocs.mac";
+
+    index.registerWorkspaceFiles([discoveredUri]);
+
+    index.updateExternalModule(
+        discoveredUri,
+        "Macro ExternalVersion()\nEnd;",
+        1
+    );
+
+    index.updateOpenModule(
+        openedUri,
+        "Macro OpenVersion()\nEnd;",
+        2
+    );
+
+    const resolution = index.resolveWorkspaceFile("bscarddocs");
+
+    assert.strictEqual(
+        resolution.kind,
+        "resolved",
+        "Разный регистр Windows-пути не должен создавать неоднозначный Import"
+    );
+
+    assert.strictEqual(
+        index.getModules().length,
+        1,
+        "Открытый и импортированный варианты должны быть одной моделью"
+    );
+
+    assert.strictEqual(
+        index.getModule(discoveredUri).uri,
+        openedUri,
+        "Открытая полная модель должна заменить external summary"
+    );
+}
+
 async function testWorkspaceLoaderUsesActiveImports() {
     const directory = await fs.promises.mkdtemp(
         path.join(os.tmpdir(), "rsl-loader-")
