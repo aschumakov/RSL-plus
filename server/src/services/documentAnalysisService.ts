@@ -6,6 +6,8 @@ import { RslSymbol } from "../symbols/rslSymbol";
 import { parseRslSyntax } from "../syntaxParser";
 import type { RslSettingsService } from "./settingsService";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
+import type { ISyntaxParseService } from "./syntaxParseService";
+
 import {
     createFastDocumentSnapshot,
     getFastDocumentSymbols,
@@ -18,6 +20,7 @@ export interface IDocumentAnalysisOptions {
     slowParseLogMs?: number;
     initialParseDelayMs?: number;
     inactiveParseDelayMs?: number;
+    syntaxParser?: ISyntaxParseService;
     log(message: string): void;
     performance?: PerformanceLogger;
     invalidateProviderCaches(uri: string): void;
@@ -143,6 +146,7 @@ export class DocumentAnalysisService {
         if (openedVersion === document.version) {
             return;
         }
+        this.options.syntaxParser?.cancel(document.uri);
 
         this.openedVersions.set(document.uri, document.version);
         this.fastSnapshots.delete(document.uri);
@@ -266,12 +270,14 @@ export class DocumentAnalysisService {
         this.parsedVersions.delete(uri);
         this.nextGeneration(uri);
         this.index.compactModule(uri);
+        this.options.syntaxParser?.cancel(uri);
     }
 
     invalidate(uri: string): void {
         this.cancelQueued(uri);
         this.fastSnapshots.delete(uri);
         this.parsedVersions.delete(uri);
+        this.options.syntaxParser?.cancel(uri);
     }
 
 
@@ -512,9 +518,32 @@ export class DocumentAnalysisService {
                 lexTokens: fastSnapshot.lex.tokens.length
             })
             : undefined;
-        const syntax = parseRslSyntax(text, fastSnapshot.lex, {
-            buildExpressionTree: false
-        });
+
+        const syntax = this.options.syntaxParser
+            ? await this.options.syntaxParser.parse(
+                uri,
+                text,
+                fastSnapshot.lex
+            )
+            : parseRslSyntax(text, fastSnapshot.lex, {
+                buildExpressionTree: false
+            });
+
+        if (!syntax) {
+            if (syntaxSpan) {
+                performance.end(syntaxSpan, {
+                    cancelled: true
+                });
+            }
+
+            if (fullSpan) {
+                performance.end(fullSpan, {
+                    cancelled: true
+                });
+            }
+
+            return;
+        }
         if (syntaxSpan) {
             performance.end(syntaxSpan, {
                 syntaxTokens: syntax.tokens.length,

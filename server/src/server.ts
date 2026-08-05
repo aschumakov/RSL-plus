@@ -34,10 +34,15 @@ import {
     type IPerformanceFields
 } from "./performanceLogger";
 
+import {
+    WorkerSyntaxParseService
+} from "./services/syntaxParseService";
+
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments<TextDocument>(TextDocument);
 const workspaceIndex = new WorkspaceIndex();
 const scopeResolver = new RslScopeResolver(workspaceIndex);
+const syntaxParseService = new WorkerSyntaxParseService(logMessage);
 
 const defaultSettings: IRslSettings = {
     language: { dialect: "rsBank" },
@@ -178,6 +183,7 @@ const documentAnalysis = new DocumentAnalysisService(
     {
         log: logMessage,
         performance: performanceLogger,
+        syntaxParser: syntaxParseService,
         invalidateProviderCaches,
         onParsed: (module, wasKnown) => {
             diagnosticsCoordinator.scheduleLocal(module.uri, 0);
@@ -582,10 +588,9 @@ function refreshOpenDependents(uri: string): void {
     });
 }
 
-connection.onShutdown(async () => {
-    await referenceIndex.flush();
-    await performanceLogger.shutdown();
-});
+connection.onShutdown(() =>
+    syntaxParseService.dispose()
+);
 
 documents.listen(connection);
 connection.listen();

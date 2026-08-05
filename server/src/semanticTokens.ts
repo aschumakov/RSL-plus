@@ -169,6 +169,26 @@ export function buildRslSemanticTokens(
         );
 
         if (!resolved) {
+            const previous = tokens[tokenIndex - 1];
+
+            if (
+                previous?.kind === "symbol" &&
+                previous.raw === "."
+            ) {
+                const next = tokens[tokenIndex + 1];
+                const looksLikeMethod =
+                    next?.kind === "symbol" &&
+                    next.raw === "(";
+
+                entries.push({
+                    token,
+                    type: TOKEN_TYPES.indexOf(
+                        looksLikeMethod ? "method" : "property"
+                    ),
+                    modifiers: 0
+                });
+            }
+
             continue;
         }
 

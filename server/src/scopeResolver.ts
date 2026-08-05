@@ -195,13 +195,13 @@ export class RslScopeResolver {
                 token.value
             );
 
-            if (member) {
-                return {
+            return member
+                ? {
                     uri: member.uri,
                     symbol: member.symbol,
                     token
-                };
-            }
+                }
+                : undefined;
         }
 
         const local = this.resolveInScopeChain(
@@ -228,8 +228,13 @@ export class RslScopeResolver {
         }
 
         const builtin = this.builtins.findSymbol(referenceName);
+
         return builtin
-            ? { uri: RSL_BUILTIN_URI, symbol: builtin, token }
+            ? {
+                uri: RSL_BUILTIN_URI,
+                symbol: builtin,
+                token
+            }
             : undefined;
     }
 
@@ -346,6 +351,95 @@ export class RslScopeResolver {
         return result;
     }
 
+    private resolveMemberInHierarchy(
+        requestUri: string,
+        requestTree: RslSymbol,
+        offset: number,
+        classSymbol: IIndexedSymbol,
+        memberName: string,
+        visited: Set<string>
+    ): IIndexedSymbol | undefined {
+        const classKey = `${classSymbol.uri}#${classSymbol.symbol.id}`;
+
+        /*
+        * Защита от ошибочной циклической цепочки наследования:
+        *
+        *     Class A(B)
+        *     Class B(A)
+        */
+        if (visited.has(classKey)) {
+            return undefined;
+        }
+
+        visited.add(classKey);
+
+        const normalizedName = normalizeIdentifier(memberName);
+        const allowPrivate = this.canAccessPrivateMembers(
+            requestUri,
+            requestTree,
+            offset,
+            classSymbol
+        );
+
+        const directCandidates = getChildrenByName(classSymbol.symbol).get(
+            normalizedName
+        );
+
+        const directMember = directCandidates?.find(
+            child => allowPrivate || !child.isPrivate
+        );
+
+        /*
+        * Член производного класса перекрывает одноимённый член базового.
+        */
+        if (directMember) {
+            return {
+                uri: classSymbol.uri,
+                symbolId: directMember.id,
+                symbol: directMember
+            };
+        }
+
+        const baseClassName = classSymbol.symbol.baseClassName;
+
+        if (!baseClassName) {
+            return undefined;
+        }
+
+        /*
+        * Базовый класс надо разрешать относительно модуля, где объявлен
+        * текущий класс, а не обязательно относительно исходного документа.
+        */
+        const classModule = classSymbol.uri === RSL_BUILTIN_URI
+            ? undefined
+            : this.index.getModule(classSymbol.uri);
+
+        const baseClass = classModule
+            ? this.findClassSymbol(
+                classSymbol.uri,
+                classModule.symbolTree,
+                baseClassName
+            )
+            : this.findClassSymbol(
+                requestUri,
+                requestTree,
+                baseClassName
+            );
+
+        if (!baseClass) {
+            return undefined;
+        }
+
+        return this.resolveMemberInHierarchy(
+            requestUri,
+            requestTree,
+            offset,
+            baseClass,
+            memberName,
+            visited
+        );
+    }
+
     private resolveMember(
         uri: string,
         tree: RslSymbol,
@@ -353,33 +447,25 @@ export class RslScopeResolver {
         receiver: IRslToken,
         memberName: string
     ): IIndexedSymbol | undefined {
-        const classSymbol = this.resolveReceiverClass(
+        const receiverClass = this.resolveReceiverClass(
             uri,
             tree,
             offset,
             receiver
         );
 
-        if (!classSymbol) {
+        if (!receiverClass) {
             return undefined;
         }
 
-        const allowPrivate = this.canAccessPrivateMembers(
+        return this.resolveMemberInHierarchy(
             uri,
             tree,
             offset,
-            classSymbol
+            receiverClass,
+            memberName,
+            new Set<string>()
         );
-        const candidates = getChildrenByName(classSymbol.symbol).get(
-            normalizeIdentifier(memberName)
-        );
-        const member = candidates
-            ? candidates.find(child => allowPrivate || !child.isPrivate)
-            : undefined;
-
-        return member
-            ? { uri: classSymbol.uri, symbolId: member.id, symbol: member }
-            : undefined;
     }
 
     private resolveReceiverClass(
