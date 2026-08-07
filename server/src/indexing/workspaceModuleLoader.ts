@@ -6,6 +6,7 @@ import { ReferenceIndex } from "../analysis/referenceIndex";
 import type { PerformanceLogger } from "../performanceLogger";
 import { extractCompactDeclarations } from "../analysis/declarationExtractor";
 import { normalizeIdentifier } from "../lexer";
+import { pickDeterministicCandidate } from "./moduleNames";
 
 export type ModuleLoadPriority = "foreground" | "background";
 export type WorkspaceIndexingMode = "activeImports" | "workspaceIdle" | "full";
@@ -236,7 +237,25 @@ export class WorkspaceModuleLoader {
 
         if (resolution.kind === "missing") {
             this.options.requestMissingImport?.(name);
+            return;
         }
+
+        /*
+         * Неоднозначный Import раньше молча пропускался: ничего не
+         * загружалось, а Ctrl+Click/Completion для символов из такого
+         * Import не работали без единого сообщения в лог. Детерминированный
+         * выбор хотя бы одного кандидата сохраняет навигацию рабочей;
+         * пользователя предупреждает отдельная диагностика ambiguous-import.
+         */
+        const chosen = pickDeterministicCandidate(
+            resolution.candidates,
+            uri => uri
+        );
+        this.options.log(
+            `Ambiguous import "${name}" resolved to ${chosen} ` +
+            `(candidates: ${resolution.candidates.join(", ")})`
+        );
+        this.enqueue(chosen, priority, generation);
     }
 
     enqueue(
@@ -423,10 +442,12 @@ export class WorkspaceModuleLoader {
         );
         const result: IIndexedModule[] = uniqueKnown.slice(0, maxResults);
         const batchSize = 16;
+        const maxScanFiles = 500;
+        const scanLimit = Math.min(candidates.length, maxScanFiles);
 
         for (
             let start = 0;
-            start < candidates.length && result.length < maxResults;
+            start < scanLimit && result.length < maxResults;
             start += batchSize
         ) {
             if (options.isCancelled?.()) {
@@ -447,6 +468,17 @@ export class WorkspaceModuleLoader {
             }
 
             await yieldToInteractiveRequests();
+        }
+
+        if (
+            result.length < maxResults &&
+            candidates.length > maxScanFiles
+        ) {
+            this.options.log(
+                `Export search for "${symbolName}" stopped after ` +
+                `${maxScanFiles} files; ${candidates.length - maxScanFiles} ` +
+                "unindexed workspace files were not scanned."
+            );
         }
 
         if (options.isCancelled?.()) {

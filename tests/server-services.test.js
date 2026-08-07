@@ -189,6 +189,10 @@ async function testProblemsDoNotWaitForConfigurationRequest() {
             getModule: requestedUri => requestedUri === uri
                 ? module
                 : undefined,
+            getCurrentModule: (requestedUri, version) =>
+                requestedUri === uri && module.version === version
+                    ? module
+                    : undefined,
             getImportClosureKey: () => "",
             get size() {
                 return 1;
@@ -454,6 +458,8 @@ async function testOutlineIsReadyBeforeDiagnostics() {
         {
             isParseBusy: requestedUri =>
                 analysis?.isBusyFor(requestedUri) ?? false,
+            waitForIdle: requestedUri =>
+                analysis?.whenIdle(requestedUri) ?? Promise.resolve(),
             log: message => {
                 throw new Error(message);
             },

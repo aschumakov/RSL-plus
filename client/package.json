@@ -1,7 +1,7 @@
 {
   "name": "rsl-plus-client",
   "description": "VS Code client for RSL-plus language server",
-  "version": "1.1.0",
+  "version": "1.1.9",
   "private": true,
   "engines": {
     "vscode": "^1.90.0"

@@ -19,6 +19,8 @@ import type { IRslSettings } from "../interfaces";
 
 export interface IDiagnosticsCoordinatorOptions {
     isParseBusy(uri: string): boolean;
+    /** Разрешается, когда parse для uri перестаёт быть busy. */
+    waitForIdle(uri: string): Promise<void>;
     log(message: string): void;
     performance?: PerformanceLogger;
     onImports(uri: string, imports: readonly string[]): void;
@@ -26,7 +28,6 @@ export interface IDiagnosticsCoordinatorOptions {
     largeLocalDebounceMs?: number;
     workspaceDebounceMs?: number;
     workspaceMaxWaitMs?: number;
-    interactiveRetryMs?: number;
     slowDiagnosticsLogMs?: number;
 }
 
@@ -51,7 +52,6 @@ export class DiagnosticsCoordinator {
     private largeLocalDebounceMs: number;
     private workspaceDebounceMs: number;
     private workspaceMaxWaitMs: number;
-    private interactiveRetryMs: number;
     private slowDiagnosticsLogMs: number;
 
     constructor(
@@ -66,7 +66,6 @@ export class DiagnosticsCoordinator {
         this.largeLocalDebounceMs = options.largeLocalDebounceMs ?? 350;
         this.workspaceDebounceMs = options.workspaceDebounceMs ?? 700;
         this.workspaceMaxWaitMs = options.workspaceMaxWaitMs ?? 1800;
-        this.interactiveRetryMs = options.interactiveRetryMs ?? 100;
         this.slowDiagnosticsLogMs = options.slowDiagnosticsLogMs ?? 100;
     }
 
@@ -198,8 +197,7 @@ export class DiagnosticsCoordinator {
     private async runLocal(uri: string): Promise<void> {
         await yieldToInteractiveRequests();
         if (this.options.isParseBusy(uri)) {
-            this.scheduleLocal(uri, this.interactiveRetryMs);
-            return;
+            await this.options.waitForIdle(uri);
         }
 
         const state = this.getCurrentState(uri);
@@ -252,8 +250,7 @@ export class DiagnosticsCoordinator {
     private async runWorkspace(uri: string): Promise<void> {
         await yieldToInteractiveRequests();
         if (this.options.isParseBusy(uri)) {
-            this.scheduleWorkspace(uri, this.interactiveRetryMs);
-            return;
+            await this.options.waitForIdle(uri);
         }
 
         const state = this.getCurrentState(uri);
@@ -305,8 +302,9 @@ export class DiagnosticsCoordinator {
         settings: IRslSettings;
     } | undefined {
         const document = this.documents.get(uri);
-        const module = this.index.getModule(uri);
-        if (!document || !module || module.version !== document.version) {
+        const module = document &&
+            this.index.getCurrentModule(uri, document.version);
+        if (!document || !module) {
             return undefined;
         }
         return {

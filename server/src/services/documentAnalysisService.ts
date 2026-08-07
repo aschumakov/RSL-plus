@@ -20,6 +20,8 @@ export interface IDocumentAnalysisOptions {
     slowParseLogMs?: number;
     initialParseDelayMs?: number;
     inactiveParseDelayMs?: number;
+    /** Сколько документов может парситься одновременно (см. worker pool). */
+    maxConcurrentValidations?: number;
     syntaxParser?: ISyntaxParseService;
     log(message: string): void;
     performance?: PerformanceLogger;
@@ -53,7 +55,9 @@ export class DocumentAnalysisService {
     private backgroundQueue: IValidationTask[] = [];
     private queued = new Map<string, IValidationTask>();
     private queueScheduled = false;
-    private validationRunning = false;
+    private runningCount = 0;
+    private maxConcurrentValidations: number;
+    private idleWaiters = new Map<string, Array<() => void>>();
     private fastSnapshots = new Map<string, IFastDocumentSnapshot>();
     private openedVersions = new Map<string, number>();
     private changeDebounceMs: number;
@@ -70,6 +74,10 @@ export class DocumentAnalysisService {
         this.changeDebounceMs = options.changeDebounceMs ?? 90;
         this.slowParseLogMs = options.slowParseLogMs ?? 75;
         this.initialParseDelayMs = options.initialParseDelayMs ?? 50;
+        this.maxConcurrentValidations = Math.max(
+            1,
+            options.maxConcurrentValidations ?? 2
+        );
     }
 
     get isBusy(): boolean {
@@ -82,6 +90,23 @@ export class DocumentAnalysisService {
         return this.parseTimers.has(uri) ||
             this.running.has(uri) ||
             this.queued.has(uri);
+    }
+
+    /**
+     * Разрешается сразу, если uri не занят, иначе — при следующем переходе
+     * в состояние idle. Заменяет опрос с фиксированной задержкой в
+     * DiagnosticsCoordinator прямым ожиданием результата parse.
+     */
+    whenIdle(uri: string): Promise<void> {
+        if (!this.isBusyFor(uri)) {
+            return Promise.resolve();
+        }
+
+        return new Promise(resolve => {
+            const waiters = this.idleWaiters.get(uri) || [];
+            waiters.push(resolve);
+            this.idleWaiters.set(uri, waiters);
+        });
     }
 
     /**
@@ -182,6 +207,7 @@ export class DocumentAnalysisService {
         for (const candidate of Array.from(this.parseTimers.keys())) {
             if (candidate !== uri) {
                 this.cancelTimer(candidate);
+                this.notifyIdleIfSettled(candidate);
             }
         }
         for (const [candidate, task] of Array.from(this.queued.entries())) {
@@ -271,6 +297,7 @@ export class DocumentAnalysisService {
         this.nextGeneration(uri);
         this.index.compactModule(uri);
         this.options.syntaxParser?.cancel(uri);
+        this.notifyIdleIfSettled(uri);
     }
 
     invalidate(uri: string): void {
@@ -278,6 +305,7 @@ export class DocumentAnalysisService {
         this.fastSnapshots.delete(uri);
         this.parsedVersions.delete(uri);
         this.options.syntaxParser?.cancel(uri);
+        this.notifyIdleIfSettled(uri);
     }
 
 
@@ -292,7 +320,10 @@ export class DocumentAnalysisService {
                 chars: document.getText().length
             })
             : undefined;
-        const snapshot = createFastDocumentSnapshot(document);
+        const snapshot = createFastDocumentSnapshot(
+            document,
+            this.fastSnapshots.get(document.uri)
+        );
         if (span) {
             performance.end(span, {
                 tokens: snapshot.lex.tokens.length
@@ -339,6 +370,7 @@ export class DocumentAnalysisService {
             const current = this.documents.get(uri);
 
             if (!current || current.version !== version) {
+                this.notifyIdleIfSettled(uri);
                 return;
             }
 
@@ -430,7 +462,7 @@ export class DocumentAnalysisService {
     }
 
     private scheduleValidationQueue(): void {
-        if (this.queueScheduled || this.validationRunning) {
+        if (this.queueScheduled || this.runningCount >= this.maxConcurrentValidations) {
             return;
         }
 
@@ -441,28 +473,31 @@ export class DocumentAnalysisService {
         });
     }
 
+    /**
+     * Несколько задач могут выполняться одновременно (см. worker pool),
+     * но не более одной на uri: foreground/background очереди и running
+     * уже гарантируют единственную запись на uri.
+     */
     private processValidationQueue(): void {
-        if (this.validationRunning) {
-            return;
+        while (this.runningCount < this.maxConcurrentValidations) {
+            const task = this.foregroundQueue.shift() ??
+                this.backgroundQueue.shift();
+            if (!task) {
+                return;
+            }
+
+            const uri = task.document.uri;
+            this.queued.delete(uri);
+            this.runningCount++;
+            this.running.set(uri, task.promise);
+
+            Promise.resolve()
+                .then(() => this.validate(task.document, task.generation))
+                .then(
+                    () => this.finishValidation(task, true),
+                    error => this.finishValidation(task, false, error)
+                );
         }
-
-        const task = this.foregroundQueue.shift() ??
-            this.backgroundQueue.shift();
-        if (!task) {
-            return;
-        }
-
-        const uri = task.document.uri;
-        this.queued.delete(uri);
-        this.validationRunning = true;
-        this.running.set(uri, task.promise);
-
-        Promise.resolve()
-            .then(() => this.validate(task.document, task.generation))
-            .then(
-                () => this.finishValidation(task, true),
-                error => this.finishValidation(task, false, error)
-            );
     }
 
     private finishValidation(
@@ -474,14 +509,29 @@ export class DocumentAnalysisService {
         if (this.running.get(uri) === task.promise) {
             this.running.delete(uri);
         }
-        this.validationRunning = false;
+        this.runningCount = Math.max(0, this.runningCount - 1);
 
         if (succeeded) {
             task.resolve();
         } else {
             task.reject(error);
         }
+        this.notifyIdleIfSettled(uri);
         this.scheduleValidationQueue();
+    }
+
+    private notifyIdleIfSettled(uri: string): void {
+        if (this.isBusyFor(uri)) {
+            return;
+        }
+
+        const waiters = this.idleWaiters.get(uri);
+        if (!waiters) {
+            return;
+        }
+
+        this.idleWaiters.delete(uri);
+        waiters.forEach(resolve => resolve());
     }
 
     private async validate(
@@ -630,9 +680,13 @@ export class DocumentAnalysisService {
     }
 
     private isCurrent(document: TextDocument): boolean {
+        const module = this.index.getCurrentModule(
+            document.uri,
+            document.version
+        );
+
         return this.parsedVersions.get(document.uri) === document.version &&
-            !!this.index.getModule(document.uri) &&
-            this.index.getModule(document.uri)?.kind === "open";
+            module?.kind === "open";
     }
 
     private refreshImportsAfterParse(
@@ -651,9 +705,8 @@ export class DocumentAnalysisService {
             : undefined;
 
         const settings = this.settings.getAvailable(uri);
-        const current = this.index.getModule(uri);
+        const current = this.index.getCurrentModule(uri, version);
         const isCurrent = !!current &&
-            current.version === version &&
             this.parseGeneration.get(uri) === generation;
 
         if (isCurrent && settings.imports.enabled) {
@@ -698,6 +751,7 @@ export class DocumentAnalysisService {
         );
         this.queued.delete(uri);
         task.resolve();
+        this.notifyIdleIfSettled(uri);
     }
 }
 

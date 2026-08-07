@@ -35,14 +35,18 @@ import {
 } from "./performanceLogger";
 
 import {
-    WorkerSyntaxParseService
+    WorkerSyntaxParsePool
 } from "./services/syntaxParseService";
+
+const SYNTAX_WORKER_POOL_SIZE = 2;
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments<TextDocument>(TextDocument);
 const workspaceIndex = new WorkspaceIndex();
 const scopeResolver = new RslScopeResolver(workspaceIndex);
-const syntaxParseService = new WorkerSyntaxParseService(logMessage);
+const syntaxParseService = new WorkerSyntaxParsePool(logMessage, {
+    poolSize: SYNTAX_WORKER_POOL_SIZE
+});
 
 const defaultSettings: IRslSettings = {
     language: { dialect: "rsBank" },
@@ -184,6 +188,7 @@ const documentAnalysis = new DocumentAnalysisService(
         log: logMessage,
         performance: performanceLogger,
         syntaxParser: syntaxParseService,
+        maxConcurrentValidations: SYNTAX_WORKER_POOL_SIZE,
         invalidateProviderCaches,
         onParsed: (module, wasKnown) => {
             diagnosticsCoordinator.scheduleLocal(module.uri, 0);
@@ -210,6 +215,7 @@ diagnosticsCoordinator = new DiagnosticsCoordinator(
     diagnosticEngine,
     {
         isParseBusy: uri => documentAnalysis.isBusyFor(uri),
+        waitForIdle: uri => documentAnalysis.whenIdle(uri),
         log: logMessage,
         performance: performanceLogger,
         onImports: (uri, imports) => {
@@ -226,16 +232,14 @@ diagnosticsCoordinator = new DiagnosticsCoordinator(
  */
 settingsService.onDidResolve((uri, settings) => {
     const document = documents.get(uri);
-    const module = workspaceIndex.getModule(uri);
 
     workspaceIndex.setImportsEnabled(settings.imports.enabled);
     moduleLoader.setIndexingMode(settings.analysis.workspaceIndexing);
 
-    if (
-        !document ||
-        !module ||
-        module.version !== document.version
-    ) {
+    const module = document &&
+        workspaceIndex.getCurrentModule(uri, document.version);
+
+    if (!document || !module) {
         return;
     }
 

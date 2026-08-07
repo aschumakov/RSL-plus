@@ -46,6 +46,27 @@ export function resolveByModuleName<T>(
         : { kind: "ambiguous", candidates };
 }
 
+/**
+ * Детерминированный выбор кандидата при неоднозначном разрешении Import.
+ *
+ * Сортировка по нормализованному пути не зависит от порядка обхода Map/Set,
+ * поэтому повторные вызовы для одного и того же набора кандидатов всегда
+ * выбирают один и тот же файл.
+ */
+export function pickDeterministicCandidate<T>(
+    candidates: readonly T[],
+    getUri: (value: T) => string
+): T {
+    return candidates
+        .slice()
+        .sort((left, right) => {
+            const leftPath = normalizeUriPath(getUri(left));
+            const rightPath = normalizeUriPath(getUri(right));
+
+            return leftPath < rightPath ? -1 : leftPath > rightPath ? 1 : 0;
+        })[0];
+}
+
 export function addUriAlias(
     index: Map<string, Set<string>>,
     uri: string

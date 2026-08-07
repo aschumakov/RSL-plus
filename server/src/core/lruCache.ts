@@ -6,6 +6,12 @@ export class LruCache<K, V> {
         this.maxEntries = Math.max(0, Math.floor(maxEntries));
     }
 
+    /** Ключ наименее недавно использованного элемента, без изменения порядка. */
+    peekOldest(): K | undefined {
+        const oldest = this.values.keys().next();
+        return oldest.done ? undefined : oldest.value;
+    }
+
     get(key: K): V | undefined {
         const value = this.values.get(key);
 

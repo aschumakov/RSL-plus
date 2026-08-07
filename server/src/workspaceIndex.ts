@@ -29,6 +29,8 @@ export type { IIndexedModule, IIndexedSymbol, ModuleResolution } from
 
 export interface IWorkspaceIndexOptions {
     importCacheEntries?: number;
+    /** Верхняя граница числа external-модулей, не открытых в редакторе. */
+    maxExternalModules?: number;
 }
 
 interface IImportContext {
@@ -48,12 +50,28 @@ export class WorkspaceIndex {
     private readonly symbols = new SymbolIndex();
     private readonly imports = new ImportGraph();
     private readonly importContexts: LruCache<string, IImportContext>;
+    /*
+     * Отслеживает порядок загрузки external-модулей (кроме открытых в
+     * редакторе), чтобы workspaceIndexing: "full"/"workspaceIdle" не росли
+     * неограниченно на очень больших проектах. Собственный cap этой
+     * структуры не используется — реальное вытеснение считает
+     * maxExternalModules ниже, чтобы дополнительно снести данные из
+     * symbols/imports/importContexts через обычный removeModule().
+     */
+    private readonly externalModuleOrder = new LruCache<string, true>(
+        Number.MAX_SAFE_INTEGER
+    );
+    private readonly maxExternalModules: number;
     private importsEnabled = true;
     private revisionValue = 0;
 
     constructor(options: IWorkspaceIndexOptions = {}) {
         this.importContexts = new LruCache(
             Math.max(1, options.importCacheEntries ?? 8)
+        );
+        this.maxExternalModules = Math.max(
+            1,
+            options.maxExternalModules ?? 4000
         );
     }
 
@@ -136,6 +154,8 @@ export class WorkspaceIndex {
     markOpen(uri: string): void {
         const module = this.modules.get(uri);
         if (module) module.isOpen = true;
+        /* Открытый документ никогда не вытесняется LRU external-модулей. */
+        this.externalModuleOrder.delete(uri);
     }
 
     removeModule(uri: string): void {
@@ -145,6 +165,7 @@ export class WorkspaceIndex {
             this.symbols.remove(previous);
             this.imports.remove(previous);
         }
+        this.externalModuleOrder.delete(uri);
         affected.add(uri);
         this.invalidateImportContexts(affected);
         this.revisionValue++;
@@ -156,6 +177,7 @@ export class WorkspaceIndex {
         this.imports.clear();
         this.files.clear();
         this.importContexts.clear();
+        this.externalModuleOrder.clear();
         this.revisionValue++;
     }
 
@@ -175,6 +197,26 @@ export class WorkspaceIndex {
 
     getModule(uri: string): IIndexedModule | undefined {
         return this.modules.get(uri);
+    }
+
+    /**
+     * Единая проверка актуальности версии модуля.
+     *
+     * DocumentAnalysisService, DiagnosticsCoordinator и обработчик настроек
+     * раньше повторяли это сравнение независимо, что создавало риск
+     * рассинхронизации условий и публикации Problems для устаревшей версии.
+     */
+    getCurrentModule(
+        uri: string,
+        version: number
+    ): IIndexedModule | undefined {
+        const module = this.modules.get(uri);
+
+        if (!module || module.version !== version) {
+            return undefined;
+        }
+
+        return module;
     }
     getModules(): IIndexedModule[] { return this.modules.values(); }
     getIndexedModules(): IIndexedModule[] { return this.modules.values(); }
@@ -315,8 +357,35 @@ export class WorkspaceIndex {
         this.collectAffectedUris(uri).forEach(value => affected.add(value));
         affected.add(uri);
         this.invalidateImportContexts(affected);
+
+        if (isOpen) {
+            this.externalModuleOrder.delete(uri);
+        } else {
+            this.touchExternalModule(uri);
+        }
+
         this.revisionValue++;
         return module;
+    }
+
+    /**
+     * Отмечает external-модуль как недавно загруженный и вытесняет самый
+     * старый, если превышен maxExternalModules. Открытые документы никогда
+     * не участвуют в этом cap.
+     */
+    private touchExternalModule(uri: string): void {
+        this.externalModuleOrder.set(uri, true);
+
+        while (this.externalModuleOrder.size > this.maxExternalModules) {
+            const oldest = this.externalModuleOrder.peekOldest();
+
+            if (oldest === undefined || oldest === uri) {
+                break;
+            }
+
+            this.externalModuleOrder.delete(oldest);
+            this.removeModule(oldest);
+        }
     }
 
     private getImportContext(uri: string): IImportContext {

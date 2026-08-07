@@ -10,12 +10,15 @@ import {
     extractCompactDeclarations,
     type IRslDeclarationDescriptor
 } from "../analysis/declarationExtractor";
+import { tryIncrementalRelex } from "./incrementalLex";
 
 /** Лёгкий versioned snapshot: один lexer-проход, presentation кэшируется. */
 export interface IFastDocumentSnapshot {
     uri: string;
     version: number;
     createdAtMs: number;
+    /** Ссылка на текст этой версии — используется только для incremental relex. */
+    text: string;
     lex: IRslLexResult;
     foldingRanges?: IRslFoldingRange[];
     symbols?: DocumentSymbol[];
@@ -23,13 +26,20 @@ export interface IFastDocumentSnapshot {
 }
 
 export function createFastDocumentSnapshot(
-    document: TextDocument
+    document: TextDocument,
+    previous?: IFastDocumentSnapshot
 ): IFastDocumentSnapshot {
+    const text = document.getText();
+    const lex = (previous &&
+        tryIncrementalRelex(previous.text, previous.lex, text)) ||
+        lexRsl(text);
+
     return {
         uri: document.uri,
         version: document.version,
         createdAtMs: Date.now(),
-        lex: lexRsl(document.getText())
+        text,
+        lex
     };
 }
 
