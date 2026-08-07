@@ -1,6 +1,7 @@
 .git/**
 .github/**
 .vscode/**
+.claude/**
 .gitignore
 BnRsl.pdf
 tests/**
