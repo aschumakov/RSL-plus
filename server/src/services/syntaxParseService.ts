@@ -1,22 +1,17 @@
 import * as path from "path";
 import { Worker } from "worker_threads";
 
-import type { IRslLexResult } from "../lexer";
+import type { IRslLexResult, IRslToken } from "../lexer";
 import type {
     IRslParseResult,
     IRslSyntaxDiagnostic,
     IRslSyntaxNode
 } from "../syntaxParser";
-import {
-    decodeTokens,
-    encodeTokens,
-    type IEncodedTokenColumns
-} from "../workers/tokenTransferCodec";
 
 interface IWorkerSyntaxResult {
     root: IRslSyntaxNode;
     diagnostics: IRslSyntaxDiagnostic[];
-    tokens: IEncodedTokenColumns;
+    tokens: IRslToken[];
 }
 
 type IWorkerResponse =
@@ -43,7 +38,6 @@ interface IQueuedRequest {
     id: number;
     uri: string;
     source: string;
-    lex: IRslLexResult;
 }
 
 interface IWorkerSlot {
@@ -121,7 +115,7 @@ export class WorkerSyntaxParsePool implements ISyntaxParseService {
             this.pendingById.set(id, pending);
             this.pendingByUri.set(uri, pending);
 
-            const request: IQueuedRequest = { id, uri, source, lex };
+            const request: IQueuedRequest = { id, uri, source };
             const slot = this.findIdleSlot();
 
             if (slot) {
@@ -186,25 +180,25 @@ export class WorkerSyntaxParsePool implements ISyntaxParseService {
             : undefined;
     }
 
+    /*
+     * Раньше main-поток отправлял worker'у уже готовый lex (columnar
+     * transferable-кодек), чтобы избежать повторного lexRsl внутри worker.
+     * Контролируемый бенчмарк (500/150/40 замеров на файлах ~1KB/15KB/160KB)
+     * показал обратный эффект: ответ доминирует размером дерева `root`
+     * (каждый узел несёт свой срез tokens), поэтому выигрыш от устранения
+     * relex тонет в стоимости передачи lex на вход, и итог оказывается на
+     * 19-33% медленнее простого варианта "worker лексирует сам". Worker
+     * снова лексирует source самостоятельно.
+     */
     private dispatch(slot: IWorkerSlot, request: IQueuedRequest): void {
         slot.busy = true;
         slot.currentId = request.id;
 
-        const encodedLex = encodeTokens(request.lex.tokens);
-        const message = {
-            id: request.id,
-            source: request.source,
-            lex: {
-                tokens: encodedLex.columns,
-                eol: request.lex.eol,
-                hasFinalEol: request.lex.hasFinalEol,
-                hasBom: request.lex.hasBom,
-                lineStarts: request.lex.lineStarts
-            }
-        };
-
         try {
-            slot.worker.postMessage(message, encodedLex.transferList);
+            slot.worker.postMessage({
+                id: request.id,
+                source: request.source
+            });
         } catch (error) {
             slot.busy = false;
             slot.currentId = undefined;
@@ -270,7 +264,7 @@ export class WorkerSyntaxParsePool implements ISyntaxParseService {
                     pending.resolve({
                         root: response.syntax.root,
                         diagnostics: response.syntax.diagnostics,
-                        tokens: decodeTokens(response.syntax.tokens),
+                        tokens: response.syntax.tokens,
                         lex: pending.lex
                     });
                 }

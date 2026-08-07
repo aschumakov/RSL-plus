@@ -1,40 +1,21 @@
 import { parentPort } from "worker_threads";
 
-import type { IRslLexResult } from "../lexer";
+import type { IRslToken } from "../lexer";
 import {
     parseRslSyntax,
     type IRslSyntaxDiagnostic,
     type IRslSyntaxNode
 } from "../syntaxParser";
-import {
-    decodeTokens,
-    encodeTokens,
-    type IEncodedTokenColumns
-} from "./tokenTransferCodec";
-
-interface IParseRequestLex {
-    tokens: IEncodedTokenColumns;
-    eol: "\r\n" | "\n" | "\r";
-    hasFinalEol: boolean;
-    hasBom: boolean;
-    lineStarts: number[];
-}
 
 interface IParseRequest {
     id: number;
     source: string;
-    /*
-     * Основной поток уже построил Fast Snapshot lex для этой версии.
-     * Раньше worker не получал его и лексировал файл заново — этот проход
-     * убирает повторный полный lexer pass на каждый parse.
-     */
-    lex: IParseRequestLex;
 }
 
 interface IWorkerSyntaxResult {
     root: IRslSyntaxNode;
     diagnostics: IRslSyntaxDiagnostic[];
-    tokens: IEncodedTokenColumns;
+    tokens: IRslToken[];
 }
 
 type IParseResponse =
@@ -55,22 +36,24 @@ if (!port) {
     throw new Error("syntaxParserWorker запущен без parentPort");
 }
 
+/*
+ * Раньше здесь передавался готовый lex с основного потока и токены уходили
+ * через columnar transferable-кодек (см. историю файла). Замеры показали
+ * обратный эффект: ответ доминирует размером дерева `root` (каждый узел
+ * несёт свой срез tokens), поэтому выигрыш кодека на верхнеуровневом массиве
+ * тонет в общей стоимости structured clone, а передача lex на вход добавляет
+ * чистые накладные расходы. Контролируемый бенчмарк (500/150/40 замеров на
+ * файлах ~1KB/15KB/160KB) показал реальную деградацию на 19-33% относительно
+ * простого relex + обычного structured clone. Возврат к этому варианту —
+ * не упрощение, а исправление реальной регрессии.
+ */
 port.on("message", (request: IParseRequest) => {
     try {
-        const lex: IRslLexResult = {
-            tokens: decodeTokens(request.lex.tokens),
-            eol: request.lex.eol,
-            hasFinalEol: request.lex.hasFinalEol,
-            hasBom: request.lex.hasBom,
-            lineStarts: request.lex.lineStarts
-        };
-
         const parsed = parseRslSyntax(
             request.source,
-            lex,
+            undefined,
             { buildExpressionTree: false }
         );
-        const encodedTokens = encodeTokens(parsed.tokens);
 
         const response: IParseResponse = {
             id: request.id,
@@ -78,11 +61,11 @@ port.on("message", (request: IParseRequest) => {
             syntax: {
                 root: parsed.root,
                 diagnostics: parsed.diagnostics,
-                tokens: encodedTokens.columns
+                tokens: parsed.tokens
             }
         };
 
-        port.postMessage(response, encodedTokens.transferList);
+        port.postMessage(response);
     } catch (error) {
         const response: IParseResponse = {
             id: request.id,
