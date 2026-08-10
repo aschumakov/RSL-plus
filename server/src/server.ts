@@ -34,19 +34,16 @@ import {
     type IPerformanceFields
 } from "./performanceLogger";
 
-import {
-    WorkerSyntaxParsePool
-} from "./services/syntaxParseService";
-
-const SYNTAX_WORKER_POOL_SIZE = 2;
+/*
+ * Сколько документов одновременно держится в разборе. Ограничивает фоновые
+ * вкладки; активный документ идёт первым (см. processValidationQueue).
+ */
+const MAX_CONCURRENT_VALIDATIONS = 2;
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments<TextDocument>(TextDocument);
 const workspaceIndex = new WorkspaceIndex();
 const scopeResolver = new RslScopeResolver(workspaceIndex);
-const syntaxParseService = new WorkerSyntaxParsePool(logMessage, {
-    poolSize: SYNTAX_WORKER_POOL_SIZE
-});
 
 const defaultSettings: IRslSettings = {
     language: { dialect: "rsBank" },
@@ -187,14 +184,7 @@ const documentAnalysis = new DocumentAnalysisService(
     {
         log: logMessage,
         performance: performanceLogger,
-        /*
-         * Пул подключён, но вынос parse в него по умолчанию выключен
-         * (offloadSyntaxParse), поэтому worker'ы не создаются: они
-         * создаются лениво первым же вынесенным запросом. Обоснование и
-         * замеры — у useWorker в documentAnalysisService.ts.
-         */
-        syntaxParser: syntaxParseService,
-        maxConcurrentValidations: SYNTAX_WORKER_POOL_SIZE,
+        maxConcurrentValidations: MAX_CONCURRENT_VALIDATIONS,
         invalidateProviderCaches,
         onParsed: (module, wasKnown) => {
             diagnosticsCoordinator.scheduleLocal(module.uri, 0);
@@ -597,10 +587,6 @@ function refreshOpenDependents(uri: string): void {
         }
     });
 }
-
-connection.onShutdown(() =>
-    syntaxParseService.dispose()
-);
 
 documents.listen(connection);
 connection.listen();

@@ -113,6 +113,21 @@ const OPERATORS_REQUIRING_RIGHT_OPERAND = new Set([
 ]);
 
 /**
+ * Добавляет элементы в конец массива без spread.
+ *
+ * target.push(...source) передаёт каждый элемент отдельным аргументом, а
+ * лимит аргументов вызова в V8 упирается в размер стека: на одном выражении
+ * примерно от 150КБ (свыше ~100 тысяч токенов) разбор падал с
+ * "RangeError: Maximum call stack size exceeded". Файл при этом полностью
+ * корректный — просто один очень длинный оператор.
+ */
+function appendAll<T>(target: T[], source: readonly T[]): void {
+    for (const item of source) {
+        target.push(item);
+    }
+}
+
+/**
  * Строит tolerant syntax tree RSL на единственном общем потоке токенов.
  * Parser сохраняет дерево даже при ошибках и добавляет missing-token
  * diagnostics в точках, где правило языка однозначно.
@@ -788,7 +803,7 @@ class Parser {
             }
 
             const name = this.importItemName(itemTokens);
-            used.push(...itemTokens);
+            appendAll(used, itemTokens);
             items.push(this.node(
                 "ImportItem",
                 itemTokens[0].start,
@@ -989,7 +1004,7 @@ class Parser {
                     new Set([",", ";"]),
                     BLOCK_BOUNDARIES
                 );
-                declTokens.push(...expression);
+                appendAll(declTokens, expression);
 
                 if (expression.length > 0) {
                     valueStart = expression[0].start;
@@ -1023,7 +1038,7 @@ class Parser {
             declarator.valueEnd = valueEnd;
             declarator.variableRole = "variable";
             children.push(declarator);
-            used.push(...declTokens.slice(1));
+            appendAll(used, declTokens.slice(1));
 
             if (this.isSymbol(",")) {
                 const comma = this.take();
@@ -1148,7 +1163,7 @@ class Parser {
             declarator.elementTypeName = elementTypeName;
             declarator.variableRole = "variable";
             children.push(declarator);
-            used.push(...declTokens.slice(1));
+            appendAll(used, declTokens.slice(1));
 
             if (this.isSymbol(",")) {
                 const comma = this.take();
@@ -1506,7 +1521,7 @@ class Parser {
             children.push(condition);
         }
 
-        children.push(...this.parseStatementList(
+        appendAll(children, this.parseStatementList(
             new Set(["elif", "else", "end"])
         ));
 
@@ -1589,7 +1604,7 @@ class Parser {
         if (this.isSymbol("(")) {
             const header = this.consumeBalanced("(", ")", used);
             this.validateForHeader(header);
-            headerChildren.push(...this.parseForHeaderNodes(header));
+            appendAll(headerChildren, this.parseForHeaderNodes(header));
         }
 
         const body = this.parseStatementList(new Set(["end"]));
@@ -1781,7 +1796,7 @@ class Parser {
             }
         }
 
-        children.push(...this.parseStatementList(new Set(["end"])));
+        appendAll(children, this.parseStatementList(new Set(["end"])));
         return this.node(
             "OnErrorClause",
             keyword.start,
@@ -1810,7 +1825,7 @@ class Parser {
                 new Set([";"]),
                 BLOCK_BOUNDARIES
             );
-            used.push(...expressionTokens);
+            appendAll(used, expressionTokens);
             expression = this.parseExpression(expressionTokens);
         }
 
@@ -1830,7 +1845,7 @@ class Parser {
             new Set([";"]),
             BLOCK_BOUNDARIES
         );
-        used.push(...expressionTokens);
+        appendAll(used, expressionTokens);
 
         if (used.length === 0) {
             used.push(this.take());

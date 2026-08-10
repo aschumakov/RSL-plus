@@ -294,6 +294,7 @@
    "scripts": {
       "vscode:prepublish": "npm test && npm run bundle",
       "bundle": "node build/bundle.js",
+      "bench": "npm run compile && node build/benchmark-parse.js",
       "clean": "tsc -b --clean && node -e \"const fs=require('fs'); for (const dir of ['client/out','server/out']) fs.rmSync(dir,{recursive:true,force:true});\"",
       "compile": "npm run clean && tsc -b",
       "watch": "tsc -b -w",

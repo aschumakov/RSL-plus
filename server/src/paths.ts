@@ -8,8 +8,8 @@ import * as path from "path";
  *   2) bundle для VSIX — весь сервер в одном server/out/server.js
  *
  * У модуля в подкаталоге __dirname в этих раскладках разный, поэтому
- * фиксированное "../.." из features/ или services/ верно только в одной из
- * них: в bundle оно уезжает на уровень выше и файл молча не находится.
+ * фиксированное "../.." из features/ верно только в одной из них: в bundle
+ * оно уезжает на уровень выше и файл молча не находится.
  *
  * Этот модуль лежит в корне server/src, то есть компилируется в
  * server/out/paths.js, а при сборке bundle его код попадает в
@@ -21,9 +21,4 @@ import * as path from "path";
 /** Корень расширения: там лежат package.json и standard-handlers.json. */
 export function resolveExtensionFile(relativePath: string): string {
     return path.resolve(__dirname, "..", "..", relativePath);
-}
-
-/** Файл рядом с выходом сервера, например worker-скрипт. */
-export function resolveServerOutFile(relativePath: string): string {
-    return path.join(__dirname, relativePath);
 }

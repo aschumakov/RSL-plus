@@ -513,25 +513,33 @@ export class DocumentAnalysisService {
     }
 
     /**
-     * Foreground не ограничен maxConcurrentValidations и запускается сразу.
-     * Это не только активный документ: ensureParsed() тоже ставит foreground
-     * для любого документа, результат которого прямо сейчас ждёт LSP-запрос,
-     * и задерживать такие задачи лимитом означало бы задерживать ответ.
+     * За один проход запускается не больше MAX_VALIDATIONS_PER_TICK разборов.
      *
-     * Ограничение приоритета само по себе и не решало бы задачу "активный
-     * документ не ждёт устаревшую работу": задача, ставшая устаревшей уже
-     * ПОСЛЕ запуска, никаким лимитом на входе не отменяется — против неё
-     * работает демотация в setActiveDocument() и вытеснение слота в
-     * syntaxParseService.ts.
+     * Раньше foreground-очередь выгружалась целиком, и поскольку parse
+     * синхронный, все разборы выполнялись одной цепочкой microtask: между
+     * ними Node не возвращался ни к таймерам, ни к LSP IPC. Восемь открытых
+     * файлов по 300КБ задерживали таймер на 171 мс (на холодном прогоне до
+     * 398 мс) — то есть отсутствие лимита не ускоряло ответы, а задерживало
+     * их все сразу, включая переключение активного документа.
      *
-     * Фоновые вкладки ограничены отдельно (maxConcurrentValidations -
-     * foregroundReserve, по умолчанию 1 из 2), чтобы восстановленные
-     * VS Code вкладки не занимали все слоты валидации сразу.
+     * Остаток очереди подхватывает finishValidation() через
+     * scheduleValidationQueue(), то есть следующей порцией из setImmediate.
+     * Активный документ ставится в начало порции, чтобы за файлами, которых
+     * пользователь не видит, не ждал тот, который он смотрит.
+     *
+     * Фоновые вкладки дополнительно ограничены (maxConcurrentValidations -
+     * foregroundReserve, по умолчанию 1 из 2).
      */
     private processValidationQueue(): void {
-        while (this.foregroundQueue.length > 0) {
-            const task = this.foregroundQueue.shift()!;
-            this.dispatchTask(task);
+        this.hoistActiveDocument();
+        let started = 0;
+
+        while (
+            this.foregroundQueue.length > 0 &&
+            started < MAX_VALIDATIONS_PER_TICK
+        ) {
+            this.dispatchTask(this.foregroundQueue.shift()!);
+            started++;
         }
 
         const maxBackgroundRunning = Math.max(
@@ -539,14 +547,36 @@ export class DocumentAnalysisService {
             this.maxConcurrentValidations - this.foregroundReserve
         );
 
-        while (this.backgroundRunningCount < maxBackgroundRunning) {
+        while (
+            started < MAX_VALIDATIONS_PER_TICK &&
+            this.backgroundRunningCount < maxBackgroundRunning
+        ) {
             const task = this.backgroundQueue.shift();
 
             if (!task) {
-                return;
+                break;
             }
 
             this.dispatchTask(task);
+            started++;
+        }
+    }
+
+    /** Активный документ — первым в порции, остальной порядок сохраняется. */
+    private hoistActiveDocument(): void {
+        const uri = this.activeDocumentUri;
+
+        if (!uri || this.foregroundQueue.length < 2) {
+            return;
+        }
+
+        const index = this.foregroundQueue.findIndex(
+            task => task.document.uri === uri
+        );
+
+        if (index > 0) {
+            const [task] = this.foregroundQueue.splice(index, 1);
+            this.foregroundQueue.unshift(task);
         }
     }
 

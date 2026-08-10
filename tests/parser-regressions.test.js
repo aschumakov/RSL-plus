@@ -18,6 +18,7 @@ require.cache[serverModulePath] = {
 
 const { createSymbolTree } = require("./test-helpers");
 const { lexRsl, tokenAtOffset } = require("../server/out/lexer");
+const { parseRslSyntax } = require("../server/out/syntaxParser");
 const { GetFoldingRanges } = require("../server/out/folding");
 
 function testSqlInjectionGrammar() {
@@ -177,8 +178,47 @@ function testLinearDeclarationExtraction() {
     );
 }
 
+/*
+ * Регрессия по ревью: накопление токенов через target.push(...source)
+ * передавало каждый токен отдельным аргументом вызова, и на одном очень
+ * длинном операторе (свыше ~100 тысяч токенов, то есть примерно от 150КБ)
+ * разбор падал с RangeError: Maximum call stack size exceeded. Файл при этом
+ * синтаксически корректный.
+ */
+function testSingleHugeExpressionDoesNotOverflowStack() {
+    const parts = ["Var total = a"];
+    let size = parts[0].length;
+    while (size < 600 * 1024) {
+        parts.push("+a");
+        size += 2;
+    }
+    parts.push(";");
+    const source = parts.join("");
+    const tokenCount = lexRsl(source).tokens.length;
+
+    assert.ok(
+        tokenCount > 150000,
+        `Тест должен превышать прежний порог падения: токенов ${tokenCount}`
+    );
+
+    for (const buildExpressionTree of [false, true]) {
+        const result = parseRslSyntax(source, undefined, {
+            buildExpressionTree
+        });
+        assert.strictEqual(
+            result.root.children.length,
+            1,
+            "Один оператор должен дать один узел верхнего уровня " +
+                `(buildExpressionTree=${buildExpressionTree})`
+        );
+    }
+}
+
 testSqlInjectionGrammar();
 console.log("[OK] grammar корректно ограничивает SQL-блок");
+
+testSingleHugeExpressionDoesNotOverflowStack();
+console.log("[OK] одно очень длинное выражение не переполняет стек");
 
 testLargeSqlMacro();
 console.log("[OK] большой макрос с SQL разбирается");

@@ -27,9 +27,6 @@ const {
     DocumentAnalysisService
 } = require("../server/out/services/documentAnalysisService");
 const {
-    WorkerSyntaxParsePool
-} = require("../server/out/services/syntaxParseService");
-const {
     createExternalModuleSummary
 } = require("../server/out/moduleModel");
 const {
@@ -496,42 +493,40 @@ async function testActiveDocumentPreemptsQueuedParses() {
 }
 
 /*
- * Регрессия по ревью: два больших файла занимают оба worker'а пула, затем
- * пользователь переключается на третий. Уже запущенные разборы при этом не
- * отменяются (их результат ещё нужен), но и держать слот в ущерб активному
- * документу не вправе.
+ * Регрессия по ревью: полный parse синхронный, поэтому несколько разборов,
+ * запущенных в одном проходе очереди, выполняются одной цепочкой microtask —
+ * между ними Node не возвращается ни к таймерам, ни к LSP IPC. На восьми
+ * файлах по 300КБ это давало задержку таймера до 171 мс (на холодном
+ * прогоне до 398 мс).
  *
- * Проверяется сквозная задержка, а не момент вызова pool.parse(): попадание
- * в очередь пула ничего не говорит о том, когда worker физически начнёт
- * работу, поэтому прежняя версия теста проходила и на коде, где активный
- * файл ждал завершения чужого разбора. Инвариант здесь причинный, а не
- * пороговый: активный файл обязан быть разобран РАНЬШЕ обоих устаревших,
- * что возможно только если слот освободился по прерыванию, а не сам.
+ * Проверяется не задержка в миллисекундах (она зависит от машины), а сам
+ * инвариант: между разборами управление возвращается в event loop. Тик
+ * считается независимым таймером; если разборы идут пачкой, все они
+ * попадают в один и тот же тик.
  *
- * Вынос parse в worker включается явно (offloadSyntaxParse): по умолчанию он
- * выключен, см. комментарий у useWorker в documentAnalysisService.ts.
+ * Второй инвариант — активный документ разбирается первым, даже если его
+ * запросили последним.
  */
-async function testActiveDocumentSurvivesStaleWorkerContention() {
-    function makeLargeSource(approxKb) {
-        const line = 'Var x1 = Something.Method(a, "text", 42) + b;\n';
-        const repeats = Math.ceil((approxKb * 1024) / line.length);
-        return line.repeat(repeats);
-    }
+async function testValidationsYieldEventLoopBetweenFiles() {
+    const line = 'Var x1 = Something.Method(a, "text", 42) + b;\n';
+    const source = line.repeat(Math.ceil((90 * 1024) / line.length));
+    const uris = [
+        "file:///batch-1.mac",
+        "file:///batch-2.mac",
+        "file:///batch-3.mac",
+        "file:///batch-4.mac",
+        "file:///active-batch.mac"
+    ];
+    const activeUri = "file:///active-batch.mac";
+    const documentsByUri = new Map(
+        uris.map(uri => [uri, createDocument(uri, 1, source)])
+    );
 
-    /*
-     * "small" здесь всё равно должен превышать DIRECT_PARSE_MAX_CHARS
-     * (150000 символов) в documentAnalysisService.ts, иначе он вообще не
-     * пойдёт через worker pool и тест ничего не проверит про резерв
-     * foreground-слота — только про отдельную оптимизацию (P0-2).
-     */
-    const documentsByUri = new Map([
-        ["file:///stale-a.mac", createDocument("file:///stale-a.mac", 1, makeLargeSource(550))],
-        ["file:///stale-b.mac", createDocument("file:///stale-b.mac", 1, makeLargeSource(550))],
-        ["file:///active-small.mac", createDocument("file:///active-small.mac", 1, makeLargeSource(160))]
-    ]);
+    const parsed = [];
+    let tick = 0;
+    /* Независимый таймер: срабатывает только когда event loop свободен. */
+    const ticker = setInterval(() => { tick++; }, 1);
 
-    const pool = new WorkerSyntaxParsePool(() => {}, { poolSize: 2 });
-    const parsedAt = [];
     const service = new DocumentAnalysisService(
         { get: uri => documentsByUri.get(uri) },
         new WorkspaceIndex(),
@@ -546,10 +541,8 @@ async function testActiveDocumentSurvivesStaleWorkerContention() {
         },
         {
             log: () => undefined,
-            syntaxParser: pool,
-            offloadSyntaxParse: true,
             invalidateProviderCaches: () => undefined,
-            onParsed: module => parsedAt.push([module.uri, Date.now()]),
+            onParsed: module => parsed.push([module.uri, tick]),
             onImports: () => undefined,
             initialParseDelayMs: 0,
             inactiveParseDelayMs: 0,
@@ -558,55 +551,41 @@ async function testActiveDocumentSurvivesStaleWorkerContention() {
     );
 
     try {
+        service.setActiveDocument(activeUri);
         /*
-         * Прогреваем оба worker'а тривиальным parse заранее. В реальном
-         * сервере worker'ы создаются один раз при старте и живут всю
-         * сессию — стоимость создания потока (variable, особенно на
-         * загруженной машине) не должна попадать в измеряемое окно и
-         * маскировать разницу между "ждать оба занятых слота" и "ждать
-         * первый освободившийся".
+         * ensureParsed() ставит foreground для любого документа, результат
+         * которого ждёт LSP-запрос. Активный запрашивается последним — он
+         * всё равно должен уйти в разбор первым.
          */
-        await Promise.all([
-            pool.parse("file:///warm-1.mac", "Macro W()\nEnd;", { tokens: [] }, "background"),
-            pool.parse("file:///warm-2.mac", "Macro W()\nEnd;", { tokens: [] }, "foreground")
-        ]);
-
-        // Оба больших файла успевают стать активными и занять пул.
-        service.open(documentsByUri.get("file:///stale-a.mac"));
-        service.open(documentsByUri.get("file:///stale-b.mac"));
-        service.setActiveDocument("file:///stale-a.mac");
-        service.setActiveDocument("file:///stale-b.mac");
-
-        // Даём обоим реально уйти в worker (не просто встать в очередь).
-        await new Promise(resolve => setTimeout(resolve, 30));
-
-        // Переключение на маленький активный файл: большие устарели, но
-        // воркеры физически продолжают их считать.
-        service.open(documentsByUri.get("file:///active-small.mac"));
-        service.setActiveDocument("file:///active-small.mac");
-
-        /* Все три разбора обязаны завершиться: жертва прерывания не теряется. */
-        await waitFor(() => parsedAt.length === 3, 20000);
-
-        const completionTimeOf = uri => parsedAt.find(([u]) => u === uri)[1];
-        const activeCompletionTime = completionTimeOf(
-            "file:///active-small.mac"
+        const pending = uris.map(uri =>
+            service.ensureParsed(documentsByUri.get(uri))
         );
-        const staleCompletionTimes = [
-            completionTimeOf("file:///stale-a.mac"),
-            completionTimeOf("file:///stale-b.mac")
-        ];
+        await Promise.all(pending);
+        await waitFor(() => parsed.length === uris.length, 20000);
+
+        assert.strictEqual(
+            parsed[0][0],
+            activeUri,
+            "Активный документ должен разбираться первым, даже если его " +
+                `запросили последним; порядок: ${parsed.map(([u]) => u)}`
+        );
+
+        const byTick = new Map();
+        for (const [, parsedTick] of parsed) {
+            byTick.set(parsedTick, (byTick.get(parsedTick) || 0) + 1);
+        }
+        const crowdedTick = Array.from(byTick.entries())
+            .find(([, count]) => count > 1);
 
         assert.ok(
-            activeCompletionTime < Math.min(...staleCompletionTimes),
-            "Активный файл должен быть разобран раньше обоих устаревших " +
-                "550КБ-файлов. Позже — значит слот освободился сам, а " +
-                "активный документ всё-таки дождался завершения чужого " +
-                "устаревшего разбора: " +
-                `active=${activeCompletionTime}, stale=${staleCompletionTimes}`
+            !crowdedTick,
+            "Разборы должны быть разнесены по тикам event loop: в одном тике " +
+                `их ${crowdedTick && crowdedTick[1]}. Значит очередь снова ` +
+                "выгружается пачкой, и всё это время таймеры и LSP IPC " +
+                `ждут. Тики разборов: ${parsed.map(([, t]) => t)}`
         );
     } finally {
-        await pool.dispose();
+        clearInterval(ticker);
     }
 }
 
@@ -1049,8 +1028,8 @@ async function waitFor(predicate, timeoutMs) {
     await testActiveDocumentPreemptsQueuedParses();
     console.log("[OK] полный parse активного файла вытесняет фоновые разборы");
 
-    await testActiveDocumentSurvivesStaleWorkerContention();
-    console.log("[OK] активный документ не ждёт занятые фоновыми файлами worker'ы");
+    await testValidationsYieldEventLoopBetweenFiles();
+    console.log("[OK] разборы не блокируют event loop пачкой, активный первым");
 
     await testParseReadinessDoesNotWaitForSettings();
     console.log("[OK] парсер и Import не ждут workspace/configuration");
