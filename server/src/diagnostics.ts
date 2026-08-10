@@ -20,11 +20,11 @@ import {
     IRslDiagnosticSettings
 } from "./interfaces";
 import {
+    cachedSignificantTokens,
     findUnrecognizedEscapes,
     IRslToken,
     normalizeIdentifier,
     normalizeReferenceIdentifier,
-    significantTokens,
     type RslSquareKind
 } from "./lexer";
 import {
@@ -409,7 +409,7 @@ function addConstantAssignmentDiagnostics(
     resolver: RslScopeResolver,
     result: Diagnostic[]
 ): void {
-    const tokens = significantTokens(module.lex.tokens);
+    const tokens = cachedSignificantTokens(module.lex.tokens);
     const declarationStarts = new Set<number>();
     walkScopes(module.symbolTree, scope => {
         for (const child of scope.children) {
@@ -490,7 +490,7 @@ function addLocalVisibilityDiagnostics(
         return;
     }
 
-    const tokens = significantTokens(module.lex.tokens);
+    const tokens = cachedSignificantTokens(module.lex.tokens);
 
     for (const token of tokens) {
         if (token.kind !== "identifier" || declarationStarts.has(token.start)) {
@@ -555,7 +555,7 @@ function addCoreDialectDiagnostics(
     resolver: RslScopeResolver,
     result: Diagnostic[]
 ): void {
-    const tokens = significantTokens(module.lex.tokens);
+    const tokens = cachedSignificantTokens(module.lex.tokens);
     for (let index = 0; index + 2 < tokens.length; index++) {
         const owner = tokens[index];
         const dot = tokens[index + 1];
@@ -591,7 +591,7 @@ function addReferenceArgumentDiagnostics(
     resolver: RslScopeResolver,
     result: Diagnostic[]
 ): void {
-    const tokens = significantTokens(module.lex.tokens);
+    const tokens = cachedSignificantTokens(module.lex.tokens);
     const declarationStarts = new Set<number>();
     walkScopes(module.symbolTree, scope => {
         for (const child of scope.children) {

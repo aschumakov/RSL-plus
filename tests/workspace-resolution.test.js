@@ -496,14 +496,20 @@ async function testActiveDocumentPreemptsQueuedParses() {
 }
 
 /*
- * Регрессия по ревью: два больших "фоновых" файла занимают оба worker'а
- * пула, отменяются переключением вкладки, затем открывается маленький
- * активный файл. До резервирования foreground-слота в
- * WorkerSyntaxParsePool этот файл ждал освобождения worker'а физически
- * ещё разбирающего устаревший текст (cancel() не прерывает синхронный
- * parse внутри worker_threads) — до 1.2-1.5с на файлах ~550КБ. Тест
- * проходит через реальный DocumentAnalysisService + WorkerSyntaxParsePool,
- * а не только через синхронный fallback, как остальные тесты в этом файле.
+ * Регрессия по ревью: два больших файла занимают оба worker'а пула, затем
+ * пользователь переключается на третий. Уже запущенные разборы при этом не
+ * отменяются (их результат ещё нужен), но и держать слот в ущерб активному
+ * документу не вправе.
+ *
+ * Проверяется сквозная задержка, а не момент вызова pool.parse(): попадание
+ * в очередь пула ничего не говорит о том, когда worker физически начнёт
+ * работу, поэтому прежняя версия теста проходила и на коде, где активный
+ * файл ждал завершения чужого разбора. Инвариант здесь причинный, а не
+ * пороговый: активный файл обязан быть разобран РАНЬШЕ обоих устаревших,
+ * что возможно только если слот освободился по прерыванию, а не сам.
+ *
+ * Вынос parse в worker включается явно (offloadSyntaxParse): по умолчанию он
+ * выключен, см. комментарий у useWorker в documentAnalysisService.ts.
  */
 async function testActiveDocumentSurvivesStaleWorkerContention() {
     function makeLargeSource(approxKb) {
@@ -526,31 +532,6 @@ async function testActiveDocumentSurvivesStaleWorkerContention() {
 
     const pool = new WorkerSyntaxParsePool(() => {}, { poolSize: 2 });
     const parsedAt = [];
-    /*
-     * Момент фактического завершения parse зависит не только от очереди,
-     * но и от того, сколько CPU достаётся worker'у после диспетчеризации —
-     * на загруженной машине это делает сравнение времён ЗАВЕРШЕНИЯ шумным
-     * и нестабильным. Момент же ДИСПЕТЧЕРИЗАЦИИ (когда pool.parse()
-     * реально вызывается для документа) определяется исключительно
-     * очередью/резервом слотов и не зависит от последующей CPU-гонки —
-     * это и есть детерминированный инвариант, который стоит проверять.
-     */
-    const dispatchedAt = [];
-    const recordingParser = {
-        get currentUri() {
-            return pool.currentUri;
-        },
-        parse(uri, source, lex, priority) {
-            dispatchedAt.push([uri, Date.now()]);
-            return pool.parse(uri, source, lex, priority);
-        },
-        cancel(uri) {
-            return pool.cancel(uri);
-        },
-        dispose() {
-            return pool.dispose();
-        }
-    };
     const service = new DocumentAnalysisService(
         { get: uri => documentsByUri.get(uri) },
         new WorkspaceIndex(),
@@ -565,7 +546,8 @@ async function testActiveDocumentSurvivesStaleWorkerContention() {
         },
         {
             log: () => undefined,
-            syntaxParser: recordingParser,
+            syntaxParser: pool,
+            offloadSyntaxParse: true,
             invalidateProviderCaches: () => undefined,
             onParsed: module => parsedAt.push([module.uri, Date.now()]),
             onImports: () => undefined,
@@ -589,7 +571,7 @@ async function testActiveDocumentSurvivesStaleWorkerContention() {
             pool.parse("file:///warm-2.mac", "Macro W()\nEnd;", { tokens: [] }, "foreground")
         ]);
 
-        // Оба больших файла открываются фоново (не активны) и занимают пул.
+        // Оба больших файла успевают стать активными и занять пул.
         service.open(documentsByUri.get("file:///stale-a.mac"));
         service.open(documentsByUri.get("file:///stale-b.mac"));
         service.setActiveDocument("file:///stale-a.mac");
@@ -598,43 +580,30 @@ async function testActiveDocumentSurvivesStaleWorkerContention() {
         // Даём обоим реально уйти в worker (не просто встать в очередь).
         await new Promise(resolve => setTimeout(resolve, 30));
 
-        // Переключение на маленький активный файл — большие становятся
-        // фоновыми/отменяются, но воркеры физически продолжают их считать.
+        // Переключение на маленький активный файл: большие устарели, но
+        // воркеры физически продолжают их считать.
         service.open(documentsByUri.get("file:///active-small.mac"));
         service.setActiveDocument("file:///active-small.mac");
 
-        /*
-         * Абсолютное время ЗАВЕРШЕНИЯ (parsedAt) зависит от того, сколько
-         * CPU реально достаётся worker'у после старта — на загруженной
-         * машине оба физических worker'а конкурируют за ядра, и даже
-         * корректно продиспетченный active-small может завершить СВОЙ
-         * расчёт позже второго stale-файла просто из-за шума планировщика
-         * ОС, а не из-за очереди. Поэтому проверяется момент
-         * ДИСПЕТЧЕРИЗАЦИИ (dispatchedAt — когда recordingParser.parse()
-         * реально вызван для документа), который определяется только
-         * очередью/резервом слотов и не зависит от последующей CPU-гонки.
-         * До фикса (см. previousActiveUri в setActiveDocument) queued-
-         * задача файла, который был активен мгновение назад, отменялась
-         * собственной же логикой "снять фон с других вкладок" и не
-         * диспетчеризовалась вовсе — ждать пришлось бы либо оба фоновых
-         * worker'а, либо (в худшем случае) бесконечно.
-         */
+        /* Все три разбора обязаны завершиться: жертва прерывания не теряется. */
         await waitFor(() => parsedAt.length === 3, 20000);
 
-        const dispatchTimeOf = uri => dispatchedAt.find(([u]) => u === uri)[1];
         const completionTimeOf = uri => parsedAt.find(([u]) => u === uri)[1];
-        const activeDispatchTime = dispatchTimeOf("file:///active-small.mac");
-        const laterStaleCompletionTime = Math.max(
+        const activeCompletionTime = completionTimeOf(
+            "file:///active-small.mac"
+        );
+        const staleCompletionTimes = [
             completionTimeOf("file:///stale-a.mac"),
             completionTimeOf("file:///stale-b.mac")
-        );
+        ];
 
         assert.ok(
-            activeDispatchTime < laterStaleCompletionTime,
-            "Активный файл должен уйти в worker сразу после освобождения " +
-                "ПЕРВОГО занятого слота, а не после завершения ОБОИХ " +
-                "фоновых 550КБ-файлов — иначе он ждёт освобождения worker'а " +
-                "вместо использования резервированного слота"
+            activeCompletionTime < Math.min(...staleCompletionTimes),
+            "Активный файл должен быть разобран раньше обоих устаревших " +
+                "550КБ-файлов. Позже — значит слот освободился сам, а " +
+                "активный документ всё-таки дождался завершения чужого " +
+                "устаревшего разбора: " +
+                `active=${activeCompletionTime}, stale=${staleCompletionTimes}`
         );
     } finally {
         await pool.dispose();

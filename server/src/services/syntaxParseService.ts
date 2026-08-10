@@ -23,6 +23,12 @@ type IWorkerResponse =
     | {
         id: number;
         ok: false;
+        /** Разбор прерван по разделяемому флагу; результата нет. */
+        cancelled: true;
+    }
+    | {
+        id: number;
+        ok: false;
         error: string;
     };
 
@@ -45,9 +51,11 @@ interface IQueuedRequest {
 
 interface IWorkerSlot {
     worker: Worker;
+    /** Разделяемый с worker'ом флаг отмены: id прерываемого запроса. */
+    cancelSignal: Int32Array;
     busy: boolean;
-    currentId?: number;
-    currentPriority?: ParsePriority;
+    /** Запрос, который worker считает физически прямо сейчас. */
+    request?: IQueuedRequest;
 }
 
 export interface ISyntaxParseService {
@@ -59,6 +67,15 @@ export interface ISyntaxParseService {
         lex: IRslLexResult,
         priority?: ParsePriority
     ): Promise<IRslParseResult | undefined>;
+
+    /**
+     * Понижает приоритет запроса до background, не отменяя его.
+     *
+     * Вызывается, когда документ перестал быть активным: результат ещё
+     * нужен, но занимать слот в ущерб новому активному документу такой
+     * запрос больше не вправе (см. yieldSlotForForeground).
+     */
+    demote?(uri: string): void;
 
     cancel(uri?: string): boolean;
     dispose(): Promise<void>;
@@ -72,11 +89,16 @@ export interface IWorkerSyntaxParsePoolOptions {
 /**
  * Пул worker_threads для полного syntax parse.
  *
- * В отличие от прежней однопоточной версии, worker'ы создаются один раз и
- * не уничтожаются при отмене — cancel() просто отбрасывает результат по id,
- * а сам worker остаётся тёплым и сразу берёт следующий запрос из очереди.
- * Несколько worker'ов позволяют парсить активный документ и фоновые вкладки
- * одновременно, а не строго по очереди на единственном потоке.
+ * Worker'ы создаются один раз и не уничтожаются при отмене: cancel()
+ * отбрасывает результат по id, а сам worker остаётся тёплым и сразу берёт
+ * следующий запрос из очереди.
+ *
+ * Отмена при этом не только логическая: parser в worker'е опрашивает
+ * разделяемый флаг (SharedArrayBuffer) и прерывает разбор, поэтому слот
+ * освобождается физически, а не только "на бумаге". На этом же механизме
+ * построено вытеснение: foreground-запрос, которому не досталось
+ * свободного слота, прерывает заведомо ненужную работу вместо ожидания —
+ * см. yieldSlotForForeground().
  */
 export class WorkerSyntaxParsePool implements ISyntaxParseService {
     private slots: IWorkerSlot[] = [];
@@ -89,12 +111,12 @@ export class WorkerSyntaxParsePool implements ISyntaxParseService {
     private readonly poolSize: number;
     /*
      * Сколько слотов резервируется для foreground (активный документ).
-     * При poolSize > 1 фон не может занять все слоты сразу — иначе
-     * отменённые, но ещё физически выполняющиеся в worker'е фоновые
-     * parse (cancel() не прерывает синхронный расчёт) заставляют
-     * активный документ ждать освобождения worker'а, а не своей очереди
-     * на уровне DocumentAnalysisService (там cancel() уже "освобождает"
-     * слот логически, но воркер остаётся занят физически).
+     * При poolSize > 1 фон не может занять все слоты сразу, чтобы новый
+     * foreground-запрос попадал в свободный слот без вытеснения. Один
+     * этот резерв проблему не решает: слоты могут быть заняты запросами,
+     * которые были foreground на момент постановки и устарели позже
+     * (быстрое переключение вкладок), — против них работает
+     * demote() + yieldSlotForForeground().
      */
     private readonly foregroundReserve: number;
     private disposed = false;
@@ -139,13 +161,53 @@ export class WorkerSyntaxParsePool implements ISyntaxParseService {
 
             if (slot) {
                 this.dispatch(slot, request);
-            } else {
-                (priority === "background"
-                    ? this.backgroundQueue
-                    : this.foregroundQueue
-                ).push(request);
+                return;
+            }
+
+            (priority === "background"
+                ? this.backgroundQueue
+                : this.foregroundQueue
+            ).push(request);
+
+            if (priority === "foreground") {
+                this.yieldSlotForForeground();
             }
         });
+    }
+
+    demote(uri: string): void {
+        const pending = this.pendingByUri.get(uri);
+
+        if (!pending) {
+            return;
+        }
+
+        const queued = this.foregroundQueue.find(
+            item => item.id === pending.id
+        );
+
+        if (queued) {
+            this.foregroundQueue = this.foregroundQueue.filter(
+                item => item !== queued
+            );
+            queued.priority = "background";
+            this.backgroundQueue.push(queued);
+            return;
+        }
+
+        const slot = this.slots.find(
+            item => item.request?.id === pending.id
+        );
+
+        if (slot?.request && slot.request.priority === "foreground") {
+            /*
+             * Слот уже занят физически; понижение приоритета не освобождает
+             * его само, но делает эту работу законной жертвой вытеснения для
+             * следующего foreground-запроса.
+             */
+            slot.request.priority = "background";
+            this.backgroundSlotsInUse++;
+        }
     }
 
     cancel(uri?: string): boolean {
@@ -171,11 +233,16 @@ export class WorkerSyntaxParsePool implements ISyntaxParseService {
         );
 
         /*
-         * Отмена — штatное завершение (undefined, а не reject). Если запрос
-         * уже ушёл в worker, синхронный parse внутри worker_threads всё
-         * равно нельзя прервать: ответ придёт позже и будет молча
-         * отброшен в обработчике message, а worker останется тёплым.
+         * Если запрос уже ушёл в worker, он прерывается по разделяемому
+         * флагу: иначе отменённый разбор продолжал бы занимать слот
+         * физически (см. yieldSlotForForeground).
          */
+        const slot = this.slots.find(item => item.request?.id === pending.id);
+        if (slot) {
+            this.requestAbort(slot);
+        }
+
+        /* Отмена — штатное завершение (undefined, а не reject). */
         pending.resolve(undefined);
         return true;
     }
@@ -222,15 +289,55 @@ export class WorkerSyntaxParsePool implements ISyntaxParseService {
     }
 
     private freeSlot(slot: IWorkerSlot): void {
-        if (slot.currentPriority === "background") {
+        if (slot.request?.priority === "background") {
             this.backgroundSlotsInUse = Math.max(
                 0,
                 this.backgroundSlotsInUse - 1
             );
         }
         slot.busy = false;
-        slot.currentId = undefined;
-        slot.currentPriority = undefined;
+        slot.request = undefined;
+    }
+
+    /**
+     * Просит worker прервать текущий разбор.
+     *
+     * Флаг разделяемый (SharedArrayBuffer), parser опрашивает его раз в
+     * несколько сотен инструкций, поэтому слот освобождается за единицы
+     * миллисекунд и worker остаётся тёплым — в отличие от terminate(),
+     * который стоит создания нового потока с повторной загрузкой модулей.
+     */
+    private requestAbort(slot: IWorkerSlot): void {
+        if (slot.request) {
+            Atomics.store(slot.cancelSignal, 0, slot.request.id);
+        }
+    }
+
+    /**
+     * Освобождает слот под запрос активного документа.
+     *
+     * Прерывается только заведомо ненужная работа: уже отменённый запрос
+     * (его результат всё равно будет отброшен) либо background — в том
+     * числе понижённый demote() разбор вкладки, которую пользователь
+     * только что покинул. Ещё нужный запрос-жертва не теряется: он
+     * возвращается в свою очередь при получении ответа "cancelled" и будет
+     * пересчитан, когда слот освободится штатно.
+     *
+     * Слот не возвращается сразу: worker освободит его сам через несколько
+     * миллисекунд, и pumpQueue() отдаст его foreground-запросу первым.
+     */
+    private yieldSlotForForeground(): void {
+        const victim = this.slots.find(slot =>
+            slot.busy &&
+            slot.request !== undefined &&
+            !this.pendingById.has(slot.request.id)
+        ) || this.slots.find(slot =>
+            slot.busy && slot.request?.priority === "background"
+        );
+
+        if (victim) {
+            this.requestAbort(victim);
+        }
     }
 
     /*
@@ -245,12 +352,19 @@ export class WorkerSyntaxParsePool implements ISyntaxParseService {
      */
     private dispatch(slot: IWorkerSlot, request: IQueuedRequest): void {
         slot.busy = true;
-        slot.currentId = request.id;
-        slot.currentPriority = request.priority;
+        slot.request = request;
 
         if (request.priority === "background") {
             this.backgroundSlotsInUse++;
         }
+
+        /*
+         * Сброс флага обязателен: id прерванного запроса мог остаться в
+         * сигнале этого слота, а прерванный запрос возвращается в очередь с
+         * тем же id — worker прервал бы его сразу же, и так по кругу.
+         * id нумеруются с 1, поэтому 0 означает "отмены нет".
+         */
+        Atomics.store(slot.cancelSignal, 0, 0);
 
         try {
             slot.worker.postMessage({
@@ -312,16 +426,32 @@ export class WorkerSyntaxParsePool implements ISyntaxParseService {
             __dirname,
             "../workers/syntaxParserWorker.js"
         );
-        const worker = new Worker(workerPath);
-        const slot: IWorkerSlot = { worker, busy: false };
+        const cancelSignal = new Int32Array(new SharedArrayBuffer(4));
+        const worker = new Worker(workerPath, {
+            workerData: { cancelSignal }
+        });
+        const slot: IWorkerSlot = { worker, cancelSignal, busy: false };
         this.slots.push(slot);
 
         worker.on("message", (response: IWorkerResponse) => {
+            const aborted = slot.request;
             this.freeSlot(slot);
 
             const pending = this.pendingById.get(response.id);
 
-            if (pending) {
+            if ("cancelled" in response) {
+                /*
+                 * Разбор прерван ради активного документа, но результат ещё
+                 * нужен: запрос возвращается в очередь и будет пересчитан,
+                 * когда слот освободится штатно.
+                 */
+                if (pending && aborted?.id === response.id) {
+                    (aborted.priority === "background"
+                        ? this.backgroundQueue
+                        : this.foregroundQueue
+                    ).push(aborted);
+                }
+            } else if (pending) {
                 this.pendingById.delete(response.id);
                 this.pendingByUri.delete(pending.uri);
 
@@ -338,7 +468,8 @@ export class WorkerSyntaxParsePool implements ISyntaxParseService {
             }
             /*
              * Отсутствие pending означает, что parse был отменён раньше:
-             * ответ отбрасывается, worker остаётся тёплым для очереди.
+             * ответ (в том числе "cancelled") отбрасывается, worker
+             * остаётся тёплым для очереди.
              */
 
             this.pumpQueue(slot);
@@ -371,7 +502,7 @@ export class WorkerSyntaxParsePool implements ISyntaxParseService {
         this.slots = this.slots.filter(item => item !== slot);
         void slot.worker.terminate().catch(() => undefined);
 
-        const failedId = slot.currentId;
+        const failedId = slot.request?.id;
         this.freeSlot(slot);
 
         if (failedId !== undefined) {

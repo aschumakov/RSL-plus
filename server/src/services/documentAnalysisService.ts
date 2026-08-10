@@ -16,12 +16,10 @@ import {
 import type { PerformanceLogger } from "../performanceLogger";
 
 /*
- * Ниже этого размера прямой parse в основном потоке быстрее, чем полный
- * round-trip через worker (лексирование в worker + structured clone AST
- * обратно) — см. комментарий у места использования. Совпадает с порогом
- * "большого файла" в diagnosticsCoordinator.ts.
+ * Порог выноса syntax parse в worker pool, действует только при
+ * offloadSyntaxParse (по умолчанию выключено, см. IDocumentAnalysisOptions).
  */
-const DIRECT_PARSE_MAX_CHARS = 150000;
+const WORKER_PARSE_MIN_CHARS = 150000;
 
 export interface IDocumentAnalysisOptions {
     changeDebounceMs?: number;
@@ -34,6 +32,13 @@ export interface IDocumentAnalysisOptions {
      * него всегда резервируется хотя бы один слот (см. processValidationQueue).
      */
     maxConcurrentValidations?: number;
+    /**
+     * Выносить полный syntax parse файлов от WORKER_PARSE_MIN_CHARS в worker
+     * pool. По умолчанию выключено — измерения показывают, что вынос
+     * ухудшает и задержку, и блокировку основного потока (обоснование см. у
+     * useWorker в validate()).
+     */
+    offloadSyntaxParse?: boolean;
     syntaxParser?: ISyntaxParseService;
     log(message: string): void;
     performance?: PerformanceLogger;
@@ -228,6 +233,20 @@ export class DocumentAnalysisService {
             this.backgroundQueue.push(task);
         }
         this.foregroundQueue = [];
+
+        /*
+         * Уже запущенные parse понижаются в приоритете и на уровне парсера.
+         * Демотация очереди выше их не касается: они больше не стоят в
+         * queued, а физически занятый слот worker'а не освободится сам —
+         * без понижения приоритета новый активный документ ждал бы
+         * завершения разбора вкладки, которую пользователь уже покинул
+         * (см. yieldSlotForForeground в syntaxParseService.ts).
+         */
+        for (const candidate of Array.from(this.running.keys())) {
+            if (candidate !== uri) {
+                this.options.syntaxParser?.demote?.(candidate);
+            }
+        }
 
         /*
          * Восстановленные VS Code вкладки получают быстрый Outline, но не
@@ -516,17 +535,20 @@ export class DocumentAnalysisService {
     }
 
     /**
-     * Foreground (активный документ) не ограничен maxConcurrentValidations
-     * и запускается сразу — в реальности одновременно активен только один
-     * документ, так что практически это не больше 1-2 задач даже при
-     * быстром переключении вкладок. Фоновые вкладки ограничены отдельно
-     * ((maxConcurrentValidations - foregroundReserve), по умолчанию 1 из 2):
-     * если бы они могли занять весь пул воркеров, только что
-     * активированный документ ждал бы физического завершения фонового
-     * parse (сам WorkerSyntaxParsePool отменить синхронный parse в
-     * worker'е не может) вместо использования зарезервированного слота.
-     * Резерв здесь и в пуле согласованы (см. foregroundReserve/
-     * canDispatchBackground в syntaxParseService.ts).
+     * Foreground не ограничен maxConcurrentValidations и запускается сразу.
+     * Это не только активный документ: ensureParsed() тоже ставит foreground
+     * для любого документа, результат которого прямо сейчас ждёт LSP-запрос,
+     * и задерживать такие задачи лимитом означало бы задерживать ответ.
+     *
+     * Ограничение приоритета само по себе и не решало бы задачу "активный
+     * документ не ждёт устаревшую работу": задача, ставшая устаревшей уже
+     * ПОСЛЕ запуска, никаким лимитом на входе не отменяется — против неё
+     * работает демотация в setActiveDocument() и вытеснение слота в
+     * syntaxParseService.ts.
+     *
+     * Фоновые вкладки ограничены отдельно (maxConcurrentValidations -
+     * foregroundReserve, по умолчанию 1 из 2), чтобы восстановленные
+     * VS Code вкладки не занимали все слоты валидации сразу.
      */
     private processValidationQueue(): void {
         while (this.foregroundQueue.length > 0) {
@@ -643,16 +665,32 @@ export class DocumentAnalysisService {
             : undefined;
 
         /*
-         * Полный round-trip через worker (лексирование + сериализация AST
-         * через structured clone) стабильно дороже прямого parse в
-         * основном потоке для файлов среднего размера — замеры показали
-         * 71мс/307мс (worker) против 32мс/82мс (прямой parse) на файлах
-         * 65КБ/273КБ. Порог совпадает с существующим "large file" порогом
-         * диагностики (diagnosticsCoordinator.ts). Ниже порога блокировка
-         * event loop короче, чем ожидание освобождения worker'а.
+         * Вынос parse в worker выключен по умолчанию, и это не выбор порога,
+         * а результат замеров (Node 20, тот же runtime, что у language
+         * server; realistic RSL, buildExpressionTree: false):
+         *
+         *   размер | parse на месте | десериализация AST в основном потоке
+         *   150КБ  |         10 мс  |  55 мс
+         *   300КБ  |          9 мс  |  96 мс
+         *   550КБ  |         25 мс  | 192 мс
+         *   1.1МБ  |         35 мс  | 430 мс
+         *
+         * Ответ worker'а — это AST, где каждый узел несёт свой срез tokens,
+         * и его structured clone распаковывается В ОСНОВНОМ ПОТОКЕ. То есть
+         * вынос не уменьшает блокировку event loop, ради которой делался, а
+         * увеличивает её в 5-12 раз (независимый замер лага таймера на
+         * 550КБ: 45 мс прямой путь против 220 мс через worker) и добавляет
+         * 100-500 мс к задержке ответа. Порога, где вынос выигрывает, нет:
+         * стоимость копии растёт быстрее стоимости самого parse.
+         *
+         * Вынос станет осмысленным, только если worker будет возвращать
+         * компактный результат (declarations + diagnostics) вместо AST, но
+         * сейчас AST нужен на основном потоке всем — diagnostics,
+         * blockNavigation, codeActions, references.
          */
-        const useWorker = this.options.syntaxParser &&
-            text.length >= DIRECT_PARSE_MAX_CHARS;
+        const useWorker = this.options.offloadSyntaxParse === true &&
+            this.options.syntaxParser &&
+            text.length >= WORKER_PARSE_MIN_CHARS;
         const syntax = useWorker
             ? await this.options.syntaxParser!.parse(
                 uri,

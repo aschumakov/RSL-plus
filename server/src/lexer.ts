@@ -314,6 +314,34 @@ export function significantTokens(tokens: IRslToken[]): IRslToken[] {
     );
 }
 
+/*
+ * Кэш отфильтрованного потока привязан к самому массиву токенов, а не к uri
+ * и версии: каждый lex (в том числе incremental relex, см. incrementalLex.ts)
+ * возвращает новый массив, поэтому устаревший результат отдать невозможно, а
+ * освобождение памяти берёт на себя GC вместе с самим lex.
+ */
+const significantTokensCache = new WeakMap<readonly IRslToken[], IRslToken[]>();
+
+/**
+ * То же, что significantTokens(), но один раз на версию token stream.
+ *
+ * Интерактивные обработчики (Completion на каждый символ) вызывались с одним
+ * и тем же массивом токенов и каждый раз заново фильтровали и аллоцировали
+ * весь файл: на 300КБ/156k токенов это около 2.4 мс на запрос — линейная
+ * работа перед бинарными поисками, ради которых её и делали.
+ */
+export function cachedSignificantTokens(tokens: IRslToken[]): IRslToken[] {
+    const cached = significantTokensCache.get(tokens);
+
+    if (cached) {
+        return cached;
+    }
+
+    const filtered = significantTokens(tokens);
+    significantTokensCache.set(tokens, filtered);
+    return filtered;
+}
+
 export function codeTokens(tokens: IRslToken[]): IRslToken[] {
     return tokens.filter(token =>
         token.kind === "identifier" ||

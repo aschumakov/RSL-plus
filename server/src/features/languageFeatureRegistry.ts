@@ -44,7 +44,7 @@ import {
     RSL_BUILTIN_URI,
     RslScopeResolver
 } from "../scopeResolver";
-import type { WorkspaceIndex } from "../workspaceIndex";
+import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 import type { PerformanceLogger } from "../performanceLogger";
 import {
     buildKnownAutoImportCompletions,
@@ -166,9 +166,14 @@ export class RslLanguageFeatureRegistry {
             if (requestIsStale(document, version, cancellationToken)) {
                 return { isIncomplete: false, items: [] };
             }
-            const module = index.getModule(document.uri);
+            const module = this.getRequestModule(document);
             if (!module) {
-                return { isIncomplete: false, items: [] };
+                /*
+                 * isIncomplete=true обязателен: полный parse этой версии ещё
+                 * идёт, и клиент должен повторить запрос, а не кэшировать
+                 * пустой список до следующего изменения текста.
+                 */
+                return { isIncomplete: true, items: [] };
             }
             const contextual = buildRslContextCompletions(
                 module,
@@ -197,7 +202,7 @@ export class RslLanguageFeatureRegistry {
                 this.defaultCompletionItems,
                 this.environment.getSettings(document.uri).autoImport.enabled
                     ? buildKnownAutoImportCompletions(
-                        index.getModule(document.uri)!,
+                        module,
                         index,
                         prefix
                     )
@@ -227,7 +232,12 @@ export class RslLanguageFeatureRegistry {
             if (requestIsStale(document, version, cancellationToken)) {
                 return null;
             }
-            const module = index.getModule(document.uri);
+            /*
+             * Signature Help ищет вызов по offset текущей позиции. На модели
+             * прошлой версии этот offset указывает в другой текст, поэтому
+             * подсказка была бы не устаревшей, а просто чужой.
+             */
+            const module = this.getRequestModule(document);
             return module
                 ? buildRslSignatureHelp(
                     module,
@@ -701,15 +711,35 @@ export class RslLanguageFeatureRegistry {
         this.semanticTokensFeatures.forget(uri);
     }
 
+    /**
+     * Модуль ровно той версии, к которой относится запрос.
+     *
+     * Completion/Hover/Signature Help ждут полный parse не дольше
+     * INTERACTIVE_PARSE_BUDGET_MS, поэтому в индексе может лежать модель
+     * предыдущей версии документа. Отвечать по ней нельзя: offset позиции
+     * вычисляется по текущему тексту, а token stream и symbolTree — по
+     * прежнему. После вставки текста перед символом такая смесь даёт не
+     * "чуть устаревший", а прямо неверный результат — найден чужой токен
+     * либо не найдено ничего.
+     */
+    private getRequestModule(
+        document: TextDocument
+    ): IIndexedModule | undefined {
+        return this.environment.index.getCurrentModule(
+            document.uri,
+            document.version
+        );
+    }
+
     private getPositionContext(
         params: TextDocumentPositionParams
     ): IPositionContext | undefined {
         const document = this.environment.documents.get(
             params.textDocument.uri
         );
-        const module = this.environment.index.getModule(
-            params.textDocument.uri
-        );
+        const module = document
+            ? this.getRequestModule(document)
+            : undefined;
         const tree = module?.symbolTree;
 
         if (!document || !module || !tree) {
@@ -756,10 +786,11 @@ function isBlockedToken(token?: IRslToken): boolean {
 
 /*
  * Completion/Hover/Signature Help чувствительны к задержке сильнее, чем к
- * свежести AST на несколько сотен мс. Если полный parse не успевает за
- * это время (занятый worker, большой файл), отвечаем по уже
- * проиндексированной модели вместо того, чтобы ждать освобождения —
- * сам parse не отменяется и следующий запрос увидит свежий результат.
+ * полноте ответа. Если полный parse не успевает за это время (большой файл,
+ * очередь валидаций), обработчик не ждёт дальше, а возвращает пустой
+ * результат: сам parse не отменяется, и следующий запрос увидит свежую
+ * модель. Отвечать по модели предыдущей версии нельзя — см.
+ * getRequestModule().
  */
 const INTERACTIVE_PARSE_BUDGET_MS = 200;
 
@@ -768,15 +799,27 @@ function waitForParseBudget(
     budgetMs: number
 ): Promise<void> {
     return new Promise(resolve => {
+        let timer: NodeJS.Timeout | undefined;
         let settled = false;
         const finish = (): void => {
-            if (!settled) {
-                settled = true;
-                resolve();
+            if (settled) {
+                return;
             }
+            settled = true;
+            /*
+             * Таймер бюджета снимается при раннем завершении parse: иначе
+             * каждый интерактивный запрос удерживал бы event loop ещё на
+             * весь остаток бюджета.
+             */
+            if (timer) {
+                clearTimeout(timer);
+            }
+            resolve();
         };
         pending.then(finish, finish);
-        setTimeout(finish, budgetMs);
+        if (!settled) {
+            timer = setTimeout(finish, budgetMs);
+        }
     });
 }
 

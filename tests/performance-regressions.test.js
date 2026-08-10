@@ -11,6 +11,9 @@ const { getDefaults } = require("../server/out/defaults");
 const {
     rankCompletionItemsForPrefix
 } = require("../server/out/features/completionRanking");
+const {
+    buildRslContextCompletions
+} = require("../server/out/features/contextCompletionProvider");
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
 const { RslScopeResolver } = require("../server/out/scopeResolver");
 const { buildRslDiagnostics } = require("../server/out/diagnostics");
@@ -122,5 +125,17 @@ assert.ok(diagnosticsMs < 1500, `large diagnostics ${diagnosticsMs.toFixed(1)}ms
 assert.ok(semanticMs < 2000, `large semantic ${semanticMs.toFixed(1)}ms`);
 assert.ok(heapDelta < 160 * 1024 * 1024, `large heap delta ${heapDelta}`);
 assert.ok(semantic.data.length > 0);
+
+/*
+ * Completion вызывается на каждый введённый символ, поэтому цена одного
+ * запроса не должна зависеть от размера файла. До кэша фильтрованного
+ * token stream каждый вызов заново отфильтровывал и аллоцировал весь файл
+ * (порядка 2 мс на 300КБ) — линейная работа ровно перед бинарными поисками,
+ * ради которых её и добавляли.
+ */
+const contextOffset = largeSource.lastIndexOf("Println(") + 8;
+measure("context completions on large module", 500, () => {
+    buildRslContextCompletions(largeModule, index, contextOffset);
+}, 60);
 
 console.log("[OK] performance regression guards");

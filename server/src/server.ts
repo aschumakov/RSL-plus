@@ -187,6 +187,12 @@ const documentAnalysis = new DocumentAnalysisService(
     {
         log: logMessage,
         performance: performanceLogger,
+        /*
+         * Пул подключён, но вынос parse в него по умолчанию выключен
+         * (offloadSyntaxParse), поэтому worker'ы не создаются: они
+         * создаются лениво первым же вынесенным запросом. Обоснование и
+         * замеры — у useWorker в documentAnalysisService.ts.
+         */
         syntaxParser: syntaxParseService,
         maxConcurrentValidations: SYNTAX_WORKER_POOL_SIZE,
         invalidateProviderCaches,

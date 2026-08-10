@@ -6,7 +6,7 @@ import {
 
 import type { RslSymbol } from "../symbols/rslSymbol";
 import { getDefaults } from "../defaults";
-import { significantTokens, type IRslToken } from "../lexer";
+import { cachedSignificantTokens, type IRslToken } from "../lexer";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 
 interface ICallContext {
@@ -64,7 +64,7 @@ export function buildRslContextCompletions(
     index: WorkspaceIndex,
     offset: number
 ): CompletionItem[] | undefined {
-    const tokens = significantTokens(module.lex.tokens);
+    const tokens = cachedSignificantTokens(module.lex.tokens);
 
     if (isImportContext(tokens, offset)) {
         return buildModuleItems(

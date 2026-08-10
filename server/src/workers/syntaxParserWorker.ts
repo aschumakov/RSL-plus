@@ -1,8 +1,9 @@
-import { parentPort } from "worker_threads";
+import { parentPort, workerData } from "worker_threads";
 
 import type { IRslToken } from "../lexer";
 import {
     parseRslSyntax,
+    RslParseCancelledError,
     type IRslSyntaxDiagnostic,
     type IRslSyntaxNode
 } from "../syntaxParser";
@@ -27,6 +28,11 @@ type IParseResponse =
     | {
         id: number;
         ok: false;
+        cancelled: true;
+    }
+    | {
+        id: number;
+        ok: false;
         error: string;
     };
 
@@ -35,6 +41,16 @@ const port = parentPort;
 if (!port) {
     throw new Error("syntaxParserWorker запущен без parentPort");
 }
+
+/*
+ * Разделяемый флаг отмены. Основной поток записывает сюда id запроса,
+ * результат которого больше не нужен; parser опрашивает флаг и прерывается.
+ * Без этого отменённый разбор продолжал занимать worker физически, и
+ * активный документ ждал не своей очереди, а завершения чужой устаревшей
+ * работы (единственной альтернативой было убийство самого потока).
+ */
+const cancelSignal = (workerData as { cancelSignal?: Int32Array } | null)
+    ?.cancelSignal;
 
 /*
  * Раньше здесь передавался готовый lex с основного потока и токены уходили
@@ -52,7 +68,12 @@ port.on("message", (request: IParseRequest) => {
         const parsed = parseRslSyntax(
             request.source,
             undefined,
-            { buildExpressionTree: false }
+            {
+                buildExpressionTree: false,
+                isCancelled: cancelSignal
+                    ? () => Atomics.load(cancelSignal, 0) === request.id
+                    : undefined
+            }
         );
 
         const response: IParseResponse = {
@@ -67,11 +88,9 @@ port.on("message", (request: IParseRequest) => {
 
         port.postMessage(response);
     } catch (error) {
-        const response: IParseResponse = {
-            id: request.id,
-            ok: false,
-            error: errorToString(error)
-        };
+        const response: IParseResponse = error instanceof RslParseCancelledError
+            ? { id: request.id, ok: false, cancelled: true }
+            : { id: request.id, ok: false, error: errorToString(error) };
 
         port.postMessage(response);
     }

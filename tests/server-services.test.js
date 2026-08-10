@@ -582,6 +582,144 @@ function testCompletionPayloadIsBoundedAndResolvedLazily() {
     assert.strictEqual(resolved.data.source, "test");
 }
 
+/*
+ * Регрессия по ревью: интерактивные обработчики ждут полный parse не дольше
+ * INTERACTIVE_PARSE_BUDGET_MS и раньше после истечения бюджета отвечали по
+ * модели ПРЕДЫДУЩЕЙ версии, подставляя в неё offset ТЕКУЩЕЙ. После вставки
+ * текста перед символом такая смесь давала не устаревший, а неверный ответ.
+ */
+async function testInteractiveFallbackDoesNotMixVersions() {
+    const uri = "file:///version-mix.mac";
+    const firstVersion = [
+        "Macro Test()",
+        "  Var value;",
+        "  value = 1;",
+        "End;"
+    ].join("\n");
+    /* Вставка целой строки сдвигает все offset-ы ниже неё. */
+    const secondVersion = firstVersion.replace(
+        "Macro Test()",
+        "Var Inserted;\nMacro Test()"
+    );
+
+    const createTestDocument = (source, version) => ({
+        uri,
+        languageId: "rsl",
+        version,
+        lineCount: source.split("\n").length,
+        getText: () => source,
+        positionAt(offset) {
+            const lines = source.slice(0, offset).split("\n");
+            return {
+                line: lines.length - 1,
+                character: lines.at(-1).length
+            };
+        },
+        offsetAt(position) {
+            const lines = source.split("\n");
+            let offset = 0;
+            for (let line = 0; line < position.line; line++) {
+                offset += lines[line].length + 1;
+            }
+            return offset + position.character;
+        }
+    });
+
+    const index = new WorkspaceIndex();
+    index.updateOpenModule(uri, firstVersion, 1);
+
+    let document = createTestDocument(secondVersion, 2);
+    const handlers = {};
+    const register = name => callback => {
+        handlers[name] = callback;
+    };
+    const connection = {
+        onCompletion: register("completion"),
+        onCompletionResolve: register("completionResolve"),
+        onSignatureHelp: register("signatureHelp"),
+        onHover: register("hover"),
+        onDocumentHighlight: register("documentHighlight"),
+        onDefinition: register("definition"),
+        onReferences: register("references"),
+        onWorkspaceSymbol: register("workspaceSymbol"),
+        onCodeAction: register("codeAction"),
+        onSelectionRanges: register("selectionRanges"),
+        onExecuteCommand: register("executeCommand"),
+        onRequest: (method, callback) => {
+            handlers[method] = callback;
+        },
+        onDocumentSymbol: register("documentSymbol"),
+        onFoldingRanges: register("foldingRanges"),
+        onDocumentFormatting: register("documentFormatting"),
+        onDocumentRangeFormatting: register("documentRangeFormatting"),
+        sendRequest: async () => undefined,
+        languages: {
+            callHierarchy: {
+                onPrepare: register("callHierarchyPrepare"),
+                onIncomingCalls: register("callHierarchyIncoming"),
+                onOutgoingCalls: register("callHierarchyOutgoing")
+            },
+            semanticTokens: {
+                on: register("semanticTokens"),
+                onDelta: register("semanticTokensDelta"),
+                onRange: register("semanticTokensRange")
+            }
+        }
+    };
+    const registry = new RslLanguageFeatureRegistry({
+        connection,
+        documents: {
+            get: requested => requested === uri ? document : undefined,
+            all: () => [document]
+        },
+        index,
+        resolver: new RslScopeResolver(index),
+        definitionProvider: {},
+        getFastDocumentSnapshot: () =>
+            createFastDocumentSnapshot(document),
+        /* Полный parse версии 2 не успевает в бюджет ожидания. */
+        ensureDocumentParsed: () => new Promise(() => undefined),
+        getSettings: () => defaults,
+        log: () => undefined
+    });
+    registry.register();
+
+    const params = {
+        textDocument: { uri },
+        position: document.positionAt(
+            secondVersion.indexOf("value = 1;")
+        )
+    };
+    const cancellation = { isCancellationRequested: false };
+    const [hover, completion, signatureHelp] = await Promise.all([
+        handlers.hover(params, cancellation),
+        handlers.completion(params, cancellation),
+        handlers.signatureHelp(params, cancellation)
+    ]);
+
+    assert.strictEqual(
+        hover,
+        null,
+        "Hover не должен отвечать по модели другой версии документа"
+    );
+    assert.deepStrictEqual(
+        completion,
+        { isIncomplete: true, items: [] },
+        "Completion обязан вернуть именно isIncomplete, чтобы клиент " +
+            "повторил запрос после готовности parse"
+    );
+    assert.strictEqual(signatureHelp, null);
+
+    /* Та же позиция на модели своей версии отвечает содержательно. */
+    index.updateOpenModule(uri, secondVersion, 2);
+    document = createTestDocument(secondVersion, 2);
+    const currentHover = await handlers.hover(params, cancellation);
+    assert.ok(
+        currentHover && currentHover.contents,
+        "После готовности parse Hover обязан отвечать по своей версии"
+    );
+}
+
 async function waitFor(predicate, timeoutMs) {
     const started = Date.now();
     while (!predicate()) {
@@ -616,6 +754,9 @@ async function waitFor(predicate, timeoutMs) {
 
     testCompletionPayloadIsBoundedAndResolvedLazily();
     console.log("[OK] Completion ограничен и догружает detail через resolve");
+
+    await testInteractiveFallbackDoesNotMixVersions();
+    console.log("[OK] интерактивный fallback не смешивает версии документа");
 })().catch(error => {
     console.error(error);
     process.exitCode = 1;
