@@ -292,7 +292,8 @@
       "onCommand:rsl.smartEnter"
    ],
    "scripts": {
-      "vscode:prepublish": "npm test",
+      "vscode:prepublish": "npm test && npm run bundle",
+      "bundle": "node build/bundle.js",
       "clean": "tsc -b --clean && node -e \"const fs=require('fs'); for (const dir of ['client/out','server/out']) fs.rmSync(dir,{recursive:true,force:true});\"",
       "compile": "npm run clean && tsc -b",
       "watch": "tsc -b -w",
@@ -310,6 +311,7 @@
    },
    "devDependencies": {
       "@types/node": "22.16.5",
+      "esbuild": "^0.28.2",
       "typescript": "5.9.3"
    }
 }

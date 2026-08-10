@@ -6,7 +6,6 @@ import { RslSymbol } from "../symbols/rslSymbol";
 import { parseRslSyntax } from "../syntaxParser";
 import type { RslSettingsService } from "./settingsService";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
-import type { ISyntaxParseService } from "./syntaxParseService";
 
 import {
     createFastDocumentSnapshot,
@@ -16,10 +15,17 @@ import {
 import type { PerformanceLogger } from "../performanceLogger";
 
 /*
- * Порог выноса syntax parse в worker pool, действует только при
- * offloadSyntaxParse (по умолчанию выключено, см. IDocumentAnalysisOptions).
+ * Сколько разборов разрешено запустить за один проход очереди.
+ *
+ * Полный parse синхронный, поэтому "параллельность" здесь — это размер
+ * порции в одном тике event loop, а не настоящая конкурентность. Каждая
+ * следующая порция уходит через setImmediate (см. scheduleValidationQueue),
+ * так что между разборами Node успевает обслужить таймеры и LSP IPC.
+ * Значение 1 выбрано намеренно: при 8 файлах по 300КБ в одной порции
+ * задержка таймера доходила до 171-398 мс, то есть пользователь платил
+ * очередью за файлы, которых даже не видит.
  */
-const WORKER_PARSE_MIN_CHARS = 150000;
+const MAX_VALIDATIONS_PER_TICK = 1;
 
 export interface IDocumentAnalysisOptions {
     changeDebounceMs?: number;
@@ -27,19 +33,10 @@ export interface IDocumentAnalysisOptions {
     initialParseDelayMs?: number;
     inactiveParseDelayMs?: number;
     /**
-     * Ограничивает фоновые (неактивные) вкладки — обычно равно размеру
-     * worker pool. Активный документ не подчиняется этому лимиту: для
-     * него всегда резервируется хотя бы один слот (см. processValidationQueue).
+     * Ограничивает фоновые (неактивные) вкладки. Активный документ идёт
+     * первым в порции независимо от этого лимита (см. processValidationQueue).
      */
     maxConcurrentValidations?: number;
-    /**
-     * Выносить полный syntax parse файлов от WORKER_PARSE_MIN_CHARS в worker
-     * pool. По умолчанию выключено — измерения показывают, что вынос
-     * ухудшает и задержку, и блокировку основного потока (обоснование см. у
-     * useWorker в validate()).
-     */
-    offloadSyntaxParse?: boolean;
-    syntaxParser?: ISyntaxParseService;
     log(message: string): void;
     performance?: PerformanceLogger;
     invalidateProviderCaches(uri: string): void;
@@ -76,11 +73,9 @@ export class DocumentAnalysisService {
     private backgroundRunningCount = 0;
     private maxConcurrentValidations: number;
     /*
-     * Как и в WorkerSyntaxParsePool: без резерва фоновые вкладки могут
-     * занять весь runningCount, и тогда validate() для только что
-     * ставшего активным документа не запустится вовсе, пока не
-     * освободится физический worker фоновой задачи — резерв на уровне
-     * пула сам по себе этого не решает, если сюда очередь не доходит.
+     * Резерв под активный документ: фоновые вкладки не должны занимать все
+     * слоты валидации, иначе только что активированный документ ждёт в
+     * очереди за файлами, которых пользователь не видит.
      */
     private foregroundReserve!: number;
     private idleWaiters = new Map<string, Array<() => void>>();
@@ -198,7 +193,6 @@ export class DocumentAnalysisService {
         if (openedVersion === document.version) {
             return;
         }
-        this.options.syntaxParser?.cancel(document.uri);
 
         this.openedVersions.set(document.uri, document.version);
         /*
@@ -233,20 +227,6 @@ export class DocumentAnalysisService {
             this.backgroundQueue.push(task);
         }
         this.foregroundQueue = [];
-
-        /*
-         * Уже запущенные parse понижаются в приоритете и на уровне парсера.
-         * Демотация очереди выше их не касается: они больше не стоят в
-         * queued, а физически занятый слот worker'а не освободится сам —
-         * без понижения приоритета новый активный документ ждал бы
-         * завершения разбора вкладки, которую пользователь уже покинул
-         * (см. yieldSlotForForeground в syntaxParseService.ts).
-         */
-        for (const candidate of Array.from(this.running.keys())) {
-            if (candidate !== uri) {
-                this.options.syntaxParser?.demote?.(candidate);
-            }
-        }
 
         /*
          * Восстановленные VS Code вкладки получают быстрый Outline, но не
@@ -357,7 +337,6 @@ export class DocumentAnalysisService {
         this.parsedVersions.delete(uri);
         this.nextGeneration(uri);
         this.index.compactModule(uri);
-        this.options.syntaxParser?.cancel(uri);
         this.notifyIdleIfSettled(uri);
     }
 
@@ -365,7 +344,6 @@ export class DocumentAnalysisService {
         this.cancelQueued(uri);
         this.fastSnapshots.delete(uri);
         this.parsedVersions.delete(uri);
-        this.options.syntaxParser?.cancel(uri);
         this.notifyIdleIfSettled(uri);
     }
 
@@ -665,42 +643,25 @@ export class DocumentAnalysisService {
             : undefined;
 
         /*
-         * Вынос parse в worker выключен по умолчанию, и это не выбор порога,
-         * а результат замеров (Node 20, тот же runtime, что у language
-         * server; realistic RSL, buildExpressionTree: false):
+         * Parse выполняется на основном потоке. Вынос в worker_threads был
+         * убран (см. историю syntaxParseService.ts): ответ worker'а — это
+         * AST, где каждый узел несёт свой срез tokens, а его structured
+         * clone распаковывается В ОСНОВНОМ ПОТОКЕ, то есть вынос увеличивал
+         * блокировку event loop, ради снижения которой делался. Замеры
+         * (Node 20, тот же runtime, что у language server) — parse на месте
+         * против одной только распаковки ответа: 150КБ 10 против 55 мс,
+         * 300КБ 9 против 96 мс, 550КБ 25 против 192 мс, 1.1МБ 35 против
+         * 430 мс. Воспроизвести: npm run bench.
          *
-         *   размер | parse на месте | десериализация AST в основном потоке
-         *   150КБ  |         10 мс  |  55 мс
-         *   300КБ  |          9 мс  |  96 мс
-         *   550КБ  |         25 мс  | 192 мс
-         *   1.1МБ  |         35 мс  | 430 мс
-         *
-         * Ответ worker'а — это AST, где каждый узел несёт свой срез tokens,
-         * и его structured clone распаковывается В ОСНОВНОМ ПОТОКЕ. То есть
-         * вынос не уменьшает блокировку event loop, ради которой делался, а
-         * увеличивает её в 5-12 раз (независимый замер лага таймера на
-         * 550КБ: 45 мс прямой путь против 220 мс через worker) и добавляет
-         * 100-500 мс к задержке ответа. Порога, где вынос выигрывает, нет:
-         * стоимость копии растёт быстрее стоимости самого parse.
-         *
-         * Вынос станет осмысленным, только если worker будет возвращать
-         * компактный результат (declarations + diagnostics) вместо AST, но
-         * сейчас AST нужен на основном потоке всем — diagnostics,
-         * blockNavigation, codeActions, references.
+         * Вместо выноса блокировка ограничена порционностью очереди
+         * (MAX_VALIDATIONS_PER_TICK), а вынос станет осмысленным только с
+         * компактным протоколом (declarations + diagnostics вместо AST) —
+         * сейчас AST нужен на основном потоке и diagnostics, и
+         * blockNavigation, и codeActions, и references.
          */
-        const useWorker = this.options.offloadSyntaxParse === true &&
-            this.options.syntaxParser &&
-            text.length >= WORKER_PARSE_MIN_CHARS;
-        const syntax = useWorker
-            ? await this.options.syntaxParser!.parse(
-                uri,
-                text,
-                fastSnapshot.lex,
-                uri === this.activeDocumentUri ? "foreground" : "background"
-            )
-            : parseRslSyntax(text, fastSnapshot.lex, {
-                buildExpressionTree: false
-            });
+        const syntax = parseRslSyntax(text, fastSnapshot.lex, {
+            buildExpressionTree: false
+        });
 
         if (!syntax) {
             if (syntaxSpan) {

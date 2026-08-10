@@ -7,17 +7,12 @@ BnRsl.pdf
 tests/**
 client/src/**
 server/src/**
+build/**
 **/*.ts
 **/*.map
 **/*.tsbuildinfo
-**/node_modules/.package-lock.json
-/node_modules/**
 **/*.patch
 patches/**
-client/node_modules/@types/**
-client/node_modules/undici-types/**
-server/node_modules/@types/**
-server/node_modules/undici-types/**
 **/tsconfig*.json
 tslint.json
 package-lock.json
@@ -32,3 +27,18 @@ coverage/**
 *.zip
 *.vsix
 *.tgz
+
+# Зависимости целиком: код vscode-languageclient/vscode-languageserver вшит
+# в bundle (build/bundle.js), отдельные пакеты в VSIX не нужны.
+**/node_modules/**
+
+# Из tsc-сборки в VSIX попадают только три entry-файла, которые bundle
+# перезаписывает: остальные модули вшиты в них же. Они остаются на диске для
+# тестов (tests/*.js требуют server/out/<модуль>.js), но не в пакете.
+# ВАЖНО: npm run bundle обязан выполняться после npm run compile, иначе здесь
+# окажутся не bundle, а обычные модули tsc без зависимостей.
+client/out/**
+!client/out/extension.js
+server/out/**
+!server/out/server.js
+!server/out/workers/syntaxParserWorker.js

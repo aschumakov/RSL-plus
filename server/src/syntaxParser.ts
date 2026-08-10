@@ -68,30 +68,7 @@ export interface IRslParseOptions {
      * Комментарии всё равно сохраняются, чтобы не менять разбор квадратных блоков.
      */
     includeTrivia?: boolean;
-    /**
-     * Опрашивается периодически (раз в CANCEL_POLL_INTERVAL инструкций).
-     * Позволяет прервать уже ненужный разбор: без этого синхронный parse
-     * в worker_threads нельзя остановить иначе как убив сам поток.
-     * true приводит к RslParseCancelledError.
-     */
-    isCancelled?(): boolean;
 }
-
-/** Разбор прерван через IRslParseOptions.isCancelled, результата нет. */
-export class RslParseCancelledError extends Error {
-    constructor() {
-        super("Разбор RSL прерван");
-        this.name = "RslParseCancelledError";
-    }
-}
-
-/*
- * Как часто parser опрашивает isCancelled. Проверка на каждой инструкции
- * заметна на горячем пути, а 256 инструкций большого файла — это единицы
- * миллисекунд, то есть реакция на отмену всё равно быстрее, чем время
- * ответа worker'а.
- */
-const CANCEL_POLL_INTERVAL = 256;
 
 export interface IRslParseResult {
     root: IRslSyntaxNode;
@@ -159,8 +136,7 @@ export function parseRslSyntax(
         tokens,
         text,
         lex,
-        options?.buildExpressionTree !== false,
-        options?.isCancelled
+        options?.buildExpressionTree !== false
     );
     return parser.parse();
 }
@@ -598,28 +574,13 @@ function createExpressionNode(
 class Parser {
     private index = 0;
     private diagnostics: IRslSyntaxDiagnostic[] = [];
-    private cancelPollCountdown = CANCEL_POLL_INTERVAL;
 
     constructor(
         private tokens: IRslToken[],
         private source: string,
         private lex: IRslLexResult,
-        private buildExpressionTree: boolean,
-        private isCancelled?: () => boolean
+        private buildExpressionTree: boolean
     ) {}
-
-    /** Дешёвая проверка на горячем пути: счётчик, опрос — раз в интервал. */
-    private throwIfCancelled(): void {
-        if (!this.isCancelled || --this.cancelPollCountdown > 0) {
-            return;
-        }
-
-        this.cancelPollCountdown = CANCEL_POLL_INTERVAL;
-
-        if (this.isCancelled()) {
-            throw new RslParseCancelledError();
-        }
-    }
 
     parse(): IRslParseResult {
         /* END на верхнем уровне завершает процедуру инициализации модуля. */
@@ -668,7 +629,6 @@ class Parser {
         const result: IRslSyntaxNode[] = [];
 
         while (!this.atEnd()) {
-            this.throwIfCancelled();
             const word = this.word();
 
             if (stop.has(word)) {

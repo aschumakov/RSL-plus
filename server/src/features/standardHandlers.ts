@@ -1,5 +1,6 @@
 import * as fs from "fs";
-import * as path from "path";
+
+import { resolveExtensionFile } from "../paths";
 
 /**
  * Корневой файл standard-handlers.json содержит только имена Macro,
@@ -40,7 +41,7 @@ function getHandlerNames(): Set<string> {
 
 function loadHandlerNames(): string[] {
     const filePath = process.env.RSL_STANDARD_HANDLERS_FILE ||
-        path.resolve(__dirname, "..", "..", "..", "standard-handlers.json");
+        resolveExtensionFile("standard-handlers.json");
 
     try {
         const parsed = JSON.parse(
