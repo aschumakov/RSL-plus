@@ -159,7 +159,10 @@ export class RslLanguageFeatureRegistry {
 
             this.environment.noteInteractiveActivity?.();
             const version = document.version;
-            await ensureDocumentParsed(document);
+            await waitForParseBudget(
+                ensureDocumentParsed(document),
+                INTERACTIVE_PARSE_BUDGET_MS
+            );
             if (requestIsStale(document, version, cancellationToken)) {
                 return { isIncomplete: false, items: [] };
             }
@@ -217,7 +220,10 @@ export class RslLanguageFeatureRegistry {
 
             this.environment.noteInteractiveActivity?.();
             const version = document.version;
-            await ensureDocumentParsed(document);
+            await waitForParseBudget(
+                ensureDocumentParsed(document),
+                INTERACTIVE_PARSE_BUDGET_MS
+            );
             if (requestIsStale(document, version, cancellationToken)) {
                 return null;
             }
@@ -243,7 +249,10 @@ export class RslLanguageFeatureRegistry {
 
             this.environment.noteInteractiveActivity?.();
             const version = document.version;
-            await ensureDocumentParsed(document);
+            await waitForParseBudget(
+                ensureDocumentParsed(document),
+                INTERACTIVE_PARSE_BUDGET_MS
+            );
             if (requestIsStale(document, version, cancellationToken)) {
                 return null;
             }
@@ -743,6 +752,32 @@ function isBlockedToken(token?: IRslToken): boolean {
         token.kind === "square" ||
         token.kind === "comment"
     );
+}
+
+/*
+ * Completion/Hover/Signature Help чувствительны к задержке сильнее, чем к
+ * свежести AST на несколько сотен мс. Если полный parse не успевает за
+ * это время (занятый worker, большой файл), отвечаем по уже
+ * проиндексированной модели вместо того, чтобы ждать освобождения —
+ * сам parse не отменяется и следующий запрос увидит свежий результат.
+ */
+const INTERACTIVE_PARSE_BUDGET_MS = 200;
+
+function waitForParseBudget(
+    pending: Promise<unknown>,
+    budgetMs: number
+): Promise<void> {
+    return new Promise(resolve => {
+        let settled = false;
+        const finish = (): void => {
+            if (!settled) {
+                settled = true;
+                resolve();
+            }
+        };
+        pending.then(finish, finish);
+        setTimeout(finish, budgetMs);
+    });
 }
 
 function requestIsStale(

@@ -23,6 +23,7 @@ export interface IPerformanceSpan {
 export class PerformanceLogger {
     private filePath: string | undefined;
     private pending: Promise<void> = Promise.resolve();
+    private directoryReady: Promise<void> = Promise.resolve();
     private memoryTimer: NodeJS.Timeout | undefined;
     private errorReported = false;
 
@@ -44,6 +45,15 @@ export class PerformanceLogger {
         if (!this.filePath) {
             return;
         }
+
+        /*
+         * Каталог проверяется/создаётся один раз при конфигурации, а не на
+         * каждой записи — mkdir(recursive) стоил лишнего fs-обращения на
+         * каждый write() при большом объёме событий.
+         */
+        this.directoryReady = fs.promises
+            .mkdir(path.dirname(this.filePath), { recursive: true })
+            .then(() => undefined);
 
         this.mark("session.start", {
             nodeVersion: process.version,
@@ -142,9 +152,7 @@ export class PerformanceLogger {
 
         const line = JSON.stringify(record) + "\n";
         this.pending = this.pending
-            .then(() => fs.promises.mkdir(path.dirname(target), {
-                recursive: true
-            }))
+            .then(() => this.directoryReady)
             .then(() => fs.promises.appendFile(target, line, "utf8"))
             .catch(error => {
                 if (!this.errorReported) {

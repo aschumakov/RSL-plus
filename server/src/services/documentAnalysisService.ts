@@ -15,12 +15,24 @@ import {
 } from "./fastDocumentSnapshot";
 import type { PerformanceLogger } from "../performanceLogger";
 
+/*
+ * Ниже этого размера прямой parse в основном потоке быстрее, чем полный
+ * round-trip через worker (лексирование в worker + structured clone AST
+ * обратно) — см. комментарий у места использования. Совпадает с порогом
+ * "большого файла" в diagnosticsCoordinator.ts.
+ */
+const DIRECT_PARSE_MAX_CHARS = 150000;
+
 export interface IDocumentAnalysisOptions {
     changeDebounceMs?: number;
     slowParseLogMs?: number;
     initialParseDelayMs?: number;
     inactiveParseDelayMs?: number;
-    /** Сколько документов может парситься одновременно (см. worker pool). */
+    /**
+     * Ограничивает фоновые (неактивные) вкладки — обычно равно размеру
+     * worker pool. Активный документ не подчиняется этому лимиту: для
+     * него всегда резервируется хотя бы один слот (см. processValidationQueue).
+     */
     maxConcurrentValidations?: number;
     syntaxParser?: ISyntaxParseService;
     log(message: string): void;
@@ -56,7 +68,16 @@ export class DocumentAnalysisService {
     private queued = new Map<string, IValidationTask>();
     private queueScheduled = false;
     private runningCount = 0;
+    private backgroundRunningCount = 0;
     private maxConcurrentValidations: number;
+    /*
+     * Как и в WorkerSyntaxParsePool: без резерва фоновые вкладки могут
+     * занять весь runningCount, и тогда validate() для только что
+     * ставшего активным документа не запустится вовсе, пока не
+     * освободится физический worker фоновой задачи — резерв на уровне
+     * пула сам по себе этого не решает, если сюда очередь не доходит.
+     */
+    private foregroundReserve!: number;
     private idleWaiters = new Map<string, Array<() => void>>();
     private fastSnapshots = new Map<string, IFastDocumentSnapshot>();
     private openedVersions = new Map<string, number>();
@@ -78,6 +99,7 @@ export class DocumentAnalysisService {
             1,
             options.maxConcurrentValidations ?? 2
         );
+        this.foregroundReserve = this.maxConcurrentValidations > 1 ? 1 : 0;
     }
 
     get isBusy(): boolean {
@@ -174,7 +196,14 @@ export class DocumentAnalysisService {
         this.options.syntaxParser?.cancel(document.uri);
 
         this.openedVersions.set(document.uri, document.version);
-        this.fastSnapshots.delete(document.uri);
+        /*
+         * Снапшот предыдущей версии НЕ удаляется здесь: getFastSnapshot()
+         * уже проверяет version перед использованием кэша, а
+         * refreshFastSnapshot() передаёт именно этот старый снапшот в
+         * tryIncrementalRelex() как "previous" для точечного relex.
+         * Преждевременное удаление сводило incremental relex к нулю —
+         * каждое изменение всегда уходило в полный lexRsl().
+         */
         this.options.invalidateProviderCaches(document.uri);
         if (document.uri === this.activeDocumentUri) {
             this.scheduleWithDelay(document, this.changeDebounceMs);
@@ -191,6 +220,7 @@ export class DocumentAnalysisService {
      * вкладки сохраняют готовый Fast Snapshot, но полный AST строят позже.
      */
     setActiveDocument(uri: string | undefined): void {
+        const previousActiveUri = this.activeDocumentUri;
         this.activeDocumentUri = uri;
 
         for (const task of this.foregroundQueue) {
@@ -203,6 +233,14 @@ export class DocumentAnalysisService {
          * Восстановленные VS Code вкладки получают быстрый Outline, но не
          * конкурируют с активным файлом за parser slot и память. Полный AST
          * будет построен при активации вкладки или явном LSP-запросе.
+         *
+         * previousActiveUri исключён из отмены: секцией выше он мог только
+         * что перейти из foreground в background в этом же вызове — это
+         * файл, который пользователь только что редактировал/просматривал,
+         * а не "восстановленная, но не открытая" вкладка. Без этого
+         * исключения его queued-задача отменялась бы немедленно, не
+         * дождавшись даже фонового parse (baг воспроизводится тестом
+         * testActiveDocumentSurvivesStaleWorkerContention).
          */
         for (const candidate of Array.from(this.parseTimers.keys())) {
             if (candidate !== uri) {
@@ -211,7 +249,11 @@ export class DocumentAnalysisService {
             }
         }
         for (const [candidate, task] of Array.from(this.queued.entries())) {
-            if (candidate !== uri && task.priority === "background") {
+            if (
+                candidate !== uri &&
+                candidate !== previousActiveUri &&
+                task.priority === "background"
+            ) {
                 this.cancelQueued(candidate);
             }
         }
@@ -462,7 +504,7 @@ export class DocumentAnalysisService {
     }
 
     private scheduleValidationQueue(): void {
-        if (this.queueScheduled || this.runningCount >= this.maxConcurrentValidations) {
+        if (this.queueScheduled) {
             return;
         }
 
@@ -474,30 +516,55 @@ export class DocumentAnalysisService {
     }
 
     /**
-     * Несколько задач могут выполняться одновременно (см. worker pool),
-     * но не более одной на uri: foreground/background очереди и running
-     * уже гарантируют единственную запись на uri.
+     * Foreground (активный документ) не ограничен maxConcurrentValidations
+     * и запускается сразу — в реальности одновременно активен только один
+     * документ, так что практически это не больше 1-2 задач даже при
+     * быстром переключении вкладок. Фоновые вкладки ограничены отдельно
+     * ((maxConcurrentValidations - foregroundReserve), по умолчанию 1 из 2):
+     * если бы они могли занять весь пул воркеров, только что
+     * активированный документ ждал бы физического завершения фонового
+     * parse (сам WorkerSyntaxParsePool отменить синхронный parse в
+     * worker'е не может) вместо использования зарезервированного слота.
+     * Резерв здесь и в пуле согласованы (см. foregroundReserve/
+     * canDispatchBackground в syntaxParseService.ts).
      */
     private processValidationQueue(): void {
-        while (this.runningCount < this.maxConcurrentValidations) {
-            const task = this.foregroundQueue.shift() ??
-                this.backgroundQueue.shift();
+        while (this.foregroundQueue.length > 0) {
+            const task = this.foregroundQueue.shift()!;
+            this.dispatchTask(task);
+        }
+
+        const maxBackgroundRunning = Math.max(
+            1,
+            this.maxConcurrentValidations - this.foregroundReserve
+        );
+
+        while (this.backgroundRunningCount < maxBackgroundRunning) {
+            const task = this.backgroundQueue.shift();
+
             if (!task) {
                 return;
             }
 
-            const uri = task.document.uri;
-            this.queued.delete(uri);
-            this.runningCount++;
-            this.running.set(uri, task.promise);
-
-            Promise.resolve()
-                .then(() => this.validate(task.document, task.generation))
-                .then(
-                    () => this.finishValidation(task, true),
-                    error => this.finishValidation(task, false, error)
-                );
+            this.dispatchTask(task);
         }
+    }
+
+    private dispatchTask(task: IValidationTask): void {
+        const uri = task.document.uri;
+        this.queued.delete(uri);
+        this.runningCount++;
+        if (task.priority === "background") {
+            this.backgroundRunningCount++;
+        }
+        this.running.set(uri, task.promise);
+
+        Promise.resolve()
+            .then(() => this.validate(task.document, task.generation))
+            .then(
+                () => this.finishValidation(task, true),
+                error => this.finishValidation(task, false, error)
+            );
     }
 
     private finishValidation(
@@ -510,6 +577,12 @@ export class DocumentAnalysisService {
             this.running.delete(uri);
         }
         this.runningCount = Math.max(0, this.runningCount - 1);
+        if (task.priority === "background") {
+            this.backgroundRunningCount = Math.max(
+                0,
+                this.backgroundRunningCount - 1
+            );
+        }
 
         if (succeeded) {
             task.resolve();
@@ -569,11 +642,23 @@ export class DocumentAnalysisService {
             })
             : undefined;
 
-        const syntax = this.options.syntaxParser
-            ? await this.options.syntaxParser.parse(
+        /*
+         * Полный round-trip через worker (лексирование + сериализация AST
+         * через structured clone) стабильно дороже прямого parse в
+         * основном потоке для файлов среднего размера — замеры показали
+         * 71мс/307мс (worker) против 32мс/82мс (прямой parse) на файлах
+         * 65КБ/273КБ. Порог совпадает с существующим "large file" порогом
+         * диагностики (diagnosticsCoordinator.ts). Ниже порога блокировка
+         * event loop короче, чем ожидание освобождения worker'а.
+         */
+        const useWorker = this.options.syntaxParser &&
+            text.length >= DIRECT_PARSE_MAX_CHARS;
+        const syntax = useWorker
+            ? await this.options.syntaxParser!.parse(
                 uri,
                 text,
-                fastSnapshot.lex
+                fastSnapshot.lex,
+                uri === this.activeDocumentUri ? "foreground" : "background"
             )
             : parseRslSyntax(text, fastSnapshot.lex, {
                 buildExpressionTree: false

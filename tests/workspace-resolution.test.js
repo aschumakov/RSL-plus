@@ -27,6 +27,9 @@ const {
     DocumentAnalysisService
 } = require("../server/out/services/documentAnalysisService");
 const {
+    WorkerSyntaxParsePool
+} = require("../server/out/services/syntaxParseService");
+const {
     createExternalModuleSummary
 } = require("../server/out/moduleModel");
 const {
@@ -492,6 +495,152 @@ async function testActiveDocumentPreemptsQueuedParses() {
     );
 }
 
+/*
+ * Регрессия по ревью: два больших "фоновых" файла занимают оба worker'а
+ * пула, отменяются переключением вкладки, затем открывается маленький
+ * активный файл. До резервирования foreground-слота в
+ * WorkerSyntaxParsePool этот файл ждал освобождения worker'а физически
+ * ещё разбирающего устаревший текст (cancel() не прерывает синхронный
+ * parse внутри worker_threads) — до 1.2-1.5с на файлах ~550КБ. Тест
+ * проходит через реальный DocumentAnalysisService + WorkerSyntaxParsePool,
+ * а не только через синхронный fallback, как остальные тесты в этом файле.
+ */
+async function testActiveDocumentSurvivesStaleWorkerContention() {
+    function makeLargeSource(approxKb) {
+        const line = 'Var x1 = Something.Method(a, "text", 42) + b;\n';
+        const repeats = Math.ceil((approxKb * 1024) / line.length);
+        return line.repeat(repeats);
+    }
+
+    /*
+     * "small" здесь всё равно должен превышать DIRECT_PARSE_MAX_CHARS
+     * (150000 символов) в documentAnalysisService.ts, иначе он вообще не
+     * пойдёт через worker pool и тест ничего не проверит про резерв
+     * foreground-слота — только про отдельную оптимизацию (P0-2).
+     */
+    const documentsByUri = new Map([
+        ["file:///stale-a.mac", createDocument("file:///stale-a.mac", 1, makeLargeSource(550))],
+        ["file:///stale-b.mac", createDocument("file:///stale-b.mac", 1, makeLargeSource(550))],
+        ["file:///active-small.mac", createDocument("file:///active-small.mac", 1, makeLargeSource(160))]
+    ]);
+
+    const pool = new WorkerSyntaxParsePool(() => {}, { poolSize: 2 });
+    const parsedAt = [];
+    /*
+     * Момент фактического завершения parse зависит не только от очереди,
+     * но и от того, сколько CPU достаётся worker'у после диспетчеризации —
+     * на загруженной машине это делает сравнение времён ЗАВЕРШЕНИЯ шумным
+     * и нестабильным. Момент же ДИСПЕТЧЕРИЗАЦИИ (когда pool.parse()
+     * реально вызывается для документа) определяется исключительно
+     * очередью/резервом слотов и не зависит от последующей CPU-гонки —
+     * это и есть детерминированный инвариант, который стоит проверять.
+     */
+    const dispatchedAt = [];
+    const recordingParser = {
+        get currentUri() {
+            return pool.currentUri;
+        },
+        parse(uri, source, lex, priority) {
+            dispatchedAt.push([uri, Date.now()]);
+            return pool.parse(uri, source, lex, priority);
+        },
+        cancel(uri) {
+            return pool.cancel(uri);
+        },
+        dispose() {
+            return pool.dispose();
+        }
+    };
+    const service = new DocumentAnalysisService(
+        { get: uri => documentsByUri.get(uri) },
+        new WorkspaceIndex(),
+        {
+            getAvailable: () => ({
+                imports: { enabled: true },
+                autoImport: { enabled: true },
+                analysis: { workspaceIndexing: "activeImports" },
+                semanticHighlighting: { maxFileSizeKb: 512 },
+                diagnostics: {}
+            })
+        },
+        {
+            log: () => undefined,
+            syntaxParser: recordingParser,
+            invalidateProviderCaches: () => undefined,
+            onParsed: module => parsedAt.push([module.uri, Date.now()]),
+            onImports: () => undefined,
+            initialParseDelayMs: 0,
+            inactiveParseDelayMs: 0,
+            maxConcurrentValidations: 2
+        }
+    );
+
+    try {
+        /*
+         * Прогреваем оба worker'а тривиальным parse заранее. В реальном
+         * сервере worker'ы создаются один раз при старте и живут всю
+         * сессию — стоимость создания потока (variable, особенно на
+         * загруженной машине) не должна попадать в измеряемое окно и
+         * маскировать разницу между "ждать оба занятых слота" и "ждать
+         * первый освободившийся".
+         */
+        await Promise.all([
+            pool.parse("file:///warm-1.mac", "Macro W()\nEnd;", { tokens: [] }, "background"),
+            pool.parse("file:///warm-2.mac", "Macro W()\nEnd;", { tokens: [] }, "foreground")
+        ]);
+
+        // Оба больших файла открываются фоново (не активны) и занимают пул.
+        service.open(documentsByUri.get("file:///stale-a.mac"));
+        service.open(documentsByUri.get("file:///stale-b.mac"));
+        service.setActiveDocument("file:///stale-a.mac");
+        service.setActiveDocument("file:///stale-b.mac");
+
+        // Даём обоим реально уйти в worker (не просто встать в очередь).
+        await new Promise(resolve => setTimeout(resolve, 30));
+
+        // Переключение на маленький активный файл — большие становятся
+        // фоновыми/отменяются, но воркеры физически продолжают их считать.
+        service.open(documentsByUri.get("file:///active-small.mac"));
+        service.setActiveDocument("file:///active-small.mac");
+
+        /*
+         * Абсолютное время ЗАВЕРШЕНИЯ (parsedAt) зависит от того, сколько
+         * CPU реально достаётся worker'у после старта — на загруженной
+         * машине оба физических worker'а конкурируют за ядра, и даже
+         * корректно продиспетченный active-small может завершить СВОЙ
+         * расчёт позже второго stale-файла просто из-за шума планировщика
+         * ОС, а не из-за очереди. Поэтому проверяется момент
+         * ДИСПЕТЧЕРИЗАЦИИ (dispatchedAt — когда recordingParser.parse()
+         * реально вызван для документа), который определяется только
+         * очередью/резервом слотов и не зависит от последующей CPU-гонки.
+         * До фикса (см. previousActiveUri в setActiveDocument) queued-
+         * задача файла, который был активен мгновение назад, отменялась
+         * собственной же логикой "снять фон с других вкладок" и не
+         * диспетчеризовалась вовсе — ждать пришлось бы либо оба фоновых
+         * worker'а, либо (в худшем случае) бесконечно.
+         */
+        await waitFor(() => parsedAt.length === 3, 20000);
+
+        const dispatchTimeOf = uri => dispatchedAt.find(([u]) => u === uri)[1];
+        const completionTimeOf = uri => parsedAt.find(([u]) => u === uri)[1];
+        const activeDispatchTime = dispatchTimeOf("file:///active-small.mac");
+        const laterStaleCompletionTime = Math.max(
+            completionTimeOf("file:///stale-a.mac"),
+            completionTimeOf("file:///stale-b.mac")
+        );
+
+        assert.ok(
+            activeDispatchTime < laterStaleCompletionTime,
+            "Активный файл должен уйти в worker сразу после освобождения " +
+                "ПЕРВОГО занятого слота, а не после завершения ОБОИХ " +
+                "фоновых 550КБ-файлов — иначе он ждёт освобождения worker'а " +
+                "вместо использования резервированного слота"
+        );
+    } finally {
+        await pool.dispose();
+    }
+}
+
 async function testParseReadinessDoesNotWaitForSettings() {
     const uri = "file:///workspace/navigation.mac";
     const source = [
@@ -930,6 +1079,9 @@ async function waitFor(predicate, timeoutMs) {
 
     await testActiveDocumentPreemptsQueuedParses();
     console.log("[OK] полный parse активного файла вытесняет фоновые разборы");
+
+    await testActiveDocumentSurvivesStaleWorkerContention();
+    console.log("[OK] активный документ не ждёт занятые фоновыми файлами worker'ы");
 
     await testParseReadinessDoesNotWaitForSettings();
     console.log("[OK] парсер и Import не ждут workspace/configuration");

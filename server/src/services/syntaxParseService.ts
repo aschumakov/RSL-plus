@@ -26,6 +26,8 @@ type IWorkerResponse =
         error: string;
     };
 
+export type ParsePriority = "foreground" | "background";
+
 interface IPendingParse {
     id: number;
     uri: string;
@@ -38,12 +40,14 @@ interface IQueuedRequest {
     id: number;
     uri: string;
     source: string;
+    priority: ParsePriority;
 }
 
 interface IWorkerSlot {
     worker: Worker;
     busy: boolean;
     currentId?: number;
+    currentPriority?: ParsePriority;
 }
 
 export interface ISyntaxParseService {
@@ -52,7 +56,8 @@ export interface ISyntaxParseService {
     parse(
         uri: string,
         source: string,
-        lex: IRslLexResult
+        lex: IRslLexResult,
+        priority?: ParsePriority
     ): Promise<IRslParseResult | undefined>;
 
     cancel(uri?: string): boolean;
@@ -77,9 +82,21 @@ export class WorkerSyntaxParsePool implements ISyntaxParseService {
     private slots: IWorkerSlot[] = [];
     private readonly pendingById = new Map<number, IPendingParse>();
     private readonly pendingByUri = new Map<string, IPendingParse>();
-    private queue: IQueuedRequest[] = [];
+    private foregroundQueue: IQueuedRequest[] = [];
+    private backgroundQueue: IQueuedRequest[] = [];
+    private backgroundSlotsInUse = 0;
     private nextId = 1;
     private readonly poolSize: number;
+    /*
+     * Сколько слотов резервируется для foreground (активный документ).
+     * При poolSize > 1 фон не может занять все слоты сразу — иначе
+     * отменённые, но ещё физически выполняющиеся в worker'е фоновые
+     * parse (cancel() не прерывает синхронный расчёт) заставляют
+     * активный документ ждать освобождения worker'а, а не своей очереди
+     * на уровне DocumentAnalysisService (там cancel() уже "освобождает"
+     * слот логически, но воркер остаётся занят физически).
+     */
+    private readonly foregroundReserve: number;
     private disposed = false;
 
     constructor(
@@ -87,6 +104,7 @@ export class WorkerSyntaxParsePool implements ISyntaxParseService {
         options: IWorkerSyntaxParsePoolOptions = {}
     ) {
         this.poolSize = Math.max(1, Math.min(3, options.poolSize ?? 2));
+        this.foregroundReserve = this.poolSize > 1 ? 1 : 0;
     }
 
     get currentUri(): string | undefined {
@@ -96,7 +114,8 @@ export class WorkerSyntaxParsePool implements ISyntaxParseService {
     parse(
         uri: string,
         source: string,
-        lex: IRslLexResult
+        lex: IRslLexResult,
+        priority: ParsePriority = "foreground"
     ): Promise<IRslParseResult | undefined> {
         if (this.disposed) {
             return Promise.resolve(undefined);
@@ -115,13 +134,16 @@ export class WorkerSyntaxParsePool implements ISyntaxParseService {
             this.pendingById.set(id, pending);
             this.pendingByUri.set(uri, pending);
 
-            const request: IQueuedRequest = { id, uri, source };
-            const slot = this.findIdleSlot();
+            const request: IQueuedRequest = { id, uri, source, priority };
+            const slot = this.findIdleSlot(priority);
 
             if (slot) {
                 this.dispatch(slot, request);
             } else {
-                this.queue.push(request);
+                (priority === "background"
+                    ? this.backgroundQueue
+                    : this.foregroundQueue
+                ).push(request);
             }
         });
     }
@@ -141,7 +163,12 @@ export class WorkerSyntaxParsePool implements ISyntaxParseService {
 
         this.pendingById.delete(pending.id);
         this.pendingByUri.delete(uri);
-        this.queue = this.queue.filter(item => item.id !== pending.id);
+        this.foregroundQueue = this.foregroundQueue.filter(
+            item => item.id !== pending.id
+        );
+        this.backgroundQueue = this.backgroundQueue.filter(
+            item => item.id !== pending.id
+        );
 
         /*
          * Отмена — штatное завершение (undefined, а не reject). Если запрос
@@ -155,7 +182,8 @@ export class WorkerSyntaxParsePool implements ISyntaxParseService {
 
     async dispose(): Promise<void> {
         this.disposed = true;
-        this.queue = [];
+        this.foregroundQueue = [];
+        this.backgroundQueue = [];
 
         for (const pending of this.pendingById.values()) {
             pending.resolve(undefined);
@@ -168,7 +196,20 @@ export class WorkerSyntaxParsePool implements ISyntaxParseService {
         await Promise.all(slots.map(slot => slot.worker.terminate()));
     }
 
-    private findIdleSlot(): IWorkerSlot | undefined {
+    /*
+     * background не может занять больше (poolSize - foregroundReserve)
+     * слотов одновременно — это и есть резерв для активного документа.
+     */
+    private canDispatchBackground(): boolean {
+        return this.backgroundSlotsInUse <
+            this.poolSize - this.foregroundReserve;
+    }
+
+    private findIdleSlot(priority: ParsePriority): IWorkerSlot | undefined {
+        if (priority === "background" && !this.canDispatchBackground()) {
+            return undefined;
+        }
+
         for (const slot of this.slots) {
             if (!slot.busy) {
                 return slot;
@@ -178,6 +219,18 @@ export class WorkerSyntaxParsePool implements ISyntaxParseService {
         return this.slots.length < this.poolSize
             ? this.createSlot()
             : undefined;
+    }
+
+    private freeSlot(slot: IWorkerSlot): void {
+        if (slot.currentPriority === "background") {
+            this.backgroundSlotsInUse = Math.max(
+                0,
+                this.backgroundSlotsInUse - 1
+            );
+        }
+        slot.busy = false;
+        slot.currentId = undefined;
+        slot.currentPriority = undefined;
     }
 
     /*
@@ -193,6 +246,11 @@ export class WorkerSyntaxParsePool implements ISyntaxParseService {
     private dispatch(slot: IWorkerSlot, request: IQueuedRequest): void {
         slot.busy = true;
         slot.currentId = request.id;
+        slot.currentPriority = request.priority;
+
+        if (request.priority === "background") {
+            this.backgroundSlotsInUse++;
+        }
 
         try {
             slot.worker.postMessage({
@@ -200,11 +258,23 @@ export class WorkerSyntaxParsePool implements ISyntaxParseService {
                 source: request.source
             });
         } catch (error) {
-            slot.busy = false;
-            slot.currentId = undefined;
+            this.freeSlot(slot);
             this.settleFailure(request.id, error);
             this.pumpQueue(slot);
         }
+    }
+
+    private takeNextQueued(queue: IQueuedRequest[]): IQueuedRequest | undefined {
+        while (queue.length > 0) {
+            const candidate = queue.shift();
+
+            if (candidate && this.pendingById.has(candidate.id)) {
+                return candidate;
+            }
+            /* Запрос мог быть отменён, пока стоял в очереди — пропускаем. */
+        }
+
+        return undefined;
     }
 
     private pumpQueue(slot: IWorkerSlot): void {
@@ -212,15 +282,13 @@ export class WorkerSyntaxParsePool implements ISyntaxParseService {
             return;
         }
 
-        const next = this.queue.shift();
+        /* Foreground всегда обслуживается раньше фоновых вкладок. */
+        const next = this.takeNextQueued(this.foregroundQueue) ??
+            (this.canDispatchBackground()
+                ? this.takeNextQueued(this.backgroundQueue)
+                : undefined);
 
         if (!next) {
-            return;
-        }
-
-        /* Запрос мог быть отменён, пока стоял в очереди. */
-        if (!this.pendingById.has(next.id)) {
-            this.pumpQueue(slot);
             return;
         }
 
@@ -249,8 +317,7 @@ export class WorkerSyntaxParsePool implements ISyntaxParseService {
         this.slots.push(slot);
 
         worker.on("message", (response: IWorkerResponse) => {
-            slot.busy = false;
-            slot.currentId = undefined;
+            this.freeSlot(slot);
 
             const pending = this.pendingById.get(response.id);
 
@@ -304,8 +371,11 @@ export class WorkerSyntaxParsePool implements ISyntaxParseService {
         this.slots = this.slots.filter(item => item !== slot);
         void slot.worker.terminate().catch(() => undefined);
 
-        if (slot.currentId !== undefined) {
-            this.settleFailure(slot.currentId, error);
+        const failedId = slot.currentId;
+        this.freeSlot(slot);
+
+        if (failedId !== undefined) {
+            this.settleFailure(failedId, error);
         }
 
         if (this.disposed) {

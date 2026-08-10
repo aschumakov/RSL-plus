@@ -81,12 +81,8 @@ export function buildRslContextCompletions(
         return staticItems;
     }
 
-    const stringIndex = tokens.findIndex(token =>
-        token.kind === "string" &&
-        token.start < offset &&
-        offset < token.end
-    );
-    if (stringIndex < 0) {
+    const stringIndex = findTokenIndexContainingOffset(tokens, offset);
+    if (stringIndex < 0 || tokens[stringIndex].kind !== "string") {
         return undefined;
     }
 
@@ -307,12 +303,43 @@ function isCallable(symbol: RslSymbol): boolean {
         symbol.kind === CompletionItemKind.Method;
 }
 
-function isImportContext(tokens: readonly IRslToken[], offset: number): boolean {
-    for (let index = tokens.length - 1; index >= 0; index--) {
-        const token = tokens[index];
-        if (token.start >= offset) {
-            continue;
+/**
+ * Первый индекс токена с `start >= offset` (бинарный поиск, токены
+ * отсортированы по позиции). Используется вместо линейного сканирования
+ * всего файла на каждый Completion-запрос.
+ */
+function lowerBoundByStart(tokens: readonly IRslToken[], offset: number): number {
+    let left = 0;
+    let right = tokens.length;
+
+    while (left < right) {
+        const middle = Math.floor((left + right) / 2);
+        if (tokens[middle].start < offset) {
+            left = middle + 1;
+        } else {
+            right = middle;
         }
+    }
+
+    return left;
+}
+
+/** Индекс единственного токена, чей диапазон строго содержит offset, либо -1. */
+function findTokenIndexContainingOffset(
+    tokens: readonly IRslToken[],
+    offset: number
+): number {
+    const index = lowerBoundByStart(tokens, offset) - 1;
+    return index >= 0 &&
+        tokens[index].start < offset &&
+        offset < tokens[index].end
+        ? index
+        : -1;
+}
+
+function isImportContext(tokens: readonly IRslToken[], offset: number): boolean {
+    for (let index = lowerBoundByStart(tokens, offset) - 1; index >= 0; index--) {
+        const token = tokens[index];
         if (token.kind === "symbol" && token.raw === ";") {
             return false;
         }
