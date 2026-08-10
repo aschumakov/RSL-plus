@@ -4,7 +4,8 @@ const assert = require("assert");
 const path = require("path");
 const {
     lexRsl,
-    tokenAtOffset
+    tokenAtOffset,
+    findUnrecognizedEscapes
 } = require(path.join(
     __dirname,
     "..",
@@ -168,6 +169,42 @@ test("SPNAME с фигурными скобками является едины�
         "{oper}",
         "{34-23-O}"
     ]);
+});
+
+test("Денежная и шестнадцатеричная константа лексируются одним токеном", () => {
+    const money = lexRsl("$146").tokens.find(token => token.kind === "number");
+    assert.ok(money);
+    assert.strictEqual(money.raw, "$146");
+
+    const moneyFraction = lexRsl("$1.46").tokens
+        .find(token => token.kind === "number");
+    assert.ok(moneyFraction);
+    assert.strictEqual(moneyFraction.raw, "$1.46");
+
+    const hex = lexRsl("#F2").tokens.find(token => token.kind === "number");
+    assert.ok(hex);
+    assert.strictEqual(hex.raw, "#F2");
+
+    const bare = lexRsl("$").tokens.find(token => token.kind === "number");
+    assert.ok(bare);
+    assert.strictEqual(bare.raw, "$");
+
+    const negative = lexRsl("-$12.34").tokens
+        .filter(token => token.kind === "symbol" || token.kind === "number");
+    assert.deepStrictEqual(
+        negative.map(token => token.raw),
+        ["-", "$12.34"]
+    );
+});
+
+test("Нераспознанная escape-последовательность обнаруживается", () => {
+    assert.deepStrictEqual(findUnrecognizedEscapes('"\\P"'), [1]);
+    assert.deepStrictEqual(findUnrecognizedEscapes('"\\n"'), []);
+    assert.deepStrictEqual(findUnrecognizedEscapes('"\\""'), []);
+    assert.deepStrictEqual(findUnrecognizedEscapes("\"\\'\""), []);
+    assert.deepStrictEqual(findUnrecognizedEscapes('"\\x41"'), []);
+    assert.deepStrictEqual(findUnrecognizedEscapes('"\\xZZ"'), [1]);
+    assert.deepStrictEqual(findUnrecognizedEscapes('"no escapes"'), []);
 });
 
 console.log("");

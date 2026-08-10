@@ -574,7 +574,6 @@ function createExpressionNode(
 class Parser {
     private index = 0;
     private diagnostics: IRslSyntaxDiagnostic[] = [];
-    private loopDepth = 0;
 
     constructor(
         private tokens: IRslToken[],
@@ -1230,57 +1229,65 @@ class Parser {
             objectName = this.tokensText(parts[0]);
             dictionaryName = this.tokensText(parts[1]);
 
-            if (!objectName) {
-                this.error(
-                    "expected-file-name",
-                    `В ${isRecord ? "RECORD" : "FILE"} ожидается имя файла`,
-                    clause[0] || this.current()
-                );
-            } else if (
-                !this.isFileName(parts[0]) &&
-                !this.hasWhitespaceSeparatedNames(parts[0])
-            ) {
-                this.error(
-                    "invalid-file-name",
-                    "Имя файла должно быть идентификатором или строкой",
-                    parts[0][0]
-                );
-            }
+            /*
+             * Пустые скобки — документированный вариант без имени объекта
+             * (пример руководства: "file aa () txt 2048"), а не ошибка.
+             * Вся проверка имени/словаря применима только когда внутри
+             * скобок действительно что-то есть.
+             */
+            if (parts.length > 0) {
+                if (!objectName) {
+                    this.error(
+                        "expected-file-name",
+                        `В ${isRecord ? "RECORD" : "FILE"} ожидается имя файла`,
+                        clause[0] || this.current()
+                    );
+                } else if (
+                    !this.isFileName(parts[0]) &&
+                    !this.hasWhitespaceSeparatedNames(parts[0])
+                ) {
+                    this.error(
+                        "invalid-file-name",
+                        "Имя файла должно быть идентификатором или строкой",
+                        parts[0][0]
+                    );
+                }
 
-            if (parts.length > 1 && !dictionaryName) {
-                this.error(
-                    "expected-dictionary-name",
-                    "После ',' ожидается имя файла словаря",
-                    parts[1][0] || clause[clause.length - 1] || this.current()
-                );
-            } else if (
-                dictionaryName &&
-                !this.isFileName(parts[1])
-            ) {
-                this.error(
-                    "invalid-dictionary-name",
-                    "Имя файла словаря должно быть идентификатором или строкой",
-                    parts[1][0]
-                );
-            }
+                if (parts.length > 1 && !dictionaryName) {
+                    this.error(
+                        "expected-dictionary-name",
+                        "После ',' ожидается имя файла словаря",
+                        parts[1][0] || clause[clause.length - 1] || this.current()
+                    );
+                } else if (
+                    dictionaryName &&
+                    !this.isFileName(parts[1])
+                ) {
+                    this.error(
+                        "invalid-dictionary-name",
+                        "Имя файла словаря должно быть идентификатором или строкой",
+                        parts[1][0]
+                    );
+                }
 
-            if (parts.length > 2) {
-                this.error(
-                    "too-many-object-arguments",
-                    `${isRecord ? "RECORD" : "FILE"} допускает не более двух параметров объекта`,
-                    parts[2][0]
-                );
-            }
+                if (parts.length > 2) {
+                    this.error(
+                        "too-many-object-arguments",
+                        `${isRecord ? "RECORD" : "FILE"} допускает не более двух параметров объекта`,
+                        parts[2][0]
+                    );
+                }
 
-            if (
-                parts.length === 1 &&
-                this.hasWhitespaceSeparatedNames(parts[0])
-            ) {
-                this.missing(
-                    "missing-comma",
-                    "Между именем объекта и именем словаря пропущена ','",
-                    parts[0][1].start
-                );
+                if (
+                    parts.length === 1 &&
+                    this.hasWhitespaceSeparatedNames(parts[0])
+                ) {
+                    this.missing(
+                        "missing-comma",
+                        "Между именем объекта и именем словаря пропущена ','",
+                        parts[0][1].start
+                    );
+                }
             }
         } else {
             this.missing(
@@ -1553,9 +1560,7 @@ class Parser {
         const keyword = this.take();
         const used = [keyword];
         const condition = this.parseRequiredCondition(used, "WHILE");
-        this.loopDepth++;
         const body = this.parseStatementList(new Set(["end"]));
-        this.loopDepth--;
         const endToken = this.expectWord("end", "Для WHILE не найден END");
 
         if (endToken) {
@@ -1576,21 +1581,18 @@ class Parser {
         const used = [keyword];
         const headerChildren: IRslSyntaxNode[] = [];
 
+        /*
+         * FOR без скобок и без параметров — документированный бесконечный
+         * цикл ("не нужно задавать ни одного параметра цикла. Можно не
+         * указывать и скобки."), а не ошибка.
+         */
         if (this.isSymbol("(")) {
             const header = this.consumeBalanced("(", ")", used);
             this.validateForHeader(header);
             headerChildren.push(...this.parseForHeaderNodes(header));
-        } else {
-            this.missing(
-                "missing-opening-parenthesis",
-                "После FOR пропущена '('",
-                this.current().start
-            );
         }
 
-        this.loopDepth++;
         const body = this.parseStatementList(new Set(["end"]));
-        this.loopDepth--;
         const endToken = this.expectWord("end", "Для FOR не найден END");
 
         if (endToken) {
@@ -1795,16 +1797,11 @@ class Parser {
         const keyword = this.take();
         const used = [keyword];
 
-        if (
-            (kind === "BreakStatement" || kind === "ContinueStatement") &&
-            this.loopDepth === 0
-        ) {
-            this.error(
-                "loop-control-outside-loop",
-                `${keyword.raw.toUpperCase()} допустим только внутри FOR или WHILE`,
-                keyword
-            );
-        }
+        /*
+         * BREAK/CONTINUE вне цикла — не ошибка: по языку RSL это эквивалент
+         * RETURN без параметров ("действие эквивалентно инструкции return
+         * без параметров").
+         */
 
         let expression: IRslSyntaxNode | undefined;
 
@@ -2319,12 +2316,11 @@ class Parser {
             !(token.kind === "symbol" && (token.raw === "(" || token.raw === ")"))
         );
 
+        /*
+         * FOR () без параметров — документированный бесконечный цикл, не
+         * ошибка (см. комментарий в parseFor).
+         */
         if (inner.length === 0) {
-            this.error(
-                "expected-for-header",
-                "В FOR ожидаются параметры цикла",
-                tokens[tokens.length - 1] || tokens[0]
-            );
             return;
         }
 

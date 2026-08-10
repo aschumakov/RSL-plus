@@ -93,13 +93,20 @@ assert.ok(parseRslSyntax("While (value ==)\nEnd;").diagnostics.some(item =>
 assert.ok(parseRslSyntax("While (value ==").diagnostics.some(item =>
     item.code === "expected-expression-operand"
 ));
-assert.ok(parseRslSyntax("For\nEnd;").diagnostics.some(item =>
-    item.code === "missing-opening-parenthesis"
+/* FOR без скобок и без параметров — документированный бесконечный цикл. */
+assert.deepStrictEqual(
+    parseRslSyntax("For\nBreak;\nEnd;").diagnostics,
+    []
+);
+assert.deepStrictEqual(
+    parseRslSyntax("For ()\nBreak;\nEnd;").diagnostics,
+    []
+);
+/* BREAK/CONTINUE вне цикла эквивалентны RETURN, а не ошибка. */
+assert.ok(!parseRslSyntax("Break;").diagnostics.some(item =>
+    item.code === "loop-control-outside-loop"
 ));
-assert.ok(parseRslSyntax("For ()\nEnd;").diagnostics.some(item =>
-    item.code === "expected-for-header"
-));
-assert.ok(parseRslSyntax("Break;").diagnostics.some(item =>
+assert.ok(!parseRslSyntax("Continue;").diagnostics.some(item =>
     item.code === "loop-control-outside-loop"
 ));
 assert.ok(!parseRslSyntax("While (true)\n Break;\nEnd;").diagnostics.some(item =>
@@ -143,9 +150,15 @@ assert.deepStrictEqual(
     fileRecord.root.children[1].specifiers,
     ["normal", "mem"]
 );
-assert.ok(parseRslSyntax("file Empty();").diagnostics.some(item =>
-    item.code === "expected-file-name"
-));
+/* Пустые скобки — документированный вариант без имени объекта. */
+assert.deepStrictEqual(
+    parseRslSyntax("file Empty();").diagnostics,
+    []
+);
+assert.deepStrictEqual(
+    parseRslSyntax("file Empty() txt 2048;").diagnostics,
+    []
+);
 assert.ok(parseRslSyntax("file Invalid(42);").diagnostics.some(item =>
     item.code === "invalid-file-name"
 ));

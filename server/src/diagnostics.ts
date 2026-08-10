@@ -20,10 +20,12 @@ import {
     IRslDiagnosticSettings
 } from "./interfaces";
 import {
+    findUnrecognizedEscapes,
     IRslToken,
     normalizeIdentifier,
     normalizeReferenceIdentifier,
-    significantTokens
+    significantTokens,
+    type RslSquareKind
 } from "./lexer";
 import {
     isRslSystemSpecialVariableName
@@ -187,6 +189,9 @@ export function buildLocalRslDiagnostics(
         addUnterminatedTokenDiagnostics(module, result);
     }
     if (options.structure && hasCapacity()) {
+        addUnrecognizedEscapeDiagnostics(module, result);
+    }
+    if (options.structure && hasCapacity()) {
         addBracketDiagnostics(module, result);
     }
     if (options.structure && hasCapacity()) {
@@ -203,6 +208,9 @@ export function buildLocalRslDiagnostics(
     }
     if (options.structure && hasCapacity()) {
         addConstantAssignmentDiagnostics(module, getResolver(), result);
+    }
+    if (options.structure && hasCapacity()) {
+        addLocalVisibilityDiagnostics(module, getResolver(), result);
     }
     if (
         options.structure &&
@@ -337,6 +345,17 @@ function addDocumentedLimitDiagnostics(
                     replacement: splitLongStringLiteral(token.raw)
                 }
             ));
+        } else if (
+            token.kind === "number" &&
+            token.raw.startsWith("$") &&
+            !/[0-9]/.test(token.raw)
+        ) {
+            result.push(createTokenDiagnostic(
+                token,
+                DiagnosticSeverity.Error,
+                "Неверная денежная константа",
+                "invalid-money-constant"
+            ));
         }
     }
 
@@ -348,8 +367,13 @@ function addDocumentedLimitDiagnostics(
             module,
             0,
             Math.min(module.source.length, 1),
-            DiagnosticSeverity.Warning,
-            "Имя macro-файла длиннее рекомендуемых 24 символов",
+            /*
+             * "Длина имени макрофайла не должна превышать 24 символа" —
+             * та же нормативная формулировка, что и для длины идентификатора
+             * (там Error), поэтому здесь тоже Error, а не рекомендация.
+             */
+            DiagnosticSeverity.Error,
+            "Имя macro-файла длиннее допустимых 24 символов",
             "macro-file-name-too-long"
         ));
     }
@@ -423,6 +447,109 @@ function addConstantAssignmentDiagnostics(
     }
 }
 
+/*
+ * LOCAL модуля виден только процедуре инициализации модуля и local-процедурам
+ * этого же модуля (стр. 43-44 руководства); LOCAL свойство класса видно
+ * только конструктору класса и local-методам того же класса. Обращение из
+ * любой другой (не-local) процедуры/метода того же файла — ошибка.
+ * Кросс-модульная видимость LOCAL уже исключена отдельно (RslSymbol.isPrivate
+ * фильтрует local наравне с private при экспорте/поиске из других файлов) —
+ * эта проверка касается только ссылок внутри одного файла.
+ */
+function addLocalVisibilityDiagnostics(
+    module: IIndexedModule,
+    resolver: RslScopeResolver,
+    result: Diagnostic[]
+): void {
+    const ownerOf = new Map<RslSymbol, RslSymbol>();
+    walkScopes(module.symbolTree, scope => {
+        for (const child of scope.children) {
+            ownerOf.set(child, scope);
+        }
+    });
+
+    /*
+     * visibility === "local" также используется отдельно для параметров
+     * (не имеет отношения к модификатору LOCAL) — у них владелец всегда
+     * MACRO/METHOD. Модификатор LOCAL по документации применим только на
+     * уровне модуля или конструктора класса, поэтому здесь учитываются
+     * только "local"-символы, чей владелец — Unit (модуль) или Class.
+     */
+    const declarationStarts = new Set<number>();
+    for (const [symbol, owner] of ownerOf) {
+        if (
+            symbol.visibility === "local" &&
+            (owner.kind === CompletionItemKind.Unit ||
+                owner.kind === CompletionItemKind.Class)
+        ) {
+            declarationStarts.add(findObjectNameRange(module, symbol).start);
+        }
+    }
+
+    if (declarationStarts.size === 0) {
+        return;
+    }
+
+    const tokens = significantTokens(module.lex.tokens);
+
+    for (const token of tokens) {
+        if (token.kind !== "identifier" || declarationStarts.has(token.start)) {
+            continue;
+        }
+
+        const resolved = resolver.resolveAt(
+            module.uri,
+            module.symbolTree,
+            token.start
+        );
+
+        if (!resolved || resolved.symbol.visibility !== "local") {
+            continue;
+        }
+
+        const owner = ownerOf.get(resolved.symbol);
+
+        if (!owner) {
+            continue;
+        }
+
+        const refChain = getScopeChain(module.symbolTree, token.start);
+        const ownerIndex = refChain.indexOf(owner);
+        const allowed = ownerIndex !== -1 && (
+            refChain.length === ownerIndex + 1 ||
+            (
+                refChain.length === ownerIndex + 2 &&
+                refChain[ownerIndex + 1].visibility === "local"
+            )
+        );
+
+        if (allowed) {
+            continue;
+        }
+
+        const ownerLabel = owner.kind === CompletionItemKind.Class
+            ? `конструктора класса ${owner.name}`
+            : "процедуры инициализации модуля";
+        result.push(createTokenDiagnostic(
+            token,
+            DiagnosticSeverity.Error,
+            `${resolved.symbol.name} — локальный объект ${ownerLabel}; ` +
+                "доступен только внутри неё и local-процедур того же уровня",
+            "local-visibility-violation"
+        ));
+    }
+}
+
+/*
+ * Руководство формулирует запрет доступа к PRIVATE через THIS безусловно
+ * (стр. 43), но эта проверка включается только под dialect === "coreRsl"
+ * (по умолчанию — "rsBank"). Это осознанное решение: настройка
+ * rslPlus.language.dialect описывает rsBank как допускающий расширения
+ * платформы сверх базового RSL, а тесты (extended-language-features)
+ * явно проверяют, что под rsBank это не ошибка. Включение проверки по
+ * умолчанию сгенерировало бы ложные ошибки на распространённом в RS-Bank
+ * коде паттерне — поэтому gating оставлен как есть.
+ */
 function addCoreDialectDiagnostics(
     module: IIndexedModule,
     resolver: RslScopeResolver,
@@ -611,6 +738,48 @@ function splitLongStringLiteral(raw: string): string | undefined {
     return parts.map(part => `${quote}${part}${quote}`).join(" +\n");
 }
 
+/*
+ * RECORD документацией не объявлен устаревшим (только ARRAY, FILE и
+ * специализированные ссылочные типы) — в отличие от прежней версии этой
+ * проверки, здесь он не флагуется.
+ */
+const DEPRECATED_DECLARATION_MESSAGES = new Map<string, string>([
+    [
+        "array",
+        "Определение ARRAY устарело, от него желательно избавляться по возможности"
+    ],
+    [
+        "file",
+        "Объект типа FILE — устаревшая конструкция; " +
+            "рекомендуется использовать конструкцию Tbfile"
+    ],
+    [
+        "btfileref",
+        "BtFileRef — устаревший специализированный тип; " +
+            "рекомендуется использовать обобщённый объект (TBfile)"
+    ],
+    [
+        "strucref",
+        "StrucRef — устаревший специализированный тип; " +
+            "рекомендуется использовать обобщённый объект (TRecHandler)"
+    ],
+    [
+        "arrayref",
+        "ArrayRef — устаревший специализированный тип; " +
+            "рекомендуется использовать обобщённый объект (TArray)"
+    ],
+    [
+        "txtfileref",
+        "TxtFileRef — устаревший специализированный тип; " +
+            "рекомендуется использовать обобщённый объект"
+    ],
+    [
+        "dbffileref",
+        "DbfFileRef — устаревший специализированный тип; " +
+            "рекомендуется использовать обобщённый объект"
+    ]
+]);
+
 function addDeprecatedDeclarationDiagnostics(
     module: IIndexedModule,
     result: Diagnostic[]
@@ -620,17 +789,18 @@ function addDeprecatedDeclarationDiagnostics(
             continue;
         }
 
-        const word = normalizeIdentifier(token.value);
+        const message = DEPRECATED_DECLARATION_MESSAGES.get(
+            normalizeIdentifier(token.value)
+        );
 
-        if (word !== "record" && word !== "array") {
+        if (!message) {
             continue;
         }
 
         result.push(createTokenDiagnostic(
             token,
             DiagnosticSeverity.Information,
-            `Определение ${word.toUpperCase()} устарело, ` +
-                "от него желательно избавляться по возможности",
+            message,
             "deprecated-declaration"
         ));
     }
@@ -662,6 +832,30 @@ function addDebugBreakDiagnostics(
     }
 }
 
+function addUnrecognizedEscapeDiagnostics(
+    module: IIndexedModule,
+    result: Diagnostic[]
+): void {
+    for (const token of module.lex.tokens) {
+        if (token.kind !== "string") {
+            continue;
+        }
+
+        for (const offset of findUnrecognizedEscapes(token.raw)) {
+            const start = token.start + offset;
+            result.push(createOffsetDiagnostic(
+                module,
+                start,
+                start + 2,
+                DiagnosticSeverity.Warning,
+                "Неизвестная escape-последовательность; " +
+                    "допустимы \\n \\r \\t \\f \\xHH \\XHH \\\\",
+                "unknown-escape-sequence"
+            ));
+        }
+    }
+}
+
 function addUnterminatedTokenDiagnostics(
     module: IIndexedModule,
     result: Diagnostic[]
@@ -687,7 +881,7 @@ function addUnterminatedTokenDiagnostics(
             ));
         } else if (
             token.kind === "square" &&
-            !isClosedSquareBlock(token.raw)
+            !isClosedSquareBlock(token.raw, token.squareKind)
         ) {
             result.push(createTokenDiagnostic(
                 token,
@@ -1701,7 +1895,16 @@ function offsetRangeKey(start: number, end: number): string {
     return `${start}:${end}`;
 }
 
-function isClosedSquareBlock(raw: string): boolean {
+// "--" — комментарий только внутри SQL-блока (обычное соглашение SQL).
+// У самого RSL комментарии — только двойной слэш и парный блочный, поэтому
+// в output-form блоке "--" — это просто декоративная рамка шаблона
+// (например, "----------------]"), а не начало комментария, и не должна
+// прятать от сканера настоящий закрывающий "]" после неё.
+function isClosedSquareBlock(
+    raw: string,
+    squareKind?: RslSquareKind
+): boolean {
+    const dashStartsComment = squareKind === "sql";
     let depth = 0;
     let quote = "";
 
@@ -1725,7 +1928,10 @@ function isClosedSquareBlock(raw: string): boolean {
             continue;
         }
 
-        if ((char === "-" && next === "-") || (char === "/" && next === "/")) {
+        if (
+            (dashStartsComment && char === "-" && next === "-") ||
+            (char === "/" && next === "/")
+        ) {
             while (
                 index < raw.length &&
                 raw.charAt(index) !== "\r" &&

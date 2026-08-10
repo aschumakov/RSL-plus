@@ -69,6 +69,97 @@ test("DEBUGBREAK выдаёт предупреждение", () => {
     assert.strictEqual(item.severity, 2);
 });
 
+test("ARRAY считается устаревшим, RECORD — нет", () => {
+    const items = diagnosticsFor(
+        "Array Values: Integer;\nRecord Buffer(\"buffer.dat\") normal mem;"
+    );
+    const deprecated = items.filter(value => value.code === "deprecated-declaration");
+    assert.strictEqual(deprecated.length, 1);
+    assert.ok(/ARRAY/.test(deprecated[0].message));
+});
+
+test("FILE считается устаревшим и рекомендует Tbfile", () => {
+    const items = diagnosticsFor("File Texts(\"texts.dat\") normal txt 120;");
+    const item = items.find(value => value.code === "deprecated-declaration");
+    assert.ok(item);
+    assert.ok(/Tbfile/.test(item.message));
+});
+
+test("LOCAL переменная модуля недоступна обычной процедуре", () => {
+    const source = [
+        "Local Var str;",
+        "Macro MyProc1()",
+        "  str = \"Hello!\";",
+        "End;",
+        "Local Macro MyMacro1()",
+        "  str = \"Hello!\";",
+        "End;"
+    ].join("\n");
+    const items = diagnosticsFor(source);
+    const violations = items.filter(value =>
+        value.code === "local-visibility-violation"
+    );
+    assert.strictEqual(violations.length, 1);
+    assert.strictEqual(violations[0].range.start.line, 2);
+});
+
+test("LOCAL свойство класса недоступно обычному методу", () => {
+    const source = [
+        "Class MyClass",
+        "  Var prop1 = 200;",
+        "  Local Var lvar = 300;",
+        "  Macro Method1()",
+        "    println(lvar);",
+        "  End;",
+        "  Local Macro LocProc()",
+        "    println(lvar);",
+        "  End;",
+        "End;"
+    ].join("\n");
+    const items = diagnosticsFor(source);
+    const violations = items.filter(value =>
+        value.code === "local-visibility-violation"
+    );
+    assert.strictEqual(violations.length, 1);
+    assert.strictEqual(violations[0].range.start.line, 4);
+});
+
+test("Денежная константа без цифр — ошибка", () => {
+    const items = diagnosticsFor("Macro Test()\n Var a = $146;\n Var b = $;\nEnd;");
+    assert.strictEqual(
+        items.filter(value => value.code === "invalid-money-constant").length,
+        1
+    );
+});
+
+test("Слишком длинное имя macro-файла — ошибка, а не рекомендация", () => {
+    const index = new WorkspaceIndex();
+    const longName = "a".repeat(25);
+    const uri = `file:///${longName}.mac`;
+    index.registerWorkspaceFiles([uri]);
+    const module = createModule(index, uri, "Macro Test()\nEnd;");
+    const items = buildRslDiagnostics(module, index);
+    const item = items.find(value => value.code === "macro-file-name-too-long");
+    assert.ok(item);
+    assert.strictEqual(item.severity, 1);
+});
+
+test("Специализированные ссылочные типы считаются устаревшими", () => {
+    const source = [
+        "Macro Test()",
+        "  Var a: BtFileRef;",
+        "  Var b: StrucRef;",
+        "  Var c: ArrayRef;",
+        "  Var d: TxtFileRef;",
+        "  Var e: DbfFileRef;",
+        "End;"
+    ].join("\n");
+    const items = diagnosticsFor(source);
+    const deprecated = items.filter(value => value.code === "deprecated-declaration");
+    assert.strictEqual(deprecated.length, 5);
+    assert.ok(deprecated.every(item => /обобщённый объект/.test(item.message)));
+});
+
 test("Неиспользуемая локальная переменная выдаёт предупреждение", () => {
     const items = diagnosticsFor("Macro Test()\n Var unused;\nEnd;");
     const item = items.find(value => value.code === "unused-declaration");
