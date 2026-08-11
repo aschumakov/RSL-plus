@@ -126,7 +126,8 @@ export class WorkspaceIndex {
         uri: string,
         sourceLength: number,
         declarations: IRslDeclarationSnapshot,
-        version: number
+        version: number,
+        fingerprint?: string
     ): IIndexedModule {
         return this.replace(
             uri,
@@ -135,7 +136,8 @@ export class WorkspaceIndex {
                 declarations
             ),
             version,
-            false
+            false,
+            fingerprint
         );
     }
 
@@ -350,7 +352,8 @@ export class WorkspaceIndex {
         uri: string,
         model: IRslModuleModel,
         version: number,
-        isOpen: boolean
+        isOpen: boolean,
+        fingerprint?: string
     ): IIndexedModule {
         const affected = this.collectAffectedUris(uri);
         const previous = this.modules.delete(uri);
@@ -358,7 +361,13 @@ export class WorkspaceIndex {
             this.symbols.remove(previous);
             this.imports.remove(previous);
         }
-        const module: IIndexedModule = { uri, ...model, version, isOpen };
+        const module: IIndexedModule = {
+            uri,
+            ...model,
+            version,
+            isOpen,
+            fingerprint
+        };
         this.modules.set(module);
         this.files.register(uri);
         this.symbols.add(module);

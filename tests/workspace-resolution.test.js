@@ -955,6 +955,167 @@ async function testActiveSwitchInterruptsPhasesOfLeftFile() {
     service.close(smallUri);
 }
 
+/*
+ * Быстрое переключение вкладок не должно стоить работы за каждый файл.
+ *
+ * Раньше setActiveDocument синхронно делал полный lexRsl и сканирование
+ * объявлений, то есть переключение по Ctrl+Tab платило за каждый файл, через
+ * который пользователь лишь прошёл: на 12 файлах по 200КБ это больше секунды
+ * основного потока, в которую не отвечали ни таймеры, ни LSP. Отсюда и жалоба
+ * «структура появляется с задержкой» — очередь разборов при этом чистилась
+ * правильно, работа выполнялась прямо в обработчике переключения.
+ */
+async function testFastTabSwitchingDoesNotBlockMainThread() {
+    const line = 'Var x1 = Something.Method(a, "text", 42) + b;\n';
+    const source = line.repeat(Math.ceil((200 * 1024) / line.length));
+    const uris = [];
+    const documentsByUri = new Map();
+    for (let index = 0; index < 12; index++) {
+        const uri = `file:///tab-${index}.mac`;
+        uris.push(uri);
+        documentsByUri.set(uri, createDocument(uri, 1, source));
+    }
+
+    const outlines = [];
+    const service = new DocumentAnalysisService(
+        { get: uri => documentsByUri.get(uri) },
+        new WorkspaceIndex(),
+        {
+            getAvailable: () => ({
+                imports: { enabled: false },
+                autoImport: { enabled: false },
+                analysis: { workspaceIndexing: "activeImports" },
+                semanticHighlighting: { maxFileSizeKb: 512 },
+                diagnostics: {}
+            })
+        },
+        {
+            log: () => undefined,
+            performance: {
+                enabled: true,
+                start(event, fields) {
+                    if (event === "analysis.outlineSnapshot") {
+                        outlines.push(fields.uri);
+                    }
+                    return { event };
+                },
+                end() {},
+                mark() {}
+            },
+            invalidateProviderCaches: () => undefined,
+            onParsed: () => undefined,
+            onImports: () => undefined,
+            initialParseDelayMs: 0,
+            inactiveParseDelayMs: 0,
+            changeDebounceMs: 0
+        }
+    );
+
+    for (const uri of uris) {
+        service.open(documentsByUri.get(uri));
+    }
+
+    /* События переключения приходят подряд, быстрее, чем успевает разбор. */
+    const startedAt = Date.now();
+    for (const uri of uris) {
+        service.setActiveDocument(uri);
+    }
+    const switchMs = Date.now() - startedAt;
+
+    assert.ok(
+        switchMs < 150,
+        "Переключение вкладок обязано быть дешёвым: работа за файл, через " +
+            `который лишь прошли, блокирует основной поток; вышло ${switchMs} мс`
+    );
+
+    const lastUri = uris[uris.length - 1];
+    await service.ensureParsed(documentsByUri.get(lastUri));
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    assert.deepStrictEqual(
+        Array.from(new Set(outlines)),
+        [lastUri],
+        "Outline обязан строиться только для вкладки, на которой " +
+            `остановились; построен для: ${Array.from(new Set(outlines))}`
+    );
+
+    for (const uri of uris) {
+        service.close(uri);
+    }
+}
+
+/*
+ * Задача, ставшая ненужной, пропускается на старте, а не разбирается до конца.
+ *
+ * Полный разбор до фазового порога идёт одним куском и никого не пускает
+ * вперёд, поэтому проверять актуальность нужно именно в момент старта задачи:
+ * к этому времени файл могли закрыть или изменить.
+ */
+async function testStaleTaskIsSkippedAtDispatch() {
+    const line = 'Var x1 = Something.Method(a, "text", 42) + b;\n';
+    const source = line.repeat(Math.ceil((60 * 1024) / line.length));
+    const uri = "file:///stale-task.mac";
+    const documentsByUri = new Map([[uri, createDocument(uri, 1, source)]]);
+
+    const parsed = [];
+    const skipped = [];
+    const service = new DocumentAnalysisService(
+        { get: requested => documentsByUri.get(requested) },
+        new WorkspaceIndex(),
+        {
+            getAvailable: () => ({
+                imports: { enabled: false },
+                autoImport: { enabled: false },
+                analysis: { workspaceIndexing: "activeImports" },
+                semanticHighlighting: { maxFileSizeKb: 512 },
+                diagnostics: {}
+            })
+        },
+        {
+            log: () => undefined,
+            performance: {
+                enabled: true,
+                start: () => ({}),
+                end() {},
+                mark(event, fields) {
+                    if (event === "analysis.skipped") {
+                        skipped.push(fields.reason);
+                    }
+                }
+            },
+            invalidateProviderCaches: () => undefined,
+            onParsed: module => parsed.push(module.uri),
+            onImports: () => undefined,
+            initialParseDelayMs: 0,
+            inactiveParseDelayMs: 0,
+            changeDebounceMs: 0
+        }
+    );
+
+    service.setActiveDocument(uri);
+    service.open(documentsByUri.get(uri));
+
+    /*
+     * ensureParsed ставит задачу в очередь сразу, а обслуживается она
+     * следующим setImmediate. Файл закрывается в этом окне — именно так
+     * выглядит вкладка, закрытая пока очередь до неё не дошла.
+     */
+    const pending = service.ensureParsed(documentsByUri.get(uri));
+    documentsByUri.delete(uri);
+    await pending;
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    assert.deepStrictEqual(
+        parsed,
+        [],
+        "Разбор закрытого файла — чистая блокировка основного потока"
+    );
+    assert.ok(
+        skipped.includes("documentClosed"),
+        `Пропуск обязан быть зафиксирован причиной; получено: ${skipped}`
+    );
+}
+
 async function testParseReadinessDoesNotWaitForSettings() {
     const uri = "file:///workspace/navigation.mac";
     const source = [
@@ -1415,6 +1576,12 @@ async function waitFor(predicate, timeoutMs) {
 
     await testActiveSwitchInterruptsPhasesOfLeftFile();
     console.log("[OK] переключение вкладки прерывает фазы покинутого файла");
+
+    await testFastTabSwitchingDoesNotBlockMainThread();
+    console.log("[OK] быстрое переключение вкладок не блокирует основной поток");
+
+    await testStaleTaskIsSkippedAtDispatch();
+    console.log("[OK] ненужная задача пропускается на старте");
 
     await testParseReadinessDoesNotWaitForSettings();
     console.log("[OK] парсер и Import не ждут workspace/configuration");

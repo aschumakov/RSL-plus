@@ -708,11 +708,17 @@ export class WorkspaceModuleLoader {
             generation: item?.generation ?? 0,
             priority: item?.priority ?? "foreground",
             /*
-             * Уже известный mtime позволяет worker'у ответить unchanged, не
-             * читая файл. Нужно для reload(): наблюдатель за файлами
+             * Известный отпечаток позволяет worker'у ответить unchanged, не
+             * сканируя файл. Нужно для reload(): наблюдатель за файлами
              * срабатывает и на сохранение без изменений.
+             *
+             * Отпечаток берётся только у внешнего модуля: у открытого в
+             * индексе лежит модель из буфера редактора, и с содержимым на
+             * диске она не связана.
              */
-            knownMtimeMs: known && !known.isOpen ? known.version : undefined
+            knownFingerprint: known && !known.isOpen
+                ? known.fingerprint
+                : undefined
         });
 
         if (response.status !== "indexed") {
@@ -749,7 +755,8 @@ export class WorkspaceModuleLoader {
                 declarations: response.declarations,
                 imports: response.imports
             },
-            response.mtimeMs
+            response.mtimeMs,
+            response.fingerprint
         );
         if (indexSpan) {
             performance.end(indexSpan, {
@@ -857,7 +864,7 @@ export class WorkspaceModuleLoader {
         request: {
             uri: string;
             generation: number;
-            knownMtimeMs?: number;
+            knownFingerprint?: string;
             expectedExport?: string;
             priority?: CompactModulePriority;
         }
@@ -923,7 +930,8 @@ export class WorkspaceModuleLoader {
                 declarations: response.declarations,
                 imports: response.imports
             },
-            response.mtimeMs
+            response.mtimeMs,
+            response.fingerprint
         );
         this.indexedUris.add(uri);
         this.options.onModuleLoaded(module);

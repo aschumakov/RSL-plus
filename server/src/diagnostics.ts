@@ -477,7 +477,15 @@ function addLocalVisibilityDiagnostics(
      * MACRO/METHOD. Модификатор LOCAL по документации применим только на
      * уровне модуля или конструктора класса, поэтому здесь учитываются
      * только "local"-символы, чей владелец — Unit (модуль) или Class.
+     *
+     * Набор символов собирается наравне с их позициями и проверяется потом на
+     * каждой ссылке. Одного visibility там недостаточно: параметр Macro,
+     * использованный во вложенном в этот Macro Macro, имеет ровно ту же
+     * visibility, и правило про LOCAL модуля объявляло его недоступным —
+     * сообщением про процедуру инициализации модуля, к которой он не имеет
+     * отношения.
      */
+    const localDeclarations = new Set<RslSymbol>();
     const declarationStarts = new Set<number>();
     for (const [symbol, owner] of ownerOf) {
         if (
@@ -485,11 +493,12 @@ function addLocalVisibilityDiagnostics(
             (owner.kind === CompletionItemKind.Unit ||
                 owner.kind === CompletionItemKind.Class)
         ) {
+            localDeclarations.add(symbol);
             declarationStarts.add(findObjectNameRange(module, symbol).start);
         }
     }
 
-    if (declarationStarts.size === 0) {
+    if (localDeclarations.size === 0) {
         return;
     }
 
@@ -506,7 +515,7 @@ function addLocalVisibilityDiagnostics(
             token.start
         );
 
-        if (!resolved || resolved.symbol.visibility !== "local") {
+        if (!resolved || !localDeclarations.has(resolved.symbol)) {
             continue;
         }
 

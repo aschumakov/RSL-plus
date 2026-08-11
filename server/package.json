@@ -1,6 +1,6 @@
 {
   "name": "rsl-plus-server",
-  "version": "1.1.9",
+  "version": "1.1.10",
   "private": true,
   "engines": {
     "node": ">=18.0.0"

@@ -427,12 +427,16 @@ connection.onInitialize((params: InitializeParams) => {
     const initializationOptions = params.initializationOptions as
         {
             referenceIndexCachePath?: string;
+            compactModuleCachePath?: string;
             performanceLogFile?: string;
             initialSettings?: IRslSettings;
             activeDocumentUri?: string | null;
         } | undefined;
     referenceIndex.configurePersistence(
         initializationOptions?.referenceIndexCachePath
+    );
+    compactModules.configureCache(
+        initializationOptions?.compactModuleCachePath
     );
     performanceLogger.configure(
         initializationOptions?.performanceLogFile

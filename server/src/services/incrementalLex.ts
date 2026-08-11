@@ -37,16 +37,53 @@ const SAFE_KINDS = new Set<RslTokenKind>([
     "identifier", "number", "string", "symbol", "whitespace"
 ]);
 
+/** Токены изменённой строки: что заменяем и на каком участке текста. */
+interface ILineWindow {
+    /** Номер строки, с которой начинается окно. */
+    line: number;
+    /** Начало строки и конец окна (включая её перевод строки, если он есть). */
+    start: number;
+    end: number;
+    /** Конец текста строки без перевода строки: правка обязана лежать здесь. */
+    textEnd: number;
+    /**
+     * Ожидается ли перевод строки последним токеном пересчёта.
+     *
+     * Строковый литерал RSL может продолжиться на следующей строке, поэтому
+     * «строка кончилась» — это не «дошли до конца слайса», а «в этом месте
+     * действительно возник newline». У последней строки файла его нет.
+     */
+    expectTrailingNewline: boolean;
+    /** Диапазон заменяемых токенов, включительно; firstIndex > lastIndex — окно пусто. */
+    firstIndex: number;
+    lastIndex: number;
+}
+
 /**
- * Пытается пересчитать lex только для локально изменённого токена вместо
- * полного повторного прохода по документу.
+ * Пытается пересчитать lex только для изменённой строки вместо полного
+ * повторного прохода по документу.
  *
- * Применяется только к большим файлам и только когда правка целиком
- * помещается внутри одного однострочного токена безопасного вида. Любое
- * сомнение (правка задевает границу токена, результат неоднозначен,
- * получившийся токен многострочный или их несколько) возвращает undefined —
- * вызывающий код в этом случае делает обычный полный lexRsl, поэтому
- * некорректный результат здесь невозможен: можно только не ускориться.
+ * Единицей пересчёта служит строка, а не отдельный токен. Правка внутри одного
+ * токена — редкий случай: пользователь набирает пробел, точку с запятой,
+ * скобку, то есть меняет само разбиение строки на токены, а не содержимое
+ * одного из них. На замере набора текста в файле 567КБ из 300 правок 187
+ * меняли число токенов — прежний путь («один токен на входе, один на выходе»)
+ * отвергал их все и уходил на полный lexRsl. Пересчёт строки принимает их и
+ * стоит 16 мс против 38 мс полного лексирования.
+ *
+ * При этом путь остаётся проверяемым: строка лексируется в отрыве от
+ * документа, поэтому достаточно убедиться, что в ней не открыто и не
+ * открывается ни одной многострочной конструкции.
+ *
+ * Именно это и проверяется. Исходные токены строки обязаны быть безопасного
+ * вида: comment, square и bom означали бы, что состояние lexer приходит
+ * извне строки. Полученные токены проверяются так же — набранное «/*» или «[»
+ * даёт comment или square, и такая правка уходит на полный lexRsl. Сама правка
+ * не должна пересекать строки, иначе менялось бы их количество.
+ *
+ * Любое сомнение возвращает undefined: вызывающий код делает обычный полный
+ * lexRsl, поэтому некорректный результат здесь невозможен — можно только не
+ * ускориться.
  */
 export function tryIncrementalRelex(
     previousText: string,
@@ -76,88 +113,80 @@ export function tryIncrementalRelex(
         return undefined;
     }
 
-    const tokenIndex = findContainingTokenIndex(
-        previousLex.tokens,
-        oldStart,
-        oldEnd
-    );
+    /*
+     * Правка, задевающая перевод строки, меняет количество строк: сдвинулись бы
+     * не только смещения, но и номера строк всего остатка потока.
+     */
+    if (
+        hasLineBreak(previousText, oldStart, oldEnd) ||
+        hasLineBreak(nextText, oldStart, newEnd)
+    ) {
+        return undefined;
+    }
 
-    if (tokenIndex === undefined) {
+    const window = findLineWindow(previousLex, previousText, oldStart, oldEnd);
+
+    if (!window) {
         return undefined;
     }
 
     /*
      * Правка в начале файла пересчитала бы позиции почти всему потоку, и это
      * дороже, чем просто пролексировать документ заново (см.
-     * MAX_SHIFTED_TOKEN_FRACTION). Проверка стоит до relex правленого
-     * фрагмента, чтобы не платить даже за него.
+     * MAX_SHIFTED_TOKEN_FRACTION). Проверка стоит до relex строки, чтобы не
+     * платить даже за него.
      */
-    const shifted = previousLex.tokens.length - tokenIndex - 1;
+    const shifted = previousLex.tokens.length - window.lastIndex - 1;
     if (shifted > previousLex.tokens.length * MAX_SHIFTED_TOKEN_FRACTION) {
         return undefined;
     }
 
-    const token = previousLex.tokens[tokenIndex];
-
-    if (!SAFE_KINDS.has(token.kind) || token.line !== token.endLine) {
-        return undefined;
-    }
-
     const delta = nextText.length - previousText.length;
-    const sliceEnd = token.end + delta;
+    const sliceEnd = window.end + delta;
 
-    if (sliceEnd < token.start) {
+    if (sliceEnd < window.start) {
         return undefined;
     }
 
-    const slice = nextText.slice(token.start, sliceEnd);
-    const relexed = lexRsl(slice);
+    const slice = nextText.slice(window.start, sliceEnd);
+    const produced = lexRsl(slice).tokens;
 
-    if (relexed.tokens.length !== 1) {
+    if (!coversExactly(produced, slice.length, window.expectTrailingNewline)) {
         return undefined;
     }
 
-    const replacement = relexed.tokens[0];
+    const replacement: IRslToken[] = produced.map(token => ({
+        ...token,
+        start: window.start + token.start,
+        end: window.start + token.end,
+        line: window.line + token.line,
+        endLine: window.line + token.endLine
+    }));
 
-    if (
-        !SAFE_KINDS.has(replacement.kind) ||
-        replacement.line !== replacement.endLine ||
-        replacement.start !== 0 ||
-        replacement.end !== slice.length
+    const tokens = previousLex.tokens.slice(0, window.firstIndex)
+        .concat(replacement);
+
+    for (
+        let index = window.lastIndex + 1;
+        index < previousLex.tokens.length;
+        index++
     ) {
-        return undefined;
-    }
-
-    const patchedToken: IRslToken = {
-        ...replacement,
-        start: token.start + replacement.start,
-        end: token.start + replacement.end,
-        line: token.line,
-        endLine: token.line,
-        character: token.character + replacement.character,
-        endCharacter: token.character + replacement.endCharacter
-    };
-
-    const tokens = previousLex.tokens.slice();
-    tokens[tokenIndex] = patchedToken;
-
-    for (let index = tokenIndex + 1; index < tokens.length; index++) {
-        const original = tokens[index];
-        tokens[index] = {
+        const original = previousLex.tokens[index];
+        tokens.push({
             ...original,
             start: original.start + delta,
             end: original.end + delta,
-            character: original.line === token.line
+            character: original.line === window.line
                 ? original.character + delta
                 : original.character,
-            endCharacter: original.endLine === token.line
+            endCharacter: original.endLine === window.line
                 ? original.endCharacter + delta
                 : original.endCharacter
-        };
+        });
     }
 
     const lineStarts = previousLex.lineStarts.map((offset, index) =>
-        index > token.line ? offset + delta : offset
+        index > window.line ? offset + delta : offset
     );
 
     return {
@@ -167,6 +196,201 @@ export function tryIncrementalRelex(
         hasBom: previousLex.hasBom,
         lineStarts
     };
+}
+
+/**
+ * Окно пересчёта — строка, внутри которой лежит правка.
+ *
+ * Возвращает undefined, если правка выходит за строку или хотя бы один её
+ * токен получен из многострочной конструкции: лексирование такой строки в
+ * отрыве от документа дало бы другой результат.
+ */
+function findLineWindow(
+    previousLex: IRslLexResult,
+    previousText: string,
+    changeStart: number,
+    changeEnd: number
+): ILineWindow | undefined {
+    const line = findLineIndex(previousLex.lineStarts, changeStart);
+
+    if (line === undefined) {
+        return undefined;
+    }
+
+    const start = previousLex.lineStarts[line];
+    const tokens = previousLex.tokens;
+
+    /* Первый токен строки: двоичный поиск по возрастающему start. */
+    const firstIndex = lowerBound(tokens, start);
+    let lastIndex = firstIndex - 1;
+    let textEnd = previousText.length;
+    let end = previousText.length;
+    let expectTrailingNewline = false;
+
+    /*
+     * Токен, начавшийся раньше и накрывающий начало строки, — это открытый
+     * многострочный комментарий, квадратный блок или строковый литерал. По
+     * одному виду токенов самой строки его не увидеть: его start меньше начала
+     * строки, и поиск по start его не находит. Такую строку в отрыве от
+     * документа лексировать нельзя.
+     */
+    if (firstIndex > 0 && tokens[firstIndex - 1].end > start) {
+        return undefined;
+    }
+
+    for (let index = firstIndex; index < tokens.length; index++) {
+        const token = tokens[index];
+
+        if (token.kind === "newline") {
+            /*
+             * Перевод строки входит в окно: без него незакрытый строковый
+             * литерал, «съедающий» перевод строки, выглядел бы законным
+             * однострочным токеном (см. expectTrailingNewline).
+             */
+            textEnd = token.start;
+            end = token.end;
+            expectTrailingNewline = true;
+            lastIndex = index;
+            break;
+        }
+
+        if (!SAFE_KINDS.has(token.kind) || token.line !== token.endLine) {
+            return undefined;
+        }
+
+        lastIndex = index;
+    }
+
+    /*
+     * Правка обязана целиком лежать в тексте строки без её перевода строки.
+     * Иначе окно не покрывает изменение, и сплайс собрал бы поток, в котором
+     * часть текста не пролексирована заново.
+     */
+    if (changeStart < start || changeEnd > textEnd) {
+        return undefined;
+    }
+
+    /*
+     * lastIndex < firstIndex означает пустую последнюю строку. Это законное
+     * окно: заменять нечего, и вставка произойдёт на месте firstIndex.
+     */
+    return {
+        line,
+        start,
+        end,
+        textEnd,
+        expectTrailingNewline,
+        firstIndex,
+        lastIndex
+    };
+}
+
+/**
+ * Проверяет, что пересчёт строки годен для сплайса.
+ *
+ * Требования: токены идут непрерывно и покрывают слайс целиком (разрыв означал
+ * бы, что часть текста в поток не попала, перекрытие — что смещения
+ * разъехались); все они безопасного вида и однострочны.
+ *
+ * Отдельно проверяется хвост. Если у строки был перевод строки, он обязан
+ * возникнуть и в пересчёте — и именно последним токеном. Незакрытая кавычка
+ * делает строковый литерал, который продолжается на следующие строки: в
+ * пределах слайса он выглядит обычным однострочным токеном, и без этой
+ * проверки такая правка молча давала бы token stream, не совпадающий с полным
+ * лексированием.
+ */
+function coversExactly(
+    tokens: readonly IRslToken[],
+    length: number,
+    expectTrailingNewline: boolean
+): boolean {
+    const lastIndex = tokens.length - 1;
+    let offset = 0;
+
+    for (let index = 0; index < tokens.length; index++) {
+        const token = tokens[index];
+
+        if (token.start !== offset) {
+            return false;
+        }
+
+        const isTrailingNewline = expectTrailingNewline &&
+            index === lastIndex &&
+            token.kind === "newline";
+
+        if (
+            !isTrailingNewline &&
+            (!SAFE_KINDS.has(token.kind) || token.line !== token.endLine)
+        ) {
+            return false;
+        }
+
+        offset = token.end;
+    }
+
+    if (offset !== length) {
+        return false;
+    }
+
+    return !expectTrailingNewline ||
+        (lastIndex >= 0 && tokens[lastIndex].kind === "newline");
+}
+
+function hasLineBreak(text: string, start: number, end: number): boolean {
+    for (let index = start; index < end; index++) {
+        const code = text.charCodeAt(index);
+
+        if (code === 10 || code === 13) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/** Индекс строки, содержащей смещение; lineStarts возрастает. */
+function findLineIndex(
+    lineStarts: readonly number[],
+    offset: number
+): number | undefined {
+    if (lineStarts.length === 0 || offset < lineStarts[0]) {
+        return undefined;
+    }
+
+    let low = 0;
+    let high = lineStarts.length - 1;
+    let candidate = 0;
+
+    while (low <= high) {
+        const middle = (low + high) >>> 1;
+
+        if (lineStarts[middle] <= offset) {
+            candidate = middle;
+            low = middle + 1;
+        } else {
+            high = middle - 1;
+        }
+    }
+
+    return candidate;
+}
+
+/** Первый индекс токена с start >= offset. */
+function lowerBound(tokens: readonly IRslToken[], offset: number): number {
+    let low = 0;
+    let high = tokens.length;
+
+    while (low < high) {
+        const middle = (low + high) >>> 1;
+
+        if (tokens[middle].start < offset) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+
+    return low;
 }
 
 function commonPrefixLength(left: string, right: string): number {
@@ -194,31 +418,3 @@ function commonSuffixLength(left: string, right: string, max: number): number {
     return index;
 }
 
-/** Токены отсортированы по start; ищет единственный, содержащий [start, end). */
-function findContainingTokenIndex(
-    tokens: readonly IRslToken[],
-    start: number,
-    end: number
-): number | undefined {
-    let low = 0;
-    let high = tokens.length - 1;
-    let candidate = -1;
-
-    while (low <= high) {
-        const middle = (low + high) >>> 1;
-
-        if (tokens[middle].start <= start) {
-            candidate = middle;
-            low = middle + 1;
-        } else {
-            high = middle - 1;
-        }
-    }
-
-    if (candidate < 0) {
-        return undefined;
-    }
-
-    const token = tokens[candidate];
-    return token.start <= start && end <= token.end ? candidate : undefined;
-}

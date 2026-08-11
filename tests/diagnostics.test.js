@@ -124,6 +124,61 @@ test("LOCAL свойство класса недоступно обычному 
     assert.strictEqual(violations[0].range.start.line, 4);
 });
 
+/*
+ * Параметр Macro — не модификатор LOCAL.
+ *
+ * Внутренне у них одна и та же visibility "local", и правило про LOCAL модуля
+ * объявляло параметр внешнего Macro недоступным во вложенном в него Macro —
+ * причём сообщением про процедуру инициализации модуля, к которой параметр
+ * отношения не имеет. Проверка включается только при наличии в файле хотя бы
+ * одного настоящего LOCAL-объявления, поэтому оно здесь обязательно.
+ */
+test("параметр внешней Macro доступен во вложенной Macro", () => {
+    const source = [
+        "Local Var кэшМодуля;",
+        "Private Macro checkException(субъект_)",
+        "  Private Macro checkServkind(ptk)",
+        "    if (СрокОбслуживанияКлиента(Субъект_.partyid, ptk) == 0)",
+        "      return true;",
+        "    End;",
+        "    return false;",
+        "  End;",
+        "  return checkServkind(1);",
+        "End;"
+    ].join("\n");
+    const violations = diagnosticsFor(source).filter(value =>
+        value.code === "local-visibility-violation"
+    );
+    assert.deepStrictEqual(
+        violations.map(value => value.message),
+        [],
+        "Параметр внешней Macro виден вложенной и не является LOCAL модуля"
+    );
+});
+
+/* Параметр не должен и глушить правило: настоящее нарушение рядом с ним ловится. */
+test("параметр Macro не отменяет проверку LOCAL модуля", () => {
+    const source = [
+        "Local Var str;",
+        "Private Macro Outer(параметр_)",
+        "  Private Macro Inner(p)",
+        "    return параметр_ + p;",
+        "  End;",
+        "  str = \"Hello!\";",
+        "  return Inner(1);",
+        "End;"
+    ].join("\n");
+    const violations = diagnosticsFor(source).filter(value =>
+        value.code === "local-visibility-violation"
+    );
+    assert.strictEqual(
+        violations.length,
+        1,
+        "LOCAL модуля из обычной Private Macro по-прежнему недоступен"
+    );
+    assert.strictEqual(violations[0].range.start.line, 5);
+});
+
 test("Денежная константа без цифр — ошибка", () => {
     const items = diagnosticsFor("Macro Test()\n Var a = $146;\n Var b = $;\nEnd;");
     assert.strictEqual(

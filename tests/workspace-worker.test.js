@@ -131,9 +131,9 @@ function writeModule(directory, name, source) {
             assert.deepStrictEqual(
                 Object.keys(response).sort(),
                 [
-                    "declarations", "exportsRequestedName", "generation", "id",
-                    "imports", "mtimeMs", "reused", "sourceLength", "status",
-                    "uri"
+                    "declarations", "exportsRequestedName", "fingerprint",
+                    "generation", "id", "imports", "mtimeMs", "reused",
+                    "sourceLength", "status", "uri"
                 ],
                 "Состав ответа расширился — проверьте, не попал ли в него " +
                     "текст, дерево или токены"
@@ -214,7 +214,7 @@ function writeModule(directory, name, source) {
     );
 
     await test(
-        "известный mtime отвечает unchanged без чтения",
+        "известный отпечаток отвечает unchanged без сканирования",
         () => withWorkspace(async ({ directory, service }) => {
             const { uri } = writeModule(
                 directory,
@@ -225,12 +225,122 @@ function writeModule(directory, name, source) {
             const second = await service.index({
                 uri,
                 generation: 0,
-                knownMtimeMs: first.mtimeMs
+                knownFingerprint: first.fingerprint
             });
 
             assert.strictEqual(second.status, "unchanged");
             assert.strictEqual(second.mtimeMs, first.mtimeMs);
+            assert.strictEqual(second.fingerprint, first.fingerprint);
             assert.strictEqual(second.declarations, undefined);
+        })
+    );
+
+    await test(
+        "изменённый файл с сохранённой датой не считается неизменённым",
+        () => withWorkspace(async ({ directory, service }) => {
+            const before = "Macro Before()\nEnd;";
+            const after = "Macro Afterx()\nEnd;";
+            assert.strictEqual(
+                before.length,
+                after.length,
+                "Тест проверяет именно содержимое: размер обязан совпасть"
+            );
+            const { filePath, uri } = writeModule(
+                directory,
+                "same-mtime.mac",
+                before
+            );
+            /*
+             * Дата ставится ровной в миллисекундах и задаётся явно оба раза.
+             * Через stat.mtime её восстановить нельзя: Date округляет доли
+             * миллисекунды, файл получает дату на 1 мс другую, и тест
+             * проходил бы просто потому, что даты не совпали.
+             */
+            const stamp = new Date(1700000000000);
+            fs.utimesSync(filePath, stamp, stamp);
+            const first = await service.index({ uri, generation: 0 });
+            assert.strictEqual(first.status, "indexed");
+
+            /*
+             * Так выглядит правка, пришедшая из системы контроля версий или от
+             * утилиты копирования: содержимое другое, а дата изменения
+             * прежняя. По одному mtime такой файл выглядел неизменённым, и в
+             * индексе оставались объявления, которых в файле уже нет.
+             */
+            fs.writeFileSync(filePath, after);
+            fs.utimesSync(filePath, stamp, stamp);
+
+            const second = await service.index({
+                uri,
+                generation: 0,
+                knownFingerprint: first.fingerprint
+            });
+
+            /*
+             * Предпосылка проверяется отдельно: если дата или размер всё же
+             * разошлись, тест обязан упасть здесь, а не «пройти» на условии,
+             * которого он не собирался проверять.
+             */
+            assert.strictEqual(
+                second.mtimeMs,
+                first.mtimeMs,
+                "Дата обязана совпасть, иначе проверяется не подмена " +
+                    "содержимого, а обычное изменение файла"
+            );
+            assert.strictEqual(
+                fs.statSync(filePath).size,
+                Buffer.byteLength(before),
+                "Размер обязан остаться прежним, иначе тест ничего не ловит"
+            );
+            assert.strictEqual(
+                second.status,
+                "indexed",
+                "Файл с другим содержимым обязан быть переиндексирован, " +
+                    "даже если дата изменения осталась прежней"
+            );
+            assert.notStrictEqual(second.fingerprint, first.fingerprint);
+            assert.ok(
+                second.declarations.some(item => item.name === "Afterx"),
+                "В ответе обязан быть новый состав объявлений"
+            );
+        })
+    );
+
+    await test(
+        "сохранение без правок отвечает unchanged по отпечатку",
+        () => withWorkspace(async ({ directory, service }) => {
+            const source = externalSource(2);
+            const { filePath, uri } = writeModule(
+                directory,
+                "resaved.mac",
+                source
+            );
+            const first = await service.index({ uri, generation: 0 });
+
+            /* mtime на Windows имеет ограниченное разрешение. */
+            await new Promise(resolve => setTimeout(resolve, 20));
+            /* Ctrl+S без правок: дата новая, содержимое прежнее. */
+            fs.writeFileSync(filePath, source);
+
+            const second = await service.index({
+                uri,
+                generation: 0,
+                knownFingerprint: first.fingerprint
+            });
+
+            assert.notStrictEqual(
+                second.mtimeMs,
+                first.mtimeMs,
+                "Дата изменения обязана обновиться, иначе проверяется не то"
+            );
+            assert.strictEqual(
+                second.status,
+                "unchanged",
+                "Отпечаток следует за содержимым, а не за датой: повторная " +
+                    "публикация модуля запускала бы пересчёт межфайловых " +
+                    "Problems у всех зависимых файлов"
+            );
+            assert.strictEqual(second.fingerprint, first.fingerprint);
         })
     );
 
@@ -541,7 +651,7 @@ function writeModule(directory, name, source) {
                     index: async request => {
                         const response = await service.index(request);
                         requests.push({
-                            knownMtimeMs: request.knownMtimeMs,
+                            knownFingerprint: request.knownFingerprint,
                             status: response.status
                         });
                         return response;
@@ -555,10 +665,14 @@ function writeModule(directory, name, source) {
             /* Наблюдатель за файлами срабатывает и на сохранение без правок. */
             await loader.reload(uri);
 
+            assert.ok(
+                first.fingerprint,
+                "Внешний модуль обязан запомнить отпечаток содержимого"
+            );
             assert.strictEqual(
-                requests[1].knownMtimeMs,
-                first.version,
-                "Загрузчик обязан сообщить worker'у уже известный mtime"
+                requests[1].knownFingerprint,
+                first.fingerprint,
+                "Загрузчик обязан сообщить worker'у уже известный отпечаток"
             );
             assert.strictEqual(
                 requests[1].status,
@@ -924,6 +1038,243 @@ function writeModule(directory, name, source) {
                 requests[navigated].priority,
                 "foreground",
                 "Адресная загрузка обязана сохранить высший приоритет"
+            );
+        })
+    );
+
+    /* --- постоянный кэш компактных сводок ------------------------------- */
+
+    const {
+        configureCompactModuleCache,
+        compactModuleCache
+    } = require("../server/out/indexing/compactModuleReader");
+
+    /**
+     * Кэш модульный, поэтому каждый тест получает свой файл и выключает кэш
+     * после себя: иначе записи одного теста попадали бы в другой.
+     */
+    function withCache(action) {
+        const directory = fs.mkdtempSync(
+            path.join(os.tmpdir(), "rsl-cache-")
+        );
+        const cacheFile = path.join(directory, "compact-modules.json");
+        configureCompactModuleCache(cacheFile);
+        return action({ directory, cacheFile })
+            .finally(() => {
+                configureCompactModuleCache(undefined);
+                fs.rmSync(directory, { recursive: true, force: true });
+            });
+    }
+
+    await test(
+        "кэш переживает перезапуск и снимает повторное сканирование",
+        () => withCache(async ({ directory, cacheFile }) => {
+            const { uri } = writeModule(
+                directory,
+                "cached.mac",
+                externalSource(3)
+            );
+
+            const first = await readCompactModule({ uri, generation: 0, id: 1 });
+            assert.strictEqual(first.status, "indexed");
+            assert.strictEqual(
+                first.reused,
+                false,
+                "Первое обращение обязано просканировать файл"
+            );
+            await compactModuleCache().flush();
+            assert.ok(fs.existsSync(cacheFile), "Кэш обязан появиться на диске");
+
+            /*
+             * Перезапуск сессии: память на последние файлы пуста, на диске
+             * остался только кэш. Файл не менялся, поэтому сканирование
+             * повторяться не должно.
+             */
+            configureCompactModuleCache(undefined);
+            configureCompactModuleCache(cacheFile);
+
+            const second = await readCompactModule({
+                uri,
+                generation: 0,
+                id: 2
+            });
+
+            assert.strictEqual(second.status, "indexed");
+            assert.strictEqual(
+                second.reused,
+                true,
+                "Сводка неизменённого файла обязана прийти из кэша, а не " +
+                    "сканироваться заново при каждом запуске"
+            );
+            assert.deepStrictEqual(
+                second.declarations.map(item => item.name),
+                first.declarations.map(item => item.name)
+            );
+            assert.deepStrictEqual(second.imports, first.imports);
+            assert.strictEqual(second.sourceLength, first.sourceLength);
+        })
+    );
+
+    await test(
+        "изменённый файл не берётся из кэша",
+        () => withCache(async ({ directory, cacheFile }) => {
+            const { filePath, uri } = writeModule(
+                directory,
+                "cache-stale.mac",
+                "Macro Before()\nEnd;"
+            );
+            const stamp = new Date(1700000000000);
+            fs.utimesSync(filePath, stamp, stamp);
+            await readCompactModule({ uri, generation: 0, id: 1 });
+            await compactModuleCache().flush();
+
+            /* Та же дата и тот же размер — отличается только содержимое. */
+            fs.writeFileSync(filePath, "Macro Afterx()\nEnd;");
+            fs.utimesSync(filePath, stamp, stamp);
+            configureCompactModuleCache(undefined);
+            configureCompactModuleCache(cacheFile);
+
+            const second = await readCompactModule({
+                uri,
+                generation: 0,
+                id: 2
+            });
+
+            assert.strictEqual(second.reused, false);
+            assert.ok(
+                second.declarations.some(item => item.name === "Afterx"),
+                "Кэш обязан сверяться по отпечатку содержимого: иначе после " +
+                    "правки в индекс попадали бы прежние объявления"
+            );
+        })
+    );
+
+    await test(
+        "кэш чужой версии и повреждённый кэш не ломают чтение",
+        () => withCache(async ({ directory, cacheFile }) => {
+            const { uri } = writeModule(
+                directory,
+                "cache-bad.mac",
+                externalSource(2)
+            );
+
+            for (const content of [
+                JSON.stringify({ version: 999, entries: [] }),
+                "{ это не JSON",
+                JSON.stringify({ version: 1, entries: "не массив" })
+            ]) {
+                fs.writeFileSync(cacheFile, content);
+                configureCompactModuleCache(undefined);
+                configureCompactModuleCache(cacheFile);
+
+                const response = await readCompactModule({
+                    uri,
+                    generation: 0,
+                    id: 3
+                });
+                assert.strictEqual(
+                    response.status,
+                    "indexed",
+                    `Кэш (${content.slice(0, 20)}) обязан игнорироваться, ` +
+                        "а не отменять индексацию"
+                );
+                assert.ok(response.declarations.length > 0);
+            }
+        })
+    );
+
+    await test(
+        "в кэш не попадают исходный текст и AST",
+        () => withCache(async ({ directory, cacheFile }) => {
+            /* Состав уникален: тест не должен зависеть от памяти сессии. */
+            const { uri } = writeModule(
+                directory,
+                "cache-payload.mac",
+                externalSource(7)
+            );
+            await readCompactModule({ uri, generation: 0, id: 1 });
+            await compactModuleCache().flush();
+
+            const raw = fs.readFileSync(cacheFile, "utf8");
+            const parsed = JSON.parse(raw);
+            assert.strictEqual(parsed.version, 1);
+            assert.deepStrictEqual(
+                Object.keys(parsed.entries[0]).sort(),
+                [
+                    "declarations", "fingerprint", "imports", "mtimeMs",
+                    "sourceLength", "uri"
+                ],
+                "Состав записи расширился — проверьте, не попал ли в кэш " +
+                    "текст, дерево или токены"
+            );
+            assert.ok(
+                !raw.includes("localValue"),
+                "Локальные переменные Macro не должны попадать в кэш"
+            );
+            assert.ok(
+                !raw.includes("Hidden"),
+                "Private-объявления не должны попадать в кэш"
+            );
+            assert.ok(
+                !/"tokens"|"root"|Macro Exported0\(/.test(raw),
+                "В кэше не должно быть исходного текста и дерева"
+            );
+        })
+    );
+
+    await test(
+        "кэш ограничен по объёму, а не только по числу записей",
+        () => withCache(async ({ directory, cacheFile }) => {
+            /*
+             * Объём сводки задаётся числом экспортируемых объявлений, а не
+             * размером файла. Без предела по байтам кэш растёт до размеров,
+             * при которых его загрузка дороже сэкономленного сканирования.
+             */
+            for (let index = 0; index < 6; index++) {
+                const { uri } = writeModule(
+                    directory,
+                    `bulky-${index}.mac`,
+                    externalSource(400) + `\n// unique ${index}`
+                );
+                await readCompactModule({ uri, generation: 0, id: index });
+            }
+            await compactModuleCache().flush();
+
+            const size = fs.statSync(cacheFile).size;
+            assert.ok(
+                size < 32 * 1024 * 1024,
+                `Кэш обязан оставаться в пределах бюджета; вышло ${size} байт`
+            );
+
+            const parsed = JSON.parse(fs.readFileSync(cacheFile, "utf8"));
+            assert.ok(
+                parsed.entries.length > 0,
+                "Бюджет не должен вырождать кэш в пустой файл"
+            );
+        })
+    );
+
+    await test(
+        "без настроенного пути кэш выключен",
+        () => withWorkspace(async ({ directory }) => {
+            configureCompactModuleCache(undefined);
+            const { uri } = writeModule(
+                directory,
+                "no-cache.mac",
+                externalSource(2)
+            );
+
+            const response = await readCompactModule({
+                uri,
+                generation: 0,
+                id: 1
+            });
+
+            assert.strictEqual(response.status, "indexed");
+            assert.strictEqual(
+                compactModuleCache().configured,
+                false,
+                "Без каталога расширения кэш обязан оставаться выключенным"
             );
         })
     );

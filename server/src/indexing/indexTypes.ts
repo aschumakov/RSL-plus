@@ -5,6 +5,14 @@ export interface IIndexedModule extends IRslModuleModel {
     uri: string;
     version: number;
     isOpen: boolean;
+    /**
+     * Отпечаток содержимого на диске; только у внешних модулей.
+     *
+     * Хранится на модуле, а не отдельной картой в загрузчике: удаление модуля
+     * из индекса обязано уносить отпечаток вместе с ним, иначе следующая
+     * загрузка сослалась бы на снимок, которого в индексе уже нет.
+     */
+    fingerprint?: string;
 }
 
 export interface IIndexedSymbol {

@@ -1,6 +1,9 @@
-import { parentPort } from "worker_threads";
+import { parentPort, workerData } from "worker_threads";
 
-import { readCompactModule } from "./compactModuleReader";
+import {
+    configureCompactModuleCache,
+    readCompactModule
+} from "./compactModuleReader";
 import type { ICompactModuleRequest } from "./compactModuleProtocol";
 
 /*
@@ -15,6 +18,14 @@ const port = parentPort;
 if (!port) {
     throw new Error("compactModuleWorker запущен без parentPort");
 }
+
+/*
+ * Кэш настраивается здесь, а не сообщением: путь нужен уже первому запросу, а
+ * сообщение с настройкой могло бы прийти после него. Владелец файла — worker:
+ * он выполняет все обычные запросы, и запись из двух процессов сразу не нужна.
+ */
+const cachePath = (workerData as { cachePath?: string } | null)?.cachePath;
+configureCompactModuleCache(cachePath);
 
 port.on("message", (request: ICompactModuleRequest) => {
     readCompactModule(request).then(

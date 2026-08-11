@@ -305,6 +305,17 @@ export function activate(context: ExtensionContext): void {
                     "reference-index-v2.json"
                 ).fsPath
                 : undefined,
+            /*
+             * Кэш компактных сводок внешних модулей. Версия в имени файла: при
+             * смене формата старый файл просто перестаёт читаться, и его не
+             * нужно ни переносить, ни удалять вручную.
+             */
+            compactModuleCachePath: context.storageUri
+                ? Uri.joinPath(
+                    context.storageUri,
+                    "compact-modules-v1.json"
+                ).fsPath
+                : undefined,
             performanceLogFile: performanceLogFile || undefined,
             initialSettings,
             activeDocumentUri: activeRslDocumentUri()

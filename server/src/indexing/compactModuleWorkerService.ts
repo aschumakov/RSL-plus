@@ -9,6 +9,11 @@ import type {
 
 export interface ICompactModuleWorkerOptions {
     log(message: string): void;
+    /**
+     * Файл постоянного кэша компактных сводок; передаётся worker'у при
+     * создании. Без него кэш выключен и чтение работает как раньше.
+     */
+    cachePath?: string;
 }
 
 interface IPendingRequest {
@@ -48,6 +53,30 @@ export class CompactModuleWorkerService {
     private disposed = false;
 
     constructor(private options: ICompactModuleWorkerOptions) {}
+
+    /**
+     * Задаёт файл постоянного кэша.
+     *
+     * Путь становится известен только на initialize, а сервис создаётся раньше.
+     * Уже запущенный поток заменяется: workerData передаётся при создании и
+     * задним числом не меняется, а сессия без кэша была бы медленнее ровно
+     * там, ради чего кэш и сделан.
+     */
+    configureCache(cachePath: string | undefined): void {
+        const normalized = (cachePath || "").trim() || undefined;
+
+        if (normalized === this.options.cachePath) {
+            return;
+        }
+
+        this.options = { ...this.options, cachePath: normalized };
+        const worker = this.worker;
+
+        if (worker && !this.inFlight) {
+            this.worker = undefined;
+            void worker.terminate().catch(() => undefined);
+        }
+    }
 
     private get queuedCount(): number {
         return this.foregroundQueue.length +
@@ -163,7 +192,8 @@ export class CompactModuleWorkerService {
 
         try {
             const worker = new Worker(
-                resolveServerOutFile("indexing/compactModuleWorker.js")
+                resolveServerOutFile("indexing/compactModuleWorker.js"),
+                { workerData: { cachePath: this.options.cachePath } }
             );
             worker.on("message", (response: ICompactModuleResponse) =>
                 this.settle(response)

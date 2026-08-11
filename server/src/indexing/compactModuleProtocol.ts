@@ -48,10 +48,11 @@ export interface ICompactModuleRequest {
      */
     generation: number;
     /**
-     * Известный основному потоку mtime. Если файл не менялся, worker отвечает
-     * unchanged и не тратит ни чтения, ни сканирования.
+     * Известный основному потоку fingerprint содержимого (см. поле ответа).
+     * Если он совпал с фактическим, worker отвечает unchanged и не тратит
+     * сканирование.
      */
-    knownMtimeMs?: number;
+    knownFingerprint?: string;
     /**
      * Адресная проверка экспорта (Ctrl+Click по неизвестному символу).
      * Worker дополнительно сообщает, экспортирует ли модуль это имя.
@@ -74,7 +75,31 @@ interface ICompactModuleResponseBase {
     generation: number;
 }
 
-export interface ICompactModuleIndexed extends ICompactModuleResponseBase {
+/**
+ * Отпечаток содержимого файла: размер в байтах и hash.
+ *
+ * Только по mtime «файл не менялся» решать нельзя. Дата изменения — не
+ * свойство содержимого: её сохраняют системы контроля версий и утилиты
+ * копирования, а разрешение mtime на части файловых систем грубее интервала
+ * между правками. Ответ unchanged в таком случае оставлял бы в индексе прежние
+ * объявления — то есть переходы и Problems по уже несуществующему коду.
+ *
+ * Обратная сторона: отпечаток требует чтения файла, тогда как сравнение mtime
+ * обходилось одним stat. Это осознанный обмен: чтение с hash на файле 550КБ
+ * стоит 1 мс против 33 мс сканирования (1100КБ — 1.6 мс против 57.5 мс), а
+ * пропускается именно сканирование и передача ответа.
+ *
+ * Заодно правка «сохранили без изменений» теперь тоже распознаётся: mtime у
+ * неё новый, а содержимое прежнее, и модуль больше не публикуется заново — то
+ * есть не запускает пересчёт межфайловых Problems у всех зависимых файлов.
+ */
+export interface ICompactModuleFingerprint {
+    /** Формат: "<размер в байтах>:<sha1 содержимого>". */
+    fingerprint: string;
+}
+
+export interface ICompactModuleIndexed
+    extends ICompactModuleResponseBase, ICompactModuleFingerprint {
     status: "indexed";
     mtimeMs: number;
     sourceLength: number;
@@ -82,11 +107,12 @@ export interface ICompactModuleIndexed extends ICompactModuleResponseBase {
     imports: string[];
     /** Задан только для запроса с expectedExport. */
     exportsRequestedName?: boolean;
-    /** true, если ответ собран из памяти worker'а без повторного чтения. */
+    /** true, если сканирование взято из памяти worker'а по отпечатку. */
     reused: boolean;
 }
 
-export interface ICompactModuleUnchanged extends ICompactModuleResponseBase {
+export interface ICompactModuleUnchanged
+    extends ICompactModuleResponseBase, ICompactModuleFingerprint {
     status: "unchanged";
     mtimeMs: number;
 }

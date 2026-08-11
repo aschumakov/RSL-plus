@@ -68,6 +68,8 @@ export class DocumentAnalysisService {
     private parseGeneration = new Map<string, number>();
     private parsedVersions = new Map<string, number>();
     private parseTimers = new Map<string, NodeJS.Timeout>();
+    /** Отложенный прогрев Outline; проверяется на актуальность при старте. */
+    private outlineTimers = new Map<string, NodeJS.Immediate>();
     private running = new Map<string, Promise<void>>();
     private foregroundQueue: IValidationTask[] = [];
     private backgroundQueue: IValidationTask[] = [];
@@ -274,6 +276,17 @@ export class DocumentAnalysisService {
                 this.notifyIdleIfSettled(candidate);
             }
         }
+
+        /*
+         * Прогрев Outline покинутых вкладок снимается сразу. Он и сам
+         * проверил бы активность при старте, но снятие экономит очередь
+         * setImmediate при быстром переключении по многим файлам.
+         */
+        for (const candidate of Array.from(this.outlineTimers.keys())) {
+            if (candidate !== uri) {
+                this.cancelOutline(candidate);
+            }
+        }
         for (const [candidate, task] of Array.from(this.queued.entries())) {
             if (
                 candidate !== uri &&
@@ -297,11 +310,19 @@ export class DocumentAnalysisService {
             return;
         }
 
-        /* Восстановленная неактивная вкладка до активации не лексировалась. */
-        const snapshot = this.getFastSnapshot(document);
-        if (snapshot.symbols === undefined) {
-            this.prepareOutline(document, snapshot);
-        }
+        /*
+         * Восстановленная неактивная вкладка до активации не лексировалась, но
+         * подготовка Outline отложена на следующий тик.
+         *
+         * Раньше она шла здесь же, синхронно, и переключение вкладки стоило
+         * полного lexRsl плюс сканирования объявлений. При переключении по
+         * Ctrl+Tab это платилось за каждый файл, через который пользователь
+         * лишь прошёл: на замере 12 файлов по 200КБ — 12 × ~100 мс основного
+         * потока, то есть больше секунды, в которую не отвечали ни таймеры, ни
+         * LSP. Отсюда и «структура появляется с задержкой»: очередь тут ни при
+         * чём, работа выполнялась прямо в обработчике переключения.
+         */
+        this.scheduleOutline(document);
 
         const queued = this.queued.get(uri);
         if (queued) {
@@ -366,6 +387,7 @@ export class DocumentAnalysisService {
 
     invalidate(uri: string): void {
         this.cancelQueued(uri);
+        this.cancelOutline(uri);
         this.fastSnapshots.delete(uri);
         this.parsedVersions.delete(uri);
         this.notifyIdleIfSettled(uri);
@@ -395,6 +417,63 @@ export class DocumentAnalysisService {
         this.fastSnapshots.set(document.uri, snapshot);
         this.options.invalidateProviderCaches(document.uri);
         return snapshot;
+    }
+
+    /**
+     * Откладывает подготовку Outline и на старте проверяет, нужна ли она.
+     *
+     * Если к моменту запуска пользователь ушёл на другую вкладку, работа
+     * пропускается: Outline закрытой или покинутой вкладки редактор не
+     * показывает, а стоит она полного сканирования файла. Запрос
+     * textDocument/documentSymbol в любом случае построит её сам через
+     * getFastSnapshot, поэтому это предварительный прогрев, а не обязательство.
+     */
+    private scheduleOutline(document: TextDocument): void {
+        const uri = document.uri;
+        const version = document.version;
+
+        if (this.outlineTimers.has(uri)) {
+            return;
+        }
+
+        const timer = setImmediate(() => {
+            this.outlineTimers.delete(uri);
+            const current = this.documents.get(uri);
+
+            if (
+                !current ||
+                current.version !== version ||
+                uri !== this.activeDocumentUri
+            ) {
+                this.options.performance?.mark?.("analysis.outlineSkipped", {
+                    uri,
+                    version,
+                    reason: !current
+                        ? "documentClosed"
+                        : current.version !== version
+                            ? "supersededVersion"
+                            : "notActive"
+                });
+                return;
+            }
+
+            const snapshot = this.getFastSnapshot(current);
+
+            if (snapshot.symbols === undefined) {
+                this.prepareOutline(current, snapshot);
+            }
+        });
+
+        this.outlineTimers.set(uri, timer);
+    }
+
+    private cancelOutline(uri: string): void {
+        const timer = this.outlineTimers.get(uri);
+
+        if (timer) {
+            clearImmediate(timer);
+            this.outlineTimers.delete(uri);
+        }
     }
 
     /**
@@ -665,12 +744,62 @@ export class DocumentAnalysisService {
         this.running.set(uri, task.promise);
         this.validationInFlight = true;
 
+        /*
+         * Актуальность задачи проверяется в момент старта, а не только при
+         * постановке в очередь.
+         *
+         * Пока задача стояла в очереди, файл могли закрыть или изменить, и
+         * разбор его прежней версии — это чистая блокировка основного потока:
+         * до фазового порога (PHASED_ANALYSIS_MIN_CHARS) разбор идёт одним
+         * куском и никого не пускает вперёд. Раньше такая проверка стояла
+         * только внутри разбора больших файлов, поэтому обычные файлы
+         * разбирались до конца, даже когда результат уже никому не нужен.
+         *
+         * Признак «файл сейчас неактивен» здесь НЕ используется намеренно:
+         * ensureParsed вызывают LSP-обработчики для файла, который им нужен
+         * прямо сейчас, и он не обязан быть активным. Пропуск по неактивности
+         * молча возвращал бы им undefined.
+         */
+        const stale = this.staleTaskReason(task);
+
+        if (stale) {
+            this.options.performance?.mark?.("analysis.skipped", {
+                uri,
+                version: task.document.version,
+                reason: stale
+            });
+            this.finishValidation(task, true);
+            return;
+        }
+
         Promise.resolve()
             .then(() => this.validate(task.document, task.generation))
             .then(
                 () => this.finishValidation(task, true),
                 error => this.finishValidation(task, false, error)
             );
+    }
+
+    /** Причина не начинать разбор, либо undefined. */
+    private staleTaskReason(task: IValidationTask): string | undefined {
+        const uri = task.document.uri;
+        const current = this.documents.get(uri);
+
+        if (!current) {
+            return "documentClosed";
+        }
+
+        if (this.isLocalReady(task.document)) {
+            return "alreadyParsed";
+        }
+
+        return this.stillCurrent(
+            uri,
+            task.document.version,
+            task.generation
+        )
+            ? undefined
+            : "supersededVersion";
     }
 
     private finishValidation(

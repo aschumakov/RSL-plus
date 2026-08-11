@@ -84,6 +84,62 @@ function codes(items) {
         assert.ok(hover.length < 240);
     });
 
+    await test("каждая встроенная процедура описана по существу", () => {
+        const {
+            RSL_STANDARD_LIBRARY
+        } = require("../server/out/builtins/standardLibraryData");
+        /*
+         * Код вида берётся из самого каталога, а не из vscode-languageserver:
+         * пакет лежит в server/node_modules и из корневых тестов не виден.
+         */
+        const procedureKind = RSL_STANDARD_LIBRARY
+            .find(entry => entry.name === "StrLen").kind;
+        const procedures = RSL_STANDARD_LIBRARY.filter(
+            entry => entry.kind === procedureKind
+        );
+
+        /*
+         * Раздел «Встроенные процедуры» руководства (стр. 209–307) описывает
+         * 239 процедур. Число закреплено, чтобы пропажа или дубль в каталоге
+         * были видны сразу, а не проявлялись отсутствующим Completion.
+         */
+        assert.strictEqual(
+            procedures.length,
+            239,
+            "Состав каталога расошёлся с разделом руководства"
+        );
+
+        const generic = procedures
+            .filter(item => /Встроенная процедура RSL/.test(item.summary || ""))
+            .map(item => item.name);
+        assert.deepStrictEqual(
+            generic,
+            [],
+            "Заглушка вместо описания бесполезна в Hover и Completion; " +
+                "описание берётся из раздела руководства"
+        );
+
+        const tooLong = procedures.filter(item =>
+            (item.summary || "").split(/\s+/).filter(Boolean).length > 10
+        );
+        assert.deepStrictEqual(
+            tooLong.map(item => `${item.name}: ${item.summary}`),
+            [],
+            "Описание длиннее десяти слов не читается в подсказке"
+        );
+
+        const unbalanced = procedures.filter(item =>
+            /\(\.\.\.\)$/.test(item.signature || "") &&
+            !/^(Print|ErrPrint|Trace|SetScroll)/.test(item.name)
+        );
+        assert.deepStrictEqual(
+            unbalanced.map(item => item.name),
+            [],
+            "Сигнатура выродилась в (...): проверьте баланс скобок — " +
+                "balancedSignature молча заменяет такую сигнатуру"
+        );
+    });
+
     await test("встроенные функции и классы участвуют в resolve и members", () => {
         const source = [
             "Macro Test()",
