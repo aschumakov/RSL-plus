@@ -21,7 +21,7 @@ const {
     createFastDocumentSnapshot,
     getFastDocumentSymbols,
     getFastFoldingRanges,
-    getFastDocumentDeclarations
+    getFastDocumentImports
 } = require("../server/out/services/fastDocumentSnapshot");
 const {
     DocumentAnalysisService
@@ -642,21 +642,31 @@ async function testFastPhasePrecedesLocalModel() {
         );
 
         const snapshot = analysis.getFastSnapshot(document);
-        const first = getFastDocumentDeclarations(snapshot);
+        const structure = getFastDocumentSymbols(document, snapshot);
         assert.ok(
-            first.declarations.some(item => item.name === "Visible"),
-            "Объявления Fast Snapshot должны содержать Macro текущего файла"
+            structure.some(item => item.name === "Visible"),
+            "Structure должна содержать Macro текущего файла до полного parse"
+        );
+        assert.strictEqual(
+            getFastDocumentSymbols(document, snapshot),
+            structure,
+            "Structure строится один раз на версию документа"
         );
         assert.deepStrictEqual(
-            first.imports.map(value => value.toLowerCase()),
+            getFastDocumentImports(snapshot).map(value => value.toLowerCase()),
             ["library"],
             "Список Import должен быть доступен до полного parse"
         );
+
+        /*
+         * Дескрипторы объявлений намеренно не остаются в снимке: всё нужное
+         * уже лежит в Structure, а вторая копия стоила около 7 МиБ на
+         * открытый файл 1,1 МБ.
+         */
         assert.strictEqual(
-            getFastDocumentDeclarations(snapshot),
-            first,
-            "Повторный запрос объявлений обязан отдавать тот же результат, " +
-                "а не сканировать токены заново"
+            snapshot.declarations,
+            undefined,
+            "Снимок не должен удерживать дескрипторы объявлений"
         );
 
         await waitFor(() => analysis.isLocalReady(document), 5000);

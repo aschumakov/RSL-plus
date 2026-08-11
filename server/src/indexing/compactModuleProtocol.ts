@@ -40,6 +40,14 @@ export interface ICompactModuleRequest {
      * Worker дополнительно сообщает, экспортирует ли модуль это имя.
      */
     expectedExport?: string;
+    /**
+     * Приоритет в очереди сервиса.
+     *
+     * Ctrl+Click и Import активного файла не должны стоять за фоновой
+     * индексацией проекта: одна очередь означала бы, что переход по символу
+     * ждёт сотни файлов, до которых пользователю сейчас нет дела.
+     */
+    priority?: "foreground" | "background";
 }
 
 interface ICompactModuleResponseBase {

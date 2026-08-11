@@ -251,6 +251,10 @@ export class DocumentAnalysisService {
         }
         this.foregroundQueue = [];
 
+        if (previousActiveUri && previousActiveUri !== uri) {
+            this.interruptPhasedValidation(previousActiveUri);
+        }
+
         /*
          * Восстановленные VS Code вкладки получают быстрый Outline, но не
          * конкурируют с активным файлом за parser slot и память. Полный AST
@@ -570,13 +574,55 @@ export class DocumentAnalysisService {
             started++;
         }
 
+        /*
+         * Пока активный документ ждёт своей очереди по debounce, фон слот не
+         * занимает. Иначе задача только что покинутого большого файла
+         * успевает уйти в разбор в это окно, и активный документ ждёт её
+         * целиком — тот же эффект, что и без прерывания фаз, только через
+         * очередь.
+         */
+        const activeWaitsForDebounce = !!this.activeDocumentUri &&
+            this.parseTimers.has(this.activeDocumentUri);
+
         while (
+            !activeWaitsForDebounce &&
             this.backgroundQueue.length > 0 &&
             started < MAX_VALIDATIONS_PER_TICK
         ) {
             this.dispatchTask(this.backgroundQueue.shift()!);
             started++;
         }
+    }
+
+    /**
+     * Прерывает оставшиеся фазы разбора покинутого документа.
+     *
+     * Большой файл разбирается частями, и без этого новый активный документ
+     * ждал бы все оставшиеся фазы предыдущего — на файле 1,1 МБ это больше
+     * ста миллисекунд ожидания того, что пользователь уже не смотрит.
+     * Прерывание работает через поколение: следующая же фаза видит, что
+     * результат никому не нужен, и выходит.
+     *
+     * Работа не выбрасывается насовсем — документ возвращается в фоновую
+     * очередь и будет разобран, когда активный файл освободит очередь.
+     */
+    private interruptPhasedValidation(uri: string): void {
+        if (!this.running.has(uri)) {
+            return;
+        }
+
+        const document = this.documents.get(uri);
+        const generation = this.nextGeneration(uri);
+
+        if (!document || !this.openedVersions.has(uri)) {
+            return;
+        }
+
+        this.startValidation(document, generation, "background").catch(
+            error => this.options.log(
+                `Validation failed: ${uri}\n${errorToString(error)}`
+            )
+        );
     }
 
     /**

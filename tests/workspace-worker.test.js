@@ -608,6 +608,182 @@ function writeModule(directory, name, source) {
         })
     );
 
+    /**
+     * Индексатор, у которого задерживается доставка ответа, а не чтение.
+     *
+     * Так ведёт себя настоящий worker: файл он читает сразу, а ответ идёт к
+     * основному потоку позже. Именно в этом окне файл успевает измениться или
+     * исчезнуть, и именно оно проверяется ниже.
+     */
+    function createDelayedDeliveryIndexer() {
+        let release = () => undefined;
+        const delivered = new Promise(resolve => { release = resolve; });
+        let calls = 0;
+
+        return {
+            get calls() { return calls; },
+            release: () => release(),
+            indexer: {
+                async index(request) {
+                    calls++;
+                    const response = await readCompactModule({
+                        ...request,
+                        id: 0
+                    });
+                    await delivered;
+                    return response;
+                }
+            }
+        };
+    }
+
+    await test(
+        "правка файла во время запроса приводит к повторному чтению",
+        () => withWorkspace(async ({ directory }) => {
+            const { filePath, uri } = writeModule(
+                directory,
+                "changed-in-flight.mac",
+                "Macro Before()\nEnd;"
+            );
+            const controlled = createDelayedDeliveryIndexer();
+            const { index, loader } = createLoader(directory, {
+                compactModules: controlled.indexer
+            });
+
+            const first = loader.ensureLoadedUri(uri);
+            /* Ждём, пока worker прочитает прежнее содержимое. */
+            await new Promise(resolve => setTimeout(resolve, 40));
+            fs.writeFileSync(filePath, "Macro After()\nEnd;");
+            const reloaded = loader.reload(uri);
+            controlled.release();
+            await Promise.all([first, reloaded]);
+
+            assert.strictEqual(
+                controlled.calls,
+                2,
+                "reload обязан перечитать файл, а не дождаться устаревшего " +
+                    "запроса: иначе индекс остаётся с прежним содержимым до " +
+                    "следующей правки"
+            );
+            assert.ok(
+                index.getModule(uri).symbolTree.find("After"),
+                "В индексе должно оказаться новое содержимое файла"
+            );
+            assert.strictEqual(
+                index.getModule(uri).symbolTree.find("Before"),
+                undefined
+            );
+        })
+    );
+
+    await test(
+        "удаление файла во время запроса не возвращает его в индекс",
+        () => withWorkspace(async ({ directory }) => {
+            const { filePath, uri } = writeModule(
+                directory,
+                "deleted-in-flight.mac",
+                externalSource(2)
+            );
+            const controlled = createDelayedDeliveryIndexer();
+            const { index, loader } = createLoader(directory, {
+                compactModules: controlled.indexer
+            });
+
+            const pending = loader.ensureLoadedUri(uri);
+            await new Promise(resolve => setTimeout(resolve, 40));
+
+            loader.remove(uri);
+            fs.rmSync(filePath);
+            controlled.release();
+            await pending;
+
+            assert.strictEqual(
+                index.getModule(uri),
+                undefined,
+                "Ответ, прочитанный до удаления, не имеет права вернуть " +
+                    "удалённый файл в индекс"
+            );
+        })
+    );
+
+    await test(
+        "исключение файла из проекта отбрасывает ответ по нему",
+        () => withWorkspace(async ({ directory }) => {
+            const { uri } = writeModule(
+                directory,
+                "excluded-in-flight.mac",
+                externalSource(2)
+            );
+            const controlled = createDelayedDeliveryIndexer();
+            const { index, loader } = createLoader(directory, {
+                compactModules: controlled.indexer
+            });
+
+            const pending = loader.ensureLoadedUri(uri);
+            await new Promise(resolve => setTimeout(resolve, 40));
+
+            /* Файл перестал попадать в каталог проекта. */
+            loader.registerWorkspaceFiles([]);
+            controlled.release();
+            await pending;
+
+            assert.strictEqual(
+                index.getModule(uri),
+                undefined,
+                "Исключённый из проекта файл не должен попасть в индекс"
+            );
+        })
+    );
+
+    await test(
+        "адресный запрос обгоняет фоновую индексацию в очереди worker",
+        () => withWorkspace(async ({ directory, service }) => {
+            const background = [];
+            for (let index = 0; index < 5; index++) {
+                background.push(writeModule(
+                    directory,
+                    `queued-bg-${index}.mac`,
+                    externalSource(2)
+                ).uri);
+            }
+            const target = writeModule(
+                directory,
+                "urgent.mac",
+                externalSource(2)
+            ).uri;
+
+            const order = [];
+            const observed = {
+                index: async request => {
+                    const response = await service.index(request);
+                    order.push(request.uri);
+                    return response;
+                }
+            };
+
+            const pending = background.map(uri => observed.index({
+                uri,
+                generation: 0,
+                priority: "background"
+            }));
+            const urgent = observed.index({
+                uri: target,
+                generation: 1,
+                priority: "foreground"
+            });
+
+            await Promise.all([...pending, urgent]);
+
+            const position = order.indexOf(target);
+            assert.ok(
+                position <= 1,
+                "Запрос активного документа обязан обгонять фоновую " +
+                    `индексацию; он обработан ${position + 1}-м из ` +
+                    `${order.length}`
+            );
+        })
+    );
+
     console.log("");
     console.log(`Пройдено: ${passed}`);
     console.log(`Ошибок: ${failed}`);

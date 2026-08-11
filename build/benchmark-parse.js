@@ -207,7 +207,17 @@ function runParseScenario() {
 
 /* --- сценарий queue: блокировка event loop очередью ------------------- */
 
-async function runQueueScenario() {
+/*
+ * Один вариант (размер × число файлов) за запуск процесса.
+ *
+ * Разбор больших файлов оставляет десятки мегабайт мусора, и сборка после
+ * предыдущего варианта попадала в замер следующего: на одном и том же
+ * варианте наблюдался разброс до двух раз. Родительский процесс запускает
+ * каждый вариант несколько раз в свежем процессе и агрегирует прогоны.
+ */
+const QUEUE_REPEATS = 3;
+
+async function runQueueVariant(kb, files) {
     const { WorkspaceIndex } = require(OUT + "/workspaceIndex");
     const {
         DocumentAnalysisService
@@ -216,8 +226,8 @@ async function runQueueScenario() {
     const lag = new EventLoopLag();
     const rows = [];
 
-    for (const kb of QUEUE_SIZES_KB) {
-        for (const files of QUEUE_FILE_COUNTS) {
+    {
+        {
             const source = build(kb * 1024);
             const documentsByUri = new Map();
             for (let index = 0; index < files; index++) {
@@ -247,16 +257,33 @@ async function runQueueScenario() {
                 }
             );
 
-            const warmUri = `file:///bench-warm-${kb}-${files}.mac`;
-            documentsByUri.set(warmUri, createDocument(warmUri, source));
-            await service.ensureParsed(documentsByUri.get(warmUri));
+            /*
+             * Прогрев в СВОЁМ процессе: изоляция вариантов убрала не только
+             * чужой мусор, но и чужой прогретый JIT. Одного разбора для
+             * прогрева не хватает — на 550КБ замер без него завышал паузу
+             * почти втрое (84 мс против 32 мс). Language server в реальной
+             * сессии давно прогрет, поэтому мерить холодный код значило бы
+             * мерить не то, что видит пользователь. Прогрев идёт файлами
+             * меньшего размера: те же участки кода, но три больших AST не
+             * остаются в индексе и не поднимают давление на GC во время
+             * самого замера.
+             */
+            const warmSource = build(150 * 1024);
+            const warmUris = [0, 1, 2].map(index => {
+                const uri = `file:///bench-warm-${kb}-${files}-${index}.mac`;
+                documentsByUri.set(uri, createDocument(uri, warmSource));
+                return uri;
+            });
+            for (const uri of warmUris) {
+                await service.ensureParsed(documentsByUri.get(uri));
+            }
 
             await new Promise(resolve => setTimeout(resolve, 50));
             lag.reset();
             const started = performance.now();
             await Promise.all(
                 Array.from(documentsByUri.keys())
-                    .filter(uri => uri !== warmUri)
+                    .filter(uri => !warmUris.includes(uri))
                     .map(uri => service.ensureParsed(documentsByUri.get(uri)))
             );
             const totalMs = performance.now() - started;
@@ -275,6 +302,30 @@ async function runQueueScenario() {
 
     lag.stop();
     return rows;
+}
+
+/** Агрегирует прогоны одного варианта: median, p90 и max. */
+function summarizeQueueRuns(kb, files, runs) {
+    const pick = key => runs.map(run => run[key]);
+    const percentile = (values, fraction) => {
+        const sorted = values.slice().sort((left, right) => left - right);
+        return sorted[Math.min(
+            sorted.length - 1,
+            Math.floor(sorted.length * fraction)
+        )];
+    };
+    const lags = pick("lagMaxMs");
+    const totals = pick("totalMs");
+
+    return {
+        sizeKb: kb,
+        files,
+        runs: runs.length,
+        lagMedianMs: +median(lags).toFixed(1),
+        lagP90Ms: +percentile(lags, 0.9).toFixed(1),
+        lagMaxMs: +Math.max(...lags).toFixed(1),
+        totalMedianMs: +median(totals).toFixed(0)
+    };
 }
 
 /* --- сценарий external: индексация внешнего файла --------------------- */
@@ -447,10 +498,15 @@ function runRelexScenario() {
 
 const SCENARIOS = {
     parse: runParseScenario,
-    queue: runQueueScenario,
     external: runExternalScenario,
     relex: runRelexScenario
 };
+
+/*
+ * queue устроен иначе: каждый вариант (размер × число файлов) выполняется в
+ * отдельном процессе и несколько раз, а родитель агрегирует прогоны.
+ */
+const QUEUE_SCENARIO = "queue";
 
 function printParse(rows) {
     console.log("=== стоимость одного разбора (медиана из 5) ===");
@@ -473,20 +529,25 @@ function printParse(rows) {
 function printQueue(rows) {
     console.log("\n=== блокировка event loop очередью валидаций ===");
     console.log(
-        "файлов".padStart(7) + "размер".padStart(9) + "лаг max".padStart(10) +
-        "лаг p95".padStart(10) + "всего".padStart(9)
+        "файлов".padStart(7) + "размер".padStart(9) +
+        "лаг median".padStart(12) + "лаг p90".padStart(10) +
+        "лаг max".padStart(10) + "всего".padStart(9) +
+        "прогонов".padStart(10)
     );
     for (const row of rows) {
         console.log(
             String(row.files).padStart(7) +
             `${row.sizeKb}КБ`.padStart(9) +
+            `${row.lagMedianMs}мс`.padStart(12) +
+            `${row.lagP90Ms}мс`.padStart(10) +
             `${row.lagMaxMs}мс`.padStart(10) +
-            `${row.lagP95Ms}мс`.padStart(10) +
-            `${row.totalMs}мс`.padStart(9)
+            `${row.totalMedianMs}мс`.padStart(9) +
+            String(row.runs).padStart(10)
         );
     }
     console.log(
-        "Лаг max — сколько подряд основной поток не отдавал управление."
+        "Лаг — сколько подряд основной поток не отдавал управление. Каждый\n" +
+        "вариант замерен в отдельном процессе несколько раз."
     );
 }
 
@@ -544,7 +605,12 @@ const PRINTERS = {
 };
 
 async function runChild(name) {
-    const rows = await SCENARIOS[name]();
+    const variant = name.startsWith(QUEUE_SCENARIO + ":")
+        ? name.slice(QUEUE_SCENARIO.length + 1).split("x").map(Number)
+        : undefined;
+    const rows = variant
+        ? await runQueueVariant(variant[0], variant[1])
+        : await SCENARIOS[name]();
     process.send({ scenario: name, rows });
 }
 
@@ -576,17 +642,35 @@ async function main() {
         .find(item => item.startsWith("--scenario="));
     const names = requested
         ? requested.slice("--scenario=".length).split(",")
-        : Object.keys(SCENARIOS);
+        : ["parse", QUEUE_SCENARIO, "external", "relex"];
 
     for (const name of names) {
-        if (!SCENARIOS[name]) {
+        if (!SCENARIOS[name] && name !== QUEUE_SCENARIO) {
             throw new Error(`Неизвестный сценарий: ${name}`);
         }
     }
 
     const results = {};
     for (const name of names) {
-        results[name] = await runScenarioInChildProcess(name);
+        if (name !== QUEUE_SCENARIO) {
+            results[name] = await runScenarioInChildProcess(name);
+            continue;
+        }
+
+        const aggregated = [];
+        for (const kb of QUEUE_SIZES_KB) {
+            for (const files of QUEUE_FILE_COUNTS) {
+                const runs = [];
+                for (let repeat = 0; repeat < QUEUE_REPEATS; repeat++) {
+                    const rows = await runScenarioInChildProcess(
+                        `${QUEUE_SCENARIO}:${kb}x${files}`
+                    );
+                    runs.push(...rows);
+                }
+                aggregated.push(summarizeQueueRuns(kb, files, runs));
+            }
+        }
+        results[name] = aggregated;
     }
 
     if (asJson) {

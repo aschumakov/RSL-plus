@@ -26,8 +26,14 @@ export interface IFastDocumentSnapshot {
     text: string;
     lex: IRslLexResult;
     foldingRanges?: IRslFoldingRange[];
-    /** Объявления и Import этой версии: один проход по токенам на версию. */
-    declarations?: IRslDeclarationSnapshot;
+    /**
+     * Import этой версии — единственное, что переживает построение Structure.
+     *
+     * Сами дескрипторы объявлений не сохраняются: всё, что от них нужно,
+     * уже лежит в symbols, а держать их рядом означало платить второй раз
+     * за то же содержимое — около 7 МиБ на открытый файл 1,1 МБ.
+     */
+    imports?: string[];
     symbols?: DocumentSymbol[];
     symbolsPreparedAtMs?: number;
 }
@@ -65,21 +71,31 @@ export function getFastFoldingRanges(
 /**
  * Объявления и Import этой версии документа.
  *
- * Тот же declaration extractor, что и для compact-модулей workspace, но
- * результат сохраняется в snapshot: Outline, Structure и всё остальное,
- * чему нужны объявления до полного parse, обходятся одним проходом по
- * токенам на версию вместо прохода на каждого потребителя.
+ * Тот же declaration extractor, что и для compact-модулей workspace. Результат
+ * в snapshot не кэшируется: Structure строится из него один раз, а держать
+ * дескрипторы дальше означало бы дублировать в памяти то, что уже лежит в
+ * symbols. Список Import при этом сохраняется — он маленький и нужен до
+ * полного разбора.
  */
 export function getFastDocumentDeclarations(
     snapshot: IFastDocumentSnapshot
 ): IRslDeclarationSnapshot {
-    if (!snapshot.declarations) {
-        snapshot.declarations = extractCompactDeclarations(snapshot.text, {
-            includePrivate: true,
-            tokens: snapshot.lex.tokens
-        });
+    const declarations = extractCompactDeclarations(snapshot.text, {
+        includePrivate: true,
+        tokens: snapshot.lex.tokens
+    });
+    snapshot.imports = declarations.imports;
+    return declarations;
+}
+
+/** Import этой версии, без повторного сканирования, если Structure готова. */
+export function getFastDocumentImports(
+    snapshot: IFastDocumentSnapshot
+): string[] {
+    if (!snapshot.imports) {
+        getFastDocumentDeclarations(snapshot);
     }
-    return snapshot.declarations;
+    return snapshot.imports || [];
 }
 
 /** Outline использует тот же declaration extractor, что compact workspace. */

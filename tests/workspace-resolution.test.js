@@ -871,6 +871,90 @@ async function testLargeFileIsAnalysedInPhases() {
     }
 }
 
+/*
+ * Переключение вкладки прерывает оставшиеся фазы покинутого файла.
+ *
+ * Большой файл разбирается частями, и без прерывания новый активный документ
+ * ждал бы все оставшиеся фазы предыдущего — на файле 1,1 МБ это больше ста
+ * миллисекунд ожидания того, что пользователь уже не смотрит. Работа при этом
+ * не теряется: покинутый файл возвращается в фоновую очередь.
+ */
+async function testActiveSwitchInterruptsPhasesOfLeftFile() {
+    const line = 'Var x1 = Something.Method(a, "text", 42) + b;\n';
+    const bigSource = line.repeat(Math.ceil((700 * 1024) / line.length));
+    const smallSource = line.repeat(Math.ceil((8 * 1024) / line.length));
+    const bigUri = "file:///left-behind.mac";
+    const smallUri = "file:///newly-active.mac";
+    const documentsByUri = new Map([
+        [bigUri, createDocument(bigUri, 1, bigSource)],
+        [smallUri, createDocument(smallUri, 1, smallSource)]
+    ]);
+
+    const parsed = [];
+    const started = [];
+    const service = new DocumentAnalysisService(
+        { get: uri => documentsByUri.get(uri) },
+        new WorkspaceIndex(),
+        {
+            getAvailable: () => ({
+                imports: { enabled: false },
+                autoImport: { enabled: false },
+                analysis: { workspaceIndexing: "activeImports" },
+                semanticHighlighting: { maxFileSizeKb: 512 },
+                diagnostics: {}
+            })
+        },
+        {
+            log: () => undefined,
+            performance: {
+                enabled: true,
+                start: (event, fields) => {
+                    if (event === "analysis.full") started.push(fields.uri);
+                    return { event, fields };
+                },
+                end: () => undefined,
+                mark: () => undefined
+            },
+            invalidateProviderCaches: () => undefined,
+            onParsed: module => parsed.push(module.uri),
+            onImports: () => undefined,
+            initialParseDelayMs: 0,
+            inactiveParseDelayMs: 0
+        }
+    );
+
+    /* Обе вкладки открыты, как при обычном переключении между файлами. */
+    service.setActiveDocument(bigUri);
+    service.open(documentsByUri.get(bigUri));
+    service.setActiveDocument(smallUri);
+    service.open(documentsByUri.get(smallUri));
+    service.setActiveDocument(bigUri);
+
+    /*
+     * Ждём фактического начала разбора большого файла: переключение до его
+     * старта проверяло бы не прерывание фаз, а обычную работу очереди.
+     * Опрос таймером в 1 мс попадает между фазами.
+     */
+    await waitForFast(() => started.includes(bigUri), 20000);
+
+    /* Пользователь переключился на другой файл. */
+    service.setActiveDocument(smallUri);
+
+    await waitFor(() => parsed.includes(smallUri), 20000);
+
+    assert.strictEqual(
+        parsed[0],
+        smallUri,
+        "Новый активный файл обязан быть разобран первым, а не ждать " +
+            `оставшиеся фазы покинутого; порядок: ${parsed}`
+    );
+
+    /* Покинутый файл не потерян: он вернулся в очередь и будет разобран. */
+    await waitFor(() => parsed.includes(bigUri), 20000);
+    service.close(bigUri);
+    service.close(smallUri);
+}
+
 async function testParseReadinessDoesNotWaitForSettings() {
     const uri = "file:///workspace/navigation.mac";
     const source = [
@@ -1280,6 +1364,16 @@ async function testServerSideWorkspaceDiscovery() {
     }
 }
 
+async function waitForFast(predicate, timeoutMs) {
+    const started = Date.now();
+    while (!predicate()) {
+        if (Date.now() - started >= timeoutMs) {
+            throw new Error("Истекло время ожидания тестового события");
+        }
+        await new Promise(resolve => setTimeout(resolve, 1));
+    }
+}
+
 async function waitFor(predicate, timeoutMs) {
     const started = Date.now();
     while (!predicate()) {
@@ -1318,6 +1412,9 @@ async function waitFor(predicate, timeoutMs) {
 
     await testLargeFileIsAnalysedInPhases();
     console.log("[OK] очень большой файл разбирается фазами, разбор один");
+
+    await testActiveSwitchInterruptsPhasesOfLeftFile();
+    console.log("[OK] переключение вкладки прерывает фазы покинутого файла");
 
     await testParseReadinessDoesNotWaitForSettings();
     console.log("[OK] парсер и Import не ждут workspace/configuration");

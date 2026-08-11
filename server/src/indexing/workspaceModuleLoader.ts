@@ -63,6 +63,16 @@ export class WorkspaceModuleLoader {
         Promise<IIndexedModule | undefined>
     >();
     private exportSearchCache = new Map<string, string[]>();
+    /*
+     * Версия содержимого файла для загрузчика.
+     *
+     * Ответ на запрос к worker приходит асинхронно, и за это время файл могли
+     * изменить, удалить или исключить из проекта. Само по себе поколение
+     * очереди этого не ловит: оно про приоритет ветви Import, а не про то,
+     * актуально ли прочитанное содержимое. Номер увеличивается на каждое
+     * такое событие, и ответ со старым номером отбрасывается.
+     */
+    private fileEpochs = new Map<string, number>();
     private indexingMode: WorkspaceIndexingMode = "activeImports";
     private idleTimer: NodeJS.Timeout | undefined;
     private idleDelayMs: number;
@@ -103,6 +113,8 @@ export class WorkspaceModuleLoader {
             }
 
             this.removeQueued(uri);
+            /* Файл больше не в проекте: ответ по нему уже не нужен. */
+            this.bumpEpoch(uri);
             this.indexedUris.delete(uri);
             this.index.unregisterWorkspaceFile(uri);
             const module = this.index.getModule(uri);
@@ -505,6 +517,22 @@ export class WorkspaceModuleLoader {
     async reload(uri: string): Promise<void> {
         this.exportSearchCache.clear();
         this.removeQueued(uri);
+        /*
+         * Файл изменился: уже полученный ответ относится к прежнему
+         * содержимому и должен быть отброшен.
+         */
+        this.bumpEpoch(uri);
+
+        /*
+         * Дедупликация по uri не должна превратить перезагрузку в ожидание
+         * устаревшего запроса: его результат уже отброшен по epoch, поэтому
+         * дожидаемся завершения и читаем файл заново.
+         */
+        const running = this.loadingPromises.get(uri);
+        if (running) {
+            await running.catch(() => undefined);
+        }
+
         await this.loadOnce(uri, {
             uri,
             priority: "foreground",
@@ -515,6 +543,8 @@ export class WorkspaceModuleLoader {
     remove(uri: string): void {
         this.exportSearchCache.clear();
         this.removeQueued(uri);
+        /* Ответ на запрос, начатый до удаления, не должен вернуть модуль. */
+        this.bumpEpoch(uri);
         this.workspaceUris.delete(uri);
         this.indexedUris.delete(uri);
         this.referenceIndex.invalidate(uri);
@@ -522,6 +552,14 @@ export class WorkspaceModuleLoader {
         this.index.removeModule(uri);
         this.options.onModuleCountChanged();
         this.reportProgress();
+    }
+
+    private epochOf(uri: string): number {
+        return this.fileEpochs.get(uri) ?? 0;
+    }
+
+    private bumpEpoch(uri: string): void {
+        this.fileEpochs.set(uri, this.epochOf(uri) + 1);
     }
 
     get isIndexing(): boolean {
@@ -647,9 +685,12 @@ export class WorkspaceModuleLoader {
             })
             : undefined;
         const known = this.index.getModule(uri);
+        /* Номер фиксируется ДО запроса: сравнивать будем с ним. */
+        const epoch = this.epochOf(uri);
         const response = await this.readCompactModule({
             uri,
             generation: item?.generation ?? 0,
+            priority: item?.priority ?? "foreground",
             /*
              * Уже известный mtime позволяет worker'у ответить unchanged, не
              * читая файл. Нужно для reload(): наблюдатель за файлами
@@ -671,12 +712,8 @@ export class WorkspaceModuleLoader {
             return response.status === "unchanged" ? known : undefined;
         }
 
-        const stale = this.staleReason(uri, item);
+        const stale = this.staleReason(uri, epoch);
         if (stale) {
-            /*
-             * Пока шёл разбор, результат стал ненужным: файл открыли в
-             * редакторе (там точная модель, компактная её только испортит).
-             */
             if (loadSpan) {
                 performance.end(loadSpan, { outcome: stale });
             }
@@ -745,18 +782,23 @@ export class WorkspaceModuleLoader {
     /**
      * Причина отбросить уже полученный компактный результат, либо undefined.
      *
-     * Пока запрос шёл в worker, файл мог быть открыт в редакторе. Тогда в
-     * индексе лежит точная модель открытого документа, и перезапись её
+     * Пока запрос шёл в worker, могло случиться два события. Файл открыли в
+     * редакторе — тогда в индексе лежит точная модель, и перезапись её
      * компактной означала бы потерю областей видимости и AST до следующего
-     * разбора. Поколение очереди здесь не проверяется намеренно: разбор уже
-     * выполнен, данные корректны, и выбрасывать их только потому, что
-     * пользователь успел переключить вкладку, значит считать их заново при
-     * возврате. На приоритет это влияет — дочерние Import уходят в фон.
+     * разбора. Либо файл изменили, удалили или исключили из проекта — тогда
+     * прочитанное содержимое уже не соответствует диску, и индексировать его
+     * нельзя ни при каких условиях.
+     *
+     * Поколение очереди здесь не проверяется намеренно: разбор уже выполнен,
+     * данные корректны, и выбрасывать их только потому, что пользователь
+     * успел переключить вкладку, значит считать их заново при возврате. На
+     * приоритет это влияет — дочерние Import уходят в фон.
      */
-    private staleReason(
-        uri: string,
-        _item?: IQueuedModule
-    ): string | undefined {
+    private staleReason(uri: string, epoch: number): string | undefined {
+        if (this.epochOf(uri) !== epoch) {
+            return "fileChanged";
+        }
+
         return this.index.getModule(uri)?.isOpen === true
             ? "documentOpened"
             : undefined;
@@ -775,6 +817,7 @@ export class WorkspaceModuleLoader {
             generation: number;
             knownMtimeMs?: number;
             expectedExport?: string;
+            priority?: "foreground" | "background";
         }
     ): Promise<ICompactModuleResponse> {
         const indexer = this.options.compactModules;
@@ -807,16 +850,19 @@ export class WorkspaceModuleLoader {
         uri: string,
         normalizedName: string
     ): Promise<IIndexedModule | undefined> {
+        const epoch = this.epochOf(uri);
         const response = await this.readCompactModule({
             uri,
             generation: this.foregroundGeneration,
-            expectedExport: normalizedName
+            expectedExport: normalizedName,
+            /* Ctrl+Click ждёт ответа прямо сейчас. */
+            priority: "foreground"
         });
 
         if (
             response.status !== "indexed" ||
             response.exportsRequestedName !== true ||
-            this.staleReason(uri)
+            this.staleReason(uri, epoch)
         ) {
             return undefined;
         }
