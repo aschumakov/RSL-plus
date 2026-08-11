@@ -2,6 +2,7 @@ import { Worker } from "worker_threads";
 
 import { resolveServerOutFile } from "../paths";
 import type {
+    CompactModulePriority,
     ICompactModuleRequest,
     ICompactModuleResponse
 } from "./compactModuleProtocol";
@@ -21,7 +22,7 @@ interface IPendingRequest {
  * Одного потока достаточно: worker занят чтением и однопроходным
  * сканированием, а не тяжёлым разбором, и параллельные потоки только
  * конкурировали бы за диск и ядра с основным. Запросы обрабатываются по
- * одному, но в двух очередях: приоритет проставляет загрузчик, потому что
+ * одному, но в трёх очередях: приоритет проставляет загрузчик, потому что
  * только он знает, какая Import-ветвь сейчас активна.
  *
  * Worker создаётся лениво при первом запросе и переживает падения: упавший
@@ -33,12 +34,15 @@ export class CompactModuleWorkerService {
     private worker: Worker | undefined;
     private inFlight: IPendingRequest | undefined;
     /*
-     * Две очереди вместо одной: запросы активного документа (Import открытого
-     * файла, адресная проверка по Ctrl+Click) обгоняют фоновую индексацию
-     * проекта и Auto Import. В одной очереди переход по символу ждал бы все
-     * ранее поставленные файлы, до которых пользователю сейчас нет дела.
+     * Три очереди вместо одной: запросы активного документа (Import открытого
+     * файла, адресная проверка по Ctrl+Click) обгоняют и обход кандидатов
+     * Auto Import, и фоновую индексацию проекта. В одной очереди переход по
+     * символу ждал бы все ранее поставленные файлы, до которых пользователю
+     * сейчас нет дела; а Auto Import ставит их сразу пачкой (см.
+     * CompactModulePriority).
      */
     private foregroundQueue: IPendingRequest[] = [];
+    private searchQueue: IPendingRequest[] = [];
     private backgroundQueue: IPendingRequest[] = [];
     private nextId = 1;
     private disposed = false;
@@ -46,7 +50,18 @@ export class CompactModuleWorkerService {
     constructor(private options: ICompactModuleWorkerOptions) {}
 
     private get queuedCount(): number {
-        return this.foregroundQueue.length + this.backgroundQueue.length;
+        return this.foregroundQueue.length +
+            this.searchQueue.length +
+            this.backgroundQueue.length;
+    }
+
+    /** Очередь по приоритету запроса; по умолчанию — foreground. */
+    private queueFor(priority: CompactModulePriority | undefined) {
+        if (priority === "background") {
+            return this.backgroundQueue;
+        }
+
+        return priority === "search" ? this.searchQueue : this.foregroundQueue;
     }
 
     get isBusy(): boolean {
@@ -77,20 +92,22 @@ export class CompactModuleWorkerService {
         }
 
         return new Promise<ICompactModuleResponse>(resolve => {
-            (request.priority === "background"
-                ? this.backgroundQueue
-                : this.foregroundQueue
-            ).push({ request: full, resolve });
+            this.queueFor(request.priority).push({ request: full, resolve });
             this.pump();
         });
     }
 
     async dispose(): Promise<void> {
         this.disposed = true;
-        const queued = [...this.foregroundQueue, ...this.backgroundQueue];
+        const queued = [
+            ...this.foregroundQueue,
+            ...this.searchQueue,
+            ...this.backgroundQueue
+        ];
         const pending = this.inFlight ? [this.inFlight, ...queued] : queued;
         this.inFlight = undefined;
         this.foregroundQueue = [];
+        this.searchQueue = [];
         this.backgroundQueue = [];
 
         for (const item of pending) {
@@ -110,8 +127,9 @@ export class CompactModuleWorkerService {
             return;
         }
 
-        /* Foreground всегда обслуживается раньше фоновой индексации. */
+        /* Активный документ раньше Auto Import, тот — раньше индексации. */
         const next = this.foregroundQueue.shift() ||
+            this.searchQueue.shift() ||
             this.backgroundQueue.shift();
 
         if (!next) {

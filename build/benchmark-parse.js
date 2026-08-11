@@ -304,16 +304,17 @@ async function runQueueVariant(kb, files) {
     return rows;
 }
 
-/** Агрегирует прогоны одного варианта: median, p90 и max. */
+/**
+ * Агрегирует прогоны одного варианта: median и max.
+ *
+ * Перцентилей здесь нет намеренно. При QUEUE_REPEATS прогонах p90 совпадает с
+ * максимумом (на трёх значениях 90-й перцентиль — всегда наибольшее), то есть
+ * дублировал бы соседнюю колонку и выглядел бы при этом отдельной оценкой
+ * хвоста. Для честного перцентиля нужны десятки прогонов, а каждый прогон —
+ * отдельный процесс с разбором файлов до 1100КБ.
+ */
 function summarizeQueueRuns(kb, files, runs) {
     const pick = key => runs.map(run => run[key]);
-    const percentile = (values, fraction) => {
-        const sorted = values.slice().sort((left, right) => left - right);
-        return sorted[Math.min(
-            sorted.length - 1,
-            Math.floor(sorted.length * fraction)
-        )];
-    };
     const lags = pick("lagMaxMs");
     const totals = pick("totalMs");
 
@@ -322,7 +323,6 @@ function summarizeQueueRuns(kb, files, runs) {
         files,
         runs: runs.length,
         lagMedianMs: +median(lags).toFixed(1),
-        lagP90Ms: +percentile(lags, 0.9).toFixed(1),
         lagMaxMs: +Math.max(...lags).toFixed(1),
         totalMedianMs: +median(totals).toFixed(0)
     };
@@ -530,7 +530,7 @@ function printQueue(rows) {
     console.log("\n=== блокировка event loop очередью валидаций ===");
     console.log(
         "файлов".padStart(7) + "размер".padStart(9) +
-        "лаг median".padStart(12) + "лаг p90".padStart(10) +
+        "лаг median".padStart(12) +
         "лаг max".padStart(10) + "всего".padStart(9) +
         "прогонов".padStart(10)
     );
@@ -539,7 +539,6 @@ function printQueue(rows) {
             String(row.files).padStart(7) +
             `${row.sizeKb}КБ`.padStart(9) +
             `${row.lagMedianMs}мс`.padStart(12) +
-            `${row.lagP90Ms}мс`.padStart(10) +
             `${row.lagMaxMs}мс`.padStart(10) +
             `${row.totalMedianMs}мс`.padStart(9) +
             String(row.runs).padStart(10)

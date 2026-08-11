@@ -5,6 +5,7 @@ import { normalizeIdentifier } from "../lexer";
 import { pickDeterministicCandidate } from "./moduleNames";
 import { readCompactModule } from "./compactModuleReader";
 import type {
+    CompactModulePriority,
     ICompactModuleIndexer,
     ICompactModuleResponse
 } from "./compactModuleProtocol";
@@ -522,6 +523,7 @@ export class WorkspaceModuleLoader {
          * содержимому и должен быть отброшен.
          */
         this.bumpEpoch(uri);
+        const epoch = this.epochOf(uri);
 
         /*
          * Дедупликация по uri не должна превратить перезагрузку в ожидание
@@ -531,6 +533,20 @@ export class WorkspaceModuleLoader {
         const running = this.loadingPromises.get(uri);
         if (running) {
             await running.catch(() => undefined);
+
+            /*
+             * За время ожидания файл могли удалить или исключить из проекта.
+             * Проверять это обязательно здесь: повторное чтение получит уже
+             * свежий epoch, и staleReason в load() пропустит ответ, вернув
+             * исключённый файл в индекс.
+             */
+            const cancelled = this.reloadCancelReason(uri, epoch);
+            if (cancelled) {
+                this.options.log(
+                    `Reload skipped: ${uri}; reason=${cancelled}`
+                );
+                return;
+            }
         }
 
         await this.loadOnce(uri, {
@@ -805,6 +821,32 @@ export class WorkspaceModuleLoader {
     }
 
     /**
+     * Причина не начинать повторное чтение после ожидания старого запроса.
+     *
+     * staleReason проверяет уже полученный ответ и здесь не помогает: он
+     * сравнивает epoch, зафиксированный ПЕРЕД запросом, а новый запрос
+     * стартовал бы уже после исключения — со свежим epoch. Поэтому события,
+     * случившиеся во время ожидания, отсекаются отдельно.
+     *
+     * Каталог проекта здесь авторитетнее собственного workspaceUris: файл,
+     * созданный во время сессии, попадает в каталог сразу по событию
+     * наблюдателя, а в workspaceUris — только со следующим обходом проекта.
+     */
+    private reloadCancelReason(
+        uri: string,
+        epoch: number
+    ): string | undefined {
+        if (this.epochOf(uri) !== epoch) {
+            return "fileChanged";
+        }
+
+        return this.index.workspaceFilesReady !== false &&
+            !this.index.hasWorkspaceFile(uri)
+            ? "notInWorkspace"
+            : undefined;
+    }
+
+    /**
      * Компактный разбор внешнего файла: обычно в worker, иначе на месте.
      *
      * Ответ worker'а не отклоняется исключениями — недоступный файл и
@@ -817,7 +859,7 @@ export class WorkspaceModuleLoader {
             generation: number;
             knownMtimeMs?: number;
             expectedExport?: string;
-            priority?: "foreground" | "background";
+            priority?: CompactModulePriority;
         }
     ): Promise<ICompactModuleResponse> {
         const indexer = this.options.compactModules;
@@ -842,9 +884,9 @@ export class WorkspaceModuleLoader {
      * Адресная проверка: экспортирует ли файл нужное имя.
      *
      * Идёт через тот же worker, что обычная загрузка, поэтому обход
-     * кандидатов по Ctrl+Click не блокирует основной поток. Файл, который
-     * имени не экспортирует, не попадает в индекс — иначе поиск по одному
-     * символу раздувал бы индекс всеми просмотренными файлами.
+     * кандидатов по явно вызванному Auto Import не блокирует основной поток.
+     * Файл, который имени не экспортирует, не попадает в индекс — иначе поиск
+     * по одному символу раздувал бы индекс всеми просмотренными файлами.
      */
     private async inspectExport(
         uri: string,
@@ -855,8 +897,15 @@ export class WorkspaceModuleLoader {
             uri,
             generation: this.foregroundGeneration,
             expectedExport: normalizedName,
-            /* Ctrl+Click ждёт ответа прямо сейчас. */
-            priority: "foreground"
+            /*
+             * Обход кандидатов ставит в очередь сразу пачку файлов (batchSize
+             * в findModulesExportingSymbol). С приоритетом активного документа
+             * она задерживала бы адресную навигацию: FIFO внутри очереди
+             * означает, что Ctrl+Click оказывается за всей пачкой. Отдельный
+             * уровень search держит лампочку впереди индексации проекта, но
+             * позади того, чего пользователь ждёт прямо сейчас.
+             */
+            priority: "search"
         });
 
         if (

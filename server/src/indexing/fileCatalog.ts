@@ -71,6 +71,11 @@ export class FileCatalog {
         return Array.from(this.files.values());
     }
 
+    /** Входит ли файл в проект; сравнение по идентичности, а не по строке. */
+    has(uri: string): boolean {
+        return !!uri && this.files.has(getUriIdentity(uri));
+    }
+
     resolve(moduleName: string): ModuleResolution<string> {
         return resolveByModuleName(
             moduleName,

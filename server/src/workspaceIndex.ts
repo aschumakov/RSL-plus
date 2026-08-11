@@ -195,6 +195,7 @@ export class WorkspaceIndex {
     registerWorkspaceFile(uri: string): void { this.files.register(uri); }
     unregisterWorkspaceFile(uri: string): void { this.files.unregister(uri); }
     getWorkspaceFileUris(): string[] { return this.files.values(); }
+    hasWorkspaceFile(uri: string): boolean { return this.files.has(uri); }
     resolveWorkspaceFile(name: string): ModuleResolution<string> {
         return this.files.resolve(name);
     }

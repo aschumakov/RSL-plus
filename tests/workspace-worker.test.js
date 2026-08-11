@@ -618,10 +618,18 @@ function writeModule(directory, name, source) {
     function createDelayedDeliveryIndexer() {
         let release = () => undefined;
         const delivered = new Promise(resolve => { release = resolve; });
+        let signalRead = () => undefined;
+        /*
+         * Момент "файл уже прочитан" сообщается промисом, а не паузой: пауза
+         * на медленной машине истекала бы до чтения, и тест проверял бы уже
+         * не то окно между чтением и доставкой ответа, ради которого написан.
+         */
+        const readCompleted = new Promise(resolve => { signalRead = resolve; });
         let calls = 0;
 
         return {
             get calls() { return calls; },
+            readCompleted,
             release: () => release(),
             indexer: {
                 async index(request) {
@@ -630,6 +638,7 @@ function writeModule(directory, name, source) {
                         ...request,
                         id: 0
                     });
+                    signalRead();
                     await delivered;
                     return response;
                 }
@@ -652,7 +661,7 @@ function writeModule(directory, name, source) {
 
             const first = loader.ensureLoadedUri(uri);
             /* Ждём, пока worker прочитает прежнее содержимое. */
-            await new Promise(resolve => setTimeout(resolve, 40));
+            await controlled.readCompleted;
             fs.writeFileSync(filePath, "Macro After()\nEnd;");
             const reloaded = loader.reload(uri);
             controlled.release();
@@ -690,7 +699,7 @@ function writeModule(directory, name, source) {
             });
 
             const pending = loader.ensureLoadedUri(uri);
-            await new Promise(resolve => setTimeout(resolve, 40));
+            await controlled.readCompleted;
 
             loader.remove(uri);
             fs.rmSync(filePath);
@@ -720,7 +729,7 @@ function writeModule(directory, name, source) {
             });
 
             const pending = loader.ensureLoadedUri(uri);
-            await new Promise(resolve => setTimeout(resolve, 40));
+            await controlled.readCompleted;
 
             /* Файл перестал попадать в каталог проекта. */
             loader.registerWorkspaceFiles([]);
@@ -731,6 +740,48 @@ function writeModule(directory, name, source) {
                 index.getModule(uri),
                 undefined,
                 "Исключённый из проекта файл не должен попасть в индекс"
+            );
+        })
+    );
+
+    await test(
+        "исключение файла во время reload не возвращает его в индекс",
+        () => withWorkspace(async ({ directory }) => {
+            const { uri } = writeModule(
+                directory,
+                "excluded-while-reloading.mac",
+                externalSource(2)
+            );
+            const controlled = createDelayedDeliveryIndexer();
+            const { index, loader } = createLoader(directory, {
+                compactModules: controlled.indexer
+            });
+
+            const pending = loader.ensureLoadedUri(uri);
+            await controlled.readCompleted;
+
+            /*
+             * Наблюдатель за файлами сообщил о правке, пока первый запрос ещё
+             * не доставил ответ; reload встаёт в ожидание этого запроса. За
+             * время ожидания файл исключают из проекта.
+             */
+            const reloaded = loader.reload(uri);
+            loader.registerWorkspaceFiles([]);
+            controlled.release();
+            await Promise.all([pending, reloaded]);
+
+            assert.strictEqual(
+                index.getModule(uri),
+                undefined,
+                "reload после исключения возвращал файл в индекс: повторное " +
+                    "чтение получает свежий epoch, и проверка ответа его " +
+                    "пропускает"
+            );
+            assert.strictEqual(
+                controlled.calls,
+                1,
+                "Перечитывать исключённый файл не нужно: reload обязан " +
+                    "отмениться, а не выдать повторный запрос"
             );
         })
     );
@@ -780,6 +831,99 @@ function writeModule(directory, name, source) {
                 "Запрос активного документа обязан обгонять фоновую " +
                     `индексацию; он обработан ${position + 1}-м из ` +
                     `${order.length}`
+            );
+        })
+    );
+
+    await test(
+        "адресный запрос обгоняет пачку проверок Auto Import",
+        () => withWorkspace(async ({ directory, service }) => {
+            /*
+             * Auto Import ставит кандидатов в очередь пачкой (batchSize в
+             * findModulesExportingSymbol), поэтому с общим приоритетом
+             * навигация оказывалась за всей пачкой, а не за одним файлом.
+             */
+            const candidates = [];
+            for (let index = 0; index < 8; index++) {
+                candidates.push(writeModule(
+                    directory,
+                    `candidate-${index}.mac`,
+                    externalSource(2)
+                ).uri);
+            }
+            const target = writeModule(
+                directory,
+                "navigated.mac",
+                externalSource(2)
+            ).uri;
+
+            const order = [];
+            const observed = request => service.index(request).then(response => {
+                order.push(request.uri);
+                return response;
+            });
+
+            const search = candidates.map(uri => observed({
+                uri,
+                generation: 0,
+                expectedExport: "Exported0",
+                priority: "search"
+            }));
+            const urgent = observed({
+                uri: target,
+                generation: 1,
+                priority: "foreground"
+            });
+
+            await Promise.all([...search, urgent]);
+
+            const position = order.indexOf(target);
+            assert.ok(
+                position <= 1,
+                "Адресная навигация обязана обгонять обход кандидатов Auto " +
+                    `Import; она обработана ${position + 1}-й из ` +
+                    `${order.length}`
+            );
+        })
+    );
+
+    await test(
+        "обход кандидатов Auto Import не занимает приоритет навигации",
+        () => withWorkspace(async ({ directory }) => {
+            for (let index = 0; index < 3; index++) {
+                writeModule(directory, `scanned-${index}.mac`, externalSource(2));
+            }
+            const requests = [];
+            const { loader } = createLoader(directory, {
+                compactModules: {
+                    index: async request => {
+                        requests.push(request);
+                        return readCompactModule({ ...request, id: 0 });
+                    }
+                }
+            });
+
+            await loader.findModulesExportingSymbol("Unknown0", 10, {
+                scanWorkspace: true
+            });
+
+            assert.ok(requests.length > 0, "Обход обязан обратиться к worker");
+            assert.deepStrictEqual(
+                Array.from(new Set(requests.map(item => item.priority))),
+                ["search"],
+                "Явно вызванный Auto Import обязан идти отдельным уровнем " +
+                    "приоритета: с foreground его пачка задерживала адресную " +
+                    "навигацию"
+            );
+
+            const navigated = requests.length;
+            await loader.ensureLoadedUri(
+                pathToFileURL(path.join(directory, "scanned-0.mac")).toString()
+            );
+            assert.strictEqual(
+                requests[navigated].priority,
+                "foreground",
+                "Адресная загрузка обязана сохранить высший приоритет"
             );
         })
     );
