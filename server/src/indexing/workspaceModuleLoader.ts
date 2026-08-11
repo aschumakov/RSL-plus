@@ -1,12 +1,13 @@
-import * as fs from "fs";
-import { fileURLToPath } from "url";
-
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 import { ReferenceIndex } from "../analysis/referenceIndex";
 import type { PerformanceLogger } from "../performanceLogger";
-import { extractCompactDeclarations } from "../analysis/declarationExtractor";
 import { normalizeIdentifier } from "../lexer";
 import { pickDeterministicCandidate } from "./moduleNames";
+import { readCompactModule } from "./compactModuleReader";
+import type {
+    ICompactModuleIndexer,
+    ICompactModuleResponse
+} from "./compactModuleProtocol";
 
 export type ModuleLoadPriority = "foreground" | "background";
 export type WorkspaceIndexingMode = "activeImports" | "workspaceIdle" | "full";
@@ -20,6 +21,15 @@ interface IQueuedModule {
 export interface IWorkspaceModuleLoaderOptions {
     log(message: string): void;
     performance?: PerformanceLogger;
+    /**
+     * Компактная индексация внешних файлов в отдельном потоке.
+     *
+     * Без него чтение и сканирование выполняются на основном потоке — это и
+     * есть резервный путь: если worker не запустился (ограниченная среда,
+     * упавший поток), навигация по Import обязана продолжать работать, пусть
+     * и с блокировкой основного потока на время сканирования.
+     */
+    compactModules?: ICompactModuleIndexer;
     onModuleLoaded(module: IIndexedModule): void;
     onModuleCountChanged(): void;
     onIndexProgress?(loaded: number, total: number): void;
@@ -628,14 +638,6 @@ export class WorkspaceModuleLoader {
         uri: string,
         item?: IQueuedModule
     ): Promise<IIndexedModule | undefined> {
-        let filePath: string;
-
-        try {
-            filePath = fileURLToPath(uri);
-        } catch (_error) {
-            return undefined;
-        }
-
         const performance = this.options.performance;
         const loadSpan = performance?.enabled
             ? performance.start("workspaceModule.load", {
@@ -644,33 +646,63 @@ export class WorkspaceModuleLoader {
                 generation: item?.generation || 0
             })
             : undefined;
-        const ioSpan = performance?.enabled
-            ? performance.start("workspaceModule.io", { uri })
-            : undefined;
-        const [stat, text] = await Promise.all([
-            fs.promises.stat(filePath),
-            fs.promises.readFile(filePath, "utf8")
-        ]);
-        if (ioSpan) {
-            performance.end(ioSpan, {
-                chars: text.length
-            });
+        const known = this.index.getModule(uri);
+        const response = await this.readCompactModule({
+            uri,
+            generation: item?.generation ?? 0,
+            /*
+             * Уже известный mtime позволяет worker'у ответить unchanged, не
+             * читая файл. Нужно для reload(): наблюдатель за файлами
+             * срабатывает и на сохранение без изменений.
+             */
+            knownMtimeMs: known && !known.isOpen ? known.version : undefined
+        });
+
+        if (response.status !== "indexed") {
+            if (response.status === "missing" || response.status === "failed") {
+                this.options.log(
+                    `Compact indexing skipped: ${uri}; ` +
+                    `status=${response.status}; ${response.error ?? ""}`
+                );
+            }
+            if (loadSpan) {
+                performance.end(loadSpan, { outcome: response.status });
+            }
+            return response.status === "unchanged" ? known : undefined;
         }
+
+        const stale = this.staleReason(uri, item);
+        if (stale) {
+            /*
+             * Пока шёл разбор, результат стал ненужным: файл открыли в
+             * редакторе (там точная модель, компактная её только испортит).
+             */
+            if (loadSpan) {
+                performance.end(loadSpan, { outcome: stale });
+            }
+            return undefined;
+        }
+
         const indexSpan = performance?.enabled
             ? performance.start("workspaceModule.index", {
                 uri,
-                chars: text.length
+                chars: response.sourceLength
             })
             : undefined;
-        const module = this.index.updateExternalModule(
+        const module = this.index.updateExternalModuleFromDeclarations(
             uri,
-            text,
-            Math.floor(stat.mtimeMs)
+            response.sourceLength,
+            {
+                declarations: response.declarations,
+                imports: response.imports
+            },
+            response.mtimeMs
         );
         if (indexSpan) {
             performance.end(indexSpan, {
                 imports: module.imports.length,
-                topLevelSymbols: module.symbolTree.children.length
+                topLevelSymbols: module.symbolTree.children.length,
+                reusedScan: response.reused
             });
         }
         this.indexedUris.add(uri);
@@ -700,59 +732,108 @@ export class WorkspaceModuleLoader {
         this.options.onModuleCountChanged();
         if (loadSpan) {
             performance.end(loadSpan, {
-                chars: text.length,
+                outcome: "indexed",
+                chars: response.sourceLength,
                 imports: module.imports.length,
-                indexedModules: this.index.size
+                indexedModules: this.index.size,
+                reusedScan: response.reused
             });
         }
         return module;
     }
 
+    /**
+     * Причина отбросить уже полученный компактный результат, либо undefined.
+     *
+     * Пока запрос шёл в worker, файл мог быть открыт в редакторе. Тогда в
+     * индексе лежит точная модель открытого документа, и перезапись её
+     * компактной означала бы потерю областей видимости и AST до следующего
+     * разбора. Поколение очереди здесь не проверяется намеренно: разбор уже
+     * выполнен, данные корректны, и выбрасывать их только потому, что
+     * пользователь успел переключить вкладку, значит считать их заново при
+     * возврате. На приоритет это влияет — дочерние Import уходят в фон.
+     */
+    private staleReason(
+        uri: string,
+        _item?: IQueuedModule
+    ): string | undefined {
+        return this.index.getModule(uri)?.isOpen === true
+            ? "documentOpened"
+            : undefined;
+    }
+
+    /**
+     * Компактный разбор внешнего файла: обычно в worker, иначе на месте.
+     *
+     * Ответ worker'а не отклоняется исключениями — недоступный файл и
+     * упавший поток приходят как status, потому что для загрузчика это
+     * штатные исходы очереди.
+     */
+    private async readCompactModule(
+        request: {
+            uri: string;
+            generation: number;
+            knownMtimeMs?: number;
+            expectedExport?: string;
+        }
+    ): Promise<ICompactModuleResponse> {
+        const indexer = this.options.compactModules;
+
+        if (indexer) {
+            const response = await indexer.index(request);
+
+            if (response.status !== "failed") {
+                return response;
+            }
+
+            this.options.log(
+                `Compact indexing worker failed, using main thread: ` +
+                `${request.uri}; ${response.error ?? ""}`
+            );
+        }
+
+        return readCompactModule({ ...request, id: 0 });
+    }
+
+    /**
+     * Адресная проверка: экспортирует ли файл нужное имя.
+     *
+     * Идёт через тот же worker, что обычная загрузка, поэтому обход
+     * кандидатов по Ctrl+Click не блокирует основной поток. Файл, который
+     * имени не экспортирует, не попадает в индекс — иначе поиск по одному
+     * символу раздувал бы индекс всеми просмотренными файлами.
+     */
     private async inspectExport(
         uri: string,
         normalizedName: string
     ): Promise<IIndexedModule | undefined> {
-        let filePath: string;
+        const response = await this.readCompactModule({
+            uri,
+            generation: this.foregroundGeneration,
+            expectedExport: normalizedName
+        });
 
-        try {
-            filePath = fileURLToPath(uri);
-        } catch (_error) {
+        if (
+            response.status !== "indexed" ||
+            response.exportsRequestedName !== true ||
+            this.staleReason(uri)
+        ) {
             return undefined;
         }
 
-        try {
-            const [stat, source] = await Promise.all([
-                fs.promises.stat(filePath),
-                fs.promises.readFile(filePath, "utf8")
-            ]);
-
-            if (!containsIdentifier(source, normalizedName)) {
-                return undefined;
-            }
-
-            const declarations = extractCompactDeclarations(source);
-            const exported = declarations.declarations.some(symbol =>
-                symbol.visibility === "public" &&
-                normalizeIdentifier(symbol.name) === normalizedName
-            );
-
-            if (!exported) {
-                return undefined;
-            }
-
-            const module = this.index.updateExternalModuleFromDeclarations(
-                uri,
-                source.length,
-                declarations,
-                Math.floor(stat.mtimeMs)
-            );
-            this.indexedUris.add(uri);
-            this.options.onModuleLoaded(module);
-            this.options.onModuleCountChanged();
-            return module;
-        } catch (_error) {
-            return undefined;
-        }
+        const module = this.index.updateExternalModuleFromDeclarations(
+            uri,
+            response.sourceLength,
+            {
+                declarations: response.declarations,
+                imports: response.imports
+            },
+            response.mtimeMs
+        );
+        this.indexedUris.add(uri);
+        this.options.onModuleLoaded(module);
+        this.options.onModuleCountChanged();
+        return module;
     }
 
     private removeQueued(uri: string): void {
@@ -789,28 +870,6 @@ function uniqueModules(items: readonly IIndexedModule[]): IIndexedModule[] {
     }
 
     return result;
-}
-
-function containsIdentifier(source: string, normalizedName: string): boolean {
-    const lower = source.toLowerCase();
-    let index = lower.indexOf(normalizedName);
-
-    while (index >= 0) {
-        const before = index > 0 ? lower.charAt(index - 1) : "";
-        const after = lower.charAt(index + normalizedName.length);
-
-        if (!isIdentifierCharacter(before) && !isIdentifierCharacter(after)) {
-            return true;
-        }
-
-        index = lower.indexOf(normalizedName, index + normalizedName.length);
-    }
-
-    return false;
-}
-
-function isIdentifierCharacter(value: string): boolean {
-    return !!value && /[a-zа-яё0-9_@]/i.test(value);
 }
 
 function yieldToInteractiveRequests(): Promise<void> {

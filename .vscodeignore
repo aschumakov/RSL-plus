@@ -32,12 +32,13 @@ coverage/**
 # в bundle (build/bundle.js), отдельные пакеты в VSIX не нужны.
 **/node_modules/**
 
-# Из tsc-сборки в VSIX попадают только три entry-файла, которые bundle
-# перезаписывает: остальные модули вшиты в них же. Они остаются на диске для
-# тестов (tests/*.js требуют server/out/<модуль>.js), но не в пакете.
+# Из tsc-сборки в VSIX попадают только entry-файлы, которые перезаписывает
+# bundle: остальные модули вшиты в них же. Они остаются на диске для тестов
+# (tests/*.js требуют server/out/<модуль>.js), но не в пакете.
 # ВАЖНО: npm run bundle обязан выполняться после npm run compile, иначе здесь
 # окажутся не bundle, а обычные модули tsc без зависимостей.
 client/out/**
 !client/out/extension.js
 server/out/**
 !server/out/server.js
+!server/out/indexing/compactModuleWorker.js

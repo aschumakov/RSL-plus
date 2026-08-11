@@ -1,0 +1,32 @@
+import { parentPort } from "worker_threads";
+
+import { readCompactModule } from "./compactModuleReader";
+import type { ICompactModuleRequest } from "./compactModuleProtocol";
+
+/*
+ * Точка входа worker'а компактной индексации.
+ *
+ * Сама работа живёт в compactModuleReader: тот же код выполняется на основном
+ * потоке, если worker не удалось запустить. Здесь только приём сообщений —
+ * так резервный путь не может разойтись с обычным.
+ */
+const port = parentPort;
+
+if (!port) {
+    throw new Error("compactModuleWorker запущен без parentPort");
+}
+
+port.on("message", (request: ICompactModuleRequest) => {
+    readCompactModule(request).then(
+        response => port.postMessage(response),
+        error => port.postMessage({
+            id: request.id,
+            uri: request.uri,
+            generation: request.generation,
+            status: "failed",
+            error: error instanceof Error
+                ? `${error.name}: ${error.message}`
+                : String(error)
+        })
+    );
+});

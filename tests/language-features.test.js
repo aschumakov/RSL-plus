@@ -564,6 +564,70 @@ test("Циклический Import диагностируется на корн
     );
 });
 
+/*
+ * Правило порядка разрешения: локальный символ ищется до внешнего индекса.
+ *
+ * Это то, что делает навигацию по текущему файлу независимой от готовности
+ * Import-графа: переменные, параметры и Macro своего файла обязаны находиться,
+ * даже если ни один импортированный модуль ещё не загружен (а при фоновой
+ * индексации workspace он загружен не будет ещё секунды). Правило легко
+ * потерять, поменяв порядок веток в resolveTokenAt, поэтому оно закреплено
+ * тестом, а не только комментарием.
+ */
+test("локальные символы разрешаются без загруженного Import", () => {
+    const index = new WorkspaceIndex();
+    const source = [
+        "Import library;",
+        "Macro Handler(parameter)",
+        "  Var localValue = 1;",
+        "  localValue = parameter + Shared(2);",
+        "End;"
+    ].join("\n");
+    const uri = "file:///workspace/local-first.mac";
+    const module = createSyntaxModule(index, uri, source);
+    const resolver = new RslScopeResolver(index);
+
+    /* Ни library, ни Shared не загружены: внешнего индекса просто нет. */
+    assert.strictEqual(index.findImportedSymbols(uri, "Shared").length, 0);
+
+    const localOffset = source.lastIndexOf("localValue");
+    const local = resolver.resolveAt(uri, module.symbolTree, localOffset);
+    assert.ok(local, "Локальная переменная должна разрешаться");
+    assert.strictEqual(local.uri, uri);
+    assert.strictEqual(local.symbol.name, "localValue");
+
+    const parameterOffset = source.lastIndexOf("parameter");
+    const parameter = resolver.resolveAt(
+        uri,
+        module.symbolTree,
+        parameterOffset
+    );
+    assert.ok(parameter, "Параметр должен разрешаться");
+    assert.strictEqual(parameter.symbol.name, "parameter");
+
+    const macroOffset = source.indexOf("Handler");
+    const macro = resolver.resolveAt(uri, module.symbolTree, macroOffset);
+    assert.ok(macro, "Macro текущего файла должно разрешаться");
+    assert.strictEqual(macro.symbol.name, "Handler");
+
+    /*
+     * Внешний символ с тем же именем не должен перебивать локальный: иначе
+     * после загрузки Import переход по локальной переменной уехал бы в
+     * другой файл.
+     */
+    index.updateExternalModule(
+        "file:///workspace/library.mac",
+        "Macro localValue()\nEnd;\nMacro Shared(value)\nEnd;",
+        1
+    );
+    const afterImport = resolver.resolveAt(uri, module.symbolTree, localOffset);
+    assert.strictEqual(
+        afterImport.uri,
+        uri,
+        "Локальное объявление обязано выигрывать у импортированного"
+    );
+});
+
 console.log("");
 console.log(`Пройдено: ${passed}`);
 console.log(`Ошибок: ${failed}`);

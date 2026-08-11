@@ -1,13 +1,14 @@
 "use strict";
 
 /*
- * Сборка VSIX-варианта расширения: два bundle вместо ~350 отдельных файлов.
+ * Сборка VSIX-варианта расширения: три bundle вместо ~350 отдельных файлов.
  *
  * Bundle пишется ПОВЕРХ entry-файлов tsc-сборки (client/out/extension.js,
- * server/out/server.js). Так package.json main, путь до сервера в
- * client/src/extension.ts, вычисление путей в server/src/paths.ts и
- * конфигурация отладки (F5 + tsc -b -w) остаются нетронутыми: раскладка на
- * диске та же, просто entry-файлы теперь несут в себе весь код и зависимости.
+ * server/out/server.js, server/out/indexing/compactModuleWorker.js). Так
+ * package.json main, путь до сервера в client/src/extension.ts, вычисление
+ * путей в server/src/paths.ts и конфигурация отладки (F5 + tsc -b -w)
+ * остаются нетронутыми: раскладка на диске та же, просто entry-файлы теперь
+ * несут в себе весь код и зависимости.
  *
  * Остальные файлы tsc (server/out/lexer.js и прочие) остаются на диске —
  * их требуют тесты, — но в VSIX не попадают, см. .vscodeignore.
@@ -33,6 +34,18 @@ const TARGETS = [
         name: "server",
         entry: "server/src/server.ts",
         outfile: "server/out/server.js",
+        external: []
+    },
+    /*
+     * Worker компактной индексации — отдельный entry: он создаётся по пути в
+     * runtime (new Worker), втянуть его внутрь bundle нельзя. Путь совпадает
+     * с раскладкой tsc, поэтому resolveServerOutFile() в обеих сборках
+     * указывает в одно место (см. server/src/paths.ts).
+     */
+    {
+        name: "compact-worker",
+        entry: "server/src/indexing/compactModuleWorker.ts",
+        outfile: "server/out/indexing/compactModuleWorker.js",
         external: []
     }
 ];

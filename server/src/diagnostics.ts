@@ -201,7 +201,7 @@ export function buildLocalRslDiagnostics(
         addDuplicateDeclarationDiagnostics(module, result);
     }
     if (options.structure && hasCapacity()) {
-        addBasicImportDiagnostics(module, index, result);
+        addBasicImportDiagnostics(module, result);
     }
     if (options.structure && hasCapacity()) {
         addImportPlacementDiagnostics(module, result);
@@ -265,7 +265,10 @@ export function buildWorkspaceRslDiagnostics(
     const options = normalizeDiagnosticSettings(settings);
     if (!options.enabled || options.maxProblems === 0) return [];
     const result: Diagnostic[] = [];
-    if (options.ambiguousReferences) {
+    if (options.structure) {
+        addSelfImportDiagnostics(module, index, result);
+    }
+    if (options.ambiguousReferences && result.length < options.maxProblems) {
         addAmbiguousReferenceDiagnostics(module, index, result);
     }
     if (options.unusedImports && result.length < options.maxProblems) {
@@ -1344,9 +1347,15 @@ function addDuplicateDeclarationDiagnostics(
     });
 }
 
+/**
+ * Повторный и конфликтующий по расширению Import.
+ *
+ * Строго локальная проверка: смотрит только на текст Import текущего файла и
+ * не обращается к индексу, поэтому её результат не зависит от готовности
+ * обхода workspace (см. addSelfImportDiagnostics).
+ */
 function addBasicImportDiagnostics(
     module: IIndexedModule,
-    index: WorkspaceIndex,
     result: Diagnostic[]
 ): void {
     const references = GetImportDefinitionTargetsFromTokens(module.lex.tokens);
@@ -1393,10 +1402,37 @@ function addBasicImportDiagnostics(
             importedByStem.set(stem, normalizedImport);
         }
 
+        /*
+         * Отсутствие файла в workspace не является ошибкой:
+         * модуль может входить в базовую поставку RS-Bank.
+         */
+    }
+}
+
+/**
+ * Файл импортирует сам себя.
+ *
+ * Проверка workspace-фазы, а не локальной: имя из Import сопоставляется с
+ * файлом через каталог workspace и загруженные модули, то есть результат
+ * зависит от готовности индекса. В локальной фазе она молча пропадала бы на
+ * файлах, открытых до завершения обхода workspace — ключ локального кэша
+ * состояние индекса не учитывает и пересчёта бы не случилось.
+ */
+function addSelfImportDiagnostics(
+    module: IIndexedModule,
+    index: WorkspaceIndex,
+    result: Diagnostic[]
+): void {
+    for (const reference of GetImportDefinitionTargetsFromTokens(
+        module.lex.tokens
+    )) {
         const imported = index.findModuleByName(reference.moduleName);
         const workspaceUri = index.findWorkspaceFileUri(reference.moduleName);
 
-        if ((imported && imported.uri === module.uri) || workspaceUri === module.uri) {
+        if (
+            (imported && imported.uri === module.uri) ||
+            workspaceUri === module.uri
+        ) {
             result.push(createImportDiagnostic(
                 module,
                 reference,
@@ -1405,11 +1441,6 @@ function addBasicImportDiagnostics(
                 "self-import"
             ));
         }
-
-        /*
-         * Отсутствие файла в workspace не является ошибкой:
-         * модуль может входить в базовую поставку RS-Bank.
-         */
     }
 }
 

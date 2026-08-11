@@ -207,6 +207,116 @@ test("Нераспознанная escape-последовательность �
     assert.deepStrictEqual(findUnrecognizedEscapes('"no escapes"'), []);
 });
 
+/* --- точечный relex больших файлов ---------------------------------- */
+
+const {
+    tryIncrementalRelex
+} = require("../server/out/services/incrementalLex");
+
+function bigLexSource(approxKb) {
+    const chunks = [];
+    let size = 0;
+    let index = 0;
+    while (size < approxKb * 1024) {
+        const chunk = [
+            `Macro Handler${index}(obj, cmd, id)`,
+            `  Var value${index} = ${index};`,
+            `  Println("text ${index}");`,
+            `  return value${index};`,
+            "End;",
+            ""
+        ].join("\n");
+        chunks.push(chunk);
+        size += chunk.length;
+        index++;
+    }
+    return chunks.join("\n");
+}
+
+/*
+ * Точечный relex обязан быть либо правильным, либо отсутствующим.
+ *
+ * Проверка сравнивает его результат с полным лексированием на множестве
+ * правок в разных местах файла: любое расхождение означает, что дальше
+ * поедет весь анализ — токены лежат в основе AST, Structure и подсветки.
+ * Отказ (undefined) допустим всегда, неверный результат — никогда.
+ */
+test("точечный relex совпадает с полным лексированием или отказывает", () => {
+    const source = bigLexSource(120);
+    const lex = lexRsl(source);
+    let applied = 0;
+
+    const positions = [];
+    for (let fraction = 0.55; fraction < 1; fraction += 0.05) {
+        const anchor = Math.floor(source.length * fraction);
+        const found = source.indexOf("value", anchor);
+        if (found > 0) positions.push(found);
+    }
+    assert.ok(positions.length > 0, "Не нашлось позиций для правок");
+
+    for (const position of positions) {
+        const variants = [
+            source.slice(0, position + 3) + "X" + source.slice(position + 3),
+            source.slice(0, position + 3) + source.slice(position + 4),
+            source.slice(0, position + 5) + "9" + source.slice(position + 5),
+            source.slice(0, position) + "renamed" + source.slice(position + 5)
+        ];
+
+        for (const next of variants) {
+            const incremental = tryIncrementalRelex(source, lex, next);
+            if (!incremental) continue;
+            applied++;
+            assert.deepStrictEqual(
+                incremental.tokens,
+                lexRsl(next).tokens,
+                "Точечный relex дал другой token stream, чем полный проход"
+            );
+            assert.deepStrictEqual(
+                incremental.lineStarts,
+                lexRsl(next).lineStarts,
+                "Точечный relex сбил границы строк"
+            );
+        }
+    }
+
+    assert.ok(
+        applied > 0,
+        "Ни одна правка не пошла точечным путём — проверка ничего не проверила"
+    );
+});
+
+/*
+ * Точечный relex не должен применяться там, где он дороже полного прохода.
+ *
+ * Его стоимость определяется числом токенов ПОСЛЕ правки: им пересчитываются
+ * позиции. Замеры: правка в начале файла 550КБ обходится в 46 мс против 40 мс
+ * полного лексирования, то есть путь становится вредным. Отсечка по доле
+ * потока — единственное, что удерживает его от этого.
+ */
+test("точечный relex отказывается от правки в начале большого файла", () => {
+    const source = bigLexSource(120);
+    const lex = lexRsl(source);
+
+    const nearStart = source.indexOf("value");
+    const atStart = source.slice(0, nearStart + 3) + "X" +
+        source.slice(nearStart + 3);
+    assert.strictEqual(
+        tryIncrementalRelex(source, lex, atStart),
+        undefined,
+        "Правка в начале файла пересчитала бы позиции почти всему потоку"
+    );
+
+    const nearEnd = source.lastIndexOf("value");
+    const atEnd = source.slice(0, nearEnd + 3) + "X" +
+        source.slice(nearEnd + 3);
+    const incremental = tryIncrementalRelex(source, lex, atEnd);
+    assert.ok(
+        incremental,
+        "Правка в конце файла обязана идти точечным путём: там сдвигать почти нечего"
+    );
+    assert.deepStrictEqual(incremental.tokens, lexRsl(atEnd).tokens);
+});
+
 console.log("");
 console.log(`Пройдено: ${passed}`);
 console.log(`Ошибок: ${failed}`);

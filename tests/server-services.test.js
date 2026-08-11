@@ -20,7 +20,8 @@ const {
 const {
     createFastDocumentSnapshot,
     getFastDocumentSymbols,
-    getFastFoldingRanges
+    getFastFoldingRanges,
+    getFastDocumentDeclarations
 } = require("../server/out/services/fastDocumentSnapshot");
 const {
     DocumentAnalysisService
@@ -277,7 +278,7 @@ async function testOutlineUsesPreparedSnapshotAndReportsTiming() {
         undefined,
         "Folding должен оставаться ленивым до первого запроса"
     );
-    assert.ok(getFastFoldingRanges(document, snapshot).length > 0);
+    assert.ok(getFastFoldingRanges(snapshot).length > 0);
     getFastDocumentSymbols(document, snapshot);
 
     const classSource = [
@@ -560,6 +561,324 @@ async function testInactiveRestoredTabIsLazy() {
     analysis.close(uri);
 }
 
+/*
+ * Две фазы анализа открытого файла должны быть именно фазами, а не одним
+ * событием: Structure и объявления доступны из Fast Snapshot сразу, точная
+ * локальная модель появляется позже, и одно не подменяет другое.
+ *
+ * Проверяется и стоимость: объявления одной версии сканируются один раз,
+ * сколько бы потребителей их ни спросило (Outline, Structure, будущие
+ * фазы) — иначе каждый потребитель платил бы полным проходом по токенам.
+ */
+async function testFastPhasePrecedesLocalModel() {
+    const uri = "file:///two-phase.mac";
+    const line = 'Var x1 = Something.Method(a, "text", 42) + b;\n';
+    const source = [
+        "Import library;",
+        "Macro Visible(obj)",
+        line.repeat(1200),
+        "End;"
+    ].join("\n");
+    const lineStarts = [0];
+    for (let position = 0; position < source.length; position++) {
+        if (source[position] === "\n") lineStarts.push(position + 1);
+    }
+    const document = {
+        uri,
+        languageId: "rsl",
+        version: 1,
+        lineCount: lineStarts.length,
+        getText: () => source,
+        positionAt(offset) {
+            const bounded = Math.max(0, Math.min(offset, source.length));
+            let line = 0;
+            while (
+                line + 1 < lineStarts.length &&
+                lineStarts[line + 1] <= bounded
+            ) line++;
+            return { line, character: bounded - lineStarts[line] };
+        },
+        offsetAt: () => 0
+    };
+    const documents = {
+        get: requested => requested === uri ? document : undefined,
+        all: () => [document]
+    };
+    const index = new WorkspaceIndex();
+    const analysis = new DocumentAnalysisService(
+        documents,
+        index,
+        { getAvailable: () => defaults },
+        {
+            log: () => undefined,
+            invalidateProviderCaches: () => undefined,
+            onParsed: () => undefined,
+            onImports: () => undefined,
+            initialParseDelayMs: 0,
+            inactiveParseDelayMs: 0
+        }
+    );
+
+    try {
+        analysis.setActiveDocument(uri);
+        assert.strictEqual(
+            analysis.isFastReady(document),
+            false,
+            "До открытия документа не готова ни одна фаза"
+        );
+
+        analysis.open(document);
+
+        assert.strictEqual(
+            analysis.isFastReady(document),
+            true,
+            "Fast Snapshot обязан быть готов синхронно в open()"
+        );
+        assert.strictEqual(
+            analysis.isLocalReady(document),
+            false,
+            "Полная модель не может быть готова до планового parse: иначе " +
+                "Structure ждала бы полного разбора"
+        );
+
+        const snapshot = analysis.getFastSnapshot(document);
+        const first = getFastDocumentDeclarations(snapshot);
+        assert.ok(
+            first.declarations.some(item => item.name === "Visible"),
+            "Объявления Fast Snapshot должны содержать Macro текущего файла"
+        );
+        assert.deepStrictEqual(
+            first.imports.map(value => value.toLowerCase()),
+            ["library"],
+            "Список Import должен быть доступен до полного parse"
+        );
+        assert.strictEqual(
+            getFastDocumentDeclarations(snapshot),
+            first,
+            "Повторный запрос объявлений обязан отдавать тот же результат, " +
+                "а не сканировать токены заново"
+        );
+
+        await waitFor(() => analysis.isLocalReady(document), 5000);
+        assert.strictEqual(
+            analysis.isFastReady(document),
+            true,
+            "Готовность полной модели не должна сбрасывать первую фазу"
+        );
+        assert.ok(
+            index.getCurrentModule(uri, document.version)?.symbolTree
+                .find("Visible"),
+            "Полная модель обязана содержать тот же символ точнее"
+        );
+    } finally {
+        analysis.close(uri);
+    }
+}
+
+/*
+ * Подсветка и навигация при постепенно загружающемся Import-графе.
+ *
+ * Открытый файл не меняется, пока индексируются его зависимости, поэтому по
+ * одной версии документа отличить "внешний символ ещё неизвестен" от "уже
+ * известен" нельзя. Проверяется, что:
+ *   - токены не остаются закэшированными после загрузки внешнего модуля;
+ *   - сервер просит клиента перезапросить их, объединяя всплеск загрузок;
+ *   - Definition для неизвестного символа запускает приоритетную догрузку и
+ *     отвечает уже по ней.
+ */
+async function testImportContextDrivesHighlightAndNavigation() {
+    const uri = "file:///import-context.mac";
+    const source = [
+        "Import library;",
+        "Macro Caller()",
+        "  SharedHandler(1);",
+        "End;"
+    ].join("\n");
+    const lineStarts = [0];
+    for (let position = 0; position < source.length; position++) {
+        if (source[position] === "\n") lineStarts.push(position + 1);
+    }
+    const document = {
+        uri,
+        languageId: "rsl",
+        version: 1,
+        lineCount: lineStarts.length,
+        getText: () => source,
+        positionAt(offset) {
+            const bounded = Math.max(0, Math.min(offset, source.length));
+            let line = 0;
+            while (
+                line + 1 < lineStarts.length &&
+                lineStarts[line + 1] <= bounded
+            ) line++;
+            return { line, character: bounded - lineStarts[line] };
+        },
+        offsetAt(position) {
+            const line = Math.max(
+                0,
+                Math.min(position.line, lineStarts.length - 1)
+            );
+            return Math.min(
+                source.length,
+                lineStarts[line] + Math.max(0, position.character)
+            );
+        }
+    };
+
+    const index = new WorkspaceIndex();
+    index.registerWorkspaceFiles([uri, "file:///library.mac"]);
+    index.updateOpenModule(uri, source, 1);
+
+    const handlers = {};
+    const register = name => callback => { handlers[name] = callback; };
+    let refreshCount = 0;
+    const connection = {
+        onCompletion: register("completion"),
+        onCompletionResolve: register("completionResolve"),
+        onSignatureHelp: register("signatureHelp"),
+        onHover: register("hover"),
+        onDocumentHighlight: register("documentHighlight"),
+        onDefinition: register("definition"),
+        onReferences: register("references"),
+        onWorkspaceSymbol: register("workspaceSymbol"),
+        onCodeAction: register("codeAction"),
+        onSelectionRanges: register("selectionRanges"),
+        onExecuteCommand: register("executeCommand"),
+        onRequest: (method, callback) => { handlers[method] = callback; },
+        onDocumentSymbol: register("documentSymbol"),
+        onFoldingRanges: register("foldingRanges"),
+        onDocumentFormatting: register("documentFormatting"),
+        onDocumentRangeFormatting: register("documentRangeFormatting"),
+        sendRequest: async () => undefined,
+        languages: {
+            callHierarchy: {
+                onPrepare: register("callHierarchyPrepare"),
+                onIncomingCalls: register("callHierarchyIncoming"),
+                onOutgoingCalls: register("callHierarchyOutgoing")
+            },
+            semanticTokens: {
+                on: register("semanticTokens"),
+                onDelta: register("semanticTokensDelta"),
+                onRange: register("semanticTokensRange"),
+                refresh: () => {
+                    refreshCount++;
+                    return Promise.resolve();
+                }
+            }
+        }
+    };
+
+    const loadRequests = [];
+    const registry = new RslLanguageFeatureRegistry({
+        connection,
+        documents: {
+            get: requested => requested === uri ? document : undefined,
+            all: () => [document]
+        },
+        index,
+        resolver: new RslScopeResolver(index),
+        /* Провайдер отвечает за Import-файлы, строковые ссылки и Location. */
+        definitionProvider: {
+            findImportDefinition: async () => null,
+            findDynamicDefinition: async () => null,
+            createObjectLocationByUri: (targetUri, symbol) => ({
+                uri: targetUri,
+                range: {
+                    start: { line: 0, character: 0 },
+                    end: { line: 0, character: symbol.name.length }
+                }
+            })
+        },
+        getFastDocumentSnapshot: () => createFastDocumentSnapshot(document),
+        ensureDocumentParsed: async () => index.getModule(uri)?.symbolTree,
+        /* Адресная догрузка Import, как её делает WorkspaceModuleLoader. */
+        ensureImportedSymbol: async (fromUri, symbolName) => {
+            loadRequests.push(symbolName);
+            index.updateExternalModule(
+                "file:///library.mac",
+                "Macro SharedHandler(value)\nEnd;",
+                1
+            );
+            return index.findImportedSymbols(fromUri, symbolName).length > 0;
+        },
+        getSettings: () => defaults,
+        supportsRefresh: () => true,
+        log: () => undefined
+    });
+    registry.register();
+
+    try {
+        const cancellation = { isCancellationRequested: false };
+        const first = await handlers.semanticTokens(
+            { textDocument: { uri } },
+            cancellation
+        );
+        const firstResultId = first.resultId;
+        assert.ok(first.data.length > 0, "Токены должны строиться");
+
+        const cachedAgain = await handlers.semanticTokens(
+            { textDocument: { uri } },
+            cancellation
+        );
+        assert.strictEqual(
+            cachedAgain.resultId,
+            firstResultId,
+            "Без изменений кэш обязан отдавать тот же result"
+        );
+
+        /* Ctrl+Click по неизвестному символу: догрузка Import по запросу. */
+        const definition = await handlers.definition(
+            {
+                textDocument: { uri },
+                position: document.positionAt(source.indexOf("SharedHandler"))
+            },
+            cancellation
+        );
+
+        assert.deepStrictEqual(
+            loadRequests,
+            ["SharedHandler"],
+            "Неизвестный символ обязан запускать приоритетную догрузку Import"
+        );
+        assert.ok(
+            definition,
+            "После догрузки переход обязан отвечать, а не возвращать null"
+        );
+        assert.strictEqual(definition.uri, "file:///library.mac");
+
+        /* Внешний модуль загружен — Import-замыкание открытого файла другое. */
+        registry.notifyImportContextChanged([uri]);
+        registry.notifyImportContextChanged([uri]);
+        registry.notifyImportContextChanged([uri]);
+        assert.strictEqual(
+            refreshCount,
+            0,
+            "Просьба перезапросить токены обязана быть отложенной"
+        );
+        await new Promise(resolve => setTimeout(resolve, 400));
+        assert.strictEqual(
+            refreshCount,
+            1,
+            "Всплеск загрузок Import-графа обязан давать одну просьбу " +
+                `перезапросить токены, получено ${refreshCount}`
+        );
+
+        const afterImport = await handlers.semanticTokens(
+            { textDocument: { uri } },
+            cancellation
+        );
+        assert.notStrictEqual(
+            afterImport.resultId,
+            firstResultId,
+            "После загрузки внешнего модуля токены обязаны быть пересчитаны: " +
+                "иначе известный внешний символ остался бы раскрашен как " +
+                "неизвестный до следующей правки файла"
+        );
+    } finally {
+        registry.dispose();
+    }
+}
+
 function testCompletionPayloadIsBoundedAndResolvedLazily() {
     const transport = new CompletionTransport({
         maxItems: 3,
@@ -757,6 +1076,12 @@ async function waitFor(predicate, timeoutMs) {
 
     await testInteractiveFallbackDoesNotMixVersions();
     console.log("[OK] интерактивный fallback не смешивает версии документа");
+
+    await testFastPhasePrecedesLocalModel();
+    console.log("[OK] быстрая фаза опережает точную локальную модель");
+
+    await testImportContextDrivesHighlightAndNavigation();
+    console.log("[OK] подсветка и переход учитывают догруженный Import");
 })().catch(error => {
     console.error(error);
     process.exitCode = 1;

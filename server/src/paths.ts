@@ -22,3 +22,14 @@ import * as path from "path";
 export function resolveExtensionFile(relativePath: string): string {
     return path.resolve(__dirname, "..", "..", relativePath);
 }
+
+/**
+ * Файл рядом с выходом сервера — например скрипт worker'а.
+ *
+ * Bundle обязан складывать worker по тому же относительному пути, что и tsc
+ * (build/bundle.js: server/out/indexing/compactModuleWorker.js), иначе здесь
+ * пришлось бы угадывать раскладку проверками существования файла.
+ */
+export function resolveServerOutFile(relativePath: string): string {
+    return path.join(__dirname, relativePath);
+}

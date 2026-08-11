@@ -27,18 +27,15 @@ import { RSL_SEMANTIC_TOKENS_LEGEND } from "./semanticTokens";
 import { RslSettingsService } from "./services/settingsService";
 import { IIndexedModule, WorkspaceIndex } from "./workspaceIndex";
 import { WorkspaceModuleLoader } from "./indexing/workspaceModuleLoader";
+import {
+    CompactModuleWorkerService
+} from "./indexing/compactModuleWorkerService";
 import { WorkspaceFileDiscoveryService } from "./indexing/workspaceFileDiscoveryService";
 import { ReferenceIndex } from "./analysis/referenceIndex";
 import {
     PerformanceLogger,
     type IPerformanceFields
 } from "./performanceLogger";
-
-/*
- * Сколько документов одновременно держится в разборе. Ограничивает фоновые
- * вкладки; активный документ идёт первым (см. processValidationQueue).
- */
-const MAX_CONCURRENT_VALIDATIONS = 2;
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments<TextDocument>(TextDocument);
@@ -59,6 +56,12 @@ const referenceIndex = new ReferenceIndex({ log: logMessage });
 const performanceLogger = new PerformanceLogger(message => logMessage(message));
 
 let hasWorkspaceFolderCapability = false;
+/*
+ * Клиент умеет перезапрашивать semantic tokens по просьбе сервера. Без этого
+ * подсветка обновится только со следующей правкой документа, поэтому просить
+ * бессмысленно.
+ */
+let hasSemanticTokensRefreshCapability = false;
 let workFolderOpened = false;
 let clientReady = false;
 let activeDocumentUri: string | undefined;
@@ -154,11 +157,19 @@ function invalidateProviderCaches(uri: string): void {
 
 let diagnosticsCoordinator: DiagnosticsCoordinator;
 
+/*
+ * Внешние файлы читает и сканирует отдельный поток: это единственная работа,
+ * вынос которой в worker подтверждён замерами (компактный ответ вместо AST,
+ * npm run bench --scenario=external). Поток создаётся лениво первым запросом.
+ */
+const compactModules = new CompactModuleWorkerService({ log: logMessage });
+
 const moduleLoader = new WorkspaceModuleLoader(
     workspaceIndex,
     {
         log: logMessage,
         performance: performanceLogger,
+        compactModules,
         onModuleLoaded: module => {
             refreshOpenDependents(module.uri);
         },
@@ -184,8 +195,15 @@ const documentAnalysis = new DocumentAnalysisService(
     {
         log: logMessage,
         performance: performanceLogger,
-        maxConcurrentValidations: MAX_CONCURRENT_VALIDATIONS,
         invalidateProviderCaches,
+        /*
+         * Разбор своего файла запускает обе волны: локальные ошибки сразу,
+         * межфайловые — отложенно, но обязательно для той же версии.
+         * Загрузка чужого модуля (onModuleLoaded выше) запускает только
+         * вторую волну зависимых файлов: их собственный текст не менялся,
+         * пересчитывать локальные ошибки было бы лишней работой и лишним
+         * поводом для мерцания Problems.
+         */
         onParsed: (module, wasKnown) => {
             diagnosticsCoordinator.scheduleLocal(module.uri, 0);
             diagnosticsCoordinator.scheduleWorkspace(module.uri);
@@ -394,6 +412,7 @@ languageFeatures = new RslLanguageFeatureRegistry({
     findAutoImportModules: (symbolName, options) =>
         moduleLoader.findModulesExportingSymbol(symbolName, 10, options),
     getSettings: uri => settingsService.getAvailable(uri),
+    supportsRefresh: () => hasSemanticTokensRefreshCapability,
     noteInteractiveActivity: () => {
         moduleLoader.noteInteractiveActivity();
         workspaceDiscovery.noteInteractiveActivity();
@@ -430,6 +449,11 @@ connection.onInitialize((params: InitializeParams) => {
     hasWorkspaceFolderCapability = !!(
         capabilities.workspace &&
         capabilities.workspace.workspaceFolders
+    );
+    hasSemanticTokensRefreshCapability = !!(
+        capabilities.workspace &&
+        capabilities.workspace.semanticTokens &&
+        capabilities.workspace.semanticTokens.refreshSupport
     );
     settingsService.updateFromConfiguration({
         rslPlus: initializationOptions?.initialSettings
@@ -580,13 +604,30 @@ async function handleWatchedFileChange(
     );
 }
 
+/**
+ * Загрузился модуль, от которого зависят открытые файлы.
+ *
+ * Их собственные версии не изменились, но изменилось Import-замыкание:
+ * пересчитываются межфайловые Problems, а подсветка получает шанс
+ * перекраситься — известный внешний символ выглядит иначе, чем неизвестный.
+ */
 function refreshOpenDependents(uri: string): void {
-    workspaceIndex.getDependents(uri).forEach(dependentUri => {
-        if (documents.get(dependentUri)) {
-            diagnosticsCoordinator.scheduleWorkspace(dependentUri, 650);
-        }
-    });
+    const openDependents = workspaceIndex.getDependents(uri)
+        .filter(dependentUri => !!documents.get(dependentUri));
+
+    openDependents.forEach(dependentUri =>
+        diagnosticsCoordinator.scheduleWorkspace(dependentUri, 650)
+    );
+
+    if (openDependents.length > 0) {
+        languageFeatures?.notifyImportContextChanged(openDependents);
+    }
 }
+
+connection.onShutdown(() => {
+    languageFeatures?.dispose();
+    return compactModules.dispose();
+});
 
 documents.listen(connection);
 connection.listen();

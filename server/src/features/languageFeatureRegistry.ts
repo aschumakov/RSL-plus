@@ -96,6 +96,8 @@ export interface IRslLanguageFeatureEnvironment {
         }
     ): Promise<import("../workspaceIndex").IIndexedModule[]>;
     getSettings(uri: string): IRslSettings;
+    /** Клиент умеет перезапрашивать semantic tokens по просьбе сервера. */
+    supportsRefresh?(): boolean;
     noteInteractiveActivity?(): void;
     log(message: string): void;
     performance?: PerformanceLogger;
@@ -709,6 +711,18 @@ export class RslLanguageFeatureRegistry {
     forget(uri: string): void {
         this.presentationFeatures.forget(uri);
         this.semanticTokensFeatures.forget(uri);
+    }
+
+    /**
+     * Загрузился внешний модуль, от которого зависят перечисленные открытые
+     * файлы: их подсветка могла измениться, хотя сами документы не менялись.
+     */
+    notifyImportContextChanged(uris: readonly string[]): void {
+        this.semanticTokensFeatures.notifyImportContextChanged(uris);
+    }
+
+    dispose(): void {
+        this.semanticTokensFeatures.dispose();
     }
 
     /**

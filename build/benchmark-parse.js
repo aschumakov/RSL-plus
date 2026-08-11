@@ -1,37 +1,41 @@
 "use strict";
 
 /*
- * Воспроизводимый замер основного пути разбора: npm run bench
+ * Воспроизводимый замер основного пути разбора.
+ *
+ *   npm run bench                — таблицы в консоль
+ *   npm run bench -- --json      — machine-readable JSON на stdout
+ *   npm run bench -- --scenario=parse|queue|external   — один сценарий
  *
  * Существует, чтобы решения о разборе опирались на числа, а не на память о
- * прошлых замерах. Меряет то, что реально ощущает пользователь:
+ * прошлых замерах. Меряет то, что ощущает пользователь:
  *
- *   1) стоимость одного полного разбора (lex + parse + модель) по размерам и
- *      формам исходника;
- *   2) блокировку event loop: сколько времени таймер не получает управления,
- *      пока идёт очередь валидаций DocumentAnalysisService. Это та величина,
- *      из-за которой ограничен размер порции очереди
- *      (MAX_VALIDATIONS_PER_TICK) и из-за которой был убран вынос parse в
- *      worker_threads: копия AST распаковывалась в основном потоке и стоила
- *      дороже самого разбора.
+ *   parse    — стоимость одного полного разбора по размерам и формам файла;
+ *   queue    — максимальную блокировку event loop очередью валидаций: именно
+ *              столько ждут таймеры, LSP IPC и все интерактивные ответы;
+ *   external — цену индексации внешнего файла на месте против выноса в worker
+ *              с компактным ответом (declarations + imports, без AST).
  *
- * Замер намеренно не входит в npm test: он занимает десятки секунд и его
- * числа зависят от машины.
+ * Каждый сценарий выполняется в ОТДЕЛЬНОМ процессе: разборы больших файлов
+ * оставляют после себя десятки мегабайт мусора, и GC от предыдущего сценария
+ * иначе попадает в замер следующего (наблюдался разброс до 2 раз на одном и
+ * том же сценарии). Отдельный процесс также даёт каждому сценарию свежий JIT.
+ *
+ * Замер намеренно не входит в npm test: десятки секунд и машинозависимые числа.
  */
 
 const path = require("path");
+const fs = require("fs");
+const os = require("os");
+const { fork } = require("child_process");
 const { performance } = require("perf_hooks");
+const { Worker } = require("worker_threads");
 
 const OUT = path.join(__dirname, "..", "server", "out");
-const { lexRsl } = require(OUT + "/lexer");
-const { parseRslSyntax } = require(OUT + "/syntaxParser");
-const { createOpenModuleModel } = require(OUT + "/moduleModel");
-const { WorkspaceIndex } = require(OUT + "/workspaceIndex");
-const {
-    DocumentAnalysisService
-} = require(OUT + "/services/documentAnalysisService");
-
 const SIZES_KB = [150, 300, 550, 1100];
+const QUEUE_SIZES_KB = [150, 300, 550, 1100];
+const QUEUE_FILE_COUNTS = [1, 2];
+const EXTERNAL_SIZES_KB = [150, 300, 550];
 
 /* Формы исходника: разная плотность токенов на байт при том же размере. */
 const SHAPES = {
@@ -145,24 +149,24 @@ class EventLoopLag {
     report() {
         const sorted = this.gaps.slice().sort((left, right) => left - right);
         return {
-            max: sorted[sorted.length - 1] || 0,
-            p95: sorted[Math.floor(sorted.length * 0.95)] || 0
+            maxMs: sorted[sorted.length - 1] || 0,
+            p95Ms: sorted[Math.floor(sorted.length * 0.95)] || 0
         };
     }
 }
 
-function measureSingleParse() {
-    console.log("=== стоимость одного разбора (медиана из 5) ===");
-    console.log(
-        "форма".padEnd(18) + "размер".padStart(8) + "токенов".padStart(10) +
-        "lex".padStart(9) + "parse".padStart(9) + "модель".padStart(9)
-    );
+/* --- сценарий parse: стоимость одного разбора ------------------------- */
 
-    for (const [shapeName, build] of Object.entries(SHAPES)) {
+function runParseScenario() {
+    const { lexRsl } = require(OUT + "/lexer");
+    const { parseRslSyntax } = require(OUT + "/syntaxParser");
+    const { createOpenModuleModel } = require(OUT + "/moduleModel");
+    const rows = [];
+
+    for (const [shape, build] of Object.entries(SHAPES)) {
         for (const kb of SIZES_KB) {
             const source = build(kb * 1024);
             const lex = lexRsl(source);
-            /* прогрев */
             createOpenModuleModel(
                 source,
                 parseRslSyntax(source, lex, { buildExpressionTree: false })
@@ -187,35 +191,37 @@ function measureSingleParse() {
                 modelTimes.push(performance.now() - started);
             }
 
-            console.log(
-                shapeName.padEnd(18) +
-                `${kb}КБ`.padStart(8) +
-                String(lex.tokens.length).padStart(10) +
-                `${median(lexTimes).toFixed(1)}мс`.padStart(9) +
-                `${median(parseTimes).toFixed(1)}мс`.padStart(9) +
-                `${median(modelTimes).toFixed(1)}мс`.padStart(9)
-            );
+            rows.push({
+                shape,
+                sizeKb: kb,
+                tokens: lex.tokens.length,
+                lexMs: +median(lexTimes).toFixed(1),
+                parseMs: +median(parseTimes).toFixed(1),
+                modelMs: +median(modelTimes).toFixed(1)
+            });
         }
     }
+
+    return rows;
 }
 
-async function measureQueueLag() {
-    console.log("\n=== блокировка event loop очередью валидаций ===");
-    console.log(
-        "файлов".padStart(7) + "размер".padStart(9) +
-        "лаг max".padStart(10) + "лаг p95".padStart(10) +
-        "всего".padStart(9)
-    );
+/* --- сценарий queue: блокировка event loop очередью ------------------- */
 
+async function runQueueScenario() {
+    const { WorkspaceIndex } = require(OUT + "/workspaceIndex");
+    const {
+        DocumentAnalysisService
+    } = require(OUT + "/services/documentAnalysisService");
     const build = SHAPES["макросы и блоки"];
     const lag = new EventLoopLag();
+    const rows = [];
 
-    for (const kb of [150, 300]) {
-        for (const count of [1, 2, 4, 8]) {
+    for (const kb of QUEUE_SIZES_KB) {
+        for (const files of QUEUE_FILE_COUNTS) {
             const source = build(kb * 1024);
             const documentsByUri = new Map();
-            for (let index = 0; index < count; index++) {
-                const uri = `file:///bench-${kb}-${count}-${index}.mac`;
+            for (let index = 0; index < files; index++) {
+                const uri = `file:///bench-${kb}-${files}-${index}.mac`;
                 documentsByUri.set(uri, createDocument(uri, source));
             }
 
@@ -237,13 +243,11 @@ async function measureQueueLag() {
                     onParsed: () => undefined,
                     onImports: () => undefined,
                     initialParseDelayMs: 0,
-                    inactiveParseDelayMs: 0,
-                    maxConcurrentValidations: 2
+                    inactiveParseDelayMs: 0
                 }
             );
 
-            /* Прогрев JIT на отдельном документе того же размера. */
-            const warmUri = `file:///bench-warm-${kb}-${count}.mac`;
+            const warmUri = `file:///bench-warm-${kb}-${files}.mac`;
             documentsByUri.set(warmUri, createDocument(warmUri, source));
             await service.ensureParsed(documentsByUri.get(warmUri));
 
@@ -255,30 +259,349 @@ async function measureQueueLag() {
                     .filter(uri => uri !== warmUri)
                     .map(uri => service.ensureParsed(documentsByUri.get(uri)))
             );
-            const total = performance.now() - started;
+            const totalMs = performance.now() - started;
             await new Promise(resolve => setTimeout(resolve, 50));
             const report = lag.report();
 
-            console.log(
-                String(count).padStart(7) +
-                `${kb}КБ`.padStart(9) +
-                `${report.max.toFixed(1)}мс`.padStart(10) +
-                `${report.p95.toFixed(1)}мс`.padStart(10) +
-                `${total.toFixed(0)}мс`.padStart(9)
-            );
+            rows.push({
+                sizeKb: kb,
+                files,
+                lagMaxMs: +report.maxMs.toFixed(1),
+                lagP95Ms: +report.p95Ms.toFixed(1),
+                totalMs: +totalMs.toFixed(0)
+            });
         }
     }
 
     lag.stop();
+    return rows;
+}
+
+/* --- сценарий external: индексация внешнего файла --------------------- */
+
+const EXTERNAL_WORKER_SOURCE = `
+const { parentPort } = require("worker_threads");
+const fs = require("fs");
+const {
+    extractCompactDeclarations
+} = require(${JSON.stringify(path.join(OUT, "analysis", "declarationExtractor"))});
+
+parentPort.on("message", request => {
+    const source = fs.readFileSync(request.filePath, "utf8");
+    const stat = fs.statSync(request.filePath);
+    /* Состав ровно как у внешнего модуля: без параметров Macro. */
+    const snapshot = extractCompactDeclarations(source, {
+        includeCallableParameters: false
+    });
+    parentPort.postMessage({
+        id: request.id,
+        postedAt: Date.now(),
+        mtimeMs: stat.mtimeMs,
+        sourceLength: source.length,
+        declarations: snapshot.declarations,
+        imports: snapshot.imports
+    });
+});
+`;
+
+function countDescriptors(list) {
+    let total = 0;
+    for (const item of list) {
+        total += 1 + countDescriptors(item.children || []);
+    }
+    return total;
+}
+
+async function runExternalScenario() {
+    const {
+        extractCompactDeclarations
+    } = require(OUT + "/analysis/declarationExtractor");
+    const build = SHAPES["макросы и блоки"];
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "rsl-bench-"));
+    const workerPath = path.join(directory, "external-worker.js");
+    fs.writeFileSync(workerPath, EXTERNAL_WORKER_SOURCE);
+
+    const worker = new Worker(workerPath);
+    const pending = new Map();
+    worker.on("message", response => {
+        const receivedAt = Date.now();
+        const resolve = pending.get(response.id);
+        pending.delete(response.id);
+        resolve({ response, receivedAt });
+    });
+    const ask = (id, filePath) => new Promise(resolve => {
+        pending.set(id, resolve);
+        worker.postMessage({ id, filePath });
+    });
+
+    const warmPath = path.join(directory, "warm.mac");
+    fs.writeFileSync(warmPath, build(20 * 1024));
+    await ask(0, warmPath);
+
+    const rows = [];
+    let id = 1;
+    for (const kb of EXTERNAL_SIZES_KB) {
+        const filePath = path.join(directory, `external-${kb}.mac`);
+        fs.writeFileSync(filePath, build(kb * 1024));
+
+        const externalOptions = { includeCallableParameters: false };
+        extractCompactDeclarations(
+            fs.readFileSync(filePath, "utf8"),
+            externalOptions
+        );
+        const localTimes = [];
+        for (let run = 0; run < 5; run++) {
+            const started = performance.now();
+            extractCompactDeclarations(
+                fs.readFileSync(filePath, "utf8"),
+                externalOptions
+            );
+            localTimes.push(performance.now() - started);
+        }
+
+        const { response, receivedAt } = await ask(id++, filePath);
+        const payloadKb = Math.round(Buffer.byteLength(JSON.stringify({
+            declarations: response.declarations,
+            imports: response.imports
+        })) / 1024);
+
+        rows.push({
+            sizeKb: kb,
+            descriptors: countDescriptors(response.declarations),
+            localMs: +median(localTimes).toFixed(1),
+            transferMs: receivedAt - response.postedAt,
+            payloadKb
+        });
+    }
+
+    await worker.terminate();
+    fs.rmSync(directory, { recursive: true, force: true });
+    return rows;
+}
+
+/* --- сценарий relex: точечный пересчёт токенов ------------------------ */
+
+/*
+ * Цена точечного relex зависит не от размера правки, а от числа токенов
+ * ПОСЛЕ неё: им всем пересчитываются позиции. Этот замер и задаёт отсечку
+ * MAX_SHIFTED_TOKEN_FRACTION в incrementalLex.ts — без неё правка в начале
+ * большого файла обходится дороже полного лексирования.
+ */
+function runRelexScenario() {
+    const { lexRsl } = require(OUT + "/lexer");
+    const {
+        tryIncrementalRelex
+    } = require(OUT + "/services/incrementalLex");
+    const build = SHAPES["макросы и блоки"];
+    const rows = [];
+
+    for (const kb of [300, 550, 1100]) {
+        const source = build(kb * 1024);
+        const lex = lexRsl(source);
+
+        lexRsl(source);
+        const fullTimes = [];
+        for (let run = 0; run < 5; run++) {
+            const started = performance.now();
+            lexRsl(source);
+            fullTimes.push(performance.now() - started);
+        }
+        const fullMs = median(fullTimes);
+
+        for (const fraction of [0, 0.25, 0.5, 0.75, 0.95]) {
+            const anchor = Math.floor(source.length * fraction);
+            const found = source.indexOf("value", anchor);
+            if (found < 0) continue;
+            const editAt = found + 3;
+            const next = source.slice(0, editAt) + "X" + source.slice(editAt);
+            const shiftedTokens = lex.tokens.filter(
+                token => token.start >= editAt
+            ).length;
+
+            tryIncrementalRelex(source, lex, next);
+            const times = [];
+            let accepted = false;
+            for (let run = 0; run < 5; run++) {
+                const started = performance.now();
+                const result = tryIncrementalRelex(source, lex, next);
+                times.push(performance.now() - started);
+                accepted = !!result;
+            }
+
+            rows.push({
+                sizeKb: kb,
+                editAtPercent: Math.round(fraction * 100),
+                shiftedTokens,
+                totalTokens: lex.tokens.length,
+                fullLexMs: +fullMs.toFixed(1),
+                relexMs: +median(times).toFixed(1),
+                accepted
+            });
+        }
+    }
+
+    return rows;
+}
+
+/* --- запуск ---------------------------------------------------------- */
+
+const SCENARIOS = {
+    parse: runParseScenario,
+    queue: runQueueScenario,
+    external: runExternalScenario,
+    relex: runRelexScenario
+};
+
+function printParse(rows) {
+    console.log("=== стоимость одного разбора (медиана из 5) ===");
+    console.log(
+        "форма".padEnd(18) + "размер".padStart(8) + "токенов".padStart(10) +
+        "lex".padStart(9) + "parse".padStart(9) + "модель".padStart(9)
+    );
+    for (const row of rows) {
+        console.log(
+            row.shape.padEnd(18) +
+            `${row.sizeKb}КБ`.padStart(8) +
+            String(row.tokens).padStart(10) +
+            `${row.lexMs}мс`.padStart(9) +
+            `${row.parseMs}мс`.padStart(9) +
+            `${row.modelMs}мс`.padStart(9)
+        );
+    }
+}
+
+function printQueue(rows) {
+    console.log("\n=== блокировка event loop очередью валидаций ===");
+    console.log(
+        "файлов".padStart(7) + "размер".padStart(9) + "лаг max".padStart(10) +
+        "лаг p95".padStart(10) + "всего".padStart(9)
+    );
+    for (const row of rows) {
+        console.log(
+            String(row.files).padStart(7) +
+            `${row.sizeKb}КБ`.padStart(9) +
+            `${row.lagMaxMs}мс`.padStart(10) +
+            `${row.lagP95Ms}мс`.padStart(10) +
+            `${row.totalMs}мс`.padStart(9)
+        );
+    }
+    console.log(
+        "Лаг max — сколько подряд основной поток не отдавал управление."
+    );
+}
+
+function printExternal(rows) {
+    console.log("\n=== индексация внешнего файла: на месте против worker ===");
+    console.log(
+        "размер".padStart(8) + "дескрипторов".padStart(14) +
+        "на месте".padStart(11) + "передача".padStart(11) +
+        "ответ JSON".padStart(12)
+    );
+    for (const row of rows) {
+        console.log(
+            `${row.sizeKb}КБ`.padStart(8) +
+            String(row.descriptors).padStart(14) +
+            `${row.localMs}мс`.padStart(11) +
+            `${row.transferMs}мс`.padStart(11) +
+            `${row.payloadKb}КБ`.padStart(12)
+        );
+    }
+    console.log(
+        "Передача — сериализация в worker плюс распаковка в основном потоке;\n" +
+        "выигрыш от выноса есть только если она заметно меньше «на месте»."
+    );
+}
+
+function printRelex(rows) {
+    console.log("\n=== точечный relex против полного лексирования ===");
+    console.log(
+        "размер".padStart(8) + "правка".padStart(9) +
+        "сдвигается".padStart(12) + "полный lex".padStart(12) +
+        "relex".padStart(9) + "принят".padStart(8)
+    );
+    for (const row of rows) {
+        console.log(
+            `${row.sizeKb}КБ`.padStart(8) +
+            `${row.editAtPercent}%`.padStart(9) +
+            `${Math.round(row.shiftedTokens / row.totalTokens * 100)}%`
+                .padStart(12) +
+            `${row.fullLexMs}мс`.padStart(12) +
+            `${row.relexMs}мс`.padStart(9) +
+            (row.accepted ? "да" : "нет").padStart(8)
+        );
+    }
+    console.log(
+        "Отсечка (incrementalLex.ts) отклоняет правки, сдвигающие больше\n" +
+        "половины потока: там точечный путь дороже полного лексирования."
+    );
+}
+
+const PRINTERS = {
+    parse: printParse,
+    queue: printQueue,
+    external: printExternal,
+    relex: printRelex
+};
+
+async function runChild(name) {
+    const rows = await SCENARIOS[name]();
+    process.send({ scenario: name, rows });
+}
+
+function runScenarioInChildProcess(name) {
+    return new Promise((resolve, reject) => {
+        const child = fork(__filename, [`--child=${name}`], { stdio: "inherit" });
+        let result;
+        child.on("message", message => { result = message.rows; });
+        child.on("error", reject);
+        child.on("exit", code => {
+            if (code !== 0) {
+                reject(new Error(`Сценарий ${name} завершился с кодом ${code}`));
+                return;
+            }
+            resolve(result || []);
+        });
+    });
 }
 
 async function main() {
-    measureSingleParse();
-    await measureQueueLag();
-    console.log(
-        "\nЛаг max — сколько подряд основной поток не отдавал управление: " +
-        "именно столько ждут таймеры, LSP IPC и все интерактивные ответы."
-    );
+    const childArgument = process.argv.find(item => item.startsWith("--child="));
+    if (childArgument) {
+        await runChild(childArgument.slice("--child=".length));
+        return;
+    }
+
+    const asJson = process.argv.includes("--json");
+    const requested = process.argv
+        .find(item => item.startsWith("--scenario="));
+    const names = requested
+        ? requested.slice("--scenario=".length).split(",")
+        : Object.keys(SCENARIOS);
+
+    for (const name of names) {
+        if (!SCENARIOS[name]) {
+            throw new Error(`Неизвестный сценарий: ${name}`);
+        }
+    }
+
+    const results = {};
+    for (const name of names) {
+        results[name] = await runScenarioInChildProcess(name);
+    }
+
+    if (asJson) {
+        console.log(JSON.stringify({
+            node: process.version,
+            platform: `${process.platform} ${process.arch}`,
+            cpu: os.cpus()[0]?.model,
+            scenarios: results
+        }, null, 2));
+        return;
+    }
+
+    for (const name of names) {
+        PRINTERS[name](results[name]);
+    }
 }
 
 main().catch(error => {

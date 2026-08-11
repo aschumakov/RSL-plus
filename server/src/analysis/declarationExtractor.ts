@@ -58,6 +58,18 @@ export interface ICompactDeclarationOptions {
     includePrivate?: boolean;
     /** Fast Snapshot передаёт уже готовый lexer result без второго прохода. */
     tokens?: readonly IRslToken[];
+    /**
+     * Включать параметры Macro как дочерние объявления. Нужно Outline, где
+     * параметры видны в дереве Structure, и не нужно внешним модулям.
+     *
+     * Для внешнего модуля это основной объём: параметры дают вчетверо больше
+     * дескрипторов, чем сами объявления, а прочитать их некому — Signature
+     * Help собирает подпись из parameterText, symbol index индексирует только
+     * верхний уровень, а разрешение members обходит только контейнеры
+     * (getObjectChildren фильтрует по isContainer). Параметры чужого Macro
+     * из другого файла и не видны.
+     */
+    includeCallableParameters?: boolean;
 }
 
 const BLOCK_START = new Set(["macro", "class", "if", "for", "while", "with"]);
@@ -192,7 +204,8 @@ export function extractCompactDeclarations(
                     nameInfo.index,
                     currentClass !== undefined,
                     privateModifier ? modifier as RslSymbolVisibility : "public",
-                    classHeader?.baseClassToken?.value
+                    classHeader?.baseClassToken?.value,
+                    options.includeCallableParameters !== false
                 )
                 : undefined;
 
@@ -273,7 +286,8 @@ function createCallableDescriptor(
     nameIndex: number,
     insideClass: boolean,
     visibility: RslSymbolVisibility,
-    baseClassName?: string
+    baseClassName: string | undefined,
+    includeParameters: boolean
 ): IRslDeclarationDescriptor {
     const parameterRange = findParameterRange(tokens, nameIndex);
     return {
@@ -299,7 +313,7 @@ function createCallableDescriptor(
         startCharacter: nameToken.character,
         endLine: nameToken.endLine,
         endCharacter: nameToken.endCharacter,
-        children: parameterRange && keyword === "macro"
+        children: parameterRange && keyword === "macro" && includeParameters
             ? scanParameters(tokens, parameterRange.startIndex, parameterRange.endIndex)
             : []
     };

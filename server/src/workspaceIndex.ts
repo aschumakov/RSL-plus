@@ -101,6 +101,14 @@ export class WorkspaceIndex {
         return this.replace(uri, model, version, true);
     }
 
+    /**
+     * Индексация внешнего модуля из исходного текста.
+     *
+     * Загрузчик workspace этим путём больше не пользуется: текст внешнего
+     * файла в основной поток не попадает, результат приходит компактными
+     * объявлениями (updateExternalModuleFromDeclarations). Метод оставлен для
+     * тестов и прямой индексации, где текст уже на руках.
+     */
     updateExternalModule(
         uri: string,
         source: string,

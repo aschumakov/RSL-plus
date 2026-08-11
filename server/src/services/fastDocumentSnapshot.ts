@@ -8,7 +8,8 @@ import {
 import { lexRsl, type IRslLexResult } from "../lexer";
 import {
     extractCompactDeclarations,
-    type IRslDeclarationDescriptor
+    type IRslDeclarationDescriptor,
+    type IRslDeclarationSnapshot
 } from "../analysis/declarationExtractor";
 import { tryIncrementalRelex } from "./incrementalLex";
 
@@ -17,10 +18,16 @@ export interface IFastDocumentSnapshot {
     uri: string;
     version: number;
     createdAtMs: number;
-    /** Ссылка на текст этой версии — используется только для incremental relex. */
+    /**
+     * Текст ровно этой версии. Все производные snapshot считаются от него, а
+     * не от document.getText(): документ к моменту обращения мог уйти вперёд,
+     * и тогда объявления считались бы по новому тексту, а токены — по старым.
+     */
     text: string;
     lex: IRslLexResult;
     foldingRanges?: IRslFoldingRange[];
+    /** Объявления и Import этой версии: один проход по токенам на версию. */
+    declarations?: IRslDeclarationSnapshot;
     symbols?: DocumentSymbol[];
     symbolsPreparedAtMs?: number;
 }
@@ -44,16 +51,35 @@ export function createFastDocumentSnapshot(
 }
 
 export function getFastFoldingRanges(
-    document: TextDocument,
     snapshot: IFastDocumentSnapshot
 ): IRslFoldingRange[] {
     if (!snapshot.foldingRanges) {
         snapshot.foldingRanges = GetFoldingRanges(
-            document.getText(),
+            snapshot.text,
             snapshot.lex
         );
     }
     return snapshot.foldingRanges;
+}
+
+/**
+ * Объявления и Import этой версии документа.
+ *
+ * Тот же declaration extractor, что и для compact-модулей workspace, но
+ * результат сохраняется в snapshot: Outline, Structure и всё остальное,
+ * чему нужны объявления до полного parse, обходятся одним проходом по
+ * токенам на версию вместо прохода на каждого потребителя.
+ */
+export function getFastDocumentDeclarations(
+    snapshot: IFastDocumentSnapshot
+): IRslDeclarationSnapshot {
+    if (!snapshot.declarations) {
+        snapshot.declarations = extractCompactDeclarations(snapshot.text, {
+            includePrivate: true,
+            tokens: snapshot.lex.tokens
+        });
+    }
+    return snapshot.declarations;
 }
 
 /** Outline использует тот же declaration extractor, что compact workspace. */
@@ -62,13 +88,9 @@ export function getFastDocumentSymbols(
     snapshot: IFastDocumentSnapshot
 ): DocumentSymbol[] {
     if (!snapshot.symbols) {
-        const declarations = extractCompactDeclarations(document.getText(), {
-            includePrivate: true,
-            tokens: snapshot.lex.tokens
-        });
-        snapshot.symbols = declarations.declarations.map(declaration =>
-            toDocumentSymbol(document, declaration)
-        );
+        snapshot.symbols = getFastDocumentDeclarations(snapshot)
+            .declarations
+            .map(declaration => toDocumentSymbol(document, declaration));
         snapshot.symbolsPreparedAtMs = Date.now();
     }
     return snapshot.symbols;

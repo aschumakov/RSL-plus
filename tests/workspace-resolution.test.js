@@ -233,6 +233,12 @@ function testFullAndCompactModelsShareDeclarationContract() {
     const full = createOpenModuleModel(source).symbolTree;
     const compact = createExternalModuleSummary(source).symbolTree;
 
+    /*
+     * Параметры Macro намеренно не сравниваются: внешний модуль их не хранит
+     * (см. includeCallableParameters). Подпись импортированного Macro
+     * собирается из parameterText, который здесь как раз сравнивается, а сами
+     * параметры чужого файла не видны и не разрешаются.
+     */
     const flattenPublic = root => {
         const result = [];
         const visit = symbol => {
@@ -246,7 +252,9 @@ function testFullAndCompactModelsShareDeclarationContract() {
                     parameterText: symbol.parameterText,
                     baseClassName: symbol.baseClassName
                 });
-                symbol.children.forEach(visit);
+                symbol.children
+                    .filter(child => child.isContainer || child.isProperty)
+                    .forEach(visit);
             }
         };
         root.children.forEach(visit);
@@ -255,6 +263,15 @@ function testFullAndCompactModelsShareDeclarationContract() {
 
     assert.deepStrictEqual(flattenPublic(compact), flattenPublic(full));
     assert.strictEqual(compact.find("Hidden"), undefined);
+    assert.deepStrictEqual(
+        compact.find("Load").children,
+        [],
+        "Внешний модуль не должен хранить параметры Macro"
+    );
+    assert.ok(
+        compact.find("Load").parameterText.includes("value"),
+        "Подпись импортированного Macro обязана остаться доступной"
+    );
 }
 
 function testWindowsUriCaseDoesNotCreateDuplicateModule() {
@@ -300,6 +317,111 @@ function testWindowsUriCaseDoesNotCreateDuplicateModule() {
     );
 }
 
+/*
+ * Компактный модуль появляется в индексе целиком: symbol index, граф Import и
+ * ключ Import-замыкания обновляются одним шагом.
+ *
+ * На этом ключе держится инвалидация кэша semantic tokens: версия открытого
+ * документа при загрузке его зависимости не меняется, и если ключ не сдвинется,
+ * подсветка останется устаревшей. Частичное обновление (например, символы без
+ * пересчёта замыкания) выглядело бы как работающее — до первого файла, чью
+ * подсветку никто не обновил.
+ */
+function testCompactModuleAppearsAtomically() {
+    const index = new WorkspaceIndex();
+    const mainUri = "file:///workspace/main.mac";
+    const libraryUri = "file:///workspace/library.mac";
+    index.registerWorkspaceFiles([mainUri, libraryUri]);
+    index.updateOpenModule(
+        mainUri,
+        "Import library;\nMacro Caller()\n  SharedHandler(1);\nEnd;",
+        1
+    );
+
+    const keyBefore = index.getImportClosureKey(mainUri);
+    assert.strictEqual(
+        index.findImportedSymbols(mainUri, "SharedHandler").length,
+        0,
+        "До загрузки зависимости внешнего символа быть не должно"
+    );
+    /*
+     * Ребро графа существует до загрузки: оно строится по именам Import,
+     * разрешённым через каталог workspace, а не по загруженным модулям.
+     * Именно поэтому загрузка обязана менять ключ замыкания — иначе
+     * "зависимость известна" и "зависимость загружена" стали бы
+     * неразличимы для кэшей.
+     */
+    assert.deepStrictEqual(
+        index.getDependents(libraryUri),
+        [mainUri],
+        "Зависимость по имени Import известна ещё до загрузки модуля"
+    );
+
+    const declarations = createExternalModuleSummary(
+        "Macro SharedHandler(value)\nEnd;"
+    );
+    index.updateExternalModuleFromDeclarations(
+        libraryUri,
+        32,
+        {
+            declarations: declarations.symbolTree.children.map(symbol => ({
+                kind: "macro",
+                name: symbol.name,
+                visibility: "public",
+                parameterText: symbol.parameterText,
+                returnType: "variant",
+                start: 0,
+                end: 1,
+                selectionStart: 0,
+                selectionEnd: 1,
+                startLine: 0,
+                startCharacter: 0,
+                endLine: 0,
+                endCharacter: 1,
+                children: []
+            })),
+            imports: []
+        },
+        1700000000000
+    );
+
+    assert.strictEqual(
+        index.findImportedSymbols(mainUri, "SharedHandler").length,
+        1,
+        "Символ обязан стать доступным сразу после появления модуля"
+    );
+    assert.deepStrictEqual(
+        index.getDependents(libraryUri),
+        [mainUri],
+        "Граф Import обязан остаться согласованным с symbol index"
+    );
+    assert.notStrictEqual(
+        index.getImportClosureKey(mainUri),
+        keyBefore,
+        "Ключ Import-замыкания обязан измениться: на нём держится " +
+            "инвалидация кэша semantic tokens"
+    );
+
+    /* Та же зависимость с новым mtime — снова другой ключ. */
+    const keyAfterFirst = index.getImportClosureKey(mainUri);
+    index.updateExternalModuleFromDeclarations(
+        libraryUri,
+        32,
+        { declarations: [], imports: [] },
+        1700000000001
+    );
+    assert.notStrictEqual(
+        index.getImportClosureKey(mainUri),
+        keyAfterFirst,
+        "Перезагрузка зависимости обязана сдвигать ключ замыкания"
+    );
+    assert.strictEqual(
+        index.findImportedSymbols(mainUri, "SharedHandler").length,
+        0,
+        "Старые символы зависимости не должны оставаться в индексе"
+    );
+}
+
 async function testWorkspaceLoaderUsesActiveImports() {
     const directory = await fs.promises.mkdtemp(
         path.join(os.tmpdir(), "rsl-loader-")
@@ -339,16 +461,26 @@ async function testWorkspaceLoaderUsesActiveImports() {
                     ? { kind: "resolved", value: uri }
                     : { kind: "missing" };
             },
-            updateExternalModule(uri, source, version) {
+            /*
+             * Загрузчик принимает результат только компактными объявлениями:
+             * исходный текст внешнего файла в основной поток больше не
+             * попадает (см. compactModuleProtocol.ts).
+             */
+            updateExternalModuleFromDeclarations(
+                uri,
+                sourceLength,
+                declarations,
+                version
+            ) {
                 const module = {
                     uri,
                     source: "",
-                    sourceLength: source.length,
+                    sourceLength,
                     object: {},
                     version,
                     isOpen: false,
                     kind: "external",
-                    imports: []
+                    imports: declarations.imports
                 };
                 modules.set(uri, module);
                 loaded.push(uri);
@@ -500,9 +632,14 @@ async function testActiveDocumentPreemptsQueuedParses() {
  * прогоне до 398 мс).
  *
  * Проверяется не задержка в миллисекундах (она зависит от машины), а сам
- * инвариант: между разборами управление возвращается в event loop. Тик
- * считается независимым таймером; если разборы идут пачкой, все они
- * попадают в один и тот же тик.
+ * инвариант: между разборами управление возвращается в event loop.
+ *
+ * Поколение считает самоперепланирующийся setImmediate: его callback
+ * выполняется ровно один раз за оборот event loop, поэтому номер поколения —
+ * это детерминированный счётчик оборотов, не зависящий ни от разрешения
+ * таймеров, ни от скорости машины (таймер в 1 мс мог бы не успеть стать
+ * "просроченным" на быстрой машине и дал бы ложное совпадение поколений).
+ * Разборы в одной цепочке microtask неизбежно получают одно поколение.
  *
  * Второй инвариант — активный документ разбирается первым, даже если его
  * запросили последним.
@@ -523,9 +660,16 @@ async function testValidationsYieldEventLoopBetweenFiles() {
     );
 
     const parsed = [];
-    let tick = 0;
-    /* Независимый таймер: срабатывает только когда event loop свободен. */
-    const ticker = setInterval(() => { tick++; }, 1);
+    let generation = 0;
+    let counting = true;
+    const countGenerations = () => {
+        if (!counting) {
+            return;
+        }
+        generation++;
+        setImmediate(countGenerations);
+    };
+    setImmediate(countGenerations);
 
     const service = new DocumentAnalysisService(
         { get: uri => documentsByUri.get(uri) },
@@ -542,11 +686,10 @@ async function testValidationsYieldEventLoopBetweenFiles() {
         {
             log: () => undefined,
             invalidateProviderCaches: () => undefined,
-            onParsed: module => parsed.push([module.uri, tick]),
+            onParsed: module => parsed.push([module.uri, generation]),
             onImports: () => undefined,
             initialParseDelayMs: 0,
-            inactiveParseDelayMs: 0,
-            maxConcurrentValidations: 2
+            inactiveParseDelayMs: 0
         }
     );
 
@@ -570,22 +713,161 @@ async function testValidationsYieldEventLoopBetweenFiles() {
                 `запросили последним; порядок: ${parsed.map(([u]) => u)}`
         );
 
-        const byTick = new Map();
-        for (const [, parsedTick] of parsed) {
-            byTick.set(parsedTick, (byTick.get(parsedTick) || 0) + 1);
+        const byGeneration = new Map();
+        for (const [, parsedGeneration] of parsed) {
+            byGeneration.set(
+                parsedGeneration,
+                (byGeneration.get(parsedGeneration) || 0) + 1
+            );
         }
-        const crowdedTick = Array.from(byTick.entries())
+        const crowded = Array.from(byGeneration.entries())
             .find(([, count]) => count > 1);
 
         assert.ok(
-            !crowdedTick,
-            "Разборы должны быть разнесены по тикам event loop: в одном тике " +
-                `их ${crowdedTick && crowdedTick[1]}. Значит очередь снова ` +
+            !crowded,
+            "Разборы должны быть разнесены по оборотам event loop: в одном " +
+                `обороте их ${crowded && crowded[1]}. Значит очередь снова ` +
                 "выгружается пачкой, и всё это время таймеры и LSP IPC " +
-                `ждут. Тики разборов: ${parsed.map(([, t]) => t)}`
+                `ждут. Поколения разборов: ${parsed.map(([, g]) => g)}`
         );
     } finally {
-        clearInterval(ticker);
+        counting = false;
+    }
+}
+
+/*
+ * Очень большой файл разбирается фазами.
+ *
+ * lex, parse и построение модели стоят примерно одинаково, и одним куском это
+ * блокировка на 75 мс (550КБ) и 165 мс (1.1МБ) — столько ждут таймеры и все
+ * LSP-запросы. Проверяется не время (оно машинозависимо), а сам факт: между
+ * фазами управление возвращается в event loop, а у файла обычного размера
+ * лишних возвратов нет — там пауза только отложила бы готовность модели.
+ *
+ * Второй инвариант: одновременно идёт не больше одного разбора. С фазовым
+ * разбором это перестало обеспечиваться само собой, и без явного признака
+ * два больших файла держали бы в памяти два AST одновременно.
+ */
+async function testLargeFileIsAnalysedInPhases() {
+    const line = 'Var x1 = Something.Method(a, "text", 42) + b;\n';
+    const largeSource = line.repeat(Math.ceil((320 * 1024) / line.length));
+    const smallSource = line.repeat(Math.ceil((20 * 1024) / line.length));
+    const uris = {
+        large: "file:///phased-large.mac",
+        second: "file:///phased-second.mac",
+        small: "file:///phased-small.mac"
+    };
+    const documentsByUri = new Map([
+        [uris.large, createDocument(uris.large, 1, largeSource)],
+        [uris.second, createDocument(uris.second, 1, largeSource)],
+        [uris.small, createDocument(uris.small, 1, smallSource)]
+    ]);
+
+    let generation = 0;
+    let counting = true;
+    const countGenerations = () => {
+        if (!counting) return;
+        generation++;
+        setImmediate(countGenerations);
+    };
+    setImmediate(countGenerations);
+
+    const startedAt = new Map();
+    const spans = [];
+    let concurrent = 0;
+    let maxConcurrent = 0;
+    const service = new DocumentAnalysisService(
+        { get: uri => documentsByUri.get(uri) },
+        new WorkspaceIndex(),
+        {
+            getAvailable: () => ({
+                imports: { enabled: false },
+                autoImport: { enabled: false },
+                analysis: { workspaceIndexing: "activeImports" },
+                semanticHighlighting: { maxFileSizeKb: 512 },
+                diagnostics: {}
+            })
+        },
+        {
+            log: () => undefined,
+            performance: {
+                enabled: true,
+                start: (event, fields) => {
+                    if (event === "analysis.full") {
+                        concurrent++;
+                        maxConcurrent = Math.max(maxConcurrent, concurrent);
+                        startedAt.set(fields.uri, generation);
+                    }
+                    return { event, fields };
+                },
+                end: span => {
+                    if (span.event === "analysis.full") {
+                        concurrent--;
+                        spans.push({
+                            uri: span.fields.uri,
+                            generations: generation - startedAt.get(span.fields.uri)
+                        });
+                    }
+                },
+                mark: () => undefined
+            },
+            invalidateProviderCaches: () => undefined,
+            onParsed: () => undefined,
+            onImports: () => undefined,
+            initialParseDelayMs: 0,
+            inactiveParseDelayMs: 0
+        }
+    );
+
+    try {
+        await service.ensureParsed(documentsByUri.get(uris.small));
+        const small = spans.find(item => item.uri === uris.small);
+        assert.ok(small, "Разбор небольшого файла должен быть зафиксирован");
+        assert.strictEqual(
+            small.generations,
+            0,
+            "Файл обычного размера не должен разбиваться на фазы: пауза " +
+                "только отложила бы готовность модели"
+        );
+
+        /*
+         * Второй файл запрашивается не сразу, а когда разбор первого уже идёт
+         * и находится между фазами. Именно так возникает риск параллельности:
+         * новая работа планирует проход очереди, а тот без явного признака
+         * "разбор идёт" запустил бы второй разбор поверх первого.
+         */
+        const largeParse = service.ensureParsed(
+            documentsByUri.get(uris.large)
+        );
+        await new Promise(resolve => setImmediate(resolve));
+        await new Promise(resolve => setImmediate(resolve));
+        const secondParse = service.ensureParsed(
+            documentsByUri.get(uris.second)
+        );
+        await Promise.all([largeParse, secondParse]);
+
+        const large = spans.find(item => item.uri === uris.large);
+        assert.ok(
+            large.generations >= 2,
+            "Большой файл обязан отдавать управление между фазами; " +
+                `оборотов event loop за разбор: ${large.generations}`
+        );
+        /*
+         * Сегодня это выполняется и без явной защиты: пауза разбора уже стоит
+         * в очереди setImmediate, а новый проход очереди планируется позже и
+         * по FIFO выполняется после неё — двух фаз хватает, чтобы разбор
+         * успел завершиться. Утверждение оставлено как формулировка
+         * инварианта: он перестанет держаться сам собой, если точек возврата
+         * станет больше (например, при порционном лексировании).
+         */
+        assert.strictEqual(
+            maxConcurrent,
+            1,
+            "Одновременно должен идти один разбор: иначе два больших файла " +
+                `держат два AST сразу, получено ${maxConcurrent}`
+        );
+    } finally {
+        counting = false;
     }
 }
 
@@ -1019,6 +1301,9 @@ async function waitFor(predicate, timeoutMs) {
     testFullAndCompactModelsShareDeclarationContract();
     console.log("[OK] full и compact модели используют единый declaration contract");
 
+    testCompactModuleAppearsAtomically();
+    console.log("[OK] компактный модуль появляется в индексе целиком");
+
     await testWorkspaceLoaderUsesActiveImports();
     console.log("[OK] загружается только активный Import-граф");
 
@@ -1030,6 +1315,9 @@ async function waitFor(predicate, timeoutMs) {
 
     await testValidationsYieldEventLoopBetweenFiles();
     console.log("[OK] разборы не блокируют event loop пачкой, активный первым");
+
+    await testLargeFileIsAnalysedInPhases();
+    console.log("[OK] очень большой файл разбирается фазами, разбор один");
 
     await testParseReadinessDoesNotWaitForSettings();
     console.log("[OK] парсер и Import не ждут workspace/configuration");

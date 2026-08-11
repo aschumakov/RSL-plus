@@ -22,6 +22,12 @@ const {
     createFastDocumentSnapshot,
     getFastDocumentSymbols
 } = require("../server/out/services/fastDocumentSnapshot");
+const {
+    DocumentAnalysisService
+} = require("../server/out/services/documentAnalysisService");
+const {
+    DiagnosticsCoordinator
+} = require("../server/out/diagnostics/diagnosticsCoordinator");
 
 function measure(name, iterations, action, ceilingMs) {
     for (let index = 0; index < 1000; index++) action();
@@ -139,3 +145,157 @@ measure("context completions on large module", 500, () => {
 }, 60);
 
 console.log("[OK] performance regression guards");
+
+/*
+ * Порядок готовности, а не миллисекунды: именно он определяет, что видит
+ * пользователь сразу после открытия файла. Абсолютные задержки машинозависимы
+ * и живут в npm run bench, а здесь фиксируется последовательность:
+ *
+ *   Structure (fast snapshot) → локальная модель (полный parse) →
+ *   зависимости (список Import) → локальные Problems → межфайловые Problems
+ *
+ * Нарушение любого шага — регрессия ощущаемой отзывчивости: например,
+ * Structure, ждущая полного parse, или межфайловые Problems, опубликованные
+ * раньше локальных (мерцание Problems).
+ */
+async function testReadinessOrderForOpenDocument() {
+    const uri = "file:///readiness-order.mac";
+    const source = [
+        "Import library;",
+        "Macro Handler(obj, cmd)",
+        "  Var value = 1;",
+        "  Shared(value);",
+        "End;"
+    ].join("\n");
+    const lineStarts = [0];
+    for (let position = 0; position < source.length; position++) {
+        if (source[position] === "\n") lineStarts.push(position + 1);
+    }
+    const readinessDocument = {
+        uri,
+        languageId: "rsl",
+        version: 1,
+        lineCount: lineStarts.length,
+        getText: () => source,
+        positionAt(offset) {
+            const bounded = Math.max(0, Math.min(offset, source.length));
+            let line = 0;
+            while (
+                line + 1 < lineStarts.length &&
+                lineStarts[line + 1] <= bounded
+            ) line++;
+            return { line, character: bounded - lineStarts[line] };
+        },
+        offsetAt: () => 0
+    };
+    const readinessDocuments = {
+        get: requested => requested === uri ? readinessDocument : undefined,
+        all: () => [readinessDocument]
+    };
+    const readinessSettings = {
+        imports: { enabled: true },
+        autoImport: { enabled: true },
+        analysis: { workspaceIndexing: "activeImports" },
+        semanticHighlighting: { maxFileSizeKb: 512 },
+        diagnostics: { enabled: true, structure: true, maxProblems: 200 }
+    };
+
+    const events = [];
+    const record = name => {
+        if (!events.includes(name)) events.push(name);
+    };
+    const readinessIndex = new WorkspaceIndex();
+    let analysis;
+    const coordinator = new DiagnosticsCoordinator(
+        { sendDiagnostics: () => undefined },
+        readinessDocuments,
+        readinessIndex,
+        { getAvailable: () => readinessSettings },
+        {
+            buildLocal: () => {
+                record("локальные Problems");
+                return [];
+            },
+            buildWorkspace: () => {
+                record("межфайловые Problems");
+                return [];
+            }
+        },
+        {
+            isParseBusy: requested => analysis?.isBusyFor(requested) ?? false,
+            waitForIdle: requested =>
+                analysis?.whenIdle(requested) ?? Promise.resolve(),
+            log: () => undefined,
+            onImports: () => undefined,
+            localDebounceMs: 0,
+            workspaceDebounceMs: 20,
+            interactiveRetryMs: 1
+        }
+    );
+    analysis = new DocumentAnalysisService(
+        readinessDocuments,
+        readinessIndex,
+        { getAvailable: () => readinessSettings },
+        {
+            log: () => undefined,
+            performance: {
+                enabled: true,
+                start: (event, fields) => ({ event, fields }),
+                end: span => {
+                    if (span.event === "analysis.outlineSnapshot") {
+                        record("Structure");
+                    }
+                },
+                mark: () => undefined
+            },
+            invalidateProviderCaches: () => undefined,
+            onParsed: module => {
+                record("локальная модель");
+                coordinator.scheduleLocal(module.uri, 0);
+                coordinator.scheduleWorkspace(module.uri);
+            },
+            onImports: () => record("зависимости"),
+            initialParseDelayMs: 0,
+            inactiveParseDelayMs: 0
+        }
+    );
+
+    try {
+        analysis.setActiveDocument(uri);
+        /* Координатор публикует Problems только для активного документа. */
+        coordinator.setActiveDocument(uri);
+        analysis.open(readinessDocument);
+
+        const started = Date.now();
+        while (!events.includes("межфайловые Problems")) {
+            if (Date.now() - started > 5000) {
+                throw new Error(
+                    `Не дождались всех этапов; получено: ${events.join(" → ")}`
+                );
+            }
+            await new Promise(resolve => setTimeout(resolve, 5));
+        }
+
+        assert.deepStrictEqual(
+            events,
+            [
+                "Structure",
+                "локальная модель",
+                "зависимости",
+                "локальные Problems",
+                "межфайловые Problems"
+            ],
+            `Нарушен порядок готовности: ${events.join(" → ")}`
+        );
+    } finally {
+        analysis.close(uri);
+        coordinator.close(uri);
+    }
+}
+
+testReadinessOrderForOpenDocument().then(() => {
+    console.log("[OK] порядок готовности: Structure → модель → зависимости → Problems");
+}).catch(error => {
+    console.error(error);
+    process.exitCode = 1;
+});

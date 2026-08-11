@@ -21,6 +21,7 @@ const tests = [
     "performance-regressions.test.js",
     "quick-fix-extended.test.js",
     "workspace-resolution.test.js",
+    "workspace-worker.test.js",
     "server-services.test.js",
 ];
 

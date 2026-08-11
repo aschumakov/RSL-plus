@@ -77,7 +77,6 @@ export class PresentationFeatureRegistry {
             const cached = this.folding.get(document.uri);
             if (cached?.version === document.version) return cached.value;
             const value = getFastFoldingRanges(
-                document,
                 getFastDocumentSnapshot(document)
             ).slice();
             this.folding.set(document.uri, { version: document.version, value });

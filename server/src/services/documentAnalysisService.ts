@@ -27,16 +27,20 @@ import type { PerformanceLogger } from "../performanceLogger";
  */
 const MAX_VALIDATIONS_PER_TICK = 1;
 
+/*
+ * От какого размера разбор идёт фазами с возвратом управления между ними.
+ *
+ * Ниже порога вся работа (lex + parse + модель) дешевле одного тика, и паузы
+ * только откладывали бы готовность модели. Порог соответствует ~50 мс
+ * суммарной блокировки на замерах npm run bench.
+ */
+const PHASED_ANALYSIS_MIN_CHARS = 300_000;
+
 export interface IDocumentAnalysisOptions {
     changeDebounceMs?: number;
     slowParseLogMs?: number;
     initialParseDelayMs?: number;
     inactiveParseDelayMs?: number;
-    /**
-     * Ограничивает фоновые (неактивные) вкладки. Активный документ идёт
-     * первым в порции независимо от этого лимита (см. processValidationQueue).
-     */
-    maxConcurrentValidations?: number;
     log(message: string): void;
     performance?: PerformanceLogger;
     invalidateProviderCaches(uri: string): void;
@@ -69,15 +73,8 @@ export class DocumentAnalysisService {
     private backgroundQueue: IValidationTask[] = [];
     private queued = new Map<string, IValidationTask>();
     private queueScheduled = false;
-    private runningCount = 0;
-    private backgroundRunningCount = 0;
-    private maxConcurrentValidations: number;
-    /*
-     * Резерв под активный документ: фоновые вкладки не должны занимать все
-     * слоты валидации, иначе только что активированный документ ждёт в
-     * очереди за файлами, которых пользователь не видит.
-     */
-    private foregroundReserve!: number;
+    /** Идёт разбор: между фазами большого файла управление возвращается. */
+    private validationInFlight = false;
     private idleWaiters = new Map<string, Array<() => void>>();
     private fastSnapshots = new Map<string, IFastDocumentSnapshot>();
     private openedVersions = new Map<string, number>();
@@ -95,11 +92,6 @@ export class DocumentAnalysisService {
         this.changeDebounceMs = options.changeDebounceMs ?? 90;
         this.slowParseLogMs = options.slowParseLogMs ?? 75;
         this.initialParseDelayMs = options.initialParseDelayMs ?? 50;
-        this.maxConcurrentValidations = Math.max(
-            1,
-            options.maxConcurrentValidations ?? 2
-        );
-        this.foregroundReserve = this.maxConcurrentValidations > 1 ? 1 : 0;
     }
 
     get isBusy(): boolean {
@@ -112,6 +104,37 @@ export class DocumentAnalysisService {
         return this.parseTimers.has(uri) ||
             this.running.has(uri) ||
             this.queued.has(uri);
+    }
+
+    /**
+     * Fast Snapshot этой версии готов: есть token stream, из которого без
+     * полного parse строятся Structure, Folding и список объявлений.
+     *
+     * Первая фаза анализа. Отвечает на вопрос "можно ли показать структуру",
+     * а не "точна ли модель": объявления Fast Snapshot получены сканированием
+     * токенов, без разбора выражений и областей видимости.
+     */
+    isFastReady(document: TextDocument): boolean {
+        const snapshot = this.fastSnapshots.get(document.uri);
+        return !!snapshot && snapshot.version === document.version;
+    }
+
+    /**
+     * Полная локальная модель этой версии лежит в индексе: symbolTree, AST и
+     * точные области видимости.
+     *
+     * Вторая фаза. Единственная проверка "актуальна ли модель" для всей
+     * службы — раньше это условие повторялось в нескольких местах с чуть
+     * разными формулировками.
+     */
+    isLocalReady(document: TextDocument): boolean {
+        const module = this.index.getCurrentModule(
+            document.uri,
+            document.version
+        );
+
+        return this.parsedVersions.get(document.uri) === document.version &&
+            module?.kind === "open";
     }
 
     /**
@@ -265,7 +288,7 @@ export class DocumentAnalysisService {
         if (
             !document ||
             !this.openedVersions.has(uri) ||
-            this.isCurrent(document)
+            this.isLocalReady(document)
         ) {
             return;
         }
@@ -301,16 +324,13 @@ export class DocumentAnalysisService {
 
     /** Folding и Outline получают snapshot без ожидания полного parser. */
     getFastSnapshot(document: TextDocument): IFastDocumentSnapshot {
-        const current = this.fastSnapshots.get(document.uri);
-        if (current && current.version === document.version) {
-            return current;
-        }
-
-        return this.refreshFastSnapshot(document);
+        return this.isFastReady(document)
+            ? this.fastSnapshots.get(document.uri)!
+            : this.refreshFastSnapshot(document);
     }
 
     async ensureParsed(document: TextDocument): Promise<RslSymbol | undefined> {
-        if (this.isCurrent(document)) {
+        if (this.isLocalReady(document)) {
             return this.index.getModule(document.uri)?.symbolTree;
         }
 
@@ -319,7 +339,7 @@ export class DocumentAnalysisService {
 
         if (active) {
             await active;
-            if (this.isCurrent(document)) {
+            if (this.isLocalReady(document)) {
                 return this.index.getModule(document.uri)?.symbolTree;
             }
         }
@@ -442,7 +462,7 @@ export class DocumentAnalysisService {
             return existing.then(() => {
                 const current = this.documents.get(uri);
 
-                if (!current || this.isCurrent(current)) {
+                if (!current || this.isLocalReady(current)) {
                     return;
                 }
                 return this.startValidation(
@@ -518,19 +538,27 @@ export class DocumentAnalysisService {
      * Раньше foreground-очередь выгружалась целиком, и поскольку parse
      * синхронный, все разборы выполнялись одной цепочкой microtask: между
      * ними Node не возвращался ни к таймерам, ни к LSP IPC. Восемь открытых
-     * файлов по 300КБ задерживали таймер на 171 мс (на холодном прогоне до
-     * 398 мс) — то есть отсутствие лимита не ускоряло ответы, а задерживало
-     * их все сразу, включая переключение активного документа.
+     * файлов по 300КБ задерживали таймер на 420 мс — то есть отсутствие
+     * лимита не ускоряло ответы, а задерживало их все сразу, включая
+     * переключение активного документа.
      *
      * Остаток очереди подхватывает finishValidation() через
      * scheduleValidationQueue(), то есть следующей порцией из setImmediate.
      * Активный документ ставится в начало порции, чтобы за файлами, которых
      * пользователь не видит, не ждал тот, который он смотрит.
      *
-     * Фоновые вкладки дополнительно ограничены (maxConcurrentValidations -
-     * foregroundReserve, по умолчанию 1 из 2).
+     * Одновременно выполняется не больше одного разбора. Раньше это
+     * обеспечивалось само: validate() был полностью синхронным. С фазовым
+     * разбором больших файлов (PHASED_ANALYSIS_MIN_CHARS) между фазами есть
+     * возврат управления, и без явного признака "разбор идёт" следующая
+     * порция запустила бы второй разбор параллельно — два больших файла
+     * держали бы в памяти два AST и мешали друг другу.
      */
     private processValidationQueue(): void {
+        if (this.validationInFlight) {
+            return;
+        }
+
         this.hoistActiveDocument();
         let started = 0;
 
@@ -542,24 +570,29 @@ export class DocumentAnalysisService {
             started++;
         }
 
-        const maxBackgroundRunning = Math.max(
-            1,
-            this.maxConcurrentValidations - this.foregroundReserve
-        );
-
         while (
-            started < MAX_VALIDATIONS_PER_TICK &&
-            this.backgroundRunningCount < maxBackgroundRunning
+            this.backgroundQueue.length > 0 &&
+            started < MAX_VALIDATIONS_PER_TICK
         ) {
-            const task = this.backgroundQueue.shift();
-
-            if (!task) {
-                break;
-            }
-
-            this.dispatchTask(task);
+            this.dispatchTask(this.backgroundQueue.shift()!);
             started++;
         }
+    }
+
+    /**
+     * Результат ещё нужен: документ той же версии, поколение не сменилось.
+     *
+     * Проверяется после каждой паузы фазового разбора: пока управление было
+     * у event loop, документ могли изменить или закрыть, и тогда следующая
+     * фаза считала бы по устаревшему тексту.
+     */
+    private stillCurrent(
+        uri: string,
+        version: number,
+        generation: number
+    ): boolean {
+        return this.parseGeneration.get(uri) === generation &&
+            this.documents.get(uri)?.version === version;
     }
 
     /** Активный документ — первым в порции, остальной порядок сохраняется. */
@@ -583,11 +616,8 @@ export class DocumentAnalysisService {
     private dispatchTask(task: IValidationTask): void {
         const uri = task.document.uri;
         this.queued.delete(uri);
-        this.runningCount++;
-        if (task.priority === "background") {
-            this.backgroundRunningCount++;
-        }
         this.running.set(uri, task.promise);
+        this.validationInFlight = true;
 
         Promise.resolve()
             .then(() => this.validate(task.document, task.generation))
@@ -603,15 +633,9 @@ export class DocumentAnalysisService {
         error?: unknown
     ): void {
         const uri = task.document.uri;
+        this.validationInFlight = false;
         if (this.running.get(uri) === task.promise) {
             this.running.delete(uri);
-        }
-        this.runningCount = Math.max(0, this.runningCount - 1);
-        if (task.priority === "background") {
-            this.backgroundRunningCount = Math.max(
-                0,
-                this.backgroundRunningCount - 1
-            );
         }
 
         if (succeeded) {
@@ -644,12 +668,30 @@ export class DocumentAnalysisService {
         const uri = document.uri;
         const version = document.version;
 
-        if (this.isCurrent(document)) {
+        if (this.isLocalReady(document)) {
             return;
         }
 
         const text = document.getText();
+        /*
+         * Очень большой файл разбирается фазами с возвратом управления между
+         * ними: lex, parse и построение модели стоят примерно одинаково, и на
+         * 550КБ это 29 + 23 + 23 мс, на 1.1МБ 71 + 45 + 49 мс. Одним куском
+         * это блокировка на 75 и 165 мс, то есть именно столько ждут таймеры
+         * и все LSP-запросы. Разбить сам parse нельзя без переписывания
+         * рекурсивного спуска, а разнести три фазы — можно, и максимальная
+         * блокировка становится ценой одной фазы.
+         *
+         * Для обычных файлов паузы не нужны: там вся работа дешевле одного
+         * тика, а лишние возвраты только откладывают готовность модели.
+         */
+        const phased = text.length >= PHASED_ANALYSIS_MIN_CHARS;
         const fastSnapshot = this.getFastSnapshot(document);
+
+        if (phased && !this.stillCurrent(uri, version, generation)) {
+            return;
+        }
+
         const started = Date.now();
         const wasKnown = !!this.index.getModule(uri);
         const performance = this.options.performance;
@@ -689,6 +731,20 @@ export class DocumentAnalysisService {
          * сейчас AST нужен на основном потоке и diagnostics, и
          * blockNavigation, и codeActions, и references.
          */
+        if (phased) {
+            await yieldToEventLoop();
+
+            if (!this.stillCurrent(uri, version, generation)) {
+                if (syntaxSpan) {
+                    performance.end(syntaxSpan, { cancelled: true });
+                }
+                if (fullSpan) {
+                    performance.end(fullSpan, { cancelled: true });
+                }
+                return;
+            }
+        }
+
         const syntax = parseRslSyntax(text, fastSnapshot.lex, {
             buildExpressionTree: false
         });
@@ -721,10 +777,11 @@ export class DocumentAnalysisService {
                 syntaxTokens: syntax.tokens.length
             })
             : undefined;
-        if (
-            this.parseGeneration.get(uri) !== generation ||
-            this.documents.get(uri)?.version !== version
-        ) {
+        if (phased) {
+            await yieldToEventLoop();
+        }
+
+        if (!this.stillCurrent(uri, version, generation)) {
             if (fullSpan) {
                 performance.end(fullSpan, {
                     cancelled: true
@@ -793,16 +850,6 @@ export class DocumentAnalysisService {
         );
     }
 
-    private isCurrent(document: TextDocument): boolean {
-        const module = this.index.getCurrentModule(
-            document.uri,
-            document.version
-        );
-
-        return this.parsedVersions.get(document.uri) === document.version &&
-            module?.kind === "open";
-    }
-
     private refreshImportsAfterParse(
         uri: string,
         version: number,
@@ -867,6 +914,10 @@ export class DocumentAnalysisService {
         task.resolve();
         this.notifyIdleIfSettled(uri);
     }
+}
+
+function yieldToEventLoop(): Promise<void> {
+    return new Promise(resolve => setImmediate(resolve));
 }
 
 function errorToString(error: unknown): string {

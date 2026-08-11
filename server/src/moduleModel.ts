@@ -81,11 +81,19 @@ export function createOpenModuleModel(
     };
 }
 
-/** Закрытый файл не удерживает исходник, AST и token stream. */
+/**
+ * Закрытый файл не удерживает исходник, AST и token stream.
+ *
+ * Не удерживает и параметры импортируемых Macro: их некому читать из другого
+ * файла (см. includeCallableParameters), а в дескрипторах они составляют
+ * основной объём — на файле 300КБ это 5155 дескрипторов против 1290.
+ */
 export function createExternalModuleSummary(source: string): IRslModuleModel {
     return createExternalModuleSummaryFromDeclarations(
         source.length,
-        extractCompactDeclarations(source)
+        extractCompactDeclarations(source, {
+            includeCallableParameters: false
+        })
     );
 }
 

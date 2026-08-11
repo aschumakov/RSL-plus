@@ -23,17 +23,44 @@ export interface ISemanticTokensFeatureEnvironment {
     getSettings(uri: string): IRslSettings;
     noteInteractiveActivity?(): void;
     performance?: PerformanceLogger;
+    /**
+     * Поддерживает ли клиент workspace/semanticTokens/refresh. Без этой
+     * возможности сервер не может попросить перезапросить подсветку, и
+     * обновление придёт только со следующим изменением документа.
+     */
+    supportsRefresh?(): boolean;
+    log?(message: string): void;
 }
+
+/*
+ * Как часто разрешено просить клиента перезапросить подсветку.
+ *
+ * Загрузка Import-графа — это десятки модулей подряд, и каждый меняет
+ * Import-контекст открытых файлов. Без объединения запросов клиент
+ * перезапрашивал бы токены всего файла на каждый загруженный модуль.
+ */
+const REFRESH_COALESCE_MS = 300;
 
 /** Владеет semantic-token lifecycle, resultId и delta-кэшем. */
 export class SemanticTokensFeatureRegistry {
     private static readonly MAX_CACHED_DOCUMENTS = 4;
     private cache = new Map<string, {
         version: number;
+        /**
+         * Ключ Import-замыкания на момент построения токенов.
+         *
+         * Версии документа недостаточно: подсветка различает известный
+         * импортированный символ и неизвестный, а загрузка внешнего модуля
+         * версию открытого документа не меняет. Без этого ключа токены
+         * оставались бы закэшированными с прежней раскраской, хотя нужные
+         * внешние символы уже появились в индексе.
+         */
+        closureKey: string;
         resultId: string;
         value: SemanticTokens;
     }>();
     private sequence = 0;
+    private refreshTimer: NodeJS.Timeout | undefined;
 
     constructor(private environment: ISemanticTokensFeatureEnvironment) {}
 
@@ -95,6 +122,64 @@ export class SemanticTokensFeatureRegistry {
 
     forget(uri: string): void { this.cache.delete(uri); }
 
+    /**
+     * Import-контекст перечисленных открытых файлов изменился: загрузился
+     * внешний модуль, и раскраска их символов могла стать другой.
+     *
+     * Кэш при этом не сбрасывается: он сам себя признает устаревшим по
+     * closureKey. Клиенту отправляется просьба перезапросить токены, иначе
+     * до следующей правки он показывал бы прежнюю раскраску. Запросы
+     * объединяются: загрузка Import-графа даёт десятки таких событий подряд.
+     */
+    notifyImportContextChanged(uris: readonly string[]): void {
+        if (this.environment.supportsRefresh?.() === false) {
+            return;
+        }
+
+        const affected = uris.some(uri => {
+            const cached = this.cache.get(uri);
+            return !!cached &&
+                cached.closureKey !==
+                    this.environment.index.getImportClosureKey(uri);
+        });
+
+        if (!affected || this.refreshTimer) {
+            return;
+        }
+
+        this.refreshTimer = setTimeout(() => {
+            this.refreshTimer = undefined;
+            this.requestRefresh();
+        }, REFRESH_COALESCE_MS);
+    }
+
+    dispose(): void {
+        if (this.refreshTimer) {
+            clearTimeout(this.refreshTimer);
+            this.refreshTimer = undefined;
+        }
+    }
+
+    private requestRefresh(): void {
+        this.environment.performance?.mark?.("semanticTokens.refresh", {
+            cachedDocuments: this.cache.size
+        });
+
+        try {
+            const result = this.environment.connection.languages
+                .semanticTokens.refresh();
+            void Promise.resolve(result).catch(error =>
+                this.environment.log?.(
+                    `Semantic tokens refresh failed: ${errorText(error)}`
+                )
+            );
+        } catch (error) {
+            this.environment.log?.(
+                `Semantic tokens refresh failed: ${errorText(error)}`
+            );
+        }
+    }
+
     private async getTokens(
         uri: string,
         cancellationToken?: CancellationToken
@@ -117,8 +202,12 @@ export class SemanticTokensFeatureRegistry {
             return { data: [] };
         }
 
+        const closureKey = this.environment.index.getImportClosureKey(uri);
         const cached = this.cache.get(uri);
-        if (cached?.version === module.version) {
+        if (
+            cached?.version === module.version &&
+            cached.closureKey === closureKey
+        ) {
             this.touchCache(uri, cached);
             this.endSpan(span, {
                 cacheHit: true,
@@ -134,7 +223,12 @@ export class SemanticTokensFeatureRegistry {
         );
         const resultId = `${module.version}:${++this.sequence}`;
         const value = { data: built.data, resultId };
-        this.touchCache(uri, { version: module.version, resultId, value });
+        this.touchCache(uri, {
+            version: module.version,
+            closureKey,
+            resultId,
+            value
+        });
         while (this.cache.size > SemanticTokensFeatureRegistry.MAX_CACHED_DOCUMENTS) {
             const oldest = this.cache.keys().next().value as string | undefined;
             if (!oldest) break;
@@ -150,7 +244,12 @@ export class SemanticTokensFeatureRegistry {
 
     private touchCache(
         uri: string,
-        entry: { version: number; resultId: string; value: SemanticTokens }
+        entry: {
+            version: number;
+            closureKey: string;
+            resultId: string;
+            value: SemanticTokens;
+        }
     ): void {
         this.cache.delete(uri);
         this.cache.set(uri, entry);
@@ -192,6 +291,12 @@ export class SemanticTokensFeatureRegistry {
 
 function yieldToEventLoop(): Promise<void> {
     return new Promise(resolve => setImmediate(resolve));
+}
+
+function errorText(error: unknown): string {
+    return error instanceof Error
+        ? `${error.name}: ${error.message}`
+        : String(error);
 }
 
 function requestIsStale(
