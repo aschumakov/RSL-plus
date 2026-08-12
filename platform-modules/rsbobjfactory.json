@@ -1,0 +1,1 @@
+{"version":2,"classes":[{"name":"RsbObjFactory","summary":"Класс \"фабрики\", служит для создания экземпляров объектов Rs-Vox.","members":[{"name":"GetObject","isMethod":true,"signature":"GetObject(ObjectName:String [, ObjectType:Integer]):Object","description":""}]}],"procedures":[]}

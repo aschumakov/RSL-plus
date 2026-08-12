@@ -1,0 +1,1 @@
+{"version":2,"classes":[{"name":"IRSCryptoObj","summary":"Базовый класс для объектов, реализующих работу с ЭЦП.","members":[]},{"name":"RSCryptoAPI","base":"IRSCryptoObj","summary":"Класс реализует интерфейс для работы с механизмом ЭЦП.","members":[{"name":"BeginKeyCashing","isMethod":true,"signature":"BeginKeyCashing():Bool","description":""}]}],"procedures":[]}

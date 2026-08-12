@@ -241,6 +241,92 @@ async function testLocalPhaseIgnoresIndexState() {
 }
 
 /*
+ * Problems покинутого файла не должны всплывать перед Problems нужного.
+ *
+ * Расчёт диагностики синхронный, поэтому уведомление о смене активного файла
+ * всё это время лежит в очереди событий необработанным. Публикация успевала
+ * пройти раньше него: в панели сначала появлялся список файла, из которого
+ * пользователь уже ушёл, а через мгновение гасился — и только потом появлялся
+ * нужный. Переключение здесь моделируется из buildLocal: именно так выглядит
+ * сообщение, пришедшее во время расчёта.
+ */
+async function testAbandonedFileDiagnosticsAreNotPublished() {
+  const first = "file:///workspace/first.mac";
+  const second = "file:///workspace/second.mac";
+  const sources = {
+    [first]: "Macro First()\n  Var unusedFirst;\n  DebugBreak;\nEnd;",
+    [second]: "Macro Second()\n  Var unusedSecond;\n  DebugBreak;\nEnd;"
+  };
+  const documents = new Map([
+    [first, createTestDocument(first, 1, sources[first])],
+    [second, createTestDocument(second, 1, sources[second])]
+  ]);
+  const index = new WorkspaceIndex();
+  index.registerWorkspaceFiles([first, second]);
+  for (const uri of [first, second]) {
+    index.updateOpenModule(uri, sources[uri], 1);
+  }
+
+  const publications = [];
+  let switched = false;
+  let coordinator;
+  coordinator = new DiagnosticsCoordinator(
+    {
+      sendDiagnostics: value => publications.push({
+        uri: value.uri,
+        count: value.diagnostics.length
+      })
+    },
+    {
+      get: uri => documents.get(uri),
+      all: () => [...documents.values()]
+    },
+    index,
+    { getAvailable: () => diagnosticDefaults },
+    {
+      buildLocal: (module, currentIndex, settings) => {
+        if (module.uri === first && !switched) {
+          switched = true;
+          setImmediate(() => coordinator.setActiveDocument(second));
+        }
+        return buildLocalRslDiagnostics(module, currentIndex, settings);
+      },
+      buildWorkspace: (module, currentIndex, settings) =>
+        buildWorkspaceRslDiagnostics(module, currentIndex, settings)
+    },
+    {
+      isParseBusy: () => false,
+      waitForIdle: () => Promise.resolve(),
+      log: () => undefined,
+      onImports: () => undefined,
+      localDebounceMs: 0,
+      workspaceDebounceMs: 20,
+      workspaceMaxWaitMs: 60
+    }
+  );
+
+  coordinator.setActiveDocument(first);
+  await tick(300);
+
+  const leftovers = publications.filter(
+    item => item.uri === first && item.count > 0
+  );
+  assert.deepStrictEqual(
+    leftovers,
+    [],
+    "Problems файла, из которого пользователь ушёл, публиковаться не должны; " +
+      `получено: ${JSON.stringify(publications)}`
+  );
+  assert.ok(
+    publications.some(item => item.uri === second && item.count > 0),
+    `Problems активного файла обязаны появиться: ${JSON.stringify(publications)}`
+  );
+
+  coordinator.close(first);
+  coordinator.close(second);
+}
+
+/*
  * Порядок и устойчивость двух волн: сначала локальные ошибки текущей версии,
  * затем local + workspace той же версии. Пачка загруженных модулей обязана
  * объединяться в один пересчёт, а не публиковаться после каждого Import.
@@ -371,6 +457,10 @@ async function testTwoWavePublicationIsStable() {
   await testTwoWavePublicationIsStable();
   passed++;
   console.log("[OK] две волны Problems: порядок, объединение, без мерцания");
+
+  await testAbandonedFileDiagnosticsAreNotPublished();
+  passed++;
+  console.log("[OK] Problems покинутого файла не всплывают перед нужными");
 
   console.log("");
   console.log(`Пройдено: ${passed}`);

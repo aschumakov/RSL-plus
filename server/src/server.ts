@@ -22,6 +22,9 @@ import {
     GO_TO_BLOCK_START_COMMAND
 } from "./features/blockNavigation";
 import { RslScopeResolver } from "./scopeResolver";
+import {
+    PlatformModuleCatalog
+} from "./builtins/platformModuleCatalog";
 import { IRslSettings } from "./interfaces";
 import { RSL_SEMANTIC_TOKENS_LEGEND } from "./semanticTokens";
 import { RslSettingsService } from "./services/settingsService";
@@ -40,7 +43,18 @@ import {
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments<TextDocument>(TextDocument);
 const workspaceIndex = new WorkspaceIndex();
-const scopeResolver = new RslScopeResolver(workspaceIndex);
+/*
+ * Каталог прикладных модулей читается лениво: см. ensureLoaded ниже, он
+ * вызывается по готовности списка Import, а не из обработчика Completion.
+ */
+const platformModules = new PlatformModuleCatalog({
+    log: message => logMessage(message)
+});
+const scopeResolver = new RslScopeResolver(
+    workspaceIndex,
+    undefined,
+    platformModules
+);
 
 const defaultSettings: IRslSettings = {
     language: { dialect: "rsBank" },
@@ -214,6 +228,17 @@ const documentAnalysis = new DocumentAnalysisService(
             }
         },
         onImports: (uri, imports) => {
+            /*
+             * Состав импортированных прикладных модулей читается здесь, а не в
+             * обработчике Completion: у PaymInter это 186 КБ, и разбирать их на
+             * нажатие Ctrl+Space значило бы задержать ответ там, где заметнее
+             * всего. Список берётся у резолвера — он учитывает и транзитивные
+             * Import уже разобранных файлов.
+             */
+            platformModules.ensureModules(
+                scopeResolver.visiblePlatformModules(uri)
+            );
+
             if (uri === activeDocumentUri) {
                 moduleLoader.enqueueImports(imports, "foreground");
             }
@@ -233,6 +258,17 @@ diagnosticsCoordinator = new DiagnosticsCoordinator(
         log: logMessage,
         performance: performanceLogger,
         onImports: (uri, imports) => {
+            /*
+             * Состав импортированных прикладных модулей читается здесь, а не в
+             * обработчике Completion: у PaymInter это 186 КБ, и разбирать их на
+             * нажатие Ctrl+Space значило бы задержать ответ там, где заметнее
+             * всего. Список берётся у резолвера — он учитывает и транзитивные
+             * Import уже разобранных файлов.
+             */
+            platformModules.ensureModules(
+                scopeResolver.visiblePlatformModules(uri)
+            );
+
             if (uri === activeDocumentUri) {
                 moduleLoader.enqueueImports(imports, "foreground");
             }

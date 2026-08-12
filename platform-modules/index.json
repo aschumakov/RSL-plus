@@ -1,0 +1,310 @@
+{
+ "version": 2,
+ "modules": {
+  "AcquirerObjects": {
+   "file": "acquirerobjects.json",
+   "classes": 28,
+   "procedures": 0
+  },
+  "BankInter": {
+   "file": "bankinter.json",
+   "classes": 30,
+   "procedures": 238
+  },
+  "BilFacturaInter": {
+   "file": "bilfacturainter.json",
+   "classes": 1,
+   "procedures": 6
+  },
+  "BookInter": {
+   "file": "bookinter.json",
+   "classes": 0,
+   "procedures": 5
+  },
+  "calendar": {
+   "file": "calendar.json",
+   "classes": 0,
+   "procedures": 23
+  },
+  "CarryDoc": {
+   "file": "carrydoc.json",
+   "classes": 0,
+   "procedures": 2
+  },
+  "CashInter": {
+   "file": "cashinter.json",
+   "classes": 0,
+   "procedures": 5
+  },
+  "CommonInter": {
+   "file": "commoninter.json",
+   "classes": 19,
+   "procedures": 196
+  },
+  "cryptdlm": {
+   "file": "cryptdlm.json",
+   "classes": 2,
+   "procedures": 0
+  },
+  "CTInter": {
+   "file": "ctinter.json",
+   "classes": 5,
+   "procedures": 35
+  },
+  "CurrInter": {
+   "file": "currinter.json",
+   "classes": 0,
+   "procedures": 13
+  },
+  "DealsInter": {
+   "file": "dealsinter.json",
+   "classes": 2,
+   "procedures": 21
+  },
+  "DeposInter": {
+   "file": "deposinter.json",
+   "classes": 0,
+   "procedures": 64
+  },
+  "DeskInter": {
+   "file": "deskinter.json",
+   "classes": 0,
+   "procedures": 14
+  },
+  "DPInter": {
+   "file": "dpinter.json",
+   "classes": 1,
+   "procedures": 44
+  },
+  "DvInter": {
+   "file": "dvinter.json",
+   "classes": 0,
+   "procedures": 5
+  },
+  "ExchangeInter": {
+   "file": "exchangeinter.json",
+   "classes": 0,
+   "procedures": 13
+  },
+  "FIInter": {
+   "file": "fiinter.json",
+   "classes": 1,
+   "procedures": 31
+  },
+  "FMInter": {
+   "file": "fminter.json",
+   "classes": 2,
+   "procedures": 18
+  },
+  "FXInter": {
+   "file": "fxinter.json",
+   "classes": 3,
+   "procedures": 1
+  },
+  "gate": {
+   "file": "gate.json",
+   "classes": 3,
+   "procedures": 4
+  },
+  "GateInter": {
+   "file": "gateinter.json",
+   "classes": 0,
+   "procedures": 2
+  },
+  "IFRSInter": {
+   "file": "ifrsinter.json",
+   "classes": 0,
+   "procedures": 4
+  },
+  "InsCarryDoc": {
+   "file": "inscarrydoc.json",
+   "classes": 1,
+   "procedures": 65
+  },
+  "LCInter": {
+   "file": "lcinter.json",
+   "classes": 6,
+   "procedures": 7
+  },
+  "LoansFind": {
+   "file": "loansfind.json",
+   "classes": 0,
+   "procedures": 69
+  },
+  "LoansGlobalData": {
+   "file": "loansglobaldata.json",
+   "classes": 0,
+   "procedures": 3
+  },
+  "LoansGUI": {
+   "file": "loansgui.json",
+   "classes": 0,
+   "procedures": 1
+  },
+  "LoansList": {
+   "file": "loanslist.json",
+   "classes": 0,
+   "procedures": 1
+  },
+  "MesInter": {
+   "file": "mesinter.json",
+   "classes": 4,
+   "procedures": 7
+  },
+  "MmarkInter": {
+   "file": "mmarkinter.json",
+   "classes": 0,
+   "procedures": 9
+  },
+  "MonTransInter": {
+   "file": "montransinter.json",
+   "classes": 4,
+   "procedures": 8
+  },
+  "OprInter": {
+   "file": "oprinter.json",
+   "classes": 1,
+   "procedures": 47
+  },
+  "PaymInter": {
+   "file": "payminter.json",
+   "classes": 47,
+   "procedures": 163
+  },
+  "PcRateInter": {
+   "file": "pcrateinter.json",
+   "classes": 0,
+   "procedures": 1
+  },
+  "PercInter": {
+   "file": "percinter.json",
+   "classes": 2,
+   "procedures": 6
+  },
+  "procent": {
+   "file": "procent.json",
+   "classes": 1,
+   "procedures": 11
+  },
+  "procentbuh": {
+   "file": "procentbuh.json",
+   "classes": 0,
+   "procedures": 2
+  },
+  "PSBCInter": {
+   "file": "psbcinter.json",
+   "classes": 0,
+   "procedures": 3
+  },
+  "PsInter": {
+   "file": "psinter.json",
+   "classes": 11,
+   "procedures": 31
+  },
+  "PTInter": {
+   "file": "ptinter.json",
+   "classes": 17,
+   "procedures": 69
+  },
+  "RcbCoreInter": {
+   "file": "rcbcoreinter.json",
+   "classes": 31,
+   "procedures": 0
+  },
+  "Reporting": {
+   "file": "reporting.json",
+   "classes": 9,
+   "procedures": 1
+  },
+  "ReptCBCommon": {
+   "file": "reptcbcommon.json",
+   "classes": 0,
+   "procedures": 6
+  },
+  "ReptCBInter": {
+   "file": "reptcbinter.json",
+   "classes": 0,
+   "procedures": 3
+  },
+  "ReptCBMath": {
+   "file": "reptcbmath.json",
+   "classes": 0,
+   "procedures": 2
+  },
+  "RmInter": {
+   "file": "rminter.json",
+   "classes": 0,
+   "procedures": 6
+  },
+  "RsbDataSet": {
+   "file": "rsbdataset.json",
+   "classes": 1,
+   "procedures": 0
+  },
+  "RsbObjFactory": {
+   "file": "rsbobjfactory.json",
+   "classes": 1,
+   "procedures": 0
+  },
+  "RslCellObjects": {
+   "file": "rslcellobjects.json",
+   "classes": 0,
+   "procedures": 7
+  },
+  "RsSysLog": {
+   "file": "rssyslog.json",
+   "classes": 1,
+   "procedures": 3
+  },
+  "safecells": {
+   "file": "safecells.json",
+   "classes": 12,
+   "procedures": 0
+  },
+  "SbCrdInter": {
+   "file": "sbcrdinter.json",
+   "classes": 1,
+   "procedures": 51
+  },
+  "SFInter": {
+   "file": "sfinter.json",
+   "classes": 1,
+   "procedures": 40
+  },
+  "spCardInter": {
+   "file": "spcardinter.json",
+   "classes": 0,
+   "procedures": 27
+  },
+  "SPInter": {
+   "file": "spinter.json",
+   "classes": 0,
+   "procedures": 47
+  },
+  "total": {
+   "file": "total.json",
+   "classes": 0,
+   "procedures": 15
+  },
+  "TSInter": {
+   "file": "tsinter.json",
+   "classes": 0,
+   "procedures": 46
+  },
+  "VAInter": {
+   "file": "vainter.json",
+   "classes": 0,
+   "procedures": 7
+  },
+  "VSInter": {
+   "file": "vsinter.json",
+   "classes": 0,
+   "procedures": 22
+  },
+  "WIdInter": {
+   "file": "widinter.json",
+   "classes": 7,
+   "procedures": 25
+  }
+ }
+}

@@ -138,6 +138,427 @@ function codes(items) {
             "Сигнатура выродилась в (...): проверьте баланс скобок — " +
                 "balancedSignature молча заменяет такую сигнатуру"
         );
+
+        /*
+         * Возвращаемый тип объявляется только в конце сигнатуры: отдельной
+         * таблицы типов больше нет. Если тип известен, он обязан быть виден и
+         * в самой сигнатуре — иначе Signature Help показывает меньше, чем
+         * знает каталог.
+         */
+        const hiddenType = procedures.filter(item =>
+            item.typeName !== "Variant" &&
+            !new RegExp(`:\\s*${item.typeName}\\s*$`, "iu")
+                .test(item.signature || "")
+        );
+        assert.deepStrictEqual(
+            hiddenType.map(item => `${item.name}: ${item.typeName}`),
+            [],
+            "Тип известен каталогу, но не объявлен в конце сигнатуры"
+        );
+    });
+
+    await test("каждый метод и свойство стандартного класса описаны", () => {
+        const {
+            RSL_STANDARD_LIBRARY
+        } = require("../server/out/builtins/standardLibraryData");
+        const classes = RSL_STANDARD_LIBRARY.filter(entry => entry.children);
+        const members = classes.flatMap(entry => entry.children.map(child => ({
+            name: `${entry.name}.${child.name}`,
+            summary: child.summary || ""
+        })));
+
+        assert.ok(
+            members.length > 120,
+            `Состав членов классов подозрительно мал: ${members.length}`
+        );
+
+        /*
+         * Заглушки «Метод стандартного класса.» и «Свойство стандартного
+         * класса.» ничего не сообщают: в Hover и Completion они занимают
+         * место описания, ради которого подсказку и открывают.
+         */
+        const generic = members.filter(item =>
+            /^(Метод|Свойство) стандартного класса\.?$/.test(item.summary) ||
+            !item.summary
+        );
+        assert.deepStrictEqual(
+            generic.map(item => item.name),
+            [],
+            "Описание члена класса берётся из раздела руководства о классе"
+        );
+
+        const tooLong = members.filter(item =>
+            item.summary.split(/\s+/).filter(Boolean).length > 10
+        );
+        assert.deepStrictEqual(
+            tooLong.map(item => `${item.name}: ${item.summary}`),
+            [],
+            "Описание длиннее десяти слов не читается в подсказке"
+        );
+
+        const vagueClass = classes.filter(entry =>
+            (entry.summary || "").split(/\s+/).filter(Boolean).length < 2
+        );
+        assert.deepStrictEqual(
+            vagueClass.map(entry => `${entry.name}: ${entry.summary}`),
+            [],
+            "Описание класса из одного слова не объясняет, что это за класс"
+        );
+    });
+
+    /*
+     * Ctrl+Space после точки обязан показывать унаследованные члены.
+     *
+     * Разрешение одного члена цепочку наследования обходило и раньше, поэтому
+     * переход по унаследованному свойству работал, а в подсказке его не было:
+     * найти такой член можно было только заранее зная, что он существует.
+     */
+    await test("Completion после точки показывает члены базового класса", () => {
+        const source = [
+            "Class Base",
+            "  Var BaseProp;",
+            "  Macro BaseMethod()",
+            "  End;",
+            "End;",
+            "Class (Base) Derived",
+            "  Var OwnProp;",
+            "End;",
+            "Macro Test()",
+            "  Var d = Derived();",
+            "  d.",
+            "End;"
+        ].join("\n");
+        const { module, resolver } = moduleFor(source);
+        const names = resolver
+            .getCompletions(
+                module.uri,
+                module.symbolTree,
+                source.indexOf("  d.") + 4
+            )
+            .map(item => item.label);
+
+        assert.deepStrictEqual(
+            ["OwnProp", "BaseProp", "BaseMethod"].filter(
+                name => !names.includes(name)
+            ),
+            [],
+            `Не предложено унаследованное; предложено: ${names.join(", ")}`
+        );
+    });
+
+    await test("наследование стандартного класса видно в Completion", () => {
+        /* TVarRecord в руководстве — наследник TRecHandler. */
+        const source = [
+            "Macro Test()",
+            "  Var v = TVarRecord();",
+            "  v.",
+            "End;"
+        ].join("\n");
+        const { module, resolver } = moduleFor(source);
+        const names = resolver
+            .getCompletions(
+                module.uri,
+                module.symbolTree,
+                source.indexOf("  v.") + 4
+            )
+            .map(item => item.label);
+
+        assert.ok(
+            names.includes("varPart"),
+            `Собственное свойство не предложено: ${names.join(", ")}`
+        );
+        assert.ok(
+            names.includes("Rec") && names.includes("SetRecordAddr"),
+            "Члены базового TRecHandler обязаны попадать в подсказку; " +
+                `предложено: ${names.join(", ")}`
+        );
+    });
+
+    await test("циклическое наследование не зацикливает Completion", () => {
+        /* Ошибочный код не должен подвешивать сервер. */
+        const source = [
+            "Class (Second) First",
+            "  Var FirstProp;",
+            "End;",
+            "Class (First) Second",
+            "  Var SecondProp;",
+            "End;",
+            "Macro Test()",
+            "  Var s = Second();",
+            "  s.",
+            "End;"
+        ].join("\n");
+        const { module, resolver } = moduleFor(source);
+        const names = resolver
+            .getCompletions(
+                module.uri,
+                module.symbolTree,
+                source.indexOf("  s.") + 4
+            )
+            .map(item => item.label);
+
+        assert.deepStrictEqual(
+            ["SecondProp", "FirstProp"].filter(name => !names.includes(name)),
+            [],
+            `Оба класса цепочки должны попасть в подсказку: ${names.join(", ")}`
+        );
+    });
+
+    await test("объявленный базовый класс существует в каталоге", () => {
+        const {
+            RSL_STANDARD_LIBRARY
+        } = require("../server/out/builtins/standardLibraryData");
+        const classes = RSL_STANDARD_LIBRARY.filter(entry => entry.children);
+        const known = new Set(
+            classes.map(entry => entry.name.toLowerCase())
+        );
+        const dangling = classes
+            .filter(entry => entry.base && !known.has(entry.base.toLowerCase()))
+            .map(entry => `${entry.name} -> ${entry.base}`);
+
+        assert.deepStrictEqual(
+            dangling,
+            [],
+            "Базовый класс не найден в каталоге: его члены не попадут в " +
+                "подсказку, а опечатка в имени ничем себя не проявит"
+        );
+    });
+
+    /*
+     * Классы прикладных модулей доступны только через Import.
+     *
+     * Предлагать их всегда неверно: класс модуля существует лишь там, где
+     * модуль импортирован. Транзитивный случай (модуль импортирован внутри
+     * импортированного файла) обязан работать только по уже разобранным
+     * файлам: обход проекта в момент Ctrl+Space — это задержка ровно там, где
+     * пользователь ждёт ответа.
+     */
+    await test("классы прикладного модуля видны только через Import", () => {
+        const {
+            PlatformModuleCatalog
+        } = require("../server/out/builtins/platformModuleCatalog");
+        const catalog = new PlatformModuleCatalog({ log: () => undefined });
+        catalog.ensureModules([
+            "CommonInter", "AcquirerObjects", "BankInter", "middle"
+        ]);
+
+        assert.ok(
+            catalog.ready && catalog.moduleCount > 10,
+            `Каталог прикладных модулей не прочитан: ${catalog.moduleCount}`
+        );
+
+        const MAIN = "file:///main.mac";
+        const MIDDLE = "file:///middle.mac";
+        const build = (files, source) => {
+            const index = new WorkspaceIndex();
+            index.registerWorkspaceFiles(Object.keys(files));
+            let target;
+            for (const [uri, text] of Object.entries(files)) {
+                const opened = index.updateOpenModule(uri, text, 1);
+                if (uri === MAIN) {
+                    target = opened;
+                }
+            }
+            const resolver = new RslScopeResolver(index, undefined, catalog);
+            return resolver
+                .getCompletions(
+                    MAIN,
+                    target.symbolTree,
+                    source.indexOf("Var x = R") + 9
+                )
+                .map(item => item.label);
+        };
+
+        const tail = "Macro Test()\n  Var x = R\nEnd;";
+        const withoutImport = `${tail}`;
+        const withImport = `Import CommonInter;\n${tail}`;
+        const viaMiddle = `Import middle;\n${tail}`;
+
+        assert.ok(
+            !build({ [MAIN]: withoutImport }, withoutImport)
+                .includes("RSL_LoansCarryDoc"),
+            "Без Import класс модуля не должен попадать в подсказку"
+        );
+        assert.ok(
+            build({ [MAIN]: withImport }, withImport)
+                .includes("RSL_LoansCarryDoc"),
+            "С Import CommonInter класс модуля обязан быть предложен"
+        );
+        assert.ok(
+            build(
+                {
+                    [MIDDLE]: "Import CommonInter;\nMacro Helper()\nEnd;",
+                    [MAIN]: viaMiddle
+                },
+                viaMiddle
+            ).includes("RSL_LoansCarryDoc"),
+            "Модуль, импортированный в уже разобранном файле, тоже доступен"
+        );
+
+        /* Неразобранный файл проекта не должен ни давать классы, ни грузиться. */
+        const lazyIndex = new WorkspaceIndex();
+        lazyIndex.registerWorkspaceFiles([MAIN, MIDDLE]);
+        const opened = lazyIndex.updateOpenModule(MAIN, viaMiddle, 1);
+        const lazyResolver = new RslScopeResolver(
+            lazyIndex,
+            undefined,
+            catalog
+        );
+        assert.ok(
+            !lazyResolver
+                .getCompletions(
+                    MAIN,
+                    opened.symbolTree,
+                    viaMiddle.indexOf("Var x = R") + 9
+                )
+                .map(item => item.label)
+                .includes("RSL_LoansCarryDoc"),
+            "Пока импортированный файл не разобран, его Import не учитывается: " +
+                "иначе Completion пришлось бы обходить проект"
+        );
+    });
+
+    await test("Completion не читает файл прикладных модулей", () => {
+        const fs = require("fs");
+        const {
+            PlatformModuleCatalog
+        } = require("../server/out/builtins/platformModuleCatalog");
+        const catalog = new PlatformModuleCatalog({ log: () => undefined });
+        catalog.ensureModules([
+            "CommonInter", "AcquirerObjects", "BankInter", "middle"
+        ]);
+
+        const source = "Import CommonInter;\nMacro Test()\n  Var x = R\nEnd;";
+        const index = new WorkspaceIndex();
+        const uri = "file:///reads.mac";
+        index.registerWorkspaceFiles([uri]);
+        const opened = index.updateOpenModule(uri, source, 1);
+        const resolver = new RslScopeResolver(index, undefined, catalog);
+
+        const real = fs.readFileSync;
+        let reads = 0;
+        fs.readFileSync = function (...args) {
+            if (String(args[0]).includes("platform-modules")) {
+                reads++;
+            }
+            return real.apply(this, args);
+        };
+        try {
+            resolver.getCompletions(
+                uri,
+                opened.symbolTree,
+                source.indexOf("Var x = R") + 9
+            );
+        } finally {
+            fs.readFileSync = real;
+        }
+
+        assert.strictEqual(
+            reads,
+            0,
+            "Состав обязан быть готов заранее: у PaymInter это 186 КБ, " +
+                "читать их в момент Ctrl+Space значит задержать ответ"
+        );
+    });
+
+    await test("класс модуля наследует члены стандартного класса", () => {
+        const {
+            PlatformModuleCatalog
+        } = require("../server/out/builtins/platformModuleCatalog");
+        const catalog = new PlatformModuleCatalog({ log: () => undefined });
+        catalog.ensureModules([
+            "CommonInter", "AcquirerObjects", "BankInter", "middle"
+        ]);
+
+        /* TAcqDocument -> TPersistVarRecord -> TVarRecord -> TRecHandler. */
+        const source = [
+            "Import AcquirerObjects;",
+            "Macro Test()",
+            "  Var d = TAcqDocument();",
+            "  d.",
+            "End;"
+        ].join("\n");
+        const uri = "file:///acq.mac";
+        const index = new WorkspaceIndex();
+        index.registerWorkspaceFiles([uri]);
+        const opened = index.updateOpenModule(uri, source, 1);
+        const resolver = new RslScopeResolver(index, undefined, catalog);
+        const names = resolver
+            .getCompletions(uri, opened.symbolTree, source.indexOf("  d.") + 4)
+            .map(item => item.label);
+
+        assert.ok(
+            names.includes("branch"),
+            `Собственное свойство не предложено: ${names.join(", ")}`
+        );
+        assert.ok(
+            names.includes("Rec") && names.includes("varPart"),
+            "Цепочка наследования обязана доходить до стандартных классов; " +
+                `предложено: ${names.join(", ")}`
+        );
+    });
+
+    await test("процедуры прикладного модуля предлагаются и знают свой тип", () => {
+        const {
+            PlatformModuleCatalog
+        } = require("../server/out/builtins/platformModuleCatalog");
+        const catalog = new PlatformModuleCatalog({ log: () => undefined });
+        catalog.ensureModules(["total"]);
+
+        /*
+         * LnGetRecordSet объявлена как «(Query:String, MsgPrint:Bool): Object»,
+         * то есть тип результата у процедуры модуля известен — и должен
+         * использоваться при выводе типа переменной.
+         */
+        assert.strictEqual(
+            catalog.findResultType(["total"], "LnGetRecordSet"),
+            "Object",
+            "Тип результата процедуры модуля обязан быть прочитан"
+        );
+
+        const source = "Import total;\nMacro Test()\n  Var v = Ln\nEnd;";
+        const uri = "file:///proc.mac";
+        const index = new WorkspaceIndex();
+        index.registerWorkspaceFiles([uri]);
+        const opened = index.updateOpenModule(uri, source, 1);
+        const resolver = new RslScopeResolver(index, undefined, catalog);
+        const names = resolver
+            .getCompletions(uri, opened.symbolTree, source.indexOf("Var v = Ln") + 10)
+            .map(item => item.label);
+
+        assert.ok(
+            names.includes("LnGetRecordSet"),
+            `Процедура модуля не предложена: ${names.slice(0, 8).join(", ")}`
+        );
+    });
+
+    await test("состав модуля читается только для импортированных", () => {
+        const {
+            PlatformModuleCatalog
+        } = require("../server/out/builtins/platformModuleCatalog");
+        const catalog = new PlatformModuleCatalog({ log: () => undefined });
+
+        /* Индекс знает про все модули, но их состав ещё не прочитан. */
+        assert.ok(
+            catalog.knowsModule("PaymInter") && catalog.moduleCount > 30,
+            `Индекс модулей не прочитан: ${catalog.moduleCount}`
+        );
+        assert.strictEqual(
+            catalog.loadedCount,
+            0,
+            "Индекс не должен тянуть за собой состав: у PaymInter это 186 КБ"
+        );
+
+        catalog.ensureModules(["CommonInter"]);
+        assert.strictEqual(
+            catalog.loadedCount,
+            1,
+            "Читаться обязан только запрошенный модуль"
+        );
+        assert.ok(
+            !catalog.findClass(["PaymInter"], "RsbPayDocument"),
+            "Непрочитанный модуль не должен отдавать символы"
+        );
     });
 
     await test("встроенные функции и классы участвуют в resolve и members", () => {

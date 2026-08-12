@@ -205,6 +205,30 @@ export class DiagnosticsCoordinator {
             return;
         }
 
+        /*
+         * Актуальность проверяется на старте задачи, а не только при её
+         * постановке: между ними были await, и за это время пользователь мог
+         * перейти в другой файл. Расчёт покинутого файла — это чужое время
+         * перед тем, которое ждёт пользователь.
+         *
+         * Результат не теряется: staleLocal остаётся, и при возврате в файл
+         * setActiveDocument поставит расчёт заново.
+         */
+        if (!this.isActive(uri)) {
+            this.cancel(uri);
+
+            /*
+             * Import сообщаем всё равно: загрузка импортированных модулей
+             * нужна независимо от того, на какой файл смотрит пользователь, и
+             * отменять её из-за переключения вкладки значило бы каждый раз
+             * начинать индексацию заново.
+             */
+            if (state.settings.imports.enabled) {
+                this.options.onImports(uri, state.module.imports);
+            }
+            return;
+        }
+
         const key = [
             state.module.version,
             JSON.stringify(localSettingsKey(state.settings.diagnostics))
@@ -241,7 +265,7 @@ export class DiagnosticsCoordinator {
         }
 
         this.staleLocal.delete(uri);
-        this.publishCombined(uri);
+        await this.publishWhenStillActive(uri);
         if (state.settings.imports.enabled) {
             this.options.onImports(uri, state.module.imports);
         }
@@ -255,6 +279,15 @@ export class DiagnosticsCoordinator {
 
         const state = this.getCurrentState(uri);
         if (!state) {
+            return;
+        }
+
+        /*
+         * Межфайловая фаза дороже локальной, и отменять её для покинутого файла
+         * тем важнее: именно она заставляет ждать активный документ.
+         */
+        if (!this.isActive(uri)) {
+            this.cancel(uri);
             return;
         }
 
@@ -293,6 +326,24 @@ export class DiagnosticsCoordinator {
 
         this.workspaceFirstScheduled.delete(uri);
         this.staleWorkspace.delete(uri);
+        await this.publishWhenStillActive(uri);
+    }
+
+    /**
+     * Публикует результат, дав сначала разобрать накопившиеся сообщения LSP.
+     *
+     * Расчёт диагностики синхронный, поэтому уведомление о смене активного
+     * файла всё это время лежит в очереди событий необработанным. Без возврата
+     * управления публикация успевала пройти раньше него, и Problems покинутого
+     * файла всплывали в панели, а через мгновение гасились уже обработанным
+     * переключением — заметное мигание чужого списка перед нужным.
+     *
+     * Возврат управления делает публикацию согласованной: если переключение
+     * уже пришло, planUpdatedDiagnostics отдаст по этому файлу пустой список,
+     * а сам результат останется в кэше до возвращения в файл.
+     */
+    private async publishWhenStillActive(uri: string): Promise<void> {
+        await yieldToInteractiveRequests();
         this.publishCombined(uri);
     }
 

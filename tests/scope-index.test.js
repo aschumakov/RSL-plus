@@ -192,6 +192,73 @@ test("Тип объекта выводится из отдельного при�
     assert.ok(methodTokens.some(token => token.line === 7));
 });
 
+/*
+ * Тип переменной берётся из объявленного типа результата процедуры.
+ *
+ * Раньше разбор присваивания считал типом само имя вызванного — верно для
+ * конструктора класса и неверно для процедуры: у Macro Get():RsdRecordset
+ * типом становилось имя Get, класса с таким именем нет, и подсказка по
+ * переменной пропадала полностью.
+ */
+test("тип переменной выводится из типа результата Macro", () => {
+    const source = [
+        "Macro execSQLselect(sqltext:string, params:TArray, " +
+            "throw:bool):RsdRecordset",
+        "End;",
+        "Macro Test()",
+        "    Var rs = execSQLselect(sql, MakeArray(), true);",
+        "    rs.MoveNext();",
+        "End;"
+    ].join("\n");
+    const index = new WorkspaceIndex();
+    const tree = createModule(index, "file:///main.mac", source);
+    const resolver = new RslScopeResolver(index);
+    const resolved = resolver.resolveAt(
+        "file:///main.mac",
+        tree,
+        offsetInside(source, "MoveNext", 0)
+    );
+
+    assert.ok(
+        resolved,
+        "Член RsdRecordset не разрешён: тип результата Macro не учтён"
+    );
+    assert.strictEqual(resolved.symbol.name, "MoveNext");
+});
+
+/*
+ * Переменная без Var: в RSL она возникает от самого присваивания, поэтому в
+ * дереве символов её нет — а тип из присваивания известен.
+ */
+test("Completion работает по переменной без объявления Var", () => {
+    const source = [
+        "Macro execSQLselect(sqltext:string):RsdRecordset",
+        "End;",
+        "Macro Test()",
+        "    rs = execSQLselect(sql);",
+        "    while ( rs.movenext () )",
+        "    End;",
+        "End;"
+    ].join("\n");
+    const index = new WorkspaceIndex();
+    const tree = createModule(index, "file:///main.mac", source);
+    const resolver = new RslScopeResolver(index);
+
+    const names = resolver
+        .getCompletions(
+            "file:///main.mac",
+            tree,
+            source.indexOf("rs.movenext") + 3
+        )
+        .map(item => item.label);
+
+    assert.ok(
+        names.some(name => /^movenext$/i.test(name)),
+        "Члены RsdRecordset обязаны предлагаться и без Var; " +
+            `предложено: ${names.slice(0, 10).join(", ")}`
+    );
+});
+
 test("Completion после частично введённого метода остаётся объектным", () => {
     const source = [
         "Class Service",

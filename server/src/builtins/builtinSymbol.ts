@@ -21,6 +21,8 @@ export class BuiltinSymbol {
     readonly signature: string;
     readonly summary: string;
     readonly insertText: string;
+    /** Имя базового класса; пусто, если класс ничего не наследует. */
+    readonly base: string;
     readonly children: readonly BuiltinSymbol[];
 
     constructor(definition: IRslBuiltinDefinition) {
@@ -30,6 +32,7 @@ export class BuiltinSymbol {
         this.signature = definition.signature || definition.name;
         this.summary = definition.summary || "";
         this.insertText = definition.insertText || "";
+        this.base = definition.base || "";
         this.children = Object.freeze(
             (definition.children || []).map(item => new BuiltinSymbol(item))
         );
@@ -85,6 +88,12 @@ export class BuiltinSymbol {
             parameterText: parameterText(this.signature, this.name),
             documentation: this.summary,
             builtin: true,
+            /*
+             * Имя базового класса передаётся как есть: разрешать его здесь
+             * нельзя, каталог ещё строится. Цепочку обходит scopeResolver — он
+             * же обрабатывает наследование классов пользователя.
+             */
+            baseClassName: this.base || undefined,
             children: this.children.map(child => child.toRslSymbol(id))
         });
     }

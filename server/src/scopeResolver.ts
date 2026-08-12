@@ -17,6 +17,9 @@ import {
 } from "./workspaceIndex";
 import { getDefaults } from "./defaults";
 import type { BuiltinCatalog } from "./builtins/builtinSymbol";
+import type {
+    PlatformModuleCatalog
+} from "./builtins/platformModuleCatalog";
 
 export const RSL_BUILTIN_URI = "rsl-builtin:/standard-library";
 
@@ -59,10 +62,23 @@ export class RslScopeResolver {
     >();
     private resolutionCacheHits = 0;
     private resolutionCacheMisses = 0;
+    /*
+     * Видимые прикладные модули на документ.
+     *
+     * Считаются по Import и сбрасываются по номеру ревизии индекса: набор
+     * зависит и от текста файла, и от того, какие импортированные модули уже
+     * разобраны. Кэш нужен потому, что обход вызывается из Completion, а тот
+     * срабатывает на каждое нажатие.
+     */
+    private visibleModulesByUri = new Map<
+        string,
+        { revision: number; modules: readonly string[] }
+    >();
 
     constructor(
         private index: WorkspaceIndex,
-        private builtins: BuiltinCatalog = getDefaults()
+        private builtins: BuiltinCatalog = getDefaults(),
+        private platformModules?: PlatformModuleCatalog
     ) {}
 
     resolveAt(
@@ -264,23 +280,16 @@ export class RslScopeResolver {
                 );
 
                 if (classObject) {
-                    const allowPrivate = this.canAccessPrivateMembers(
-                        uri,
-                        tree,
-                        offset,
-                        classObject
-                    );
-
                     return deduplicateCompletionItems(
-                        classObject.symbol
-                            .children
-                            .filter(child =>
-                                allowPrivate || !child.isPrivate
-                            )
-                            .map(child => withCompletionPriority(
-                                child.completionItem,
-                                "0"
-                            ))
+                        this.collectMembersInHierarchy(
+                            uri,
+                            tree,
+                            offset,
+                            classObject
+                        ).map(child => withCompletionPriority(
+                            child.completionItem,
+                            "0"
+                        ))
                     );
                 }
             }
@@ -309,6 +318,18 @@ export class RslScopeResolver {
         }
 
         result.push(...this.index.getImportedCompletionItems(uri));
+
+        /*
+         * Классы прикладных модулей — только тех, что импортированы. Данные к
+         * этому моменту уже прочитаны (ensureLoaded вызывается по готовности
+         * списка Import), поэтому здесь остаётся чтение готовых map.
+         */
+        if (this.platformModules) {
+            result.push(...this.platformModules.completionItems(
+                this.visiblePlatformModules(uri)
+            ));
+        }
+
         return deduplicateCompletionItems(result);
     }
 
@@ -346,6 +367,156 @@ export class RslScopeResolver {
                 token.kind !== "square"
             );
             this.tokensByModule.set(module, result);
+        }
+
+        return result;
+    }
+
+    /**
+     * Прикладные модули, чьи классы видны в этом документе.
+     *
+     * Только по Import — как прямым, так и через уже разобранные
+     * импортированные файлы: модуль, импортированный внутри импортированного
+     * файла, тоже доступен. Транзитивный обход идёт ИСКЛЮЧИТЕЛЬНО по модулям,
+     * которые уже лежат в индексе: ни чтения файла, ни постановки в очередь
+     * загрузки здесь не происходит. Иначе Ctrl+Space в файле с десятком Import
+     * запускал бы обход проекта — ровно в тот момент, когда пользователь ждёт
+     * ответа. Ещё не разобранный Import просто не даёт своих модулей, а
+     * появятся они при следующем запросе, когда индекс их уже построит.
+     */
+    visiblePlatformModules(uri: string): readonly string[] {
+        const catalog = this.platformModules;
+
+        if (!catalog?.ready) {
+            return [];
+        }
+
+        const cached = this.visibleModulesByUri.get(uri);
+        const revision = this.index.revision;
+
+        if (cached?.revision === revision) {
+            return cached.modules;
+        }
+
+        const found = new Set<string>();
+        const visitedUris = new Set<string>([uri]);
+        const queue: readonly string[][] = [
+            this.index.getModule(uri)?.imports || []
+        ];
+
+        for (const imports of queue) {
+            for (const importName of imports) {
+                if (catalog.knowsModule(importName)) {
+                    found.add(importName);
+                    continue;
+                }
+
+                /* Файл проекта: его собственные Import учитываются, если он уже разобран. */
+                const resolution = this.index.resolveWorkspaceFile(importName);
+
+                if (resolution.kind !== "resolved") {
+                    continue;
+                }
+
+                const imported = this.index.getModule(resolution.value);
+
+                if (!imported || visitedUris.has(imported.uri)) {
+                    continue;
+                }
+                visitedUris.add(imported.uri);
+                (queue as string[][]).push(imported.imports.slice());
+            }
+        }
+
+        const modules = Object.freeze(Array.from(found));
+        this.visibleModulesByUri.set(uri, { revision, modules });
+        return modules;
+    }
+
+    /**
+     * Базовый класс, разрешённый относительно модуля объявления.
+     *
+     * Имя базового класса ищется в том модуле, где объявлен текущий класс, а
+     * не обязательно в исходном документе: Import у них разные. Для класса
+     * стандартной библиотеки модуля нет, и имя разрешается от документа
+     * запроса — оттуда поиск всё равно доходит до каталога встроенных классов.
+     */
+    private resolveBaseClass(
+        requestUri: string,
+        requestTree: RslSymbol,
+        classSymbol: IIndexedSymbol
+    ): IIndexedSymbol | undefined {
+        const baseClassName = classSymbol.symbol.baseClassName;
+
+        if (!baseClassName) {
+            return undefined;
+        }
+
+        const classModule = classSymbol.uri === RSL_BUILTIN_URI
+            ? undefined
+            : this.index.getModule(classSymbol.uri);
+
+        return classModule
+            ? this.findClassSymbol(
+                classSymbol.uri,
+                classModule.symbolTree,
+                baseClassName
+            )
+            : this.findClassSymbol(requestUri, requestTree, baseClassName);
+    }
+
+    /**
+     * Члены класса вместе с унаследованными — для Ctrl+Space после точки.
+     *
+     * Разрешение одного члена цепочку наследования обходит (см.
+     * resolveMemberInHierarchy), а список для автодополнения раньше брал
+     * только собственных детей класса. Из-за этого переход по унаследованному
+     * свойству работал, но в подсказке его не было — то есть найти его можно
+     * было только зная, что оно существует.
+     */
+    private collectMembersInHierarchy(
+        requestUri: string,
+        requestTree: RslSymbol,
+        offset: number,
+        classSymbol: IIndexedSymbol
+    ): RslSymbol[] {
+        const result: RslSymbol[] = [];
+        const taken = new Set<string>();
+        const visited = new Set<string>();
+        let current: IIndexedSymbol | undefined = classSymbol;
+
+        while (current) {
+            const classKey = `${current.uri}#${current.symbol.id}`;
+
+            /* Та же защита от циклической цепочки, что и в разрешении члена. */
+            if (visited.has(classKey)) {
+                break;
+            }
+            visited.add(classKey);
+
+            const allowPrivate = this.canAccessPrivateMembers(
+                requestUri,
+                requestTree,
+                offset,
+                current
+            );
+
+            for (const child of current.symbol.children) {
+                if (!allowPrivate && child.isPrivate) {
+                    continue;
+                }
+
+                const key = normalizeIdentifier(child.name);
+
+                /* Член производного класса перекрывает член базового. */
+                if (taken.has(key)) {
+                    continue;
+                }
+                taken.add(key);
+                result.push(child);
+            }
+
+            current = this.resolveBaseClass(requestUri, requestTree, current);
         }
 
         return result;
@@ -400,31 +571,11 @@ export class RslScopeResolver {
             };
         }
 
-        const baseClassName = classSymbol.symbol.baseClassName;
-
-        if (!baseClassName) {
-            return undefined;
-        }
-
-        /*
-        * Базовый класс надо разрешать относительно модуля, где объявлен
-        * текущий класс, а не обязательно относительно исходного документа.
-        */
-        const classModule = classSymbol.uri === RSL_BUILTIN_URI
-            ? undefined
-            : this.index.getModule(classSymbol.uri);
-
-        const baseClass = classModule
-            ? this.findClassSymbol(
-                classSymbol.uri,
-                classModule.symbolTree,
-                baseClassName
-            )
-            : this.findClassSymbol(
-                requestUri,
-                requestTree,
-                baseClassName
-            );
+        const baseClass = this.resolveBaseClass(
+            requestUri,
+            requestTree,
+            classSymbol
+        );
 
         if (!baseClass) {
             return undefined;
@@ -493,25 +644,41 @@ export class RslScopeResolver {
             receiver.value,
             offset
         );
+        const module = this.index.getModule(uri);
 
-        if (!receiverObject) {
+        /*
+         * Отсутствие объявления не повод сдаваться: в RSL переменная возникает
+         * и просто от присваивания. Код вида
+         *
+         *     rs = ExecSQLselect (sql, ..., true);
+         *     while (rs.movenext ())
+         *
+         * не содержит Var, поэтому rs нет в дереве символов — а тип у него
+         * тем не менее известен из присваивания.
+         */
+        if (!receiverObject && !module) {
             return undefined;
         }
 
-        let typeName = normalizeIdentifier(receiverObject.typeName);
+        let typeName = receiverObject
+            ? normalizeIdentifier(receiverObject.typeName)
+            : "";
 
-        if (!typeName || typeName === "variant") {
-            const module = this.index.getModule(uri);
-            typeName = module
-                ? inferDeclaredType(this.getTokens(module), receiverObject)
-                : "";
+        if (module && (!typeName || typeName === "variant")) {
+            if (receiverObject) {
+                typeName = inferDeclaredType(
+                    this.getTokens(module),
+                    receiverObject
+                );
+            }
 
-            if (module && (!typeName || typeName === "variant")) {
+            if (!typeName || typeName === "variant") {
                 typeName = this.inferAssignedType(
                     module,
                     tree,
-                    receiverObject,
-                    offset
+                    receiver.value,
+                    offset,
+                    receiverObject?.range.start ?? 0
                 );
             }
         }
@@ -556,11 +723,29 @@ export class RslScopeResolver {
         }
 
         const builtin = this.builtins.findClass(normalizedType);
-        return builtin
-            ? {
+        if (builtin) {
+            return {
                 uri: RSL_BUILTIN_URI,
                 symbolId: builtin.id,
                 symbol: builtin
+            };
+        }
+
+        /*
+         * Класс прикладного модуля — последним: он доступен только через
+         * Import, поэтому не должен перекрывать ни файл проекта, ни встроенный
+         * класс с тем же именем.
+         */
+        const platform = this.platformModules?.findClass(
+            this.visiblePlatformModules(uri),
+            normalizedType
+        );
+
+        return platform
+            ? {
+                uri: RSL_BUILTIN_URI,
+                symbolId: platform.id,
+                symbol: platform
             }
             : undefined;
     }
@@ -574,14 +759,23 @@ export class RslScopeResolver {
      * Индекс присваиваний строится один раз на immutable module model, поэтому
      * Semantic Tokens не сканирует весь Macro заново для каждого вызова.
      */
+    /**
+     * Тип из ближайшего предшествующего присваивания.
+     *
+     * Имя, а не символ: переменная могла не объявляться через Var, и тогда её
+     * в дереве символов нет, а присваивание есть. declaredAt отсекает
+     * присваивания до объявления, если оно всё-таки было; для неявной
+     * переменной достаточно границы текущей области.
+     */
     private inferAssignedType(
         module: IIndexedModule,
         tree: RslSymbol,
-        receiverObject: RslSymbol,
-        offset: number
+        receiverName: string,
+        offset: number,
+        declaredAt: number
     ): string {
         const assignments = this.getConstructorAssignments(module).get(
-            normalizeIdentifier(receiverObject.name)
+            normalizeIdentifier(receiverName)
         );
         if (!assignments || assignments.length === 0) {
             return "";
@@ -589,10 +783,7 @@ export class RslScopeResolver {
 
         const scopeChain = getScopeChain(tree, offset);
         const scope = scopeChain[scopeChain.length - 1] || tree;
-        const lowerBound = Math.max(
-            receiverObject.range.start,
-            scope.range.start
-        );
+        const lowerBound = Math.max(declaredAt, scope.range.start);
         let index = upperBoundAssignmentOffset(assignments, offset) - 1;
 
         while (index >= 0) {
@@ -637,7 +828,10 @@ export class RslScopeResolver {
             const values = result.get(name) || [];
             values.push({
                 offset: target.start,
-                typeName: this.getCallableResultType(constructor.value)
+                typeName: this.getCallableResultType(
+                    module.uri,
+                    constructor.value
+                )
             });
             result.set(name, values);
         }
@@ -646,7 +840,14 @@ export class RslScopeResolver {
         return result;
     }
 
-    private getCallableResultType(name: string): string {
+    /**
+     * Тип значения, которое даёт вызов: класс — сам себя, процедура — свой
+     * объявленный тип результата.
+     *
+     * Неизвестное имя возвращается как есть: тогда это скорее всего имя класса,
+     * который просто ещё не загружен, и findClassSymbol попробует его найти.
+     */
+    private getCallableResultType(uri: string, name: string): string {
         const builtin = this.builtins.findSymbol(name);
         if (builtin) {
             return builtin.kind === CompletionItemKind.Class
@@ -659,12 +860,19 @@ export class RslScopeResolver {
             item.symbol.kind === CompletionItemKind.Function ||
             item.symbol.kind === CompletionItemKind.Method
         );
-        if (!workspace) {
-            return normalizeIdentifier(name);
+        if (workspace) {
+            return workspace.symbol.kind === CompletionItemKind.Class
+                ? workspace.symbol.name
+                : workspace.symbol.typeName;
         }
-        return workspace.symbol.kind === CompletionItemKind.Class
-            ? workspace.symbol.name
-            : workspace.symbol.typeName;
+
+        /* Процедура импортированного прикладного модуля. */
+        const platform = this.platformModules?.findResultType(
+            this.visiblePlatformModules(uri),
+            name
+        );
+
+        return platform || normalizeIdentifier(name);
     }
 
     private canAccessPrivateMembers(
@@ -890,13 +1098,18 @@ function inferDeclaredType(
                 : "";
         }
 
+        /*
+         * Присваивание здесь намеренно не разбирается.
+         *
+         * Раньше `Var x = Name(...)` давало тип "Name" — верно для
+         * конструктора класса и неверно для процедуры: у
+         * `Macro Get():RsdRecordset` типом становилось имя Get, класса с таким
+         * именем нет, и подсказка по x пропадала совсем. Хуже того, непустой
+         * результат отменял разбор присваивания ниже, который как раз умеет
+         * посмотреть объявленный тип результата (см. getCallableResultType).
+         */
         if (depth === 0 && token.raw === "=") {
-            const typeToken = tokens[index + 1];
-            const openToken = tokens[index + 2];
-            return typeToken?.kind === "identifier" &&
-                openToken?.kind === "symbol" && openToken.raw === "("
-                ? normalizeIdentifier(typeToken.value)
-                : "";
+            break;
         }
     }
 

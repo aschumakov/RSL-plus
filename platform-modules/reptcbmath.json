@@ -1,0 +1,1 @@
+{"version":2,"classes":[],"procedures":[{"name":"RANDOM","signature":"RANDOM(Parm):DoubleL","description":"Предназначена для генерации случайных чисел."},{"name":"SQRT","signature":"SQRT(Value:DoubleL, Integer, MoneyL):DoubleL","description":"Вычисляет квадратный корень из неотрицательного числа."}]}

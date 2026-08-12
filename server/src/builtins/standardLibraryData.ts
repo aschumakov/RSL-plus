@@ -7,650 +7,887 @@ export interface IRslBuiltinDefinition {
     signature?: string;
     summary?: string;
     insertText?: string;
+    /**
+     * Имя базового класса — только для классов.
+     *
+     * Члены базового класса здесь не дублируются: цепочку обходит
+     * scopeResolver, тот же самый, что и для Class (Base) пользователя.
+     * Копирование состава в производный класс означало бы, что правка
+     * базового класса требует правки всех производных.
+     */
+    base?: string;
     children?: readonly IRslBuiltinDefinition[];
 }
+
+/*
+ * Возвращаемый тип берётся из конца сигнатуры.
+ *
+ * Именно из конца, а не из первого двоеточия после закрывающей скобки:
+ * двоеточия внутри сигнатуры принадлежат типам параметров, а необязательный
+ * параметр может закрываться скобкой (`Date [ (day, mon, year) ]: Date`).
+ *
+ * Объявление стоит до каталога намеренно: const не поднимается, а массивы
+ * ниже вызывают procedure() и method() уже при инициализации модуля.
+ */
+const TRAILING_TYPE = /:\s*(@?[\wА-Яа-яЁё]+)\s*$/u;
 
 /*
  * Каталог хранит только факты, необходимые IDE: имена, сигнатуры, типы и
  * короткие собственные описания. Текст руководства и ссылки на него сюда не
  * копируются. Массив создаётся один раз при загрузке language server.
- */
-const STANDARD_PROCEDURE_SIGNATURES = [
-    "GetInt (id [, prompt, len [, hide] ])",
-    "GetDouble (id [, prompt, len [, hide [, pos ] ] ])",
-    "GetMoney (id [, prompt, len [, hide] [, pos]])",
-    "GetNumeric (id [, prompt, len [, hide [, pos] ] ])",
-    "GetString (id [, prompt, len [, hide] ])",
-    "GetStringR (id [, prompt, len [, hide] ])",
-    "GetTime(id [, prompt [, hide ] ])",
-    "GetDate (id [, prompt [, hide] ])",
-    "GetTRUE (id [, prompt ])",
-    "Print (...)",
-    "PrintGlobs (...)",
-    "PrintFiles (...)",
-    "PrintLn",
-    "PrintLocs (...)",
-    "PrintModule (modName:String)",
-    "PrintProps (object)",
-    "PrintRefs (ob: Object)",
-    "PrintStack (...)",
-    "PrintSymModule (symbolName:String)",
-    "Message",
-    "SetOutput ([ string ] [, bool ])",
-    "SetColumn (integer)",
-    "FlushColumn",
-    "ClearColumn",
-    "SetDefPrec (integer)",
-    "SetOutHandler (NameMacro)",
-    "GetPRNInfo ([escSeq:String, banner:String, frmFeed:Bool]) : String",
-    "SetPRNInfo (prnName: String [, escSeq: String, banner: String, frmFeed:Bool ])",
-    "ValType (val)",
-    "Double (val)",
-    "DoubleL (val)",
-    "Int (val)",
-    "String (val {, val})",
-    "Money (val)",
-    "MkStr (val1, val2)",
-    "Floor (val)",
-    "Asize (val [, newsize])",
-    "Date [ (day, mon, year) ]",
-    "DateSplit (date, day, mon, year)",
-    "Time [ (hour, min, sec, msec) ]",
-    "TimeSplit (time, hour, min, sec)",
-    "DtTm (date, time)",
-    "DtTmSplit (d, dt, tm)",
-    "RubToStr (money [, rub, kop [, full ]], kol)",
-    "RubToStrAlt (money, [rub, kop, ] kol)",
-    "CurToStrAlt (money [, rub, kop ], ISO, kol)",
-    "MonName (mon)",
-    "NumToStr (val, n1:String, n2:String, n3:String, isMan:Bool, prec:Integer) : String",
-    "SetAutoMoneyFloor (auto:Bool):bool",
-    "Round (val:Variant [, pos:Integer] , [round:Integer]):Money",
-    "MakeDouble (p1:Integer, p2:Integer, p3:Integer):Double",
-    "MakeMoney (p1:Integer, p2:Integer, p3:Integer):Money",
-    "SplitMoney (mn:Money, p1:@Integer, p2:@Integer, p3:@Integer)",
-    "StrLen (string)",
-    "Index (srcStr:String, fnd:String [, startPos:Integer]):Integer",
-    "StrBrk (string1, string2)",
-    "StrIsNumber(str:String):Bool",
-    "SubStr (string, integer1 [, integer2])",
-    "StrSet (string1, integer, string2)",
-    "Trim (string)",
-    "StrSplit (string, array, len [, len_first] [, minseg])",
-    "StrSplit2 (source:String, len:Integer [, len_first:Integer] [, minseg:Integer]) : TArray",
-    "StrUpr (string [,len])",
-    "StrLwr (string [, len])",
-    "CodeFor (string)",
-    "StrFor (number)",
-    "StrSubst (sourse, strToFind, strToReplace)",
-    "ToOEM (string [, mode])",
-    "ToANSI (string [, mode])",
-    "GetParm (num, var)",
-    "IsOutParm (num:Integer):Bool",
-    "SetParm (num, expression)",
-    "Parmcount ()",
-    "Run (prog, parm, init, finish:String)",
-    "CallRemoteRsl (fileName [, procName [, parm1, parm2, ...]])",
-    "Menu (array [, prompt] [, head] [, x] [, y] [, n])",
-    "RunMenu (menuName, procName | procAddr [, lbrName])",
-    "AddScroll (dlg:TRecHandler, data:Object [, numCol:Integer, " +
-        "colArray:TArray, proc:Variant, rdOnly:Bool, focused:Bool] " +
-        "[, NumBar:Integer])",
-    "RunDialog (dlg:TRecHandler [, proc:Variant]):Bool",
-    "DisableValidation (dlg:Variant, id:Integer)",
-    "UpdateFields (dlg:TRecHandler [, id:Integer])",
-    "SetFocus (dlg:TRecHandler, id:Integer)",
-    "MsgBox (mes)",
-    "DisableFields (dlg:TRecHandler [, id:Integer])",
-    "EnableFields (dlg:TRecHandler [, id:Integer])",
-    "SetTimer (dlg:TRecHandler [, timeOut:Integer, set:Bool])",
-    "MsgBoxEx (val:Variant [, flags:Integer, defInd:Integer, title:String, statLn:String ])",
-    "SetScroll (FILE, { DlgName, FileName } ...)",
-    "FindRow (dlg, id)",
-    "FindCol (dlg, id)",
-    "FillDown (dlg, pos)",
-    "FillUp (dlg, pos)",
-    "SetDlgFields (dlg, row)",
-    "ScrollMes (dlg, cmd, id, key)",
-    "UserFill (dlg)",
-    "AddMultiAction (rs:Object, key:Integer):Bool",
-    "GetMultiCount (rs:Object):Integer",
-    "GoToScroll (obj:Object)",
-    "RunScroll (data:Object, numCol:Integer, colInfo:TArray, uniqName, " +
-        "proc:Variant, head:String, stLine:String, rdOnly:Bool, x:Integer, " +
-        "y:Integer, cx:Integer, cy:Integer):Bool",
-    "UpdateScroll (obj:Object, mode:Integer)",
-    "GetScrollFieldValue(numfld:Integer, value:Undef):Bool",
-    "SetScrollFieldValue(numfld:Integer, newvalue:Undef, [strlen:Integer]):Bool",
-    "IsScrollEditMode():Bool",
-    "Trace (...)",
-    "DebugBreak",
-    "ConvertDDF (defName:String, outDir:String):Bool",
-    "CopyTblDef (inDef:String, outDef:String, inStruct:String, outStruct:String):Bool",
-    "ExistFile (string [, integer])",
-    "Open (fid, name:String, encode:String, fatal:Bool, eolType:Integer) : Bool",
-    "Close (id)",
-    "ClearStructs",
-    "Create (id [, filename] [, isTable:Bool] [, isP:Bool])",
-    "Clone (id [, filename] [, isTable:Bool] [, isP:Bool])",
-    "ViewFile (id, name [, edit])",
-    "DelFile (string)",
-    "DropTable (string)",
-    "Next (id [, integer])",
-    "Prev (id)",
-    "ReWind (id)",
-    "Insert (id [, string | size] [, integer] [, bool])",
-    "Update (id [, size] [, bool])",
-    "Delete (id, bool)",
-    "GetPos (id)",
-    "GetDirect (id [, recpos])",
-    "GetEQ (id)",
-    "GetGT (id)",
-    "GetGE (id)",
-    "GetLT (id)",
-    "GetLE (id)",
-    "SetRecordAddr (recId, fileId [, ind] [, offset] [, fix])",
-    "PackVarBuff (file [, size])",
-    "UnPackVarBuff (file)",
-    "GetRecordSize (id)",
-    "GetVarSize (id)",
-    "FileName (id)",
-    "NRecords (id [, par:Bool])",
-    "FldNumber (id)",
-    "FldName (id, number)",
-    "FldIndex (id, string)",
-    "FldOffset (id, string | number)",
-    "ClearRecord (id)",
-    "SetBuff (id, addr)",
-    "Copy (id1, id2 [, flag:Integer])",
-    "CopyBlob ()",
-    "KeyNum (id [, newkey])",
-    "SetDelim (symbol, space)",
-    "Status [ (parm) ]",
-    "ProcessTrn (TrnType:Integer, MacroName:String, Variant [, file1:File] " +
-        "[, file2:File] [, ...:File]):Bool",
-    "LoopInTrn (val)",
-    "AbortTrn()",
-    "SelectFile (file [, mask, head], sort, term)",
-    "SelectFolder (folder [, mask, head, ] term)",
-    "NeedFreeDB ()",
-    "WriteBlob (file, value)",
-    "ReadBlob (file, value)",
-    "CopyFile (src:String, dst:String [, ind:Bool [, indHeading:String]]) : Bool",
-    "RenameFile (src:String, dst:String) : Bool",
-    "RemoveFile (src:String) : Bool",
-    "ExistDir(name:String):Integer",
-    "MakeDir (name:String) : Bool",
-    "RemoveDir (name:String) : Bool",
-    "GetCurDir ([isRemote:Bool]) : String",
-    "SplitFile (pathName: String [, name: String [, ext: String ] ]): String",
-    "MergeFile (dirName: String ,name: String [, ext: String ]): String",
-    "FindPath (name: String [, dirList: String [, defExt: String [, curDir: Bool ] ] ]):",
-    "GetSysDir ([ ndir: Integer ]): String",
-    "GetIniFileValue (iniFileName:String, keyName:String):String",
-    "GetFileInfo (src:String [, dt:@Date, tm:@Time, size:@Integer, path:@String]) : Bool",
-    "ActiveX (mon:String, const=1):Object",
-    "ClassKind (obj:Object [, mask:Integer]):Integer",
-    "GenClassName (obj)",
-    "GenAttach (id, methodName, macroName | macroAddr)",
-    "GenObject (className [ , parm1, parm2, ...])",
-    "GenRun (ob, methodName [, par1, par2, ...])",
-    "GenSetProp (ob, propName, val)",
-    "GenGetProp (ob, propName)",
-    "GetObjProps (obj:Object, [CaseSensitive:Bool]):TArray",
-    "GetObjMethods (obj:Object, [CaseSensitive:Bool]):TArray",
-    "IsEqClass (className, obj)",
-    "GenPropID (obj, propName)",
-    "R2M (obj:Object, name:String) : MethodRef",
-    "CallR2M (oPtr:MethodRef [, par1, par2,...]) : Variant",
-    "GenNumProps (obj:Object) : Integer",
-    "ClrRmtOnRelease (proxy:Object) : Bool",
-    "GetNamedChanel (name:String) : Object",
-    "InitProgress (maxRecord:Integer [, msg:String, head:String])",
-    "UseProgress (record)",
-    "RemProgress",
-    "BegAction ([tm:Integer, text:String, canClose:Bool])",
-    "EndAction (tm:Integer)",
-    "CheckBits (n1:Integer, n2:Integer):Integer",
-    "DateShift (inData:Date [, nDay:Integer] [, nMon:Integer] [, nYear:Integer]):Date",
-    "ExecMacro (string,.....)",
-    "ExecMacro2 (string, .....)",
-    "ExecMacroFile (Module [, ProcName [, Parm1,Parm2, ...] ])",
-    "ExecMacroModule (codeStr:String [, macroName, par1, par2, ...])",
-    "ReplaceMacro (string1, [ string2 ])",
-    "ExecExp (string)",
-    "GCollect (ncol:@Integer):Integer",
-    "GetCallStack ()",
-    "GetEnv (string)",
-    "GetMemAddrFrom (obj:Variant):MemAddr",
-    "GetUIMode () : Integer",
-    "InstLoadModule (moduleName:String):Bool",
-    "IsWeakRef (obj:Object):Bool",
-    "WriteByte (stream:Object, byte:Integer):Bool",
-    "ReadByte (stream:Object, byte:@Integer):Bool",
-    "RunError ([ mes:String] [, userObj:Variant])",
-    "Exit ([code:Integer] [, mes:String])",
-    "SetExitFlag (code:Integer)",
-    "MemSize()",
-    "Version()",
-    "CurrentLine ([ line ])",
-    "UserNumber ()",
-    "Random ([ integer ])",
-    "SetDefMoneyPrec (newVal:Integer):Integer",
-    "ShowDictError (show:Bool):Bool",
-    "ShowRSCOMError (obj:TRsComErr)",
-    "StartProg (fileName:String [, cmdLine:String ] [, detached:Bool]):Integer",
-    "StrongRef (par:Object):Object",
-    "SysGetProperty (key:String):String",
-    "SysPutProperty (key:String, val:String):Bool",
-    "System (Number:Integer, CodeFor:Integer|Type:String [, CmdArgs:String])",
-    "IsStandAlone",
-    "TestEvent ([pause])",
-    "AddEvent (key:Integer)",
-    "IsGUI",
-    "ErrPrint (...)",
-    "ErrBox (str:TArray [, caption:String, flags:Integer]) : Integer",
-    "ModuleFileName ([moduleName:String] [, moduleType:@Integer]):String",
-    "ModuleName ([symbolName:string]):string",
-    "CmdArgs : String",
-    "GetUserName : String",
-    "IsSQL : Bool",
-    "UnderRCWHost : Bool",
-    "GetLocaleInfo (id:Integer, code:Integer [, isLocal:Bool]) : String",
-    "GetLangId (id:Integer [, isLocal:Bool]) : Integer",
-    "ZeroValue (valtp:Integer):Variant",
-    "StartShellProgram (fileName:Char):Integer",
-] as const;
-
-const RETURN_TYPES: Readonly<Record<string, string>> = Object.freeze({
-    getint: "Bool",
-    getdouble: "Bool",
-    getmoney: "Bool",
-    getnumeric: "Bool",
-    getstring: "Bool",
-    getstringr: "Bool",
-    gettime: "Bool",
-    getdate: "Bool",
-    gettrue: "Bool",
-    valtype: "Integer",
-    double: "Double",
-    doublel: "DoubleL",
-    int: "Integer",
-    string: "String",
-    money: "Money",
-    mkstr: "String",
-    floor: "Integer",
-    asize: "Integer",
-    date: "Date",
-    time: "Time",
-    dttm: "DateTime",
-    rubtostr: "String",
-    rubtostralt: "String",
-    curtostralt: "String",
-    monname: "String",
-    numtostr: "String",
-    round: "Money",
-    makedouble: "Double",
-    makemoney: "Money",
-    strlen: "Integer",
-    index: "Integer",
-    strbrk: "Integer",
-    strisnumber: "Bool",
-    substr: "String",
-    strset: "String",
-    trim: "String",
-    strsplit2: "TArray",
-    strupr: "String",
-    strlwr: "String",
-    codefor: "Integer",
-    strfor: "String",
-    strsubst: "String",
-    isoutparm: "Bool",
-    parmcount: "Integer",
-    existfile: "Bool",
-    next: "Bool",
-    prev: "Bool",
-    rewind: "Bool",
-    insert: "Bool",
-    update: "Bool",
-    delete: "Bool",
-    geteq: "Bool",
-    getgt: "Bool",
-    getge: "Bool",
-    getlt: "Bool",
-    getle: "Bool",
-    nrecords: "Integer",
-    fldnumber: "Integer",
-    fldname: "String",
-    fldindex: "Integer",
-    fldoffset: "Integer",
-    filename: "String",
-    getrecordsize: "Integer",
-    getvarsize: "Integer",
-    existdir: "Integer",
-    makedir: "Bool",
-    removedir: "Bool",
-    getcurdir: "String",
-    splitfile: "String",
-    mergefile: "String",
-    findpath: "String",
-    getsysdir: "String",
-    getinifilevalue: "String",
-    getfileinfo: "Bool",
-    activex: "Object",
-    classkind: "Integer",
-    genclassname: "String",
-    genobject: "Object",
-    iseqclass: "Bool",
-    execmacro: "Variant",
-    execmacro2: "Variant",
-    execmacrofile: "Variant",
-    execmacromodule: "Variant",
-    execexp: "Variant",
-    getcallstack: "TArray",
-    getenv: "String",
-    getuimode: "Integer",
-    isweakref: "Bool",
-    random: "Integer",
-    modulefilename: "String",
-    modulename: "String",
-    cmdargs: "String",
-    getusername: "String",
-    isgui: "Bool",
-    issql: "Bool",
-    underrcwhost: "Bool",
-    errbox: "Integer",
-    getlocaleinfo: "String",
-    getlangid: "Integer",
-    zerovalue: "Variant"
-});
-
-/*
- * Короткие описания процедур: своя формулировка, а не цитата руководства.
  *
- * Каждая строка — одно предложение по существу того, что процедура делает.
- * Подробности (диапазоны, значения флагов, поведение в трёхзвенной
- * архитектуре) сюда не переносятся: в Hover и Completion они не читаются, а
- * место занимают. Порядок и группировка повторяют раздел «Встроенные
- * процедуры» руководства, чтобы сверка со следующей его редакцией была
+ * Одно объявление на элемент — и для процедуры, и для члена класса. Раньше
+ * сигнатуры, возвращаемые типы и описания процедур лежали в трёх отдельных
+ * структурах, связанных по имени в нижнем регистре: опечатка в ключе не была
+ * ошибкой компиляции, а просто молча оставляла процедуру без описания или с
+ * типом Variant. Возвращаемый тип теперь объявляется один раз — в конце
+ * сигнатуры, где он к тому же виден в Signature Help.
+ *
+ * Описания — своя формулировка по существу, а не цитата руководства: одно
+ * предложение о том, что элемент делает. Подробности (диапазоны, значения
+ * флагов, поведение в трёхзвенной архитектуре) не переносятся — в Hover и
+ * Completion они не читаются, а место занимают. Порядок и группировка
+ * повторяют разделы руководства, чтобы сверка с его следующей редакцией была
  * механической.
  */
-const SUMMARIES: Readonly<Record<string, string>> = Object.freeze({
+const PROCEDURE_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
     /* Ввод данных с клавиатуры. */
-    getint: "Вводит значение Integer.",
-    getdouble: "Вводит значение Double.",
-    getmoney: "Вводит значение Money.",
-    getnumeric: "Вводит значение Numeric.",
-    getstring: "Вводит строковое значение.",
-    getstringr: "Вводит числовую строку с выравниванием вправо.",
-    gettime: "Вводит значение Time.",
-    getdate: "Вводит значение Date.",
-    gettrue: "Запрашивает подтверждение и вводит Bool.",
+    procedure(
+        "GetInt (id [, prompt, len [, hide] ]): Bool",
+        "Вводит значение Integer."
+    ),
+    procedure(
+        "GetDouble (id [, prompt, len [, hide [, pos ] ] ]): Bool",
+        "Вводит значение Double."
+    ),
+    procedure(
+        "GetMoney (id [, prompt, len [, hide] [, pos]]): Bool",
+        "Вводит значение Money."
+    ),
+    procedure(
+        "GetNumeric (id [, prompt, len [, hide [, pos] ] ]): Bool",
+        "Вводит значение Numeric."
+    ),
+    procedure(
+        "GetString (id [, prompt, len [, hide] ]): Bool",
+        "Вводит строковое значение."
+    ),
+    procedure(
+        "GetStringR (id [, prompt, len [, hide] ]): Bool",
+        "Вводит числовую строку с выравниванием вправо."
+    ),
+    procedure(
+        "GetTime(id [, prompt [, hide ] ]): Bool",
+        "Вводит значение Time."
+    ),
+    procedure(
+        "GetDate (id [, prompt [, hide] ]): Bool",
+        "Вводит значение Date."
+    ),
+    procedure(
+        "GetTRUE (id [, prompt ]): Bool",
+        "Запрашивает подтверждение и вводит Bool."
+    ),
 
     /* Вывод и отладочная печать. */
-    print: "Выводит переданные значения.",
-    println: "Выводит значения и перевод строки.",
-    printglobs: "Выводит все глобальные переменные.",
-    printfiles: "Выводит имя, тип и файл каждого модуля.",
-    printlocs: "Выводит локальные переменные текущей процедуры.",
-    printmodule: "Выводит тип и файл модуля.",
-    printprops: "Выводит свойства объекта.",
-    printrefs: "Выводит объекты, ссылающиеся на заданный.",
-    printstack: "Выводит стек вызова процедур.",
-    printsymmodule: "Выводит сведения о символе и его модуле.",
-    message: "Выводит строку в нижнюю строку экрана.",
-    setoutput: "Задаёт файл вывода.",
-    setcolumn: "Задаёт колонку вывода отчёта.",
-    flushcolumn: "Выводит буфер колонок в файл.",
-    clearcolumn: "Очищает буфер печати.",
-    setdefprec: "Задаёт число знаков после точки.",
-    setouthandler: "Задаёт обработчик стандартного вывода.",
-    getprninfo: "Возвращает имя устройства печати.",
-    setprninfo: "Задаёт принтер и параметры печати.",
+    procedure("Print (...)", "Выводит переданные значения."),
+    procedure("PrintGlobs (...)", "Выводит все глобальные переменные."),
+    procedure("PrintFiles (...)", "Выводит имя, тип и файл каждого модуля."),
+    procedure("PrintLn", "Выводит значения и перевод строки."),
+    procedure(
+        "PrintLocs (...)",
+        "Выводит локальные переменные текущей процедуры."
+    ),
+    procedure("PrintModule (modName:String)", "Выводит тип и файл модуля."),
+    procedure("PrintProps (object)", "Выводит свойства объекта."),
+    procedure(
+        "PrintRefs (ob: Object)",
+        "Выводит объекты, ссылающиеся на заданный."
+    ),
+    procedure("PrintStack (...)", "Выводит стек вызова процедур."),
+    procedure(
+        "PrintSymModule (symbolName:String)",
+        "Выводит сведения о символе и его модуле."
+    ),
+    procedure("Message", "Выводит строку в нижнюю строку экрана."),
+    procedure("SetOutput ([ string ] [, bool ])", "Задаёт файл вывода."),
+    procedure("SetColumn (integer)", "Задаёт колонку вывода отчёта."),
+    procedure("FlushColumn", "Выводит буфер колонок в файл."),
+    procedure("ClearColumn", "Очищает буфер печати."),
+    procedure("SetDefPrec (integer)", "Задаёт число знаков после точки."),
+    procedure(
+        "SetOutHandler (NameMacro)",
+        "Задаёт обработчик стандартного вывода."
+    ),
+    procedure(
+        "GetPRNInfo ([escSeq:String, banner:String, " +
+            "frmFeed:Bool]) : String",
+        "Возвращает имя устройства печати."
+    ),
+    procedure(
+        "SetPRNInfo (prnName: String [, escSeq: String, banner: String, " +
+            "frmFeed:Bool ])",
+        "Задаёт принтер и параметры печати."
+    ),
 
     /* Преобразование типов и значений. */
-    valtype: "Возвращает код типа значения.",
-    double: "Преобразует значение в Double.",
-    doublel: "Преобразует значение в DoubleL.",
-    int: "Преобразует значение в Integer.",
-    string: "Формирует отформатированную строку из параметров.",
-    money: "Преобразует значение в Money.",
-    mkstr: "Возвращает строку из символа-заполнителя.",
-    floor: "Возвращает целую часть числа.",
-    asize: "Возвращает размер массива или создаёт новый.",
-    date: "Возвращает дату, заменяя её части.",
-    datesplit: "Разбирает дату на день, месяц, год.",
-    time: "Возвращает время, заменяя его части.",
-    timesplit: "Разбирает время на часы, минуты, секунды.",
-    dttm: "Собирает Dttm из даты и времени.",
-    dttmsplit: "Разбирает Dttm на дату и время.",
-    rubtostr: "Записывает сумму в рублях прописью.",
-    rubtostralt: "Записывает сумму прописью, альтернативный формат.",
-    curtostralt: "Записывает сумму прописью по ISO-коду валюты.",
-    monname: "Возвращает название месяца по номеру.",
-    numtostr: "Записывает число прописью с единицами измерения.",
-    setautomoneyfloor: "Управляет отбрасыванием долей копеек.",
-    round: "Округляет значение до заданной точности.",
-    makedouble: "Собирает Double из трёх полей.",
-    makemoney: "Собирает Money из трёх полей.",
-    splitmoney: "Разбирает Money на три целых числа.",
+    procedure("ValType (val): Integer", "Возвращает код типа значения."),
+    procedure("Double (val): Double", "Преобразует значение в Double."),
+    procedure("DoubleL (val): DoubleL", "Преобразует значение в DoubleL."),
+    procedure("Int (val): Integer", "Преобразует значение в Integer."),
+    procedure(
+        "String (val {, val}): String",
+        "Формирует отформатированную строку из параметров."
+    ),
+    procedure("Money (val): Money", "Преобразует значение в Money."),
+    procedure(
+        "MkStr (val1, val2): String",
+        "Возвращает строку из символа-заполнителя."
+    ),
+    procedure("Floor (val): Integer", "Возвращает целую часть числа."),
+    procedure(
+        "Asize (val [, newsize]): Integer",
+        "Возвращает размер массива или создаёт новый."
+    ),
+    procedure(
+        "Date [ (day, mon, year) ]: Date",
+        "Возвращает дату, заменяя её части."
+    ),
+    procedure(
+        "DateSplit (date, day, mon, year)",
+        "Разбирает дату на день, месяц, год."
+    ),
+    procedure(
+        "Time [ (hour, min, sec, msec) ]: Time",
+        "Возвращает время, заменяя его части."
+    ),
+    procedure(
+        "TimeSplit (time, hour, min, sec)",
+        "Разбирает время на часы, минуты, секунды."
+    ),
+    procedure(
+        "DtTm (date, time): DateTime",
+        "Собирает Dttm из даты и времени."
+    ),
+    procedure("DtTmSplit (d, dt, tm)", "Разбирает Dttm на дату и время."),
+    procedure(
+        "RubToStr (money [, rub, kop [, full ]], kol): String",
+        "Записывает сумму в рублях прописью."
+    ),
+    procedure(
+        "RubToStrAlt (money, [rub, kop, ] kol): String",
+        "Записывает сумму прописью, альтернативный формат."
+    ),
+    procedure(
+        "CurToStrAlt (money [, rub, kop ], ISO, kol): String",
+        "Записывает сумму прописью по ISO-коду валюты."
+    ),
+    procedure(
+        "MonName (mon): String",
+        "Возвращает название месяца по номеру."
+    ),
+    procedure(
+        "NumToStr (val, n1:String, n2:String, n3:String, isMan:Bool, " +
+            "prec:Integer) : String",
+        "Записывает число прописью с единицами измерения."
+    ),
+    procedure(
+        "SetAutoMoneyFloor (auto:Bool):bool",
+        "Управляет отбрасыванием долей копеек."
+    ),
+    procedure(
+        "Round (val:Variant [, pos:Integer] , [round:Integer]):Money",
+        "Округляет значение до заданной точности."
+    ),
+    procedure(
+        "MakeDouble (p1:Integer, p2:Integer, p3:Integer):Double",
+        "Собирает Double из трёх полей."
+    ),
+    procedure(
+        "MakeMoney (p1:Integer, p2:Integer, p3:Integer):Money",
+        "Собирает Money из трёх полей."
+    ),
+    procedure(
+        "SplitMoney (mn:Money, p1:@Integer, p2:@Integer, p3:@Integer)",
+        "Разбирает Money на три целых числа."
+    ),
 
     /* Работа со строками. */
-    strlen: "Возвращает длину строки.",
-    index: "Возвращает позицию подстроки.",
-    strbrk: "Возвращает позицию первого совпавшего символа.",
-    strisnumber: "Проверяет, состоит ли строка из цифр.",
-    substr: "Возвращает фрагмент строки.",
-    strset: "Записывает подстроку с заданной позиции.",
-    strsplit: "Разбивает строку на сегменты в массив.",
-    strsplit2: "Разбивает строку на сегменты, возвращает TArray.",
-    strupr: "Преобразует строку в верхний регистр.",
-    strlwr: "Преобразует строку в нижний регистр.",
-    codefor: "Возвращает ASCII-код первого символа.",
-    strfor: "Возвращает символ по ASCII-коду.",
-    strsubst: "Заменяет подстроки.",
-    trim: "Удаляет крайние пробелы.",
-    tooem: "Конвертирует строку из ANSI в OEM.",
-    toansi: "Конвертирует строку из OEM в ANSI.",
+    procedure("StrLen (string): Integer", "Возвращает длину строки."),
+    procedure(
+        "Index (srcStr:String, fnd:String [, startPos:Integer]):Integer",
+        "Возвращает позицию подстроки."
+    ),
+    procedure(
+        "StrBrk (string1, string2): Integer",
+        "Возвращает позицию первого совпавшего символа."
+    ),
+    procedure(
+        "StrIsNumber(str:String):Bool",
+        "Проверяет, состоит ли строка из цифр."
+    ),
+    procedure(
+        "SubStr (string, integer1 [, integer2]): String",
+        "Возвращает фрагмент строки."
+    ),
+    procedure(
+        "StrSet (string1, integer, string2): String",
+        "Записывает подстроку с заданной позиции."
+    ),
+    procedure("Trim (string): String", "Удаляет крайние пробелы."),
+    procedure(
+        "StrSplit (string, array, len [, len_first] [, minseg])",
+        "Разбивает строку на сегменты в массив."
+    ),
+    procedure(
+        "StrSplit2 (source:String, len:Integer [, len_first:Integer] [, " +
+            "minseg:Integer]) : TArray",
+        "Разбивает строку на сегменты, возвращает TArray."
+    ),
+    procedure(
+        "StrUpr (string [,len]): String",
+        "Преобразует строку в верхний регистр."
+    ),
+    procedure(
+        "StrLwr (string [, len]): String",
+        "Преобразует строку в нижний регистр."
+    ),
+    procedure(
+        "CodeFor (string): Integer",
+        "Возвращает ASCII-код первого символа."
+    ),
+    procedure("StrFor (number): String", "Возвращает символ по ASCII-коду."),
+    procedure(
+        "StrSubst (sourse, strToFind, strToReplace): String",
+        "Заменяет подстроки."
+    ),
+    procedure("ToOEM (string [, mode])", "Конвертирует строку из ANSI в OEM."),
+    procedure(
+        "ToANSI (string [, mode])",
+        "Конвертирует строку из OEM в ANSI."
+    ),
 
     /* Параметры процедур. */
-    getparm: "Читает фактический параметр вызывающей процедуры.",
-    isoutparm: "Проверяет, является ли параметр выходным.",
-    setparm: "Записывает фактический параметр вызывающей процедуры.",
-    parmcount: "Возвращает количество переданных параметров.",
+    procedure(
+        "GetParm (num, var)",
+        "Читает фактический параметр вызывающей процедуры."
+    ),
+    procedure(
+        "IsOutParm (num:Integer):Bool",
+        "Проверяет, является ли параметр выходным."
+    ),
+    procedure(
+        "SetParm (num, expression)",
+        "Записывает фактический параметр вызывающей процедуры."
+    ),
+    procedure(
+        "Parmcount (): Integer",
+        "Возвращает количество переданных параметров."
+    ),
 
     /* Запуск программ и меню. */
-    run: "Запускает внешнюю программу.",
-    callremotersl: "Выполняет макрофайл на терминале.",
-    menu: "Показывает меню выбора из массива строк.",
-    runmenu: "Выполняет меню из библиотеки ресурсов.",
+    procedure(
+        "Run (prog, parm, init, finish:String)",
+        "Запускает внешнюю программу."
+    ),
+    procedure(
+        "CallRemoteRsl (fileName [, procName [, parm1, parm2, ...]])",
+        "Выполняет макрофайл на терминале."
+    ),
+    procedure(
+        "Menu (array [, prompt] [, head] [, x] [, y] [, n])",
+        "Показывает меню выбора из массива строк."
+    ),
+    procedure(
+        "RunMenu (menuName, procName | procAddr [, lbrName])",
+        "Выполняет меню из библиотеки ресурсов."
+    ),
 
     /* Диалоговые панели. */
-    addscroll: "Создаёт область прокрутки диалоговой панели.",
-    rundialog: "Показывает диалоговое окно.",
-    disablevalidation: "Отключает проверку даты в поле диалога.",
-    updatefields: "Обновляет значения полей диалоговой панели.",
-    setfocus: "Устанавливает фокус ввода в поле.",
-    disablefields: "Запрещает редактирование полей диалога.",
-    enablefields: "Разрешает редактирование полей диалога.",
-    settimer: "Устанавливает таймер диалоговой панели.",
-    msgbox: "Показывает сообщение.",
-    msgboxex: "Показывает окно сообщения с кнопками.",
+    procedure(
+        "AddScroll (dlg:TRecHandler, data:Object [, numCol:Integer, " +
+            "colArray:TArray, proc:Variant, rdOnly:Bool, focused:Bool] [, " +
+            "NumBar:Integer])",
+        "Создаёт область прокрутки диалоговой панели."
+    ),
+    procedure(
+        "RunDialog (dlg:TRecHandler [, proc:Variant]):Bool",
+        "Показывает диалоговое окно."
+    ),
+    procedure(
+        "DisableValidation (dlg:Variant, id:Integer)",
+        "Отключает проверку даты в поле диалога."
+    ),
+    procedure(
+        "UpdateFields (dlg:TRecHandler [, id:Integer])",
+        "Обновляет значения полей диалоговой панели."
+    ),
+    procedure(
+        "SetFocus (dlg:TRecHandler, id:Integer)",
+        "Устанавливает фокус ввода в поле."
+    ),
+    procedure("MsgBox (mes)", "Показывает сообщение."),
+    procedure(
+        "DisableFields (dlg:TRecHandler [, id:Integer])",
+        "Запрещает редактирование полей диалога."
+    ),
+    procedure(
+        "EnableFields (dlg:TRecHandler [, id:Integer])",
+        "Разрешает редактирование полей диалога."
+    ),
+    procedure(
+        "SetTimer (dlg:TRecHandler [, timeOut:Integer, set:Bool])",
+        "Устанавливает таймер диалоговой панели."
+    ),
+    procedure(
+        "MsgBoxEx (val:Variant [, flags:Integer, defInd:Integer, " +
+            "title:String, statLn:String ])",
+        "Показывает окно сообщения с кнопками."
+    ),
 
     /* Скроллинг. */
-    setscroll: "Связывает поля файла с полями диалога.",
-    findrow: "Возвращает номер строки скроллинга для поля.",
-    findcol: "Возвращает номер колонки скроллинга для поля.",
-    filldown: "Заполняет скроллинг вниз от заданной записи.",
-    fillup: "Заполняет скроллинг вверх от заданной записи.",
-    setdlgfields: "Заполняет строку скроллинга данными из файла.",
-    scrollmes: "Обрабатывает необработанные сообщения скроллинга.",
-    userfill: "Вызывается перед перерисовкой области скроллинга.",
-    addmultiaction: "Регистрирует клавишу перебора выбранных записей.",
-    getmulticount: "Возвращает число выбранных записей скроллинга.",
-    gotoscroll: "Позиционирует прокрутку на текущую запись.",
-    runscroll: "Открывает окно прокрутки набора данных RSD.",
-    updatescroll: "Обновляет окно прокрутки набора данных.",
-    getscrollfieldvalue: "Читает значение поля текущей строки скроллинга.",
-    setscrollfieldvalue: "Задаёт значение поля текущей строки скроллинга.",
-    isscrolleditmode: "Проверяет режим редактирования внутри скроллинга.",
-    trace: "Печатает параметры в окно трассировки отладчика.",
+    procedure(
+        "SetScroll (FILE, { DlgName, FileName } ...)",
+        "Связывает поля файла с полями диалога."
+    ),
+    procedure(
+        "FindRow (dlg, id)",
+        "Возвращает номер строки скроллинга для поля."
+    ),
+    procedure(
+        "FindCol (dlg, id)",
+        "Возвращает номер колонки скроллинга для поля."
+    ),
+    procedure(
+        "FillDown (dlg, pos)",
+        "Заполняет скроллинг вниз от заданной записи."
+    ),
+    procedure(
+        "FillUp (dlg, pos)",
+        "Заполняет скроллинг вверх от заданной записи."
+    ),
+    procedure(
+        "SetDlgFields (dlg, row)",
+        "Заполняет строку скроллинга данными из файла."
+    ),
+    procedure(
+        "ScrollMes (dlg, cmd, id, key)",
+        "Обрабатывает необработанные сообщения скроллинга."
+    ),
+    procedure(
+        "UserFill (dlg)",
+        "Вызывается перед перерисовкой области скроллинга."
+    ),
+    procedure(
+        "AddMultiAction (rs:Object, key:Integer):Bool",
+        "Регистрирует клавишу перебора выбранных записей."
+    ),
+    procedure(
+        "GetMultiCount (rs:Object):Integer",
+        "Возвращает число выбранных записей скроллинга."
+    ),
+    procedure(
+        "GoToScroll (obj:Object)",
+        "Позиционирует прокрутку на текущую запись."
+    ),
+    procedure(
+        "RunScroll (data:Object, numCol:Integer, colInfo:TArray, " +
+            "uniqName, proc:Variant, head:String, stLine:String, " +
+            "rdOnly:Bool, x:Integer, y:Integer, cx:Integer, cy:Integer):Bool",
+        "Открывает окно прокрутки набора данных RSD."
+    ),
+    procedure(
+        "UpdateScroll (obj:Object, mode:Integer)",
+        "Обновляет окно прокрутки набора данных."
+    ),
+    procedure(
+        "GetScrollFieldValue(numfld:Integer, value:Undef):Bool",
+        "Читает значение поля текущей строки скроллинга."
+    ),
+    procedure(
+        "SetScrollFieldValue(numfld:Integer, newvalue:Undef, " +
+            "[strlen:Integer]):Bool",
+        "Задаёт значение поля текущей строки скроллинга."
+    ),
+    procedure(
+        "IsScrollEditMode():Bool",
+        "Проверяет режим редактирования внутри скроллинга."
+    ),
+    procedure(
+        "Trace (...)",
+        "Печатает параметры в окно трассировки отладчика."
+    ),
+    procedure("DebugBreak", "Передаёт управление отладчику."),
 
     /* Словари и структура таблиц. */
-    convertddf: "Конвертирует словарь def в формат ddf.",
-    copytbldef: "Копирует описание структуры таблицы между словарями.",
+    procedure(
+        "ConvertDDF (defName:String, outDir:String):Bool",
+        "Конвертирует словарь def в формат ddf."
+    ),
+    procedure(
+        "CopyTblDef (inDef:String, outDef:String, inStruct:String, " +
+            "outStruct:String):Bool",
+        "Копирует описание структуры таблицы между словарями."
+    ),
 
     /* Таблицы базы данных и файлы. */
-    existfile: "Проверяет существование таблицы или файла.",
-    open: "Открывает таблицу базы данных или файл.",
-    close: "Закрывает таблицу или файл.",
-    clearstructs: "Освобождает из памяти структуры открытых таблиц.",
-    create: "Создаёт таблицу или DBF-файл по словарю.",
-    clone: "Создаёт или очищает таблицу по словарю.",
-    viewfile: "Показывает текстовый файл или таблицу.",
-    delfile: "Удаляет таблицу вместе с описанием в словаре.",
-    droptable: "Удаляет таблицу, сохраняя описание в словаре.",
-    next: "Читает следующую запись.",
-    prev: "Читает предыдущую запись.",
-    rewind: "Сбрасывает позицию чтения таблицы.",
-    insert: "Добавляет запись из буфера данных.",
-    update: "Обновляет текущую запись из буфера данных.",
-    delete: "Удаляет текущую запись.",
-    getpos: "Возвращает физическую позицию текущей записи.",
-    getdirect: "Читает запись по физической позиции.",
-    geteq: "Ищет запись с равным ключом.",
-    getgt: "Ищет запись с большим ключом.",
-    getge: "Ищет запись с не меньшим ключом.",
-    getlt: "Ищет запись с меньшим ключом.",
-    getle: "Ищет запись с не большим ключом.",
-    setrecordaddr: "Накладывает структуру на таблицу базы данных.",
-    packvarbuff: "Упаковывает переменную часть записи.",
-    unpackvarbuff: "Распаковывает переменную часть записи.",
-    getrecordsize: "Возвращает размер записи в байтах.",
-    getvarsize: "Возвращает размер переменной части записи.",
-    filename: "Возвращает имя таблицы или файла.",
-    nrecords: "Возвращает количество записей.",
-    fldnumber: "Возвращает количество полей.",
-    fldname: "Возвращает имя поля по индексу.",
-    fldindex: "Возвращает индекс поля по имени.",
-    fldoffset: "Возвращает смещение поля в байтах.",
-    clearrecord: "Обнуляет буфер записи.",
-    setbuff: "Задаёт адрес памяти для структуры RECORD.",
-    copy: "Копирует содержимое буфера записи.",
-    copyblob: "Копирует запись вместе с полем BLOB.",
-    keynum: "Возвращает или задаёт номер текущего ключа.",
-    setdelim: "Задаёт символы-разделители строк текстового файла.",
-    status: "Возвращает код ошибки работы с таблицами.",
-    writeblob: "Записывает значение в поле BLOB.",
-    readblob: "Читает очередное значение поля BLOB.",
-    needfreedb: "Требует закрыть словари при завершении программы.",
+    procedure(
+        "ExistFile (string [, integer]): Bool",
+        "Проверяет существование таблицы или файла."
+    ),
+    procedure(
+        "Open (fid, name:String, encode:String, fatal:Bool, " +
+            "eolType:Integer) : Bool",
+        "Открывает таблицу базы данных или файл."
+    ),
+    procedure("Close (id)", "Закрывает таблицу или файл."),
+    procedure(
+        "ClearStructs",
+        "Освобождает из памяти структуры открытых таблиц."
+    ),
+    procedure(
+        "Create (id [, filename] [, isTable:Bool] [, isP:Bool])",
+        "Создаёт таблицу или DBF-файл по словарю."
+    ),
+    procedure(
+        "Clone (id [, filename] [, isTable:Bool] [, isP:Bool])",
+        "Создаёт или очищает таблицу по словарю."
+    ),
+    procedure(
+        "ViewFile (id, name [, edit])",
+        "Показывает текстовый файл или таблицу."
+    ),
+    procedure(
+        "DelFile (string)",
+        "Удаляет таблицу вместе с описанием в словаре."
+    ),
+    procedure(
+        "DropTable (string)",
+        "Удаляет таблицу, сохраняя описание в словаре."
+    ),
+    procedure("Next (id [, integer]): Bool", "Читает следующую запись."),
+    procedure("Prev (id): Bool", "Читает предыдущую запись."),
+    procedure("ReWind (id): Bool", "Сбрасывает позицию чтения таблицы."),
+    procedure(
+        "Insert (id [, string | size] [, integer] [, bool]): Bool",
+        "Добавляет запись из буфера данных."
+    ),
+    procedure(
+        "Update (id [, size] [, bool]): Bool",
+        "Обновляет текущую запись из буфера данных."
+    ),
+    procedure("Delete (id, bool): Bool", "Удаляет текущую запись."),
+    procedure("GetPos (id)", "Возвращает физическую позицию текущей записи."),
+    procedure(
+        "GetDirect (id [, recpos])",
+        "Читает запись по физической позиции."
+    ),
+    procedure("GetEQ (id): Bool", "Ищет запись с равным ключом."),
+    procedure("GetGT (id): Bool", "Ищет запись с большим ключом."),
+    procedure("GetGE (id): Bool", "Ищет запись с не меньшим ключом."),
+    procedure("GetLT (id): Bool", "Ищет запись с меньшим ключом."),
+    procedure("GetLE (id): Bool", "Ищет запись с не большим ключом."),
+    procedure(
+        "SetRecordAddr (recId, fileId [, ind] [, offset] [, fix])",
+        "Накладывает структуру на таблицу базы данных."
+    ),
+    procedure(
+        "PackVarBuff (file [, size])",
+        "Упаковывает переменную часть записи."
+    ),
+    procedure(
+        "UnPackVarBuff (file)",
+        "Распаковывает переменную часть записи."
+    ),
+    procedure(
+        "GetRecordSize (id): Integer",
+        "Возвращает размер записи в байтах."
+    ),
+    procedure(
+        "GetVarSize (id): Integer",
+        "Возвращает размер переменной части записи."
+    ),
+    procedure("FileName (id): String", "Возвращает имя таблицы или файла."),
+    procedure(
+        "NRecords (id [, par:Bool]): Integer",
+        "Возвращает количество записей."
+    ),
+    procedure("FldNumber (id): Integer", "Возвращает количество полей."),
+    procedure(
+        "FldName (id, number): String",
+        "Возвращает имя поля по индексу."
+    ),
+    procedure(
+        "FldIndex (id, string): Integer",
+        "Возвращает индекс поля по имени."
+    ),
+    procedure(
+        "FldOffset (id, string | number): Integer",
+        "Возвращает смещение поля в байтах."
+    ),
+    procedure("ClearRecord (id)", "Обнуляет буфер записи."),
+    procedure(
+        "SetBuff (id, addr)",
+        "Задаёт адрес памяти для структуры RECORD."
+    ),
+    procedure(
+        "Copy (id1, id2 [, flag:Integer])",
+        "Копирует содержимое буфера записи."
+    ),
+    procedure("CopyBlob ()", "Копирует запись вместе с полем BLOB."),
+    procedure(
+        "KeyNum (id [, newkey])",
+        "Возвращает или задаёт номер текущего ключа."
+    ),
+    procedure(
+        "SetDelim (symbol, space)",
+        "Задаёт символы-разделители строк текстового файла."
+    ),
+    procedure(
+        "Status [ (parm) ]",
+        "Возвращает код ошибки работы с таблицами."
+    ),
 
     /* Транзакции. */
-    processtrn: "Выполняет транзакцию.",
-    loopintrn: "Управляет повтором транзакции при захвате.",
-    aborttrn: "Прерывает транзакцию с откатом изменений.",
+    procedure(
+        "ProcessTrn (TrnType:Integer, MacroName:String, Variant [, " +
+            "file1:File] [, file2:File] [, ...:File]):Bool",
+        "Выполняет транзакцию."
+    ),
+    procedure("LoopInTrn (val)", "Управляет повтором транзакции при захвате."),
+    procedure("AbortTrn()", "Прерывает транзакцию с откатом изменений."),
 
     /* Файлы и каталоги операционной системы. */
-    selectfile: "Показывает стандартное окно выбора файла.",
-    selectfolder: "Показывает стандартное окно выбора каталога.",
-    copyfile: "Копирует файл.",
-    renamefile: "Переименовывает файл.",
-    removefile: "Удаляет файл.",
-    existdir: "Проверяет существование и доступность каталога.",
-    makedir: "Создаёт каталог.",
-    removedir: "Удаляет пустой каталог.",
-    getcurdir: "Возвращает текущий каталог.",
-    splitfile: "Разбирает полное имя файла на составляющие.",
-    mergefile: "Собирает полное имя файла из составляющих.",
-    findpath: "Ищет файл в списке каталогов.",
-    getsysdir: "Возвращает списки каталогов поиска файлов.",
-    getinifilevalue: "Читает строку из файла настроек.",
-    getfileinfo: "Возвращает дату, время, размер и путь файла.",
+    procedure(
+        "SelectFile (file [, mask, head], sort, term)",
+        "Показывает стандартное окно выбора файла."
+    ),
+    procedure(
+        "SelectFolder (folder [, mask, head, ] term)",
+        "Показывает стандартное окно выбора каталога."
+    ),
+    procedure(
+        "NeedFreeDB ()",
+        "Требует закрыть словари при завершении программы."
+    ),
+    procedure("WriteBlob (file, value)", "Записывает значение в поле BLOB."),
+    procedure(
+        "ReadBlob (file, value)",
+        "Читает очередное значение поля BLOB."
+    ),
+    procedure(
+        "CopyFile (src:String, dst:String [, ind:Bool [, " +
+            "indHeading:String]]) : Bool",
+        "Копирует файл."
+    ),
+    procedure(
+        "RenameFile (src:String, dst:String) : Bool",
+        "Переименовывает файл."
+    ),
+    procedure("RemoveFile (src:String) : Bool", "Удаляет файл."),
+    procedure(
+        "ExistDir(name:String):Integer",
+        "Проверяет существование и доступность каталога."
+    ),
+    procedure("MakeDir (name:String) : Bool", "Создаёт каталог."),
+    procedure("RemoveDir (name:String) : Bool", "Удаляет пустой каталог."),
+    procedure(
+        "GetCurDir ([isRemote:Bool]) : String",
+        "Возвращает текущий каталог."
+    ),
+    procedure(
+        "SplitFile (pathName: String [, name: String [, " +
+            "ext: String ] ]): String",
+        "Разбирает полное имя файла на составляющие."
+    ),
+    procedure(
+        "MergeFile (dirName: String ,name: String [, " +
+            "ext: String ]): String",
+        "Собирает полное имя файла из составляющих."
+    ),
+    procedure(
+        "FindPath (name: String [, dirList: String [, defExt: String [, " +
+            "curDir: Bool ] ] ]): String",
+        "Ищет файл в списке каталогов."
+    ),
+    procedure(
+        "GetSysDir ([ ndir: Integer ]): String",
+        "Возвращает списки каталогов поиска файлов."
+    ),
+    procedure(
+        "GetIniFileValue (iniFileName:String, keyName:String):String",
+        "Читает строку из файла настроек."
+    ),
+    procedure(
+        "GetFileInfo (src:String [, dt:@Date, tm:@Time, size:@Integer, " +
+            "path:@String]) : Bool",
+        "Возвращает дату, время, размер и путь файла."
+    ),
 
     /* Объекты и классы. */
-    activex: "Создаёт объект ActiveX по моникеру.",
-    classkind: "Определяет вид объекта.",
-    genclassname: "Возвращает имя класса объекта.",
-    genattach: "Заменяет метод объекта макропроцедурой.",
-    genobject: "Создаёт объект по имени класса.",
-    genrun: "Вызывает метод объекта по имени.",
-    gensetprop: "Задаёт значение свойства объекта.",
-    gengetprop: "Возвращает значение свойства объекта.",
-    getobjprops: "Возвращает массив имён свойств объекта.",
-    getobjmethods: "Возвращает массив имён методов объекта.",
-    iseqclass: "Проверяет принадлежность объекта классу.",
-    genpropid: "Возвращает индекс свойства объекта.",
-    r2m: "Возвращает ссылку на метод объекта.",
-    callr2m: "Вызывает метод по ссылке MethodRef.",
-    gennumprops: "Возвращает количество свойств объекта.",
-    clrrmtonrelease: "Удаляет удалённый объект вместе с прокси.",
-    getnamedchanel: "Возвращает коммуникационный канал по имени.",
-    isweakref: "Проверяет, является ли ссылка слабой.",
-    strongref: "Возвращает сильную ссылку на объект.",
-    gcollect: "Освобождает объекты без ссылок.",
-    getmemaddrfrom: "Возвращает адрес буфера объекта.",
+    procedure(
+        "ActiveX (mon:String, const=1):Object",
+        "Создаёт объект ActiveX по моникеру."
+    ),
+    procedure(
+        "ClassKind (obj:Object [, mask:Integer]):Integer",
+        "Определяет вид объекта."
+    ),
+    procedure("GenClassName (obj): String", "Возвращает имя класса объекта."),
+    procedure(
+        "GenAttach (id, methodName, macroName | macroAddr)",
+        "Заменяет метод объекта макропроцедурой."
+    ),
+    procedure(
+        "GenObject (className [ , parm1, parm2, ...]): Object",
+        "Создаёт объект по имени класса."
+    ),
+    procedure(
+        "GenRun (ob, methodName [, par1, par2, ...])",
+        "Вызывает метод объекта по имени."
+    ),
+    procedure(
+        "GenSetProp (ob, propName, val)",
+        "Задаёт значение свойства объекта."
+    ),
+    procedure(
+        "GenGetProp (ob, propName)",
+        "Возвращает значение свойства объекта."
+    ),
+    procedure(
+        "GetObjProps (obj:Object, [CaseSensitive:Bool]):TArray",
+        "Возвращает массив имён свойств объекта."
+    ),
+    procedure(
+        "GetObjMethods (obj:Object, [CaseSensitive:Bool]):TArray",
+        "Возвращает массив имён методов объекта."
+    ),
+    procedure(
+        "IsEqClass (className, obj): Bool",
+        "Проверяет принадлежность объекта классу."
+    ),
+    procedure(
+        "GenPropID (obj, propName)",
+        "Возвращает индекс свойства объекта."
+    ),
+    procedure(
+        "R2M (obj:Object, name:String) : MethodRef",
+        "Возвращает ссылку на метод объекта."
+    ),
+    procedure(
+        "CallR2M (oPtr:MethodRef [, par1, par2,...]) : Variant",
+        "Вызывает метод по ссылке MethodRef."
+    ),
+    procedure(
+        "GenNumProps (obj:Object) : Integer",
+        "Возвращает количество свойств объекта."
+    ),
+    procedure(
+        "ClrRmtOnRelease (proxy:Object) : Bool",
+        "Удаляет удалённый объект вместе с прокси."
+    ),
+    procedure(
+        "GetNamedChanel (name:String) : Object",
+        "Возвращает коммуникационный канал по имени."
+    ),
 
     /* Индикаторы выполнения. */
-    initprogress: "Показывает индикатор выполнения цикла.",
-    useprogress: "Обновляет индикатор выполнения.",
-    remprogress: "Убирает индикатор выполнения с экрана.",
-    begaction: "Показывает асинхронный индикатор занятости.",
-    endaction: "Убирает асинхронный индикатор занятости.",
-
-    /* Выполнение кода и модули. */
-    execmacro: "Вызывает макропроцедуру по имени.",
-    execmacro2: "Вызывает макропроцедуру и возвращает её результат.",
-    execmacrofile: "Вызывает макропроцедуру из файла.",
-    execmacromodule: "Выполняет код RSL-модуля из строки.",
-    replacemacro: "Перенаправляет вызовы процедуры на другую.",
-    execexp: "Вычисляет выражение из строки.",
-    instloadmodule: "Динамически загружает RSL-модуль.",
-    getcallstack: "Возвращает названия процедур текущего стека.",
-    modulefilename: "Возвращает имя файла модуля.",
-    modulename: "Возвращает имя модуля, где объявлен символ.",
-    system: "Запускает системный модуль подсистемы.",
-    startprog: "Запускает приложение на терминале или сервере.",
-    startshellprogram: "Открывает файл зарегистрированным в ОС приложением.",
-
-    /* Потоки байтов. */
-    writebyte: "Записывает байт в поток IRsStream.",
-    readbyte: "Читает байт из потока IRsStream.",
-
-    /* Ошибки и завершение работы. */
-    runerror: "Повторно генерирует текущую ошибку.",
-    debugbreak: "Передаёт управление отладчику.",
-    errprint: "Печатает параметры в стандартный поток ошибок.",
-    errbox: "Показывает диалоговое окно со списком строк.",
-    showdicterror: "Управляет выводом сообщений о несоответствии словаря.",
-    showrscomerror: "Показывает ошибки RSCOM в диалоговом окне.",
-    exit: "Прекращает выполнение макропрограммы.",
-    setexitflag: "Задаёт режим просмотра результата без выхода.",
+    procedure(
+        "InitProgress (maxRecord:Integer [, msg:String, head:String])",
+        "Показывает индикатор выполнения цикла."
+    ),
+    procedure("UseProgress (record)", "Обновляет индикатор выполнения."),
+    procedure("RemProgress", "Убирает индикатор выполнения с экрана."),
+    procedure(
+        "BegAction ([tm:Integer, text:String, canClose:Bool])",
+        "Показывает асинхронный индикатор занятости."
+    ),
+    procedure(
+        "EndAction (tm:Integer)",
+        "Убирает асинхронный индикатор занятости."
+    ),
 
     /* Среда выполнения и разное. */
-    checkbits: "Возвращает побитовое И двух чисел.",
-    dateshift: "Смещает дату на дни, месяцы, годы.",
-    getenv: "Возвращает значение переменной среды.",
-    getuimode: "Возвращает тип пользовательского интерфейса.",
-    memsize: "Возвращает объём свободной памяти.",
-    version: "Возвращает номер версии RSL.",
-    currentline: "Возвращает или задаёт номер строки вывода.",
-    usernumber: "Возвращает номер пользователя в сети.",
-    random: "Возвращает случайное число.",
-    setdefmoneyprec: "Задаёт число знаков после запятой для Money.",
-    sysgetproperty: "Возвращает значение глобального свойства.",
-    sysputproperty: "Задаёт значение глобального свойства.",
-    isstandalone: "Определяет двухуровневый режим работы приложения.",
-    testevent: "Возвращает код нажатой клавиши или ноль.",
-    addevent: "Добавляет клавиатурное сообщение в очередь.",
-    isgui: "Проверяет графическую среду выполнения.",
-    cmdargs: "Возвращает параметры командной строки.",
-    getusername: "Возвращает имя текущего пользователя.",
-    issql: "Проверяет SQL-версию RSL.",
-    underrcwhost: "Проверяет исполнение модулем RCWHost.",
-    getlocaleinfo: "Возвращает региональную настройку.",
-    getlangid: "Возвращает идентификатор языка.",
-    zerovalue: "Возвращает нулевое значение для кода типа."
-});
+    procedure(
+        "CheckBits (n1:Integer, n2:Integer):Integer",
+        "Возвращает побитовое И двух чисел."
+    ),
+    procedure(
+        "DateShift (inData:Date [, nDay:Integer] [, nMon:Integer] [, " +
+            "nYear:Integer]):Date",
+        "Смещает дату на дни, месяцы, годы."
+    ),
+
+    /* Выполнение кода и модули. */
+    procedure(
+        "ExecMacro (string,.....): Variant",
+        "Вызывает макропроцедуру по имени."
+    ),
+    procedure(
+        "ExecMacro2 (string, .....): Variant",
+        "Вызывает макропроцедуру и возвращает её результат."
+    ),
+    procedure(
+        "ExecMacroFile (Module [, ProcName [, Parm1,Parm2, " +
+            "...] ]): Variant",
+        "Вызывает макропроцедуру из файла."
+    ),
+    procedure(
+        "ExecMacroModule (codeStr:String [, macroName, par1, par2, " +
+            "...]): Variant",
+        "Выполняет код RSL-модуля из строки."
+    ),
+    procedure(
+        "ReplaceMacro (string1, [ string2 ])",
+        "Перенаправляет вызовы процедуры на другую."
+    ),
+    procedure("ExecExp (string): Variant", "Вычисляет выражение из строки."),
+    procedure(
+        "GCollect (ncol:@Integer):Integer",
+        "Освобождает объекты без ссылок."
+    ),
+    procedure(
+        "GetCallStack (): TArray",
+        "Возвращает названия процедур текущего стека."
+    ),
+    procedure(
+        "GetEnv (string): String",
+        "Возвращает значение переменной среды."
+    ),
+    procedure(
+        "GetMemAddrFrom (obj:Variant):MemAddr",
+        "Возвращает адрес буфера объекта."
+    ),
+    procedure(
+        "GetUIMode () : Integer",
+        "Возвращает тип пользовательского интерфейса."
+    ),
+    procedure(
+        "InstLoadModule (moduleName:String):Bool",
+        "Динамически загружает RSL-модуль."
+    ),
+    procedure(
+        "IsWeakRef (obj:Object):Bool",
+        "Проверяет, является ли ссылка слабой."
+    ),
+
+    /* Потоки байтов. */
+    procedure(
+        "WriteByte (stream:Object, byte:Integer):Bool",
+        "Записывает байт в поток IRsStream."
+    ),
+    procedure(
+        "ReadByte (stream:Object, byte:@Integer):Bool",
+        "Читает байт из потока IRsStream."
+    ),
+
+    /* Ошибки и завершение работы. */
+    procedure(
+        "RunError ([ mes:String] [, userObj:Variant])",
+        "Повторно генерирует текущую ошибку."
+    ),
+    procedure(
+        "Exit ([code:Integer] [, mes:String])",
+        "Прекращает выполнение макропрограммы."
+    ),
+    procedure(
+        "SetExitFlag (code:Integer)",
+        "Задаёт режим просмотра результата без выхода."
+    ),
+    procedure("MemSize()", "Возвращает объём свободной памяти."),
+    procedure("Version()", "Возвращает номер версии RSL."),
+    procedure(
+        "CurrentLine ([ line ])",
+        "Возвращает или задаёт номер строки вывода."
+    ),
+    procedure("UserNumber ()", "Возвращает номер пользователя в сети."),
+    procedure("Random ([ integer ]): Integer", "Возвращает случайное число."),
+    procedure(
+        "SetDefMoneyPrec (newVal:Integer):Integer",
+        "Задаёт число знаков после запятой для Money."
+    ),
+    procedure(
+        "ShowDictError (show:Bool):Bool",
+        "Управляет выводом сообщений о несоответствии словаря."
+    ),
+    procedure(
+        "ShowRSCOMError (obj:TRsComErr)",
+        "Показывает ошибки RSCOM в диалоговом окне."
+    ),
+    procedure(
+        "StartProg (fileName:String [, cmdLine:String ] [, " +
+            "detached:Bool]):Integer",
+        "Запускает приложение на терминале или сервере."
+    ),
+    procedure(
+        "StrongRef (par:Object):Object",
+        "Возвращает сильную ссылку на объект."
+    ),
+    procedure(
+        "SysGetProperty (key:String):String",
+        "Возвращает значение глобального свойства."
+    ),
+    procedure(
+        "SysPutProperty (key:String, val:String):Bool",
+        "Задаёт значение глобального свойства."
+    ),
+    procedure(
+        "System (Number:Integer, CodeFor:Integer|Type:String [, " +
+            "CmdArgs:String])",
+        "Запускает системный модуль подсистемы."
+    ),
+    procedure(
+        "IsStandAlone",
+        "Определяет двухуровневый режим работы приложения."
+    ),
+    procedure(
+        "TestEvent ([pause])",
+        "Возвращает код нажатой клавиши или ноль."
+    ),
+    procedure(
+        "AddEvent (key:Integer)",
+        "Добавляет клавиатурное сообщение в очередь."
+    ),
+    procedure("IsGUI: Bool", "Проверяет графическую среду выполнения."),
+    procedure(
+        "ErrPrint (...)",
+        "Печатает параметры в стандартный поток ошибок."
+    ),
+    procedure(
+        "ErrBox (str:TArray [, caption:String, flags:Integer]) : Integer",
+        "Показывает диалоговое окно со списком строк."
+    ),
+    procedure(
+        "ModuleFileName ([moduleName:String] [, " +
+            "moduleType:@Integer]):String",
+        "Возвращает имя файла модуля."
+    ),
+    procedure(
+        "ModuleName ([symbolName:string]):string",
+        "Возвращает имя модуля, где объявлен символ."
+    ),
+    procedure("CmdArgs : String", "Возвращает параметры командной строки."),
+    procedure("GetUserName : String", "Возвращает имя текущего пользователя."),
+    procedure("IsSQL : Bool", "Проверяет SQL-версию RSL."),
+    procedure("UnderRCWHost : Bool", "Проверяет исполнение модулем RCWHost."),
+    procedure(
+        "GetLocaleInfo (id:Integer, code:Integer [, " +
+            "isLocal:Bool]) : String",
+        "Возвращает региональную настройку."
+    ),
+    procedure(
+        "GetLangId (id:Integer [, isLocal:Bool]) : Integer",
+        "Возвращает идентификатор языка."
+    ),
+    procedure(
+        "ZeroValue (valtp:Integer):Variant",
+        "Возвращает нулевое значение для кода типа."
+    ),
+    procedure(
+        "StartShellProgram (fileName:Char):Integer",
+        "Открывает файл зарегистрированным в ОС приложением."
+    ),
+];
 
 const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
     classDef("TArray", "Динамический массив RSL.", [
@@ -698,159 +935,376 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
         property("RecSize", "Integer", "Размер записи."),
         property("VarSize", "Integer", "Размер переменной части.")
     ]),
-    classDef("TRecHandler", "Объект записи или диалога.", [
-        property("Rec", "Record", "Связанная запись."),
-        method("SetRecordAddr(file, ind, offs, isFix): Bool")
+    classDef(
+        "TRecHandler",
+        "Структура записи как объект — альтернатива RECORD.",
+        [
+            property("Rec", "Record", "Связанная запись."),
+            method(
+                "SetRecordAddr(file, ind, offs, isFix): Bool",
+                "Связывает структуру с буфером записи файла."
+            )
+        ]
+    ),
+    classDef(
+        "TVarRecord",
+        "Запись с переменной частью ограниченной длины.",
+        [
+            property(
+                "varPart",
+                "TRecHandler",
+                "Переменная часть; доступна после setVarPartFormat."
+            ),
+            method(
+                "setVarPartFormat(structName: String, [dicName: String]): Bool",
+                "Задаёт формат переменной части из словаря."
+            )
+        ],
+        "TRecHandler"
+    ),
+    classDef(
+        "RsdEnvironment",
+        "Окружение RSD: драйвер, соединения и коллекция ошибок.",
+        [
+            property("Driver", "String", "Имя интерфейса драйвера."),
+            property("Library", "String", "Имя файла драйвера ODBC."),
+            property("ErrorCount", "Integer", "Количество ошибок в коллекции."),
+            property("Error", "RsdError", "Ошибка по индексу."),
+            method(
+                "Open([driver: String], [library: String]): Bool",
+                "Открывает окружение и загружает драйвер."
+            ),
+            method("Close(): Bool", "Закрывает окружение."),
+            method("ClearErrors(): Bool", "Очищает коллекцию ошибок.")
+        ]
+    ),
+    classDef("RsdConnection", "Соединение с источником данных ODBC.", [
+        property("Environment", "RsdEnvironment", "Окружение соединения."),
+        property("ConString", "String", "Строка соединения или имя DSN."),
+        property("User", "String", "Имя пользователя."),
+        property("Password", "String", "Пароль пользователя."),
+        method("Open(): Bool", "Открывает соединение."),
+        method("Close(): Bool", "Закрывает соединение."),
+        method("BeginTrans(): Bool", "Начинает транзакцию."),
+        method("CommitTrans(): Bool", "Фиксирует транзакцию."),
+        method("RollbackTrans(): Bool", "Откатывает транзакцию."),
+        method("IsInTrans(): Bool", "Проверяет, выполняется ли транзакция.")
     ]),
-    classDef("RsdEnvironment", "Окружение доступа к данным.", [
-        property("ErrorCount", "Integer", "Количество ошибок."),
-        property("Error", "RsdError", "Ошибка по индексу."),
-        method("Open([driver], [library]): Bool"),
-        method("Close(): Bool"),
-        method("ClearErrors(): Bool")
+    classDef("RsdCommand", "SQL-запрос к источнику данных.", [
+        property("Connection", "RsdConnection", "Соединение команды."),
+        property("CmdText", "String", "Текст команды."),
+        property("CursorType", "Integer", "Тип курсора набора данных."),
+        property("BlockSize", "Integer", "Число записей за одно обращение."),
+        property("NullConversion", "Bool", "Преобразовывать спецзначения в NULL."),
+        property("ParamCount", "Integer", "Количество параметров команды."),
+        property("Param", "RsdParameter", "Параметр по индексу или имени."),
+        property("Value", "Variant", "Значение параметра по индексу или имени."),
+        method(
+            "Execute([parm1], [parm2], ...): RsdRecordset",
+            "Выполняет команду с именованными параметрами."
+        ),
+        method(
+            "AddParam(name: String, [dir: Integer], [val], " +
+                "[len: Integer]): RsdParameter",
+            "Добавляет в команду именованный параметр."
+        ),
+        method(
+            "DeleteParam(indexOrName): Bool",
+            "Удаляет параметр по номеру или имени."
+        ),
+        method(
+            "RefreshParams(): Bool",
+            "Заполняет параметры из хранимой процедуры."
+        ),
+        method("Close(): Bool", "Закрывает команду.")
     ]),
-    classDef("RsdConnection", "Соединение с источником данных.", [
-        property("Environment", "RsdEnvironment"),
-        property("State", "Integer"),
-        method("Open(): Bool"),
-        method("Close(): Bool"),
-        method("BeginTrans(): Bool"),
-        method("CommitTrans(): Bool"),
-        method("RollbackTrans(): Bool"),
-        method("IsInTrans(): Bool")
+    classDef("RsdRecordset", "Набор записей результата SQL-запроса.", [
+        property("Command", "RsdCommand", "Команда, породившая набор."),
+        property("CursorLocation", "Integer", "Местоположение курсора."),
+        property("CursorType", "Integer", "Тип курсора."),
+        property("BOF", "Bool", "Позиция до первой записи."),
+        property("EOF", "Bool", "Позиция после последней записи."),
+        property("BookMark", "Variant", "Закладка текущей записи."),
+        property("FldCount", "Integer", "Количество полей в наборе."),
+        property("Fld", "RsdField", "Поле по номеру или имени."),
+        property("Value", "Variant", "Значение поля по номеру или имени."),
+        property("RecCount", "Integer", "Количество записей; –1 для динамического курсора."),
+        property("PageSize", "Integer", "Число записей в странице кэша."),
+        property("MaxPages", "Integer", "Предел страниц кэша в памяти."),
+        property("AutoRefresh", "RsdCommand", "Команда автоматического обновления записи."),
+        property("InsertCommand", "RsdCommand", "Пользовательская команда вставки."),
+        property("UpdateCommand", "RsdCommand", "Пользовательская команда изменения."),
+        property("DeleteCommand", "RsdCommand", "Пользовательская команда удаления."),
+        property("InsupdCommand", "RsdCommand", "Команда чтения данных после вставки."),
+        method("Open(): Bool", "Открывает набор данных."),
+        method("Close(): Bool", "Закрывает набор данных."),
+        method("MoveFirst(): Bool", "Переходит к первой записи."),
+        method("MoveLast(): Bool", "Переходит к последней записи."),
+        method("MoveNext(): Bool", "Переходит к следующей записи."),
+        method("MovePrev(): Bool", "Переходит к предыдущей записи."),
+        method(
+            "Move(numRec, moveDirect): Bool",
+            "Переходит к записи по смещению или закладке."
+        ),
+        method("AddNew(): Bool", "Вставляет новую запись."),
+        method("Edit(): Bool", "Начинает редактирование текущей записи."),
+        method("Update(): Bool", "Сохраняет изменения записи."),
+        method("CancelEdit(): Bool", "Отменяет ввод или редактирование."),
+        method("Delete(): Bool", "Удаляет запись из набора."),
+        method(
+            "AddUserCmdParam(nameParm: String, nameField: String, " +
+                "versionValue: Integer): Bool",
+            "Добавляет параметр пользовательской команде набора."
+        )
     ]),
-    classDef("RsdCommand", "Команда источника данных.", [
-        property("Connection", "RsdConnection"),
-        property("CommandText", "String"),
-        property("CommandType", "Integer"),
-        property("CursorType", "Integer"),
-        property("ParamCount", "Integer"),
-        property("Value", "Variant"),
-        method("Execute([parm1, ...]): RsdRecordset"),
-        method("AddParam(name: String, [dir: Integer], [val], [len: Integer]): RsdParameter"),
-        method("DeleteParam(indexOrName): Bool"),
-        method("RefreshParams(): Bool")
+    classDef("RsdError", "SQL-ошибка при работе с базой данных.", [
+        property("Code", "Integer", "Код ошибки."),
+        property("Descr", "String", "Описание ошибки."),
+        property("Source", "String", "Тип объекта, где произошла ошибка.")
     ]),
-    classDef("RsdRecordset", "Набор данных RSD.", [
-        property("BOF", "Bool"),
-        property("EOF", "Bool"),
-        property("FieldCount", "Integer"),
-        property("RecordCount", "Integer"),
-        property("Fld", "RsdField"),
-        property("Value", "Variant"),
-        method("Open(): Bool"),
-        method("Close(): Bool"),
-        method("MoveNext(): Bool"),
-        method("MovePrev(): Bool"),
-        method("MoveFirst(): Bool"),
-        method("MoveLast(): Bool"),
-        method("Move(numRec, moveDirect): Bool"),
-        method("AddNew(): Bool"),
-        method("Edit(): Bool"),
-        method("Update(): Bool"),
-        method("CancelEdit(): Bool"),
-        method("Delete(): Bool")
+    classDef("RsdField", "Поле набора записей RSD.", [
+        property("Name", "String", "Имя поля."),
+        property("Value", "Variant", "Значение поля."),
+        property("BlobFilename", "String", "Файл для чтения и записи BLOB."),
+        property("NullVal", "Variant", "Значение вместо NULL из SQL."),
+        method("Read(out, [count: Integer]): Bool", "Читает поле типа BLOB."),
+        method("Write(value, [count: Integer]): Bool", "Записывает поле типа BLOB.")
     ]),
-    classDef("RsdError", "Ошибка RSD.", [
-        property("Code", "Integer"),
-        property("Message", "String"),
-        property("State", "String")
+    classDef("RsdParameter", "Именованный параметр SQL-запроса.", [
+        property("Name", "String", "Наименование параметра."),
+        property("Direction", "Integer", "Входящий, исходящий или возвращаемый."),
+        property("Type", "Integer", "Тип параметра."),
+        property("Value", "Variant", "Значение параметра."),
+        method("SetSelfAlloc([...]): Variant", "Управляет внутренним буфером."),
+        method("SetStatusPtr(pStatus): Variant", "Управляет внутренним буфером.")
     ]),
-    classDef("RsdField", "Поле набора данных.", [
-        property("Name", "String"),
-        property("Type", "Integer"),
-        property("Value", "Variant"),
-        property("Size", "Integer"),
-        method("Read(out, [count]): Bool"),
-        method("Write(value, [count]): Bool")
+    classDef("TStream", "Двоичный поток файла или RSCOM-объекта.", [
+        property("Name", "String", "Имя файла потока либо null."),
+        property("Stream", "Object", "RSCOM-объект с интерфейсом IRsStream."),
+        method(
+            "Write(from, [type: Integer], [size: Integer], " +
+                "[decPoint: Integer]): Bool",
+            "Записывает в поток значение заданного типа."
+        ),
+        method(
+            "Read(out, [type: Integer], [size: Integer], " +
+                "[decPoint: Integer]): Bool",
+            "Читает из потока значение заданного типа."
+        ),
+        method("Write2(from: Object): Bool", "Записывает в поток структуру записи."),
+        method("Read2(to: Object): Bool", "Читает из потока структуру записи."),
+        method("WriteVal(from): Bool", "Записывает значение вместе с его типом."),
+        method("ReadVal(to): Bool", "Читает значение, сохранённое WriteVal."),
+        method(
+            "Copy(from: Object, [numBytes: Integer]): Bool",
+            "Копирует данные из другого потока."
+        ),
+        method(
+            "SetPos(pos: Integer, [from: Integer]): Bool",
+            "Устанавливает позицию в потоке."
+        ),
+        method("GetPos(): Integer", "Возвращает позицию от начала потока."),
+        method("SetSize(size: Integer): Bool", "Устанавливает размер потока."),
+        method("GetSize(): Integer", "Возвращает размер потока."),
+        method("Flush(): Bool", "Сбрасывает несохранённые изменения на диск.")
     ]),
-    classDef("RsdParameter", "Параметр команды RSD.", [
-        property("Name", "String"),
-        property("Direction", "Integer"),
-        property("Type", "Integer"),
-        property("Value", "Variant"),
-        property("Size", "Integer")
+    classDef("TStreamDoc", "Текстовый поток строк с признаком конца строки.", [
+        property("Name", "String", "Имя файла потока либо null."),
+        property("Stream", "Object", "RSCOM-объект с интерфейсом IRsStream."),
+        property("Str", "String", "Строка, прочитанная последним ReadLine."),
+        method(
+            "WriteLine(value: String): Bool",
+            "Записывает строку и признак конца строки."
+        ),
+        method(
+            "ReadLine(result: @String): Bool",
+            "Читает строку без признака конца строки."
+        ),
+        method("WriteVal(from): Bool", "Записывает значение вместе с его типом."),
+        method("ReadVal(to): Bool", "Читает значение, сохранённое WriteVal."),
+        method("Flush(): Bool", "Сбрасывает несохранённые изменения на диск.")
     ]),
-    classDef("TStream", "Двоичный поток.", [
-        method("Write(from, [type], [size], [decPoint]): Bool"),
-        method("Read(out, [type], [size], [decPoint]): Bool"),
-        method("Write2(from: Object): Bool"),
-        method("Read2(to: Object): Bool"),
-        method("WriteVal(from): Bool"),
-        method("ReadVal(to): Bool"),
-        method("Copy(from: Object, [numBytes: Integer]): Bool"),
-        method("SetPos(pos: Integer, [from: Integer]): Bool"),
-        method("GetPos(): Integer"),
-        method("SetSize(size: Integer): Bool"),
-        method("GetSize(): Integer"),
-        method("Flush(): Bool")
+    classDef("TDirList", "Список файлов и каталогов, отобранных по маске.", [
+        property("Count", "Integer", "Количество элементов в списке."),
+        method("Name(index: Integer): String", "Имя файла или каталога."),
+        method("Size(index: Integer): Integer", "Размер файла."),
+        /* SizeEx в руководстве не описан; оставлен как известное расширение. */
+        method("SizeEx(index: Integer): Integer", "Размер файла без ограничения 2 ГБ."),
+        method("FDate(index: Integer): Date", "Дата последней модификации."),
+        method("FTime(index: Integer): Time", "Время последней модификации."),
+        method("IsDir(index: Integer): Bool", "Элемент является каталогом."),
+        method("IsCopy(index: Integer): Bool", "Файл был успешно скопирован."),
+        method("IsDel(index: Integer): Bool", "Файл был успешно удалён."),
+        method(
+            "Copy(srcMask: String, attr: String, dstDir: String, " +
+                "[move: Bool], [indic: Bool], [header: String]): Bool",
+            "Копирует отобранные по маске файлы в каталог."
+        ),
+        method(
+            "List(mask: String, [attr: String], [newSizeMode: Bool]): Bool",
+            "Наполняет список файлами по маске."
+        ),
+        method(
+            "Remove(mask: String, [attr: String]): Bool",
+            "Удаляет отобранные по маске файлы."
+        ),
+        method(
+            "Sort([sortBy: Integer], [dirFirst: Bool]): Bool",
+            "Сортирует список по имени, размеру или дате."
+        )
     ]),
-    classDef("TStreamDoc", "Текстовый поток.", [
-        property("Str", "String", "Последняя прочитанная строка."),
-        method("WriteLine(value: String): Bool"),
-        method("ReadLine(result: @String): Bool"),
-        method("WriteVal(from): Bool"),
-        method("ReadVal(to): Bool"),
-        method("Flush(): Bool")
+    classDef("TRslEvHandler", "Обработчик событий ActiveX-объектов.", [
+        property("EvSource", "Object", "Коллекция объектов — источников событий."),
+        property("TypeLib", "Object", "Файл библиотеки типов источников."),
+        method(
+            "SetHandler(pref, proc, id): Bool",
+            "Связывает событие с процедурой обработки."
+        ),
+        method("RemHandler(pref, id): Bool", "Разрывает связь события и обработчика."),
+        method("Raise(...): Bool", "Возбуждает событие объекта Object RSL.")
     ]),
-    classDef("TDirList", "Список файлов и каталогов.", [
-        property("Count", "Integer"),
-        method("FDate(index: Integer): Date"),
-        method("FTime(index: Integer): Time"),
-        method("IsCopy(index: Integer): Bool"),
-        method("IsDel(index: Integer): Bool"),
-        method("IsDir(index: Integer): Bool"),
-        method("Name(index: Integer): String"),
-        method("Size(index: Integer): Integer"),
-        method("SizeEx(index: Integer): Integer"),
-        method("Copy(srcMask: String, attr: String, dstDir: String, ...): Bool"),
-        method("List(mask: String, [attr: String], [newSizeMode: Bool]): Bool"),
-        method("Remove(mask: String, [attr: String]): Bool"),
-        method("Sort([sortBy: Integer], [dirFirst: Bool]): Bool")
+    classDef("RslTimer", "Таймеры для вызова обработчиков по интервалу.", [
+        method(
+            "SetTimer(timeout: Integer, id: Integer, handler, " +
+                "[isSys: Bool]): Bool",
+            "Устанавливает таймер с заданным интервалом."
+        ),
+        method("RemTimer(id: Integer): Bool", "Удаляет таймер по идентификатору.")
     ]),
-    classDef("TRslEvHandler", "Обработчик событий.", [
-        property("EvSource", "Object"),
-        property("TypeLib", "Object"),
-        method("SetHandler(pref, proc, id): Bool"),
-        method("RemHandler(pref, id): Bool"),
-        method("Raise(...): Bool")
+    classDef("TRepForm", "Отчёт по текстовому шаблону форм.", [
+        method("Value(nameOrId): Variant", "Значение поля по имени или номеру."),
+        method("Index(name: String): Integer", "Номер поля по имени."),
+        method("Field(nameOrId): TPattFieldR", "Поле по имени или номеру."),
+        method("newLine(): Bool", "Отделяет одну форму отчёта от другой."),
+        method(
+            "writeFields(name: String, col: Integer, data, " +
+                "flags: Integer, w: Integer, p: Integer): Bool",
+            "Выводит поля формы в отчёт."
+        )
     ]),
-    classDef("RslTimer", "Таймер RSL.", [
-        method("SetTimer(timeout: Integer, id: Integer, handler, [isSys: Bool]): Bool"),
-        method("RemTimer(id: Integer): Bool")
+    classDef("TPattFieldR", "Поле формы отчёта из файла шаблона.", [
+        property("Name", "String", "Имя поля."),
+        property("Value", "Variant", "Значение, связанное с полем."),
+        property("Attr", "Integer", "Выравнивание: влево, вправо, по центру.")
     ]),
-    classDef("TRepForm", "Форма отчёта."),
-    classDef("TPattFieldR", "Поле шаблона отчёта."),
-    classDef("ToolsDataAdapter", "Источник данных интерфейса."),
-    classDef("TRslChanel", "Канал RSCOM."),
-    classDef("TRcwSite", "Контекст RSCOM."),
-    classDef("TRsAxServer", "Сервер ActiveX."),
-    classDef("TRcwHost", "Хост RSCOM."),
-    classDef("TClrHost", "Хост .NET."),
-    classDef("TJavaHost", "Хост Java."),
-    classDef("TJavaObj", "Объект Java.")
+    classDef(
+        "ToolsDataAdapter",
+        "Произвольный источник данных для RunScroll.",
+        [
+            method(
+                "setCurrentRecord(rec: TRecHandler): Bool",
+                "Задаёт объект с текущей записью набора."
+            ),
+            method("getColumnsInfo(): TArray", "Визуальные атрибуты колонок."),
+            method("getLastStatus(): Integer", "Код последней ошибки источника."),
+            method("getFileName(): String", "Имя файла источника данных."),
+            method("moveFirst(): Bool", "Переходит к первой записи."),
+            method("moveLast(): Bool", "Переходит к последней записи."),
+            method("moveNext(): Bool", "Переходит к следующей записи."),
+            method("movePrev(): Bool", "Переходит к предыдущей записи."),
+            method("moveToBookmark(bmk): Bool", "Переходит к закладке."),
+            method("getBookmark(): Variant", "Закладка текущей записи."),
+            method("RecordInsert(): Bool", "Вставляет запись в источник."),
+            method("RecordUpdate(): Bool", "Обновляет запись в источнике."),
+            method("RecordDelete(): Bool", "Удаляет запись из источника."),
+            method(
+                "AddColumn(name, head, width, kind, dec): Bool",
+                "Добавляет колонку в описание набора."
+            ),
+            method("prepareColumns(): Bool", "Готовит описание колонок."),
+            method("initCurRecord(): Bool", "Инициализирует текущую запись."),
+            method("initAdapter(): Bool", "Инициализирует источник данных.")
+        ]
+    ),
+    classDef("TRslChanel", "Канал связи с сервером приложений RSCOM.", [
+        property("Name", "String", "Имя канала; повторное имя переиспользуется."),
+        property("Protocol", "String", "Протокол соединения."),
+        property("Server", "String", "Имя сервера приложений."),
+        property("KeyPath", "String", "Путь к ключу соединения."),
+        property("PipeName", "String", "Имя именованного канала."),
+        property("Ip", "String", "IP-адрес сервера."),
+        property("Spx", "String", "Адрес SPX."),
+        property("NBPref", "String", "Префикс NetBIOS."),
+        property("Lana", "Integer", "Номер адаптера NetBIOS."),
+        property("Port", "Integer", "Порт сервера."),
+        property("TermNumber", "Integer", "Номер терминала."),
+        property("User", "String", "Имя пользователя."),
+        property("Domain", "String", "Домен пользователя."),
+        property("Password", "String", "Пароль пользователя."),
+        property("HostApp", "String", "Имя приложения-хоста."),
+        method("Connect(): Bool", "Соединяется с сервером приложений."),
+        method(
+            "LoadConfig(iniFile: String): Bool",
+            "Загружает параметры соединения из ini-файла."
+        )
+    ]),
+    classDef(
+        "TRcwSite",
+        "Обработчик интерактивных сообщений от RcwHost.",
+        []
+    ),
+    classDef("TRsAxServer", "Сервер создания ActiveX-объектов.", [
+        method(
+            "CreateComObject(progID: String, [useActive: Bool], [evId]): Object",
+            "Создаёт ActiveX-объект по программному идентификатору."
+        )
+    ]),
+    classDef("TRcwHost", "Экземпляр интерпретатора RSL через RSCOM.", [
+        property("Version", "String", "Номер версии модуля."),
+        property("SQLMode", "Bool", "Модуль является SQL-модулем."),
+        method(
+            "AttachSite(site: TRcwSite): Bool",
+            "Устанавливает объект обработки сообщений."
+        ),
+        method("DetachSite(): Bool", "Удаляет ранее установленный сайт."),
+        method(
+            "AddModule(moduleName: String): Bool",
+            "Загружает RSL-модуль в интерпретатор."
+        ),
+        method("Execute(): Bool", "Исполняет загруженные модули."),
+        method("Stop(): Bool", "Деинициализирует экземпляр интерпретатора."),
+        method(
+            "TestExist(moduleName: String): Bool",
+            "Проверяет, загружен ли модуль в память."
+        ),
+        method(
+            "Call(methodName: String, par1, par2, ...): Variant",
+            "Вызывает процедуру, конструктор или читает переменную."
+        )
+    ]),
+    classDef("TClrHost", "Хост .NET: создание объектов из сборок.", [
+        method(
+            "CreateCLRObject(assembly: String, className: String): Object",
+            "Создаёт объект класса .NET из сборки."
+        )
+    ]),
+    classDef(
+        "TJavaHost",
+        "Доступ к Java-машине через RSCOM.",
+        []
+    ),
+    classDef("TJavaObj", "Объект Java, полученный от TJavaHost.", [])
 ];
 
 export const RSL_STANDARD_LIBRARY: readonly IRslBuiltinDefinition[] =
     Object.freeze([
         ...CLASS_DEFINITIONS,
-        ...STANDARD_PROCEDURE_SIGNATURES.map(procedureFromSignature)
+        ...PROCEDURE_DEFINITIONS
     ]);
 
-function procedureFromSignature(signature: string): IRslBuiltinDefinition {
-    const name = signature.match(/^([^\s(]+)/)?.[1] || signature;
-    const normalizedSignature = balancedSignature(signature)
-        ? signature
-        : `${name}(...)`;
-    const explicitType = normalizedSignature
-        .match(/\)\s*:\s*(@?[\wА-Яа-яЁё]+)/u)?.[1];
-    const key = name.toLowerCase();
+function procedure(
+    signature: string,
+    summary: string
+): IRslBuiltinDefinition {
+    const name = signature.match(/^([^\s(:[]+)/)?.[1] || signature;
     return {
         name,
         kind: CompletionItemKind.Function,
-        typeName: explicitType || RETURN_TYPES[key] || "Variant",
-        signature: normalizedSignature,
-        summary: SUMMARIES[key] || "Встроенная процедура RSL."
+        typeName: TRAILING_TYPE.exec(signature)?.[1] || "Variant",
+        signature: balancedSignature(signature)
+            ? signature
+            : `${name}(...)`,
+        summary
     };
 }
 
@@ -874,7 +1328,8 @@ function balancedSignature(value: string): boolean {
 function classDef(
     name: string,
     summary: string,
-    children: readonly IRslBuiltinDefinition[] = []
+    children: readonly IRslBuiltinDefinition[] = [],
+    base?: string
 ): IRslBuiltinDefinition {
     return {
         name,
@@ -882,21 +1337,20 @@ function classDef(
         typeName: name,
         signature: `${name}(...)`,
         summary,
+        base,
         children
     };
 }
 
 function method(
     signature: string,
-    summary = "Метод стандартного класса."
+    summary: string
 ): IRslBuiltinDefinition {
     const name = signature.match(/^([^\s(]+)/)?.[1] || signature;
-    const typeName = signature.match(/\)\s*:\s*(@?[\wА-Яа-яЁё]+)/u)?.[1] ||
-        "Variant";
     return {
         name,
         kind: CompletionItemKind.Method,
-        typeName,
+        typeName: TRAILING_TYPE.exec(signature)?.[1] || "Variant",
         signature,
         summary
     };
@@ -905,7 +1359,7 @@ function method(
 function property(
     name: string,
     typeName: string,
-    summary = "Свойство стандартного класса."
+    summary: string
 ): IRslBuiltinDefinition {
     return {
         name,

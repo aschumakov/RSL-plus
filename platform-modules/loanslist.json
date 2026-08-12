@@ -1,0 +1,1 @@
+{"version":2,"classes":[],"procedures":[{"name":"Loans_ListLCP","signature":"Loans_ListLCP(ObjectID:Integer, CredObjID:Integer, buff:Record):Bool","description":"С помощью процедуры осуществляется выбор из списка связи объектов и ставок."}]}
