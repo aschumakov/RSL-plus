@@ -106,12 +106,19 @@ export class SemanticTokensFeatureRegistry {
                 this.endSpan(span, { cancelled: true, dataInts: 0 });
                 return { data: [] };
             }
-            const result = buildRslSemanticTokens(module, index, resolver, {
-                startLine: params.range.start.line,
-                startCharacter: params.range.start.character,
-                endLine: params.range.end.line,
-                endCharacter: params.range.end.character
-            });
+            const result = buildRslSemanticTokens(
+                module,
+                index,
+                resolver,
+                {
+                    startLine: params.range.start.line,
+                    startCharacter: params.range.start.character,
+                    endLine: params.range.end.line,
+                    endCharacter: params.range.end.character
+                },
+                /* Отмена проверяется и во время расчёта, а не только до него. */
+                () => requestIsStale(document, version, token)
+            );
             this.endSpan(span, { cancelled: false, dataInts: result.data.length });
             return result;
         });
@@ -219,8 +226,16 @@ export class SemanticTokensFeatureRegistry {
         const built = buildRslSemanticTokens(
             module,
             this.environment.index,
-            this.environment.resolver
+            this.environment.resolver,
+            undefined,
+            () => requestIsStale(document, version, cancellationToken)
         );
+
+        if (requestIsStale(document, version, cancellationToken)) {
+            /* Отменённый результат не кладётся в кэш: он может быть неполным. */
+            this.endSpan(span, { cancelled: true, dataInts: 0 });
+            return { data: [] };
+        }
         const resultId = `${module.version}:${++this.sequence}`;
         const value = { data: built.data, resultId };
         this.touchCache(uri, {

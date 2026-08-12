@@ -67,6 +67,15 @@ export interface ICompactModuleRequest {
      * которых пользователю сейчас нет дела.
      */
     priority?: CompactModulePriority;
+    /**
+     * Служебный запрос: записать отложенный кэш и подтвердить.
+     *
+     * Файлом кэша владеет worker, поэтому сбросить его перед остановкой может
+     * только он сам. Отдельного канала для этого нет намеренно: запрос идёт по
+     * той же очереди, а значит гарантированно после уже принятых запросов, чьи
+     * результаты и надо сохранить.
+     */
+    flushCache?: boolean;
 }
 
 interface ICompactModuleResponseBase {
@@ -136,7 +145,13 @@ export interface ICompactModuleFailed extends ICompactModuleResponseBase {
     error?: string;
 }
 
+/** Ответ на служебный flushCache. */
+export interface ICompactModuleFlushed extends ICompactModuleResponseBase {
+    status: "flushed";
+}
+
 export type ICompactModuleResponse =
+    | ICompactModuleFlushed
     | ICompactModuleIndexed
     | ICompactModuleUnchanged
     | ICompactModuleNotExported

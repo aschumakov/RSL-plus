@@ -245,10 +245,29 @@ export class RslScopeResolver {
 
         const builtin = this.builtins.findSymbol(referenceName);
 
-        return builtin
-            ? {
+        if (builtin) {
+            return {
                 uri: RSL_BUILTIN_URI,
                 symbol: builtin,
+                token
+            };
+        }
+
+        /*
+         * Символ импортированного прикладного модуля — последним, после
+         * объявлений файла, импортированных модулей проекта и стандартной
+         * библиотеки: он доступен только через Import и не должен перекрывать
+         * одноимённое объявление, которое ближе к пользователю.
+         */
+        const platform = this.platformModules?.findSymbol(
+            this.visiblePlatformModules(uri),
+            referenceName
+        );
+
+        return platform
+            ? {
+                uri: RSL_BUILTIN_URI,
+                symbol: platform,
                 token
             }
             : undefined;

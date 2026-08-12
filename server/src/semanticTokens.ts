@@ -69,15 +69,38 @@ interface IObjectInfo {
  * TextMate остаётся базовым быстрым слоем, semantic tokens уточняют смысл
  * идентификаторов после завершения разбора.
  */
+/*
+ * Как часто проверяется отмена.
+ *
+ * Проверка на каждом токене заметна на горячем пути, а раз в тысячу — нет:
+ * файл в 512 КБ даёт порядка сотни проверок, то есть отклик на отмену внутри
+ * одного-двух миллисекунд работы.
+ */
+const CANCEL_CHECK_INTERVAL = 1000;
+
 export function buildRslSemanticTokens(
     module: IIndexedModule,
     index: WorkspaceIndex,
     sharedResolver?: RslScopeResolver,
-    range?: IRslSemanticTokenRange
+    range?: IRslSemanticTokenRange,
+    /*
+     * Отмена проверяется ВНУТРИ расчёта, а не только перед ним.
+     *
+     * Раньше запрос, отменённый редактором (пользователь продолжил печатать
+     * или ушёл в другой файл), всё равно доводился до конца: обход дерева
+     * символов и части потока токенов идёт по всему файлу даже для
+     * Range-запроса, и до лимита 512 КБ это заметная пауза, за которую никто
+     * уже не ждёт результата.
+     */
+    isCancelled: () => boolean = () => false
 ): SemanticTokens {
     const resolver = sharedResolver || new RslScopeResolver(index);
     const tokens = module.syntax.tokens;
-    const objects = collectObjects(module, tokens);
+    const objects = collectObjects(module, tokens, isCancelled);
+
+    if (isCancelled()) {
+        return { data: [] };
+    }
     const objectInfoByObject = new Map<RslSymbol, IObjectInfo>();
     const declarationByRange = new Map<string, IObjectInfo>();
 
@@ -103,6 +126,14 @@ export function buildRslSemanticTokens(
         : 0;
 
     for (let tokenIndex = firstTokenIndex; tokenIndex < tokens.length; tokenIndex++) {
+        if (
+            tokenIndex % CANCEL_CHECK_INTERVAL === 0 &&
+            tokenIndex > firstTokenIndex &&
+            isCancelled()
+        ) {
+            return { data: [] };
+        }
+
         const token = tokens[tokenIndex];
 
         if (range && isTokenAfterRange(token, range)) {
@@ -320,11 +351,26 @@ function createVirtualToken(
 
 function collectObjects(
     module: IIndexedModule,
-    code: IRslToken[]
+    code: IRslToken[],
+    isCancelled: () => boolean = () => false
 ): IObjectInfo[] {
     const result: IObjectInfo[] = [];
+    let visited = 0;
+    let cancelled = false;
 
     walk(module.symbolTree, scope => {
+        /*
+         * Обход идёт по всему дереву даже для Range-запроса, поэтому проверка
+         * отмены нужна и здесь, а не только в цикле по токенам.
+         */
+        if (cancelled) {
+            return;
+        }
+        if (++visited % CANCEL_CHECK_INTERVAL === 0 && isCancelled()) {
+            cancelled = true;
+            return;
+        }
+
         const signature = isCallable(scope)
             ? findSignatureRange(code, scope)
             : undefined;

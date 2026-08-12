@@ -1,6 +1,7 @@
 import { parentPort, workerData } from "worker_threads";
 
 import {
+    compactModuleCache,
     configureCompactModuleCache,
     readCompactModule
 } from "./compactModuleReader";
@@ -28,6 +29,33 @@ const cachePath = (workerData as { cachePath?: string } | null)?.cachePath;
 configureCompactModuleCache(cachePath);
 
 port.on("message", (request: ICompactModuleRequest) => {
+    /*
+     * Владелец файла кэша — worker, поэтому и записать отложенное перед
+     * остановкой может только он. Без этого закрытие редактора сразу после
+     * индексации теряло результат: запись ждала паузы простоя, а поток
+     * завершался раньше.
+     */
+    if (request.flushCache) {
+        compactModuleCache().flush().then(
+            () => port.postMessage({
+                id: request.id,
+                uri: request.uri,
+                generation: request.generation,
+                status: "flushed"
+            }),
+            error => port.postMessage({
+                id: request.id,
+                uri: request.uri,
+                generation: request.generation,
+                status: "failed",
+                error: error instanceof Error
+                    ? `${error.name}: ${error.message}`
+                    : String(error)
+            })
+        );
+        return;
+    }
+
     readCompactModule(request).then(
         response => port.postMessage(response),
         error => port.postMessage({

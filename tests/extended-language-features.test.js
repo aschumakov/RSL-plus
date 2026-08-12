@@ -395,6 +395,54 @@ function codes(items) {
             "Модуль, импортированный в уже разобранном файле, тоже доступен"
         );
 
+        /*
+         * Тот же транзитивный случай, но каталог ничего не грузил заранее —
+         * так это и происходит в жизни. Пока middle.mac не в индексе, его
+         * Import неизвестен; после появления модуль обязан попасть в список
+         * видимых, и подготовить его состав должен вызывающий
+         * (refreshOpenDependents в server.ts), а не обработчик Completion.
+         */
+        const cold = new PlatformModuleCatalog({ log: () => undefined });
+        const coldIndex = new WorkspaceIndex();
+        coldIndex.registerWorkspaceFiles([MAIN, MIDDLE]);
+        const coldMain = coldIndex.updateOpenModule(MAIN, viaMiddle, 1);
+        const coldResolver = new RslScopeResolver(coldIndex, undefined, cold);
+        const coldNames = () => coldResolver
+            .getCompletions(
+                MAIN,
+                coldMain.symbolTree,
+                viaMiddle.indexOf("Var x = R") + 9
+            )
+            .map(item => item.label);
+
+        assert.deepStrictEqual(
+            coldResolver.visiblePlatformModules(MAIN),
+            [],
+            "Пока импортированный файл не разобран, его Import не известен"
+        );
+
+        coldIndex.updateExternalModule(
+            MIDDLE,
+            "Import CommonInter;\nMacro Helper()\nEnd;",
+            1
+        );
+
+        assert.deepStrictEqual(
+            Array.from(coldResolver.visiblePlatformModules(MAIN)),
+            ["CommonInter"],
+            "После попадания middle.mac в индекс модуль обязан стать видимым"
+        );
+        assert.ok(
+            !coldNames().includes("RSL_LoansCarryDoc"),
+            "Completion не имеет права сам грузить состав модуля"
+        );
+
+        cold.ensureModules(coldResolver.visiblePlatformModules(MAIN));
+        assert.ok(
+            coldNames().includes("RSL_LoansCarryDoc"),
+            "После подготовки состава классы модуля обязаны появиться"
+        );
+
         /* Неразобранный файл проекта не должен ни давать классы, ни грузиться. */
         const lazyIndex = new WorkspaceIndex();
         lazyIndex.registerWorkspaceFiles([MAIN, MIDDLE]);
@@ -496,6 +544,52 @@ function codes(items) {
             "Цепочка наследования обязана доходить до стандартных классов; " +
                 `предложено: ${names.join(", ")}`
         );
+    });
+
+    await test("символы прикладного модуля разрешаются, а не только предлагаются", () => {
+        const {
+            PlatformModuleCatalog
+        } = require("../server/out/builtins/platformModuleCatalog");
+        const catalog = new PlatformModuleCatalog({ log: () => undefined });
+        catalog.ensureModules(["total", "CommonInter"]);
+
+        /*
+         * Без этого имя из модуля попадало в Completion, но resolveAt его не
+         * находил — то есть Hover, подсказка параметров и семантическая
+         * подсветка по нему не работали.
+         */
+        const source = [
+            "Import total, CommonInter;",
+            "Macro Test()",
+            "  Var r = LnGetRecordSet(query, true);",
+            "  Var d = RSL_LoansCarryDoc();",
+            "End;"
+        ].join("\n");
+        const uri = "file:///resolve.mac";
+        const index = new WorkspaceIndex();
+        index.registerWorkspaceFiles([uri]);
+        const opened = index.updateOpenModule(uri, source, 1);
+        const resolver = new RslScopeResolver(index, undefined, catalog);
+
+        const procedure = resolver.resolveAt(
+            uri,
+            opened.symbolTree,
+            source.indexOf("LnGetRecordSet") + 1
+        );
+        assert.ok(procedure, "Процедура модуля обязана разрешаться");
+        assert.strictEqual(procedure.symbol.typeName, "Object");
+        assert.ok(
+            procedure.symbol.documentation,
+            "У символа обязано быть описание, иначе Hover покажет пустоту"
+        );
+
+        const klass = resolver.resolveAt(
+            uri,
+            opened.symbolTree,
+            source.indexOf("RSL_LoansCarryDoc") + 1
+        );
+        assert.ok(klass, "Класс модуля обязан разрешаться");
+        assert.strictEqual(klass.symbol.typeName, "RSL_LoansCarryDoc");
     });
 
     await test("процедуры прикладного модуля предлагаются и знают свой тип", () => {

@@ -1205,6 +1205,72 @@ async function testParseReadinessDoesNotWaitForSettings() {
     service.close(uri);
 }
 
+/*
+ * Правка, не меняющая длину файла, обязана быть замечена индексом ссылок.
+ *
+ * Прежде запись считалась актуальной по дате и размеру, и при совпадении файл
+ * не читался вовсе. Замена Alpha на Bravo их не меняет, поэтому в индексе
+ * оставался прежний набор идентификаторов, и Find All References по новому
+ * имени возвращал ноль результатов. Дату здесь восстанавливаем намеренно: она
+ * сохраняется при checkout ветки и распаковке архива.
+ */
+async function testReferenceIndexDetectsSameLengthEdit() {
+    const directory = await fs.promises.mkdtemp(
+        path.join(os.tmpdir(), "rsl-ref-fp-")
+    );
+
+    try {
+        const filePath = path.join(directory, "Lib.mac");
+        const cachePath = path.join(directory, "cache", "references.json");
+        const uri = pathToFileURL(filePath).toString();
+
+        fs.writeFileSync(filePath, "Macro Alpha()\nEnd;\n", "utf8");
+        const before = fs.statSync(filePath);
+
+        let index = new ReferenceIndex({
+            log: () => undefined,
+            cacheFilePath: cachePath
+        });
+        index.retainWorkspaceFiles([uri]);
+        assert.strictEqual(
+            (await index.findCandidates("Alpha", [uri])).length,
+            1,
+            "Исходное имя обязано находиться"
+        );
+        await index.flush();
+
+        /* Та же длина, та же дата — изменилось только содержимое. */
+        fs.writeFileSync(filePath, "Macro Bravo()\nEnd;\n", "utf8");
+        fs.utimesSync(filePath, before.atime, before.mtime);
+        assert.strictEqual(
+            fs.statSync(filePath).size,
+            before.size,
+            "Проверка имеет смысл только при совпавшем размере"
+        );
+
+        /* Новая сессия: кэш читается с диска. */
+        index = new ReferenceIndex({
+            log: () => undefined,
+            cacheFilePath: cachePath
+        });
+        index.retainWorkspaceFiles([uri]);
+
+        assert.strictEqual(
+            (await index.findCandidates("Bravo", [uri])).length,
+            1,
+            "Новое имя обязано находиться, иначе Find All References молча " +
+                "теряет ссылки после checkout или распаковки архива"
+        );
+        assert.strictEqual(
+            (await index.findCandidates("Alpha", [uri])).length,
+            0,
+            "Имени, которого в файле уже нет, находиться не должно"
+        );
+    } finally {
+        fs.rmSync(directory, { recursive: true, force: true });
+    }
+}
+
 async function testReferenceIndexIsLazyPersistentAndTargeted() {
     const directory = await fs.promises.mkdtemp(
         path.join(os.tmpdir(), "rsl-ref-index-")
@@ -1588,6 +1654,9 @@ async function waitFor(predicate, timeoutMs) {
 
     await testReferenceIndexIsLazyPersistentAndTargeted();
     console.log("[OK] ReferenceIndex ленивый, persistent и адресный");
+
+    await testReferenceIndexDetectsSameLengthEdit();
+    console.log("[OK] правка той же длины не теряется индексом ссылок");
 
     await testImportedSymbolLoadsOnDemand();
     console.log("[OK] Import-символ загружается для навигации по запросу");

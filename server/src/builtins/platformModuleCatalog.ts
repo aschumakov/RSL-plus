@@ -63,6 +63,13 @@ interface IPlatformModuleBody {
 }
 
 interface ILoadedModule {
+    /**
+     * Все символы модуля — классы и процедуры.
+     *
+     * Отдельно от classes: Hover, Signature Help и семантическая подсветка
+     * спрашивают символ по имени, не зная, класс это или процедура.
+     */
+    symbols: ReadonlyMap<string, RslSymbol>;
     classes: ReadonlyMap<string, RslSymbol>;
     completions: readonly CompletionItem[];
     /** Тип результата процедуры: нужен для вывода типа переменной. */
@@ -182,6 +189,32 @@ export class PlatformModuleCatalog {
         return undefined;
     }
 
+    /**
+     * Любой символ модуля по имени — класс или процедура.
+     *
+     * Нужен Hover, Signature Help и семантической подсветке: без него имя из
+     * прикладного модуля предлагалось в Completion, но при наведении и при
+     * подсветке оставалось неизвестным.
+     */
+    findSymbol(
+        moduleNames: readonly string[],
+        name: string
+    ): RslSymbol | undefined {
+        const key = normalizeIdentifier(name);
+
+        for (const moduleName of moduleNames) {
+            const symbol = this.loaded
+                .get(normalizeIdentifier(moduleName))
+                ?.symbols.get(key);
+
+            if (symbol) {
+                return symbol;
+            }
+        }
+
+        return undefined;
+    }
+
     /** Объявленный тип результата процедуры модуля, если он известен. */
     findResultType(
         moduleNames: readonly string[],
@@ -256,26 +289,37 @@ export class PlatformModuleCatalog {
 }
 
 function build(key: string, body: IPlatformModuleBody): ILoadedModule {
+    const symbols = new Map<string, RslSymbol>();
     const classes = new Map<string, RslSymbol>();
     const completions: CompletionItem[] = [];
     const resultTypes = new Map<string, string>();
 
     for (const item of body.classes || []) {
         const symbol = new BuiltinSymbol(classDefinition(item));
-        classes.set(normalizeIdentifier(item.name), symbol.toRslSymbol());
+        const name = normalizeIdentifier(item.name);
+        const semantic = symbol.toRslSymbol();
+        classes.set(name, semantic);
+        symbols.set(name, semantic);
         completions.push(moduleCompletion(symbol, key));
     }
 
     for (const item of body.procedures || []) {
         const symbol = new BuiltinSymbol(procedureDefinition(item));
+        const name = normalizeIdentifier(item.name);
         completions.push(moduleCompletion(symbol, key));
 
+        /* Класс с таким именем важнее: он несёт ещё и состав членов. */
+        if (!symbols.has(name)) {
+            symbols.set(name, symbol.toRslSymbol());
+        }
+
         if (symbol.typeName && symbol.typeName !== "Variant") {
-            resultTypes.set(normalizeIdentifier(item.name), symbol.typeName);
+            resultTypes.set(name, symbol.typeName);
         }
     }
 
     return {
+        symbols,
         classes,
         completions: Object.freeze(completions),
         resultTypes

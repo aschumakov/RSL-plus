@@ -7,6 +7,7 @@ import {
     buildReferenceCandidateUris,
     type IReferenceImportModule
 } from "./referenceImportGraph";
+import { contentFingerprint } from "./contentFingerprint";
 import {
     containsReferenceIdentifier,
     containsSortedIdentifierHash,
@@ -18,13 +19,25 @@ import {
 
 export type { IReferenceImportModule } from "./referenceImportGraph";
 
-const CACHE_VERSION = 2;
+/*
+ * 3: запись хранит отпечаток содержимого вместо даты и размера.
+ *
+ * Версия поднята, чтобы кэш прежнего формата не читался: у его записей нет
+ * отпечатка, а значит нет и основания считать их актуальными.
+ */
+const CACHE_VERSION = 3;
 const DEFAULT_READ_BATCH_SIZE = 16;
 const SAVE_DEBOUNCE_MS = 3000;
 
+/**
+ * Совместимость вызывающего кода: stat здесь больше не решает актуальность.
+ *
+ * Запись сверяется по отпечатку содержимого (см. contentFingerprint), потому
+ * что дата и размер этого не гарантируют.
+ */
 export interface IReferenceFileStat {
-    mtimeMs: number;
-    size: number;
+    mtimeMs?: number;
+    size?: number;
 }
 
 export interface IReferenceCandidateSource {
@@ -43,15 +56,24 @@ export interface IReferenceIndexOptions {
     readBatchSize?: number;
 }
 
-interface IReferenceFileEntry extends IReferenceFileStat {
+interface IReferenceFileEntry {
+    /** Отпечаток содержимого, по которому запись считается актуальной. */
+    fingerprint: string;
     hashes: Uint32Array;
     imports: string[];
+    /**
+     * Отпечаток сверен с диском в этой сессии.
+     *
+     * На диск не пишется: после перезапуска доверять прежней проверке нельзя.
+     * Пока запись не сверена, её нельзя использовать для вывода «в файле нет
+     * такого идентификатора» — именно этот вывод и терял ссылки.
+     */
+    validated?: boolean;
 }
 
 interface ISerializedEntry {
     uri: string;
-    mtimeMs: number;
-    size: number;
+    fingerprint: string;
     hashes: string;
     imports: string[];
 }
@@ -125,31 +147,35 @@ export class ReferenceIndex {
     indexSource(
         uri: string,
         source: string,
-        stat: IReferenceFileStat,
+        /* Оставлен для совместимости вызывающего кода; актуальность решает
+         * отпечаток содержимого, а не дата с размером. */
+        _stat?: IReferenceFileStat,
         imports?: readonly string[]
     ): void {
         if (!uri) {
             return;
         }
 
-        const normalizedStat = {
-            mtimeMs: normalizeMtime(stat.mtimeMs),
-            size: Math.max(0, stat.size)
-        };
+        const fingerprint = contentFingerprint(source);
         const existing = this.entries.get(uri);
-        if (
-            existing &&
-            existing.mtimeMs === normalizedStat.mtimeMs &&
-            existing.size === normalizedStat.size
-        ) {
+
+        /*
+         * Сравнивается отпечаток содержимого, а не дата с размером: правка,
+         * не меняющая длину файла (Alpha на Bravo), при сохранённой дате
+         * оставляла в индексе прежний набор идентификаторов, и поиск нового
+         * имени не находил ничего.
+         */
+        if (existing && existing.fingerprint === fingerprint) {
             return;
         }
 
         const facts = scanReferenceSource(source, imports);
         this.entries.set(uri, {
-            ...normalizedStat,
+            fingerprint,
             hashes: facts.hashes,
-            imports: facts.imports
+            imports: facts.imports,
+            /* Отпечаток посчитан по фактическому содержимому. */
+            validated: true
         });
         this.importGraphValidated = false;
         this.scheduleSave();
@@ -284,24 +310,26 @@ export class ReferenceIndex {
             return undefined;
         }
 
-        let stat: fs.Stats;
-        try {
-            stat = await fs.promises.stat(filePath);
-        } catch (_error) {
-            this.invalidate(uri);
-            return undefined;
-        }
-
-        const normalizedStat: IReferenceFileStat = {
-            mtimeMs: normalizeMtime(stat.mtimeMs),
-            size: stat.size
-        };
         let entry = this.entries.get(uri);
-        const valid = !!entry &&
-            entry.mtimeMs === normalizedStat.mtimeMs &&
-            entry.size === normalizedStat.size;
 
-        if (valid && entry && !containsSortedIdentifierHash(entry.hashes, targetHash)) {
+        /*
+         * Файл не читается только по СВЕРЕННОЙ записи.
+         *
+         * Это единственное место, ради которого индекс существует: если в
+         * наборе идентификаторов файла нужного имени нет, читать его незачем.
+         * Но вывод «нет» имеет право делать лишь запись, чей отпечаток уже
+         * сверён с диском в этой сессии. Раньше здесь сравнивались дата и
+         * размер, а они не меняются при правке одинаковой длины — и файл с
+         * новым именем молча пропускался.
+         *
+         * Сверка стоит одного чтения на файл за сессию: дальше правки
+         * сбрасывают запись через наблюдателя за файлами (invalidate), и
+         * повторные поиски снова обходятся без чтения.
+         */
+        if (
+            entry?.validated &&
+            !containsSortedIdentifierHash(entry.hashes, targetHash)
+        ) {
             return undefined;
         }
 
@@ -309,12 +337,16 @@ export class ReferenceIndex {
         try {
             source = await fs.promises.readFile(filePath, "utf8");
         } catch (_error) {
+            this.invalidate(uri);
             return undefined;
         }
 
-        if (!valid) {
-            this.indexSource(uri, source, normalizedStat);
+        if (!entry || entry.fingerprint !== contentFingerprint(source)) {
+            /* Содержимое разошлось с записью — пересканируем. */
+            this.indexSource(uri, source, {});
             entry = this.entries.get(uri);
+        } else if (!entry.validated) {
+            entry.validated = true;
         }
 
         if (!entry || !containsSortedIdentifierHash(entry.hashes, targetHash)) {
@@ -326,6 +358,18 @@ export class ReferenceIndex {
             : undefined;
     }
 
+    /**
+     * Можно ли сузить кандидатов по сохранённому графу Import.
+     *
+     * Граф строится из записей индекса, поэтому доверять ему можно только
+     * когда все записи сверены с диском по отпечатку. Ранее здесь сравнивались
+     * дата и размер: правка Import, не изменившая длину файла, оставляла граф
+     * прежним, и файл выпадал из кандидатов.
+     *
+     * Отказ безопасен — вызывающий берёт все файлы проекта, то есть ищет шире,
+     * а не меньше. И он самоустраняется: тот же поиск прочитает и сверит файлы,
+     * так что следующий раз граф уже применим.
+     */
     private async ensureImportGraphValid(
         uris: readonly string[],
         loadedModules: readonly IReferenceImportModule[],
@@ -335,36 +379,18 @@ export class ReferenceIndex {
             return true;
         }
 
-        const loadedUris = new Set(loadedModules.map(module => module.uri));
-        const diskUris = uris.filter(uri => !loadedUris.has(uri));
+        if (isCancelled()) {
+            return false;
+        }
 
-        for (
-            let start = 0;
-            start < diskUris.length;
-            start += this.readBatchSize
-        ) {
-            if (isCancelled()) {
-                return false;
+        const loadedUris = new Set(loadedModules.map(module => module.uri));
+
+        for (const uri of uris) {
+            if (loadedUris.has(uri)) {
+                continue;
             }
 
-            const batch = diskUris.slice(start, start + this.readBatchSize);
-            const valid = await Promise.all(batch.map(async uri => {
-                const entry = this.entries.get(uri);
-                if (!entry) {
-                    return false;
-                }
-
-                try {
-                    const filePath = fileURLToPath(uri);
-                    const stat = await fs.promises.stat(filePath);
-                    return entry.mtimeMs === normalizeMtime(stat.mtimeMs) &&
-                        entry.size === stat.size;
-                } catch (_error) {
-                    return false;
-                }
-            }));
-
-            if (valid.some(value => !value)) {
+            if (!this.entries.get(uri)?.validated) {
                 return false;
             }
         }
@@ -406,10 +432,14 @@ export class ReferenceIndex {
                     continue;
                 }
 
+                if (!item.fingerprint) {
+                    /* Запись прежнего формата без отпечатка доверия не имеет. */
+                    continue;
+                }
+
                 if (!this.entries.has(item.uri)) {
                     this.entries.set(item.uri, {
-                        mtimeMs: normalizeMtime(item.mtimeMs),
-                        size: Math.max(0, item.size),
+                        fingerprint: item.fingerprint,
                         hashes,
                         imports: normalizeReferenceImports(item.imports || [])
                     });
@@ -455,8 +485,7 @@ export class ReferenceIndex {
 
             files.push({
                 uri,
-                mtimeMs: entry.mtimeMs,
-                size: entry.size,
+                fingerprint: entry.fingerprint,
                 hashes: encodeHashes(entry.hashes),
                 imports: entry.imports.slice()
             });
@@ -509,10 +538,6 @@ function decodeHashes(value: string): Uint32Array | undefined {
     } catch (_error) {
         return undefined;
     }
-}
-
-function normalizeMtime(value: number): number {
-    return Math.floor(Number.isFinite(value) ? value : 0);
 }
 
 function errorToString(error: unknown): string {

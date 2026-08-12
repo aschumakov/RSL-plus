@@ -208,6 +208,55 @@ test("Semantic Tokens помечают объявление Macro", () => {
     assert.strictEqual(tokens[4] & 1, 1);
 });
 
+/*
+ * Отменённый запрос подсветки должен прерываться, а не доводиться до конца.
+ *
+ * Раньше отмена проверялась только перед вызовом, а сам расчёт обходил дерево
+ * символов и часть потока токенов по всему файлу — даже для Range-запроса. До
+ * лимита 512 КБ это заметная пауза, за которую результата уже никто не ждёт:
+ * пользователь либо продолжил печатать, либо ушёл в другой файл.
+ */
+test("расчёт Semantic Tokens прерывается по отмене", () => {
+    const chunk = [
+        "Macro Handler(obj, cmd)",
+        "  Var value = 1, total = 0;",
+        "  total = total + obj.Field(1);",
+        "End;",
+        ""
+    ].join("\n");
+    const source = chunk.repeat(Math.ceil((200 * 1024) / chunk.length));
+    const index = new WorkspaceIndex();
+    const module = createModule(index, "file:///big.mac", source);
+
+    const full = buildRslSemanticTokens(module, index).data;
+    assert.ok(full.length > 0, "Обычный расчёт обязан вернуть токены");
+
+    const cancelled = buildRslSemanticTokens(
+        module,
+        index,
+        undefined,
+        undefined,
+        () => true
+    ).data;
+
+    assert.strictEqual(
+        cancelled.length,
+        0,
+        "Отменённый расчёт не должен возвращать частичный результат"
+    );
+
+    /* Отмена обязана срабатывать и посреди обхода, а не только на входе. */
+    let checks = 0;
+    buildRslSemanticTokens(module, index, undefined, undefined, () => {
+        checks++;
+        return false;
+    });
+    assert.ok(
+        checks > 1,
+        `Отмена обязана проверяться во время расчёта; проверок: ${checks}`
+    );
+});
+
 test("Semantic Tokens помечают параметр отдельно от переменной", () => {
     const index = new WorkspaceIndex();
     const source = "Macro Shared(value)\n value = 1;\nEnd;";

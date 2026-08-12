@@ -7,6 +7,14 @@ import type {
     ICompactModuleResponse
 } from "./compactModuleProtocol";
 
+/*
+ * Сколько ждать записи кэша при остановке.
+ *
+ * Остановка сервера не должна зависеть от диска: не успели — потеряем кэш, но
+ * не подвесим закрытие редактора.
+ */
+const FLUSH_TIMEOUT_MS = 2000;
+
 export interface ICompactModuleWorkerOptions {
     log(message: string): void;
     /**
@@ -127,6 +135,15 @@ export class CompactModuleWorkerService {
     }
 
     async dispose(): Promise<void> {
+        /*
+         * Отложенный кэш записывается до остановки потока.
+         *
+         * Просьба уходит по обычной очереди, поэтому попадает после всех уже
+         * принятых запросов — то есть сохраняет и их результаты. Ожидание
+         * ограничено: остановка сервера не должна зависеть от записи на диск.
+         */
+        await this.flushWorkerCache();
+
         this.disposed = true;
         const queued = [
             ...this.foregroundQueue,
@@ -149,6 +166,25 @@ export class CompactModuleWorkerService {
         if (worker) {
             await worker.terminate();
         }
+    }
+
+    /** Просит worker записать кэш; молча уступает по таймауту. */
+    private async flushWorkerCache(): Promise<void> {
+        if (this.disposed || !this.worker) {
+            return;
+        }
+
+        const request = this.index({
+            uri: "",
+            generation: 0,
+            priority: "foreground",
+            flushCache: true
+        });
+        const timeout = new Promise<void>(resolve =>
+            setTimeout(resolve, FLUSH_TIMEOUT_MS).unref?.()
+        );
+
+        await Promise.race([request.then(() => undefined), timeout]);
     }
 
     private pump(): void {

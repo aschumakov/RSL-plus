@@ -1,7 +1,7 @@
-import { createHash } from "crypto";
 import * as fs from "fs";
 import { fileURLToPath } from "url";
 
+import { contentFingerprint } from "../analysis/contentFingerprint";
 import {
     extractCompactDeclarations,
     type IRslDeclarationSnapshot
@@ -75,18 +75,8 @@ export function compactModuleCache(): CompactModuleCache {
     return diskCache;
 }
 
-/**
- * Отпечаток содержимого: размер в байтах и sha1.
- *
- * Размер сам по себе ничего не решает, но входит в ключ: он делает совпадение
- * отпечатков разного содержимого не «маловероятным», а невозможным для файлов
- * разной длины, и читается в логах.
- */
-function fingerprintOf(content: Buffer): string {
-    return `${content.length}:${createHash("sha1")
-        .update(content)
-        .digest("hex")}`;
-}
+/* Отпечаток общий с ReferenceIndex: см. analysis/contentFingerprint.ts. */
+const fingerprintOf = contentFingerprint;
 
 /**
  * Сводка из постоянного кэша; попутно кладётся в память сессии.

@@ -660,12 +660,48 @@ function refreshOpenDependents(uri: string): void {
     );
 
     if (openDependents.length > 0) {
+        /*
+         * Прикладные модули зависимых файлов готовятся именно здесь.
+         *
+         * Транзитивный Import виден только после того, как импортированный
+         * файл попал в индекс: пока он не разобран, его собственные Import
+         * загрузчику каталога неизвестны. Открытый файл при этом уже
+         * разобран, и своего onImports у него больше не будет — то есть без
+         * этого вызова классы CommonInter, импортированного внутри
+         * middle.mac, не появлялись бы до правки активного файла.
+         */
+        for (const dependentUri of openDependents) {
+            platformModules.ensureModules(
+                scopeResolver.visiblePlatformModules(dependentUri)
+            );
+        }
+
         languageFeatures?.notifyImportContextChanged(openDependents);
     }
 }
 
-connection.onShutdown(() => {
+connection.onShutdown(async () => {
     languageFeatures?.dispose();
+
+    /*
+     * Постоянные кэши записываются до остановки worker'а.
+     *
+     * Обычная запись отложена на паузу простоя, и при закрытии редактора сразу
+     * после индексации она не успевала произойти: следующий запуск заново
+     * сканировал всё, что уже было посчитано. Ошибка записи не должна помешать
+     * остановке, поэтому обе операции завершаются независимо.
+     */
+    const saved = await Promise.allSettled([referenceIndex.flush()]);
+
+    for (const result of saved) {
+        if (result.status === "rejected") {
+            logMessage(
+                `Кэш не сохранён при остановке: ${String(result.reason)}`
+            );
+        }
+    }
+
+    /* Кэш compact-модулей пишет сам worker: файлом владеет он. */
     return compactModules.dispose();
 });
 
