@@ -259,6 +259,75 @@ test("Completion работает по переменной без объявл�
     );
 });
 
+/*
+ * Тип переменной из результата ВЫЗОВА МЕТОДА, а не только процедуры.
+ *
+ * У методов стандартных классов тип результата объявлен явно, но разбор
+ * присваивания раньше видел только прямой вызов `x = Name(...)`: форма
+ * `rs = cmd.Execute()` не распознавалась вовсе, и подсказки по rs не было.
+ */
+test("тип переменной выводится из результата метода класса", () => {
+    const source = [
+        "Macro Test()",
+        "    Var cmd = RsdCommand();",
+        "    Var rs = cmd.Execute();",
+        "    rs.MoveNext();",
+        "End;"
+    ].join("\n");
+    const index = new WorkspaceIndex();
+    const tree = createModule(index, "file:///main.mac", source);
+    const resolver = new RslScopeResolver(index);
+
+    const resolved = resolver.resolveAt(
+        "file:///main.mac",
+        tree,
+        offsetInside(source, "MoveNext", 0)
+    );
+
+    assert.ok(
+        resolved,
+        "Член RsdRecordset не разрешён: тип результата Execute не учтён"
+    );
+    assert.strictEqual(resolved.symbol.name, "MoveNext");
+
+    const names = resolver
+        .getCompletions(
+            "file:///main.mac",
+            tree,
+            source.indexOf("rs.MoveNext") + 3
+        )
+        .map(item => item.label);
+    assert.ok(
+        names.some(name => /^movenext$/i.test(name)),
+        `Члены RsdRecordset обязаны предлагаться: ${names.slice(0, 8).join(", ")}`
+    );
+});
+
+/* Самоприсваивание через метод не должно зацикливать вывод типа. */
+test("цепочка присваивания через метод не зацикливается", () => {
+    const source = [
+        "Macro Test()",
+        "    Var rs = RsdRecordset();",
+        "    rs = rs.Clone();",
+        "    rs.MoveNext();",
+        "End;"
+    ].join("\n");
+    const index = new WorkspaceIndex();
+    const tree = createModule(index, "file:///main.mac", source);
+    const resolver = new RslScopeResolver(index);
+
+    /* Важен сам факт завершения без переполнения стека. */
+    const resolved = resolver.resolveAt(
+        "file:///main.mac",
+        tree,
+        offsetInside(source, "MoveNext", 0)
+    );
+    assert.ok(
+        resolved === undefined || typeof resolved.symbol.name === "string",
+        "Разрешение обязано завершиться, а не зациклиться"
+    );
+});
+
 test("Completion после частично введённого метода остаётся объектным", () => {
     const source = [
         "Class Service",

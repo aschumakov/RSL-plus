@@ -31,6 +31,20 @@ export interface IRslBuiltinDefinition {
  */
 const TRAILING_TYPE = /:\s*(@?[\wА-Яа-яЁё]+)\s*$/u;
 
+/**
+ * Тип результата из конца готовой подписи.
+ *
+ * Нужен там, где подпись приходит одной строкой и разделить её при объявлении
+ * нельзя: это встроенные процедуры и сгенерированные данные прикладных модулей.
+ * У методов стандартных классов тип объявляется явно (см. method), и разбирать
+ * его строкой не приходится.
+ */
+export function trailingReturnType(
+    signature: string | undefined
+): string | undefined {
+    return signature ? TRAILING_TYPE.exec(signature)?.[1] : undefined;
+}
+
 /*
  * Каталог хранит только факты, необходимые IDE: имена, сигнатуры, типы и
  * короткие собственные описания. Текст руководства и ссылки на него сюда не
@@ -893,7 +907,12 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
     classDef("TArray", "Динамический массив RSL.", [
         property("Size", "Integer", "Размер массива."),
         property("MarshalByVal", "Bool", "Режим передачи массива."),
-        method("Sort(callback, data): Bool", "Сортирует элементы массива.")
+        method(
+            "Sort",
+            "(callback, data)",
+            "Bool",
+            "Сортирует элементы массива."
+        )
     ]),
     classDef("TRslError", "Информация об ошибке RSL.", [
         property("Code", "Integer", "Код ошибки."),
@@ -905,29 +924,44 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
         property("err", "Object", "Пользовательская ошибка.")
     ]),
     classDef("TBFile", "Таблица или файл базы данных.", [
-        method("AddFilter(cond: String): Bool", "Добавляет фильтр."),
-        method("DropFilter(): Bool", "Удаляет фильтр."),
-        method("GetFldInfo(): TArray", "Возвращает сведения о полях."),
-        method("GetKeyInfo(): TArray", "Возвращает сведения о ключах."),
-        method("Clear(): Bool", "Очищает буфер записи."),
-        method("Delete([flag: Bool]): Bool", "Удаляет текущую запись."),
-        method("GetDirect([recpos: Integer]): Bool", "Читает запись по позиции."),
-        method("GetPos(): Integer", "Возвращает позицию записи."),
-        method("GetEQ(): Bool", "Ищет запись с равным ключом."),
-        method("GetGE(): Bool", "Ищет запись с не меньшим ключом."),
-        method("GetGT(): Bool", "Ищет запись с большим ключом."),
-        method("GetLE(): Bool", "Ищет запись с не большим ключом."),
-        method("GetLT(): Bool", "Ищет запись с меньшим ключом."),
-        method("Insert(...): Bool", "Добавляет запись."),
-        method("Next(): Bool", "Переходит к следующей записи."),
-        method("Prev(): Bool", "Переходит к предыдущей записи."),
-        method("Rewind(): Bool", "Сбрасывает позицию чтения."),
-        method("Update(...): Bool", "Обновляет текущую запись."),
-        method("ReadBlob(value): Bool", "Читает BLOB."),
-        method("WriteBlob(value): Bool", "Записывает BLOB."),
-        method("SetRecordAddr(...): Bool", "Связывает буфер записи."),
-        method("PackVarBuff([size: Integer]): Bool", "Упаковывает переменный буфер."),
-        method("UnPackVarBuff(): Bool", "Распаковывает переменный буфер."),
+        method("AddFilter", "(cond: String)", "Bool", "Добавляет фильтр."),
+        method("DropFilter", "()", "Bool", "Удаляет фильтр."),
+        method("GetFldInfo", "()", "TArray", "Возвращает сведения о полях."),
+        method("GetKeyInfo", "()", "TArray", "Возвращает сведения о ключах."),
+        method("Clear", "()", "Bool", "Очищает буфер записи."),
+        method("Delete", "([flag: Bool])", "Bool", "Удаляет текущую запись."),
+        method(
+            "GetDirect",
+            "([recpos: Integer])",
+            "Bool",
+            "Читает запись по позиции."
+        ),
+        method("GetPos", "()", "Integer", "Возвращает позицию записи."),
+        method("GetEQ", "()", "Bool", "Ищет запись с равным ключом."),
+        method("GetGE", "()", "Bool", "Ищет запись с не меньшим ключом."),
+        method("GetGT", "()", "Bool", "Ищет запись с большим ключом."),
+        method("GetLE", "()", "Bool", "Ищет запись с не большим ключом."),
+        method("GetLT", "()", "Bool", "Ищет запись с меньшим ключом."),
+        method("Insert", "(...)", "Bool", "Добавляет запись."),
+        method("Next", "()", "Bool", "Переходит к следующей записи."),
+        method("Prev", "()", "Bool", "Переходит к предыдущей записи."),
+        method("Rewind", "()", "Bool", "Сбрасывает позицию чтения."),
+        method("Update", "(...)", "Bool", "Обновляет текущую запись."),
+        method("ReadBlob", "(value)", "Bool", "Читает BLOB."),
+        method("WriteBlob", "(value)", "Bool", "Записывает BLOB."),
+        method("SetRecordAddr", "(...)", "Bool", "Связывает буфер записи."),
+        method(
+            "PackVarBuff",
+            "([size: Integer])",
+            "Bool",
+            "Упаковывает переменный буфер."
+        ),
+        method(
+            "UnPackVarBuff",
+            "()",
+            "Bool",
+            "Распаковывает переменный буфер."
+        ),
         property("Rec", "Record", "Текущая запись."),
         property("KeyNum", "Integer", "Номер текущего ключа."),
         property("NRecords", "Integer", "Количество записей."),
@@ -941,7 +975,9 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
         [
             property("Rec", "Record", "Связанная запись."),
             method(
-                "SetRecordAddr(file, ind, offs, isFix): Bool",
+                "SetRecordAddr",
+                "(file, ind, offs, isFix)",
+                "Bool",
                 "Связывает структуру с буфером записи файла."
             )
         ]
@@ -956,7 +992,9 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
                 "Переменная часть; доступна после setVarPartFormat."
             ),
             method(
-                "setVarPartFormat(structName: String, [dicName: String]): Bool",
+                "setVarPartFormat",
+                "(structName: String, [dicName: String])",
+                "Bool",
                 "Задаёт формат переменной части из словаря."
             )
         ],
@@ -971,11 +1009,13 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
             property("ErrorCount", "Integer", "Количество ошибок в коллекции."),
             property("Error", "RsdError", "Ошибка по индексу."),
             method(
-                "Open([driver: String], [library: String]): Bool",
+                "Open",
+                "([driver: String], [library: String])",
+                "Bool",
                 "Открывает окружение и загружает драйвер."
             ),
-            method("Close(): Bool", "Закрывает окружение."),
-            method("ClearErrors(): Bool", "Очищает коллекцию ошибок.")
+            method("Close", "()", "Bool", "Закрывает окружение."),
+            method("ClearErrors", "()", "Bool", "Очищает коллекцию ошибок.")
         ]
     ),
     classDef("RsdConnection", "Соединение с источником данных ODBC.", [
@@ -983,12 +1023,17 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
         property("ConString", "String", "Строка соединения или имя DSN."),
         property("User", "String", "Имя пользователя."),
         property("Password", "String", "Пароль пользователя."),
-        method("Open(): Bool", "Открывает соединение."),
-        method("Close(): Bool", "Закрывает соединение."),
-        method("BeginTrans(): Bool", "Начинает транзакцию."),
-        method("CommitTrans(): Bool", "Фиксирует транзакцию."),
-        method("RollbackTrans(): Bool", "Откатывает транзакцию."),
-        method("IsInTrans(): Bool", "Проверяет, выполняется ли транзакция.")
+        method("Open", "()", "Bool", "Открывает соединение."),
+        method("Close", "()", "Bool", "Закрывает соединение."),
+        method("BeginTrans", "()", "Bool", "Начинает транзакцию."),
+        method("CommitTrans", "()", "Bool", "Фиксирует транзакцию."),
+        method("RollbackTrans", "()", "Bool", "Откатывает транзакцию."),
+        method(
+            "IsInTrans",
+            "()",
+            "Bool",
+            "Проверяет, выполняется ли транзакция."
+        )
     ]),
     classDef("RsdCommand", "SQL-запрос к источнику данных.", [
         property("Connection", "RsdConnection", "Соединение команды."),
@@ -1000,23 +1045,30 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
         property("Param", "RsdParameter", "Параметр по индексу или имени."),
         property("Value", "Variant", "Значение параметра по индексу или имени."),
         method(
-            "Execute([parm1], [parm2], ...): RsdRecordset",
+            "Execute",
+            "([parm1], [parm2], ...)",
+            "RsdRecordset",
             "Выполняет команду с именованными параметрами."
         ),
         method(
-            "AddParam(name: String, [dir: Integer], [val], " +
-                "[len: Integer]): RsdParameter",
+            "AddParam",
+            "(name: String, [dir: Integer], [val], [len: Integer])",
+            "RsdParameter",
             "Добавляет в команду именованный параметр."
         ),
         method(
-            "DeleteParam(indexOrName): Bool",
+            "DeleteParam",
+            "(indexOrName)",
+            "Bool",
             "Удаляет параметр по номеру или имени."
         ),
         method(
-            "RefreshParams(): Bool",
+            "RefreshParams",
+            "()",
+            "Bool",
             "Заполняет параметры из хранимой процедуры."
         ),
-        method("Close(): Bool", "Закрывает команду.")
+        method("Close", "()", "Bool", "Закрывает команду.")
     ]),
     classDef("RsdRecordset", "Набор записей результата SQL-запроса.", [
         property("Command", "RsdCommand", "Команда, породившая набор."),
@@ -1036,24 +1088,27 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
         property("UpdateCommand", "RsdCommand", "Пользовательская команда изменения."),
         property("DeleteCommand", "RsdCommand", "Пользовательская команда удаления."),
         property("InsupdCommand", "RsdCommand", "Команда чтения данных после вставки."),
-        method("Open(): Bool", "Открывает набор данных."),
-        method("Close(): Bool", "Закрывает набор данных."),
-        method("MoveFirst(): Bool", "Переходит к первой записи."),
-        method("MoveLast(): Bool", "Переходит к последней записи."),
-        method("MoveNext(): Bool", "Переходит к следующей записи."),
-        method("MovePrev(): Bool", "Переходит к предыдущей записи."),
+        method("Open", "()", "Bool", "Открывает набор данных."),
+        method("Close", "()", "Bool", "Закрывает набор данных."),
+        method("MoveFirst", "()", "Bool", "Переходит к первой записи."),
+        method("MoveLast", "()", "Bool", "Переходит к последней записи."),
+        method("MoveNext", "()", "Bool", "Переходит к следующей записи."),
+        method("MovePrev", "()", "Bool", "Переходит к предыдущей записи."),
         method(
-            "Move(numRec, moveDirect): Bool",
+            "Move",
+            "(numRec, moveDirect)",
+            "Bool",
             "Переходит к записи по смещению или закладке."
         ),
-        method("AddNew(): Bool", "Вставляет новую запись."),
-        method("Edit(): Bool", "Начинает редактирование текущей записи."),
-        method("Update(): Bool", "Сохраняет изменения записи."),
-        method("CancelEdit(): Bool", "Отменяет ввод или редактирование."),
-        method("Delete(): Bool", "Удаляет запись из набора."),
+        method("AddNew", "()", "Bool", "Вставляет новую запись."),
+        method("Edit", "()", "Bool", "Начинает редактирование текущей записи."),
+        method("Update", "()", "Bool", "Сохраняет изменения записи."),
+        method("CancelEdit", "()", "Bool", "Отменяет ввод или редактирование."),
+        method("Delete", "()", "Bool", "Удаляет запись из набора."),
         method(
-            "AddUserCmdParam(nameParm: String, nameField: String, " +
-                "versionValue: Integer): Bool",
+            "AddUserCmdParam",
+            "(nameParm: String, nameField: String, versionValue: Integer)",
+            "Bool",
             "Добавляет параметр пользовательской команде набора."
         )
     ]),
@@ -1067,89 +1122,202 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
         property("Value", "Variant", "Значение поля."),
         property("BlobFilename", "String", "Файл для чтения и записи BLOB."),
         property("NullVal", "Variant", "Значение вместо NULL из SQL."),
-        method("Read(out, [count: Integer]): Bool", "Читает поле типа BLOB."),
-        method("Write(value, [count: Integer]): Bool", "Записывает поле типа BLOB.")
+        method(
+            "Read",
+            "(out, [count: Integer])",
+            "Bool",
+            "Читает поле типа BLOB."
+        ),
+        method(
+            "Write",
+            "(value, [count: Integer])",
+            "Bool",
+            "Записывает поле типа BLOB."
+        )
     ]),
     classDef("RsdParameter", "Именованный параметр SQL-запроса.", [
         property("Name", "String", "Наименование параметра."),
         property("Direction", "Integer", "Входящий, исходящий или возвращаемый."),
         property("Type", "Integer", "Тип параметра."),
         property("Value", "Variant", "Значение параметра."),
-        method("SetSelfAlloc([...]): Variant", "Управляет внутренним буфером."),
-        method("SetStatusPtr(pStatus): Variant", "Управляет внутренним буфером.")
+        method(
+            "SetSelfAlloc",
+            "([...])",
+            "Variant",
+            "Управляет внутренним буфером."
+        ),
+        method(
+            "SetStatusPtr",
+            "(pStatus)",
+            "Variant",
+            "Управляет внутренним буфером."
+        )
     ]),
     classDef("TStream", "Двоичный поток файла или RSCOM-объекта.", [
         property("Name", "String", "Имя файла потока либо null."),
         property("Stream", "Object", "RSCOM-объект с интерфейсом IRsStream."),
         method(
-            "Write(from, [type: Integer], [size: Integer], " +
-                "[decPoint: Integer]): Bool",
+            "Write",
+            "(from, [type: Integer], [size: Integer], [decPoint: Integer])",
+            "Bool",
             "Записывает в поток значение заданного типа."
         ),
         method(
-            "Read(out, [type: Integer], [size: Integer], " +
-                "[decPoint: Integer]): Bool",
+            "Read",
+            "(out, [type: Integer], [size: Integer], [decPoint: Integer])",
+            "Bool",
             "Читает из потока значение заданного типа."
         ),
-        method("Write2(from: Object): Bool", "Записывает в поток структуру записи."),
-        method("Read2(to: Object): Bool", "Читает из потока структуру записи."),
-        method("WriteVal(from): Bool", "Записывает значение вместе с его типом."),
-        method("ReadVal(to): Bool", "Читает значение, сохранённое WriteVal."),
         method(
-            "Copy(from: Object, [numBytes: Integer]): Bool",
+            "Write2",
+            "(from: Object)",
+            "Bool",
+            "Записывает в поток структуру записи."
+        ),
+        method(
+            "Read2",
+            "(to: Object)",
+            "Bool",
+            "Читает из потока структуру записи."
+        ),
+        method(
+            "WriteVal",
+            "(from)",
+            "Bool",
+            "Записывает значение вместе с его типом."
+        ),
+        method(
+            "ReadVal",
+            "(to)",
+            "Bool",
+            "Читает значение, сохранённое WriteVal."
+        ),
+        method(
+            "Copy",
+            "(from: Object, [numBytes: Integer])",
+            "Bool",
             "Копирует данные из другого потока."
         ),
         method(
-            "SetPos(pos: Integer, [from: Integer]): Bool",
+            "SetPos",
+            "(pos: Integer, [from: Integer])",
+            "Bool",
             "Устанавливает позицию в потоке."
         ),
-        method("GetPos(): Integer", "Возвращает позицию от начала потока."),
-        method("SetSize(size: Integer): Bool", "Устанавливает размер потока."),
-        method("GetSize(): Integer", "Возвращает размер потока."),
-        method("Flush(): Bool", "Сбрасывает несохранённые изменения на диск.")
+        method(
+            "GetPos",
+            "()",
+            "Integer",
+            "Возвращает позицию от начала потока."
+        ),
+        method(
+            "SetSize",
+            "(size: Integer)",
+            "Bool",
+            "Устанавливает размер потока."
+        ),
+        method("GetSize", "()", "Integer", "Возвращает размер потока."),
+        method(
+            "Flush",
+            "()",
+            "Bool",
+            "Сбрасывает несохранённые изменения на диск."
+        )
     ]),
     classDef("TStreamDoc", "Текстовый поток строк с признаком конца строки.", [
         property("Name", "String", "Имя файла потока либо null."),
         property("Stream", "Object", "RSCOM-объект с интерфейсом IRsStream."),
         property("Str", "String", "Строка, прочитанная последним ReadLine."),
         method(
-            "WriteLine(value: String): Bool",
+            "WriteLine",
+            "(value: String)",
+            "Bool",
             "Записывает строку и признак конца строки."
         ),
         method(
-            "ReadLine(result: @String): Bool",
+            "ReadLine",
+            "(result: @String)",
+            "Bool",
             "Читает строку без признака конца строки."
         ),
-        method("WriteVal(from): Bool", "Записывает значение вместе с его типом."),
-        method("ReadVal(to): Bool", "Читает значение, сохранённое WriteVal."),
-        method("Flush(): Bool", "Сбрасывает несохранённые изменения на диск.")
+        method(
+            "WriteVal",
+            "(from)",
+            "Bool",
+            "Записывает значение вместе с его типом."
+        ),
+        method(
+            "ReadVal",
+            "(to)",
+            "Bool",
+            "Читает значение, сохранённое WriteVal."
+        ),
+        method(
+            "Flush",
+            "()",
+            "Bool",
+            "Сбрасывает несохранённые изменения на диск."
+        )
     ]),
     classDef("TDirList", "Список файлов и каталогов, отобранных по маске.", [
         property("Count", "Integer", "Количество элементов в списке."),
-        method("Name(index: Integer): String", "Имя файла или каталога."),
-        method("Size(index: Integer): Integer", "Размер файла."),
+        method("Name", "(index: Integer)", "String", "Имя файла или каталога."),
+        method("Size", "(index: Integer)", "Integer", "Размер файла."),
         /* SizeEx в руководстве не описан; оставлен как известное расширение. */
-        method("SizeEx(index: Integer): Integer", "Размер файла без ограничения 2 ГБ."),
-        method("FDate(index: Integer): Date", "Дата последней модификации."),
-        method("FTime(index: Integer): Time", "Время последней модификации."),
-        method("IsDir(index: Integer): Bool", "Элемент является каталогом."),
-        method("IsCopy(index: Integer): Bool", "Файл был успешно скопирован."),
-        method("IsDel(index: Integer): Bool", "Файл был успешно удалён."),
         method(
-            "Copy(srcMask: String, attr: String, dstDir: String, " +
-                "[move: Bool], [indic: Bool], [header: String]): Bool",
+            "SizeEx",
+            "(index: Integer)",
+            "Integer",
+            "Размер файла без ограничения 2 ГБ."
+        ),
+        method(
+            "FDate",
+            "(index: Integer)",
+            "Date",
+            "Дата последней модификации."
+        ),
+        method(
+            "FTime",
+            "(index: Integer)",
+            "Time",
+            "Время последней модификации."
+        ),
+        method(
+            "IsDir",
+            "(index: Integer)",
+            "Bool",
+            "Элемент является каталогом."
+        ),
+        method(
+            "IsCopy",
+            "(index: Integer)",
+            "Bool",
+            "Файл был успешно скопирован."
+        ),
+        method("IsDel", "(index: Integer)", "Bool", "Файл был успешно удалён."),
+        method(
+            "Copy",
+            "(srcMask: String, attr: String, dstDir: String, " +
+                "[move: Bool], [indic: Bool], [header: String])",
+            "Bool",
             "Копирует отобранные по маске файлы в каталог."
         ),
         method(
-            "List(mask: String, [attr: String], [newSizeMode: Bool]): Bool",
+            "List",
+            "(mask: String, [attr: String], [newSizeMode: Bool])",
+            "Bool",
             "Наполняет список файлами по маске."
         ),
         method(
-            "Remove(mask: String, [attr: String]): Bool",
+            "Remove",
+            "(mask: String, [attr: String])",
+            "Bool",
             "Удаляет отобранные по маске файлы."
         ),
         method(
-            "Sort([sortBy: Integer], [dirFirst: Bool]): Bool",
+            "Sort",
+            "([sortBy: Integer], [dirFirst: Bool])",
+            "Bool",
             "Сортирует список по имени, размеру или дате."
         )
     ]),
@@ -1157,28 +1325,63 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
         property("EvSource", "Object", "Коллекция объектов — источников событий."),
         property("TypeLib", "Object", "Файл библиотеки типов источников."),
         method(
-            "SetHandler(pref, proc, id): Bool",
+            "SetHandler",
+            "(pref, proc, id)",
+            "Bool",
             "Связывает событие с процедурой обработки."
         ),
-        method("RemHandler(pref, id): Bool", "Разрывает связь события и обработчика."),
-        method("Raise(...): Bool", "Возбуждает событие объекта Object RSL.")
+        method(
+            "RemHandler",
+            "(pref, id)",
+            "Bool",
+            "Разрывает связь события и обработчика."
+        ),
+        method(
+            "Raise",
+            "(...)",
+            "Bool",
+            "Возбуждает событие объекта Object RSL."
+        )
     ]),
     classDef("RslTimer", "Таймеры для вызова обработчиков по интервалу.", [
         method(
-            "SetTimer(timeout: Integer, id: Integer, handler, " +
-                "[isSys: Bool]): Bool",
+            "SetTimer",
+            "(timeout: Integer, id: Integer, handler, [isSys: Bool])",
+            "Bool",
             "Устанавливает таймер с заданным интервалом."
         ),
-        method("RemTimer(id: Integer): Bool", "Удаляет таймер по идентификатору.")
+        method(
+            "RemTimer",
+            "(id: Integer)",
+            "Bool",
+            "Удаляет таймер по идентификатору."
+        )
     ]),
     classDef("TRepForm", "Отчёт по текстовому шаблону форм.", [
-        method("Value(nameOrId): Variant", "Значение поля по имени или номеру."),
-        method("Index(name: String): Integer", "Номер поля по имени."),
-        method("Field(nameOrId): TPattFieldR", "Поле по имени или номеру."),
-        method("newLine(): Bool", "Отделяет одну форму отчёта от другой."),
         method(
-            "writeFields(name: String, col: Integer, data, " +
-                "flags: Integer, w: Integer, p: Integer): Bool",
+            "Value",
+            "(nameOrId)",
+            "Variant",
+            "Значение поля по имени или номеру."
+        ),
+        method("Index", "(name: String)", "Integer", "Номер поля по имени."),
+        method(
+            "Field",
+            "(nameOrId)",
+            "TPattFieldR",
+            "Поле по имени или номеру."
+        ),
+        method(
+            "newLine",
+            "()",
+            "Bool",
+            "Отделяет одну форму отчёта от другой."
+        ),
+        method(
+            "writeFields",
+            "(name: String, col: Integer, data, flags: Integer, " +
+                "w: Integer, p: Integer)",
+            "Bool",
             "Выводит поля формы в отчёт."
         )
     ]),
@@ -1192,28 +1395,72 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
         "Произвольный источник данных для RunScroll.",
         [
             method(
-                "setCurrentRecord(rec: TRecHandler): Bool",
+                "setCurrentRecord",
+                "(rec: TRecHandler)",
+                "Bool",
                 "Задаёт объект с текущей записью набора."
             ),
-            method("getColumnsInfo(): TArray", "Визуальные атрибуты колонок."),
-            method("getLastStatus(): Integer", "Код последней ошибки источника."),
-            method("getFileName(): String", "Имя файла источника данных."),
-            method("moveFirst(): Bool", "Переходит к первой записи."),
-            method("moveLast(): Bool", "Переходит к последней записи."),
-            method("moveNext(): Bool", "Переходит к следующей записи."),
-            method("movePrev(): Bool", "Переходит к предыдущей записи."),
-            method("moveToBookmark(bmk): Bool", "Переходит к закладке."),
-            method("getBookmark(): Variant", "Закладка текущей записи."),
-            method("RecordInsert(): Bool", "Вставляет запись в источник."),
-            method("RecordUpdate(): Bool", "Обновляет запись в источнике."),
-            method("RecordDelete(): Bool", "Удаляет запись из источника."),
             method(
-                "AddColumn(name, head, width, kind, dec): Bool",
+                "getColumnsInfo",
+                "()",
+                "TArray",
+                "Визуальные атрибуты колонок."
+            ),
+            method(
+                "getLastStatus",
+                "()",
+                "Integer",
+                "Код последней ошибки источника."
+            ),
+            method(
+                "getFileName",
+                "()",
+                "String",
+                "Имя файла источника данных."
+            ),
+            method("moveFirst", "()", "Bool", "Переходит к первой записи."),
+            method("moveLast", "()", "Bool", "Переходит к последней записи."),
+            method("moveNext", "()", "Bool", "Переходит к следующей записи."),
+            method("movePrev", "()", "Bool", "Переходит к предыдущей записи."),
+            method("moveToBookmark", "(bmk)", "Bool", "Переходит к закладке."),
+            method("getBookmark", "()", "Variant", "Закладка текущей записи."),
+            method(
+                "RecordInsert",
+                "()",
+                "Bool",
+                "Вставляет запись в источник."
+            ),
+            method(
+                "RecordUpdate",
+                "()",
+                "Bool",
+                "Обновляет запись в источнике."
+            ),
+            method(
+                "RecordDelete",
+                "()",
+                "Bool",
+                "Удаляет запись из источника."
+            ),
+            method(
+                "AddColumn",
+                "(name, head, width, kind, dec)",
+                "Bool",
                 "Добавляет колонку в описание набора."
             ),
-            method("prepareColumns(): Bool", "Готовит описание колонок."),
-            method("initCurRecord(): Bool", "Инициализирует текущую запись."),
-            method("initAdapter(): Bool", "Инициализирует источник данных.")
+            method("prepareColumns", "()", "Bool", "Готовит описание колонок."),
+            method(
+                "initCurRecord",
+                "()",
+                "Bool",
+                "Инициализирует текущую запись."
+            ),
+            method(
+                "initAdapter",
+                "()",
+                "Bool",
+                "Инициализирует источник данных."
+            )
         ]
     ),
     classDef("TRslChanel", "Канал связи с сервером приложений RSCOM.", [
@@ -1232,9 +1479,11 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
         property("Domain", "String", "Домен пользователя."),
         property("Password", "String", "Пароль пользователя."),
         property("HostApp", "String", "Имя приложения-хоста."),
-        method("Connect(): Bool", "Соединяется с сервером приложений."),
+        method("Connect", "()", "Bool", "Соединяется с сервером приложений."),
         method(
-            "LoadConfig(iniFile: String): Bool",
+            "LoadConfig",
+            "(iniFile: String)",
+            "Bool",
             "Загружает параметры соединения из ini-файла."
         )
     ]),
@@ -1245,7 +1494,9 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
     ),
     classDef("TRsAxServer", "Сервер создания ActiveX-объектов.", [
         method(
-            "CreateComObject(progID: String, [useActive: Bool], [evId]): Object",
+            "CreateComObject",
+            "(progID: String, [useActive: Bool], [evId])",
+            "Object",
             "Создаёт ActiveX-объект по программному идентификатору."
         )
     ]),
@@ -1253,28 +1504,43 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
         property("Version", "String", "Номер версии модуля."),
         property("SQLMode", "Bool", "Модуль является SQL-модулем."),
         method(
-            "AttachSite(site: TRcwSite): Bool",
+            "AttachSite",
+            "(site: TRcwSite)",
+            "Bool",
             "Устанавливает объект обработки сообщений."
         ),
-        method("DetachSite(): Bool", "Удаляет ранее установленный сайт."),
+        method("DetachSite", "()", "Bool", "Удаляет ранее установленный сайт."),
         method(
-            "AddModule(moduleName: String): Bool",
+            "AddModule",
+            "(moduleName: String)",
+            "Bool",
             "Загружает RSL-модуль в интерпретатор."
         ),
-        method("Execute(): Bool", "Исполняет загруженные модули."),
-        method("Stop(): Bool", "Деинициализирует экземпляр интерпретатора."),
+        method("Execute", "()", "Bool", "Исполняет загруженные модули."),
         method(
-            "TestExist(moduleName: String): Bool",
+            "Stop",
+            "()",
+            "Bool",
+            "Деинициализирует экземпляр интерпретатора."
+        ),
+        method(
+            "TestExist",
+            "(moduleName: String)",
+            "Bool",
             "Проверяет, загружен ли модуль в память."
         ),
         method(
-            "Call(methodName: String, par1, par2, ...): Variant",
+            "Call",
+            "(methodName: String, par1, par2, ...)",
+            "Variant",
             "Вызывает процедуру, конструктор или читает переменную."
         )
     ]),
     classDef("TClrHost", "Хост .NET: создание объектов из сборок.", [
         method(
-            "CreateCLRObject(assembly: String, className: String): Object",
+            "CreateCLRObject",
+            "(assembly: String, className: String)",
+            "Object",
             "Создаёт объект класса .NET из сборки."
         )
     ]),
@@ -1342,16 +1608,32 @@ function classDef(
     };
 }
 
+/**
+ * Метод класса: имя, параметры, тип результата и описание — по отдельности.
+ *
+ * Раньше всё это лежало одной строкой, и тип результата вынимался из неё
+ * регулярным выражением. Тип нужен не только подсказке, но и выводу типа
+ * переменной, которой присвоили результат вызова, — то есть это факт каталога,
+ * а не оформление подписи, и объявляться он должен так же явно, как у property.
+ *
+ * Параметры со скобками: в этом виде их ждёт Signature Help (parameterText) и в
+ * этом же виде их даёт разбор пользовательских Macro, так что встроенные и свои
+ * методы описываются одинаково.
+ */
 function method(
-    signature: string,
+    name: string,
+    parameters: string,
+    typeName: string,
     summary: string
 ): IRslBuiltinDefinition {
-    const name = signature.match(/^([^\s(]+)/)?.[1] || signature;
     return {
         name,
         kind: CompletionItemKind.Method,
-        typeName: TRAILING_TYPE.exec(signature)?.[1] || "Variant",
-        signature,
+        typeName,
+        /* Подпись собирается из частей: разойтись с ними она уже не может. */
+        signature: typeName && typeName !== "Variant"
+            ? `${name}${parameters}: ${typeName}`
+            : `${name}${parameters}`,
         summary
     };
 }

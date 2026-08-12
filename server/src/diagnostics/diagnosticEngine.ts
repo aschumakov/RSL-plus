@@ -17,6 +17,14 @@ export interface IRslDiagnosticContext {
     module: IIndexedModule;
     index: WorkspaceIndex;
     settings: IRslDiagnosticSettings | undefined;
+    /**
+     * Расчёт больше не нужен: файл покинули или изменили.
+     *
+     * Проверяется и между правилами, и внутри них — на файле 100 КБ одна
+     * локальная фаза занимает больше сотни миллисекунд, и это время отнимается
+     * у файла, который пользователь ждёт.
+     */
+    isCancelled?(): boolean;
 }
 
 export interface IRslDiagnosticRule {
@@ -39,7 +47,8 @@ export class RslDiagnosticEngine {
             run: context => buildLocalRslDiagnostics(
                 context.module,
                 context.index,
-                context.settings
+                context.settings,
+                context.isCancelled
             )
         });
         this.register({
@@ -48,7 +57,8 @@ export class RslDiagnosticEngine {
             run: context => buildWorkspaceRslDiagnostics(
                 context.module,
                 context.index,
-                context.settings
+                context.settings,
+                context.isCancelled
             )
         });
         this.register({
@@ -81,17 +91,25 @@ export class RslDiagnosticEngine {
     buildLocal(
         module: IIndexedModule,
         index: WorkspaceIndex,
-        settings?: IRslDiagnosticSettings
+        settings?: IRslDiagnosticSettings,
+        isCancelled?: () => boolean
     ): Diagnostic[] {
-        return this.buildPhase("local", module, index, settings);
+        return this.buildPhase("local", module, index, settings, isCancelled);
     }
 
     buildWorkspace(
         module: IIndexedModule,
         index: WorkspaceIndex,
-        settings?: IRslDiagnosticSettings
+        settings?: IRslDiagnosticSettings,
+        isCancelled?: () => boolean
     ): Diagnostic[] {
-        return this.buildPhase("workspace", module, index, settings);
+        return this.buildPhase(
+            "workspace",
+            module,
+            index,
+            settings,
+            isCancelled
+        );
     }
 
     /** Совместимый полный результат для тестов и прямых вызовов. */
@@ -119,7 +137,8 @@ export class RslDiagnosticEngine {
         phase: DiagnosticPhase,
         module: IIndexedModule,
         index: WorkspaceIndex,
-        settings?: IRslDiagnosticSettings
+        settings?: IRslDiagnosticSettings,
+        isCancelled?: () => boolean
     ): Diagnostic[] {
         const options = normalizeDiagnosticSettings(settings);
         if (!options.enabled || options.maxProblems === 0) {
@@ -135,13 +154,18 @@ export class RslDiagnosticEngine {
             if (remaining <= 0) {
                 break;
             }
+            /* Граница правил — вторая точка прерывания, кроме этапов внутри. */
+            if (isCancelled?.()) {
+                break;
+            }
             diagnostics.push(...rule.run({
                 module,
                 index,
                 settings: {
                     ...(settings || {}),
                     maxProblems: remaining
-                }
+                },
+                isCancelled
             }).slice(0, remaining));
         }
 

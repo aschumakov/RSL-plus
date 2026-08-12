@@ -7,7 +7,10 @@ import { normalizeIdentifier } from "../lexer";
 import type { RslSymbol } from "../symbols/rslSymbol";
 import { resolveExtensionFile } from "../paths";
 import { BuiltinSymbol } from "./builtinSymbol";
-import type { IRslBuiltinDefinition } from "./standardLibraryData";
+import {
+    trailingReturnType,
+    type IRslBuiltinDefinition
+} from "./standardLibraryData";
 
 /**
  * Классы и процедуры прикладных модулей платформы (CommonInter и прочие).
@@ -380,11 +383,12 @@ function procedureDefinition(
     };
 }
 
-function returnTypeOf(signature: string | undefined): string | undefined {
-    return signature
-        ? /:\s*(@?[\wА-Яа-яЁё]+)\s*$/u.exec(signature)?.[1]
-        : undefined;
-}
+/*
+ * Тип результата берётся из подписи: данные модулей извлечены из руководства
+ * одной строкой, разделить её на этапе объявления здесь нечем. Правило одно и
+ * то же для всего каталога — см. trailingReturnType.
+ */
+const returnTypeOf = trailingReturnType;
 
 function errorToString(error: unknown): string {
     return error instanceof Error

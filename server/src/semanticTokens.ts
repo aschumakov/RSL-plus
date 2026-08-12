@@ -252,6 +252,56 @@ export function buildRslSemanticTokens(
 }
 
 
+/**
+ * Подсветка по одним токенам, без синтаксического дерева и разрешения имён.
+ *
+ * Нужна первому запросу подсветки: полный разбор большого файла занимает
+ * десятки миллисекунд, и ждать его, чтобы ответить, значит держать документ
+ * непокрашенным всё это время. Здесь красится только то, что видно из потока
+ * токенов и не зависит от разбора — спецификаторы формата в печатных формах.
+ * Остальное уточняется, когда модель готова: сервер просит клиента
+ * перезапросить токены (см. notifyParsed в semanticTokensFeatureRegistry).
+ *
+ * Идентификаторы намеренно не красятся: их смысл — класс, метод, параметр,
+ * свойство — как раз и определяется разбором. Покрасить их наугад значило бы
+ * показать неверный цвет и потом молча его сменить.
+ */
+export function buildRslBasicSemanticTokens(
+    lexTokens: readonly IRslToken[],
+    range?: IRslSemanticTokenRange
+): SemanticTokens {
+    const entries: ISemanticEntry[] = [];
+    appendOutputFormEntries(lexTokens, entries, range);
+    const specifiers = collectFormatSpecifierTokenStarts(lexTokens);
+
+    for (const token of lexTokens) {
+        if (
+            token.kind !== "identifier" ||
+            !specifiers.has(token.start) ||
+            (range && (
+                isTokenAfterRange(token, range) ||
+                isTokenBeforeRange(token, range)
+            ))
+        ) {
+            continue;
+        }
+
+        entries.push({
+            token,
+            type: TOKEN_TYPES.indexOf("keyword"),
+            modifiers: 0
+        });
+    }
+
+    entries.sort((left, right) =>
+        left.token.line - right.token.line ||
+        left.token.character - right.token.character ||
+        (left.length || 0) - (right.length || 0)
+    );
+
+    return { data: encodeDelta(entries) };
+}
+
 function appendOutputFormEntries(
     tokens: readonly IRslToken[],
     entries: ISemanticEntry[],

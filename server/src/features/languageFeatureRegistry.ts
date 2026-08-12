@@ -129,7 +129,12 @@ export class RslLanguageFeatureRegistry {
             referenceIndex: this.referenceIndex
         });
         this.presentationFeatures = new PresentationFeatureRegistry(environment);
-        this.semanticTokensFeatures = new SemanticTokensFeatureRegistry(environment);
+        this.semanticTokensFeatures = new SemanticTokensFeatureRegistry({
+            ...environment,
+            /* Базовая подсветка берёт токены из быстрого снимка. */
+            getFastLexTokens: document =>
+                environment.getFastDocumentSnapshot(document).lex.tokens
+        });
     }
 
     register(): void {
@@ -332,7 +337,13 @@ export class RslLanguageFeatureRegistry {
                 return [];
             }
             const context = this.getPositionContext(params);
-            const module = index.getModule(document.uri);
+            /*
+             * Модель именно этой версии: проверка выше говорит лишь о том, что
+             * документ не изменился, а в индексе может лежать модель прежней
+             * версии, чей разбор для текущей ещё не завершён. Позиции в ней
+             * сдвинуты, и подсветка легла бы на чужие места.
+             */
+            const module = index.getCurrentModule(document.uri, version);
             if (!context || !module || isBlockedToken(context.token)) {
                 return [];
             }
@@ -386,8 +397,23 @@ export class RslLanguageFeatureRegistry {
                     return null;
                 }
 
+                /*
+                 * Поиск определения ходит по файлам и модулям, то есть между
+                 * его шагами документ может измениться. context со смещениями
+                 * снят до этих шагов, поэтому ответ, посчитанный по нему после
+                 * правки, указывал бы на сдвинувшееся место — переход уводил бы
+                 * не туда. Поэтому версия сверяется после каждого ожидания.
+                 */
+                const stale = () =>
+                    requestIsStale(document, version, cancellationToken);
+
                 const importedFile = await definitionProvider
                     .findImportDefinition(context);
+
+                if (stale()) {
+                    outcome = "cancelled";
+                    return null;
+                }
 
                 if (importedFile) {
                     outcome = "import";
@@ -397,6 +423,11 @@ export class RslLanguageFeatureRegistry {
                 if (context.token.kind === "string") {
                     const dynamic = await definitionProvider
                         .findDynamicDefinition(context);
+
+                    if (stale()) {
+                        outcome = "cancelled";
+                        return null;
+                    }
 
                     if (dynamic) {
                         outcome = "dynamic";
@@ -429,6 +460,12 @@ export class RslLanguageFeatureRegistry {
                             document.uri,
                             identifierToken.value
                         );
+
+                    if (stale()) {
+                        outcome = "cancelled";
+                        return null;
+                    }
+
                     resolved = resolver.resolveAt(
                         document.uri,
                         context.tree,
@@ -505,7 +542,7 @@ export class RslLanguageFeatureRegistry {
             if (requestIsStale(document, version, cancellationToken)) {
                 return null;
             }
-            const module = index.getModule(document.uri);
+            const module = index.getCurrentModule(document.uri, version);
             return module
                 ? prepareRslRename(
                     module,
@@ -524,7 +561,12 @@ export class RslLanguageFeatureRegistry {
             if (requestIsStale(document, version, cancellationToken)) {
                 return null;
             }
-            const module = index.getModule(document.uri);
+            /*
+             * Rename правит текст по позициям модели, поэтому модель обязана
+             * быть ровно той версии, для которой запрос пришёл: иначе правки
+             * встанут по сдвинувшимся смещениям и испортят файл.
+             */
+            const module = index.getCurrentModule(document.uri, version);
             return module
                 ? buildRslRenameEdit(
                     module,
@@ -542,8 +584,12 @@ export class RslLanguageFeatureRegistry {
             params: CodeActionParams,
             cancellationToken: CancellationToken
         ) => {
-            const module = index.getModule(params.textDocument.uri);
-            if (!module) {
+            const document = documents.get(params.textDocument.uri);
+            const version = document?.version;
+            const module = version === undefined
+                ? undefined
+                : index.getCurrentModule(params.textDocument.uri, version);
+            if (!document || !module) {
                 return [];
             }
 
@@ -573,7 +619,12 @@ export class RslLanguageFeatureRegistry {
                     })
                 )
                 : [];
-            if (cancellationToken.isCancellationRequested) {
+            /*
+             * Подбор Import ходит по файлам проекта, и за это время документ
+             * могли изменить. Quick Fix правит текст по диапазонам запроса,
+             * поэтому ответ для прежней версии вставил бы Import не туда.
+             */
+            if (requestIsStale(document, version, cancellationToken)) {
                 return [];
             }
             return [
@@ -629,14 +680,25 @@ export class RslLanguageFeatureRegistry {
             () => cancellationToken.isCancellationRequested
         ));
 
-        connection.onSelectionRanges(async (params: SelectionRangeParams) => {
+        connection.onSelectionRanges(async (
+            params: SelectionRangeParams,
+            cancellationToken: CancellationToken
+        ) => {
             const document = documents.get(params.textDocument.uri);
             if (!document) {
                 return [];
             }
 
+            const version = document.version;
             await ensureDocumentParsed(document);
-            const module = index.getModule(document.uri);
+            /*
+             * Ответ по версии, которой в редакторе уже нет, указывал бы на
+             * сдвинувшиеся позиции — то есть выделял бы не то место.
+             */
+            if (requestIsStale(document, version, cancellationToken)) {
+                return [];
+            }
+            const module = index.getCurrentModule(document.uri, version);
             return module
                 ? buildSelectionRanges(module, params.positions)
                 : [];
@@ -644,15 +706,22 @@ export class RslLanguageFeatureRegistry {
 
         connection.onRequest(
             "rsl/currentBlockRange",
-            async (params: IRslCurrentBlockRangeParams) => {
+            async (
+                params: IRslCurrentBlockRangeParams,
+                cancellationToken: CancellationToken
+            ) => {
                 const document = documents.get(params.textDocument.uri);
                 if (!document) {
                     return null;
                 }
 
                 this.environment.noteInteractiveActivity?.();
+                const version = document.version;
                 await ensureDocumentParsed(document);
-                const module = index.getModule(document.uri);
+                if (requestIsStale(document, version, cancellationToken)) {
+                    return null;
+                }
+                const module = index.getCurrentModule(document.uri, version);
                 return module
                     ? resolveCurrentBlockRange(
                         module,
@@ -678,10 +747,21 @@ export class RslLanguageFeatureRegistry {
             const line = typeof args[1] === "number" ? args[1] : 0;
             const character = typeof args[2] === "number" ? args[2] : 0;
             const document = documents.get(uri);
+            const version = document?.version;
             if (document) {
                 await ensureDocumentParsed(document);
+
+                /*
+                 * Переход по блоку в файле, который за время разбора успели
+                 * изменить, увёл бы курсор по устаревшим позициям.
+                 */
+                if (document.version !== version) {
+                    return null;
+                }
             }
-            const module = index.getModule(uri);
+            const module = version === undefined
+                ? index.getModule(uri)
+                : index.getCurrentModule(uri, version);
             const position = module
                 ? resolveBlockNavigationPosition(
                     module,
@@ -719,6 +799,13 @@ export class RslLanguageFeatureRegistry {
      */
     notifyImportContextChanged(uris: readonly string[]): void {
         this.semanticTokensFeatures.notifyImportContextChanged(uris);
+    }
+
+    /**
+     * Модель файла готова: подсветке, отданной без неё, нужен перезапрос.
+     */
+    notifyParsed(uri: string): void {
+        this.semanticTokensFeatures.notifyParsed(uri);
     }
 
     dispose(): void {

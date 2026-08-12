@@ -178,6 +178,16 @@ let diagnosticsCoordinator: DiagnosticsCoordinator;
  */
 const compactModules = new CompactModuleWorkerService({ log: logMessage });
 
+/** Import активного файла загружается в первую очередь. */
+function enqueueActiveImports(
+    uri: string,
+    imports: readonly string[]
+): void {
+    if (uri === activeDocumentUri) {
+        moduleLoader.enqueueImports(imports, "foreground");
+    }
+}
+
 const moduleLoader = new WorkspaceModuleLoader(
     workspaceIndex,
     {
@@ -222,6 +232,8 @@ const documentAnalysis = new DocumentAnalysisService(
             diagnosticsCoordinator.scheduleLocal(module.uri, 0);
             diagnosticsCoordinator.scheduleWorkspace(module.uri);
             notifyModuleCount();
+            /* Подсветка, отданная до готовности модели, теперь уточняется. */
+            languageFeatures?.notifyParsed(module.uri);
 
             if (!wasKnown) {
                 refreshOpenDependents(module.uri);
@@ -229,19 +241,17 @@ const documentAnalysis = new DocumentAnalysisService(
         },
         onImports: (uri, imports) => {
             /*
-             * Состав импортированных прикладных модулей читается здесь, а не в
-             * обработчике Completion: у PaymInter это 186 КБ, и разбирать их на
-             * нажатие Ctrl+Space значило бы задержать ответ там, где заметнее
-             * всего. Список берётся у резолвера — он учитывает и транзитивные
-             * Import уже разобранных файлов.
+             * Единственное место, где готовится состав прикладных модулей.
+             *
+             * Здесь AST уже построен, то есть список Import окончателен и
+             * транзитивные Import разобранных файлов видны. Диагностика
+             * сообщает те же Import позже и своего вызова не делает: он был бы
+             * повторным для того же файла.
              */
             platformModules.ensureModules(
                 scopeResolver.visiblePlatformModules(uri)
             );
-
-            if (uri === activeDocumentUri) {
-                moduleLoader.enqueueImports(imports, "foreground");
-            }
+            enqueueActiveImports(uri, imports);
         }
     }
 );
@@ -257,22 +267,8 @@ diagnosticsCoordinator = new DiagnosticsCoordinator(
         waitForIdle: uri => documentAnalysis.whenIdle(uri),
         log: logMessage,
         performance: performanceLogger,
-        onImports: (uri, imports) => {
-            /*
-             * Состав импортированных прикладных модулей читается здесь, а не в
-             * обработчике Completion: у PaymInter это 186 КБ, и разбирать их на
-             * нажатие Ctrl+Space значило бы задержать ответ там, где заметнее
-             * всего. Список берётся у резолвера — он учитывает и транзитивные
-             * Import уже разобранных файлов.
-             */
-            platformModules.ensureModules(
-                scopeResolver.visiblePlatformModules(uri)
-            );
-
-            if (uri === activeDocumentUri) {
-                moduleLoader.enqueueImports(imports, "foreground");
-            }
-        }
+        /* Прикладные модули готовит onImports после разбора: см. выше. */
+        onImports: enqueueActiveImports
     }
 );
 

@@ -252,7 +252,8 @@ export class DiagnosticsCoordinator {
             const diagnostics = this.engine.buildLocal(
                 state.module,
                 this.index,
-                state.settings.diagnostics
+                state.settings.diagnostics,
+                this.cancelWhenLeftBehind(uri, state.module.version)
             );
             if (span) {
                 performance.end(span, {
@@ -311,7 +312,8 @@ export class DiagnosticsCoordinator {
             const diagnostics = this.engine.buildWorkspace(
                 state.module,
                 this.index,
-                state.settings.diagnostics
+                state.settings.diagnostics,
+                this.cancelWhenLeftBehind(uri, state.module.version)
             );
             if (span) {
                 performance.end(span, {
@@ -342,6 +344,24 @@ export class DiagnosticsCoordinator {
      * уже пришло, planUpdatedDiagnostics отдаст по этому файлу пустой список,
      * а сам результат останется в кэше до возвращения в файл.
      */
+    /**
+     * Условие «расчёт больше не нужен» для этапов диагностики.
+     *
+     * Две причины: пользователь ушёл в другой файл либо документ изменился —
+     * в обоих случаях результат публиковать не будут, и доводить расчёт до
+     * конца значит занимать основной поток впустую.
+     *
+     * Проверка обязана быть дешёвой: она вызывается между каждыми двумя
+     * этапами.
+     */
+    private cancelWhenLeftBehind(
+        uri: string,
+        version: number
+    ): () => boolean {
+        return () => !this.isActive(uri) ||
+            this.documents.get(uri)?.version !== version;
+    }
+
     private async publishWhenStillActive(uri: string): Promise<void> {
         await yieldToInteractiveRequests();
         this.publishCombined(uri);

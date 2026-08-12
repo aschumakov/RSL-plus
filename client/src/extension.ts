@@ -146,11 +146,43 @@ function sendClientPerformance(
 }
 
 
+/*
+ * Пауза, за которую серия переключений вкладок склеивается в одно уведомление.
+ *
+ * Пролистывание по Ctrl+Tab даёт событие на каждую вкладку, а серверу важна
+ * только последняя: на промежуточные он начинал разбор и расчёт Problems,
+ * которые тут же становились ненужными. Значение маленькое намеренно — при
+ * обычном переходе в файл задержка не должна быть заметна.
+ */
+const ACTIVE_DOCUMENT_COALESCE_MS = 60;
+
+let activeDocumentTimer: NodeJS.Timeout | undefined;
+
 /**
  * Language server использует активный URI, чтобы Problems не терял текущий
  * файл среди групп, которые VS Code сортирует самостоятельно. Resource-
  * настройки вычисляются здесь же, без workspace/configuration round-trip.
+ *
+ * Уведомления склеиваются: см. ACTIVE_DOCUMENT_COALESCE_MS. Настройки читаются
+ * в момент отправки, то есть один раз на серию, а не на каждую вкладку.
  */
+function notifyActiveDocumentSoon(): void {
+    if (activeDocumentTimer) {
+        clearTimeout(activeDocumentTimer);
+    }
+
+    activeDocumentTimer = setTimeout(() => {
+        activeDocumentTimer = undefined;
+        notifyActiveDocument().then(
+            undefined,
+            error => console.error(
+                "RSL: active document notification failed",
+                error
+            )
+        );
+    }, ACTIVE_DOCUMENT_COALESCE_MS);
+}
+
 async function notifyActiveDocument(): Promise<void> {
     if (!languageClientStarted || client === undefined) {
         return;
@@ -374,13 +406,8 @@ export function activate(context: ExtensionContext): void {
     context.subscriptions.push(
         window.onDidChangeActiveTextEditor(editor => {
             activeEditor = editor;
-            notifyActiveDocument().then(
-                undefined,
-                error => console.error(
-                    "RSL: active document notification failed",
-                    error
-                )
-            );
+            /* Серия быстрых переключений уходит одним уведомлением. */
+            notifyActiveDocumentSoon();
         }),
         workspace.onDidChangeConfiguration(event => {
             if (!event.affectsConfiguration("rslPlus")) {
@@ -547,6 +574,12 @@ async function getFilebyName(
 export function deactivate():
     Promise<void> | undefined {
     languageClientStarted = false;
+
+    /* Отложенное уведомление отправлять уже некуда. */
+    if (activeDocumentTimer) {
+        clearTimeout(activeDocumentTimer);
+        activeDocumentTimer = undefined;
+    }
 
     if (client === undefined) {
         return undefined;

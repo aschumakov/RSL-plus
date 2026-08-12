@@ -207,6 +207,61 @@ function codes(items) {
     });
 
     /*
+     * Тип результата метода — факт каталога, а не оформление подписи.
+     *
+     * Он нужен выводу типа переменной, которой присвоили результат вызова,
+     * поэтому объявляется явно (см. method в standardLibraryData) и обязан
+     * совпадать с тем, что показано в подписи. Разойтись они могут только по
+     * ошибке, и заметно это будет не сразу: подсказка по переменной просто
+     * перестанет работать.
+     */
+    await test("у метода стандартного класса тип результата и подпись согласованы", () => {
+        const {
+            RSL_STANDARD_LIBRARY
+        } = require("../server/out/builtins/standardLibraryData");
+        const methods = RSL_STANDARD_LIBRARY
+            .filter(entry => entry.children)
+            .flatMap(entry => entry.children
+                .filter(child => child.signature)
+                .map(child => ({ owner: entry.name, child })));
+
+        assert.ok(
+            methods.length > 100,
+            `Методов подозрительно мало: ${methods.length}`
+        );
+
+        const mismatched = methods.filter(({ child }) => {
+            const declared = child.typeName;
+            const shown = /:\s*([\wА-Яа-яЁё@.]+)\s*$/u
+                .exec(child.signature)?.[1];
+            return declared && declared !== "Variant"
+                ? shown !== declared
+                : !!shown;
+        });
+
+        assert.deepStrictEqual(
+            mismatched.map(({ owner, child }) =>
+                `${owner}.${child.name}: тип ${child.typeName}, ` +
+                `подпись ${child.signature}`
+            ),
+            [],
+            "Тип результата в подписи расходится с объявленным"
+        );
+
+        /* Параметры обязаны быть видны: без них не собрать Signature Help. */
+        const withoutParameters = methods.filter(({ child }) =>
+            !/\(.*\)/.test(child.signature)
+        );
+        assert.deepStrictEqual(
+            withoutParameters.map(({ owner, child }) =>
+                `${owner}.${child.name}: ${child.signature}`
+            ),
+            [],
+            "В подписи метода не видно списка параметров"
+        );
+    });
+
+    /*
      * Ctrl+Space после точки обязан показывать унаследованные члены.
      *
      * Разрешение одного члена цепочку наследования обходило и раньше, поэтому

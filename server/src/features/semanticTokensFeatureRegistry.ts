@@ -10,7 +10,11 @@ import type { TextDocument } from "vscode-languageserver-textdocument";
 import type { IRslSettings } from "../interfaces";
 import type { PerformanceLogger } from "../performanceLogger";
 import type { RslScopeResolver } from "../scopeResolver";
-import { buildRslSemanticTokens } from "../semanticTokens";
+import type { IRslToken } from "../lexer";
+import {
+    buildRslBasicSemanticTokens,
+    buildRslSemanticTokens
+} from "../semanticTokens";
 import type { RslSymbol } from "../symbols/rslSymbol";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 
@@ -29,6 +33,12 @@ export interface ISemanticTokensFeatureEnvironment {
      * обновление придёт только со следующим изменением документа.
      */
     supportsRefresh?(): boolean;
+    /**
+     * Токены документа без ожидания разбора — из быстрого снимка.
+     *
+     * Нужны базовой подсветке, которая отдаётся, пока модель не готова.
+     */
+    getFastLexTokens?(document: TextDocument): readonly IRslToken[];
     log?(message: string): void;
 }
 
@@ -61,6 +71,13 @@ export class SemanticTokensFeatureRegistry {
     }>();
     private sequence = 0;
     private refreshTimer: NodeJS.Timeout | undefined;
+    /**
+     * Файлы, которым отдали базовую подсветку вместо полной.
+     *
+     * По готовности модели именно им нужно попросить перезапрос: остальные и
+     * так получили окончательный ответ.
+     */
+    private provisional = new Set<string>();
 
     constructor(private environment: ISemanticTokensFeatureEnvironment) {}
 
@@ -150,14 +167,28 @@ export class SemanticTokensFeatureRegistry {
                     this.environment.index.getImportClosureKey(uri);
         });
 
-        if (!affected || this.refreshTimer) {
+        if (!affected) {
             return;
         }
 
-        this.refreshTimer = setTimeout(() => {
-            this.refreshTimer = undefined;
-            this.requestRefresh();
-        }, REFRESH_COALESCE_MS);
+        this.scheduleRefresh();
+    }
+
+    /**
+     * Модель файла построена — если ему отдавали базовую подсветку, просим
+     * клиента перезапросить токены.
+     *
+     * Без этого уточнённая подсветка появлялась бы только со следующей правкой
+     * документа: сам клиент о готовности модели не знает.
+     */
+    notifyParsed(uri: string): void {
+        if (!this.provisional.delete(uri)) {
+            return;
+        }
+        if (this.environment.supportsRefresh?.() === false) {
+            return;
+        }
+        this.scheduleRefresh();
     }
 
     dispose(): void {
@@ -165,6 +196,18 @@ export class SemanticTokensFeatureRegistry {
             clearTimeout(this.refreshTimer);
             this.refreshTimer = undefined;
         }
+    }
+
+    /** Запросы перезапроса объединяются: см. REFRESH_COALESCE_MS. */
+    private scheduleRefresh(): void {
+        if (this.refreshTimer) {
+            return;
+        }
+
+        this.refreshTimer = setTimeout(() => {
+            this.refreshTimer = undefined;
+            this.requestRefresh();
+        }, REFRESH_COALESCE_MS);
     }
 
     private requestRefresh(): void {
@@ -196,10 +239,37 @@ export class SemanticTokensFeatureRegistry {
         this.environment.noteInteractiveActivity?.();
         const version = document.version;
         const span = this.startSpan("semanticTokens.full", document);
-        await this.environment.ensureDocumentParsed(document);
+
+        /*
+         * Готовая модель этой версии не ждётся.
+         *
+         * Раньше здесь стоял await полного разбора, и первый запрос подсветки
+         * держал документ непокрашенным всё время разбора — на большом файле
+         * это десятки миллисекунд после каждого открытия. Теперь пока модели
+         * нет, отдаётся базовая подсветка по токенам, разбор идёт своим ходом,
+         * а по его готовности сервер просит клиента перезапросить токены
+         * (notifyParsed).
+         */
+        let module = this.environment.index.getCurrentModule(uri, version);
+
+        if (!module) {
+            void this.environment.ensureDocumentParsed(document);
+            this.provisional.add(uri);
+            const basic = buildRslBasicSemanticTokens(
+                this.environment.getFastLexTokens?.(document) || []
+            );
+            this.endSpan(span, {
+                provisional: true,
+                cancelled: false,
+                dataInts: basic.data.length
+            });
+            /* Без resultId: результат неполный, delta от него строить нельзя. */
+            return basic;
+        }
+
         /* Outline/hover/completion, уже стоящие в IPC-очереди, идут первыми. */
         await yieldToEventLoop();
-        const module = this.environment.index.getModule(uri);
+        module = this.environment.index.getCurrentModule(uri, version);
         if (
             !module ||
             requestIsStale(document, version, cancellationToken) ||
@@ -208,6 +278,7 @@ export class SemanticTokensFeatureRegistry {
             this.endSpan(span, { cancelled: true, dataInts: 0 });
             return { data: [] };
         }
+        this.provisional.delete(uri);
 
         const closureKey = this.environment.index.getImportClosureKey(uri);
         const cached = this.cache.get(uri);

@@ -36,7 +36,19 @@ interface IResolutionCache {
 
 interface IConstructorAssignment {
     offset: number;
+    /** Тип для прямого вызова: конструктор класса или процедура. */
     typeName: string;
+    /**
+     * Вызов метода получателя: `rs = cmd.Execute()`.
+     *
+     * Тип здесь нельзя посчитать на этапе разбора токенов: сначала нужно
+     * выяснить класс получателя, а это уже разрешение имён. Поэтому имена
+     * запоминаются, а тип берётся при выводе (см. inferAssignedType).
+     */
+    member?: {
+        receiver: string;
+        method: string;
+    };
 }
 
 /*
@@ -62,6 +74,8 @@ export class RslScopeResolver {
     >();
     private resolutionCacheHits = 0;
     private resolutionCacheMisses = 0;
+    /** Присваивания, тип которых сейчас вычисляется: защита от цикла. */
+    private memberTypeGuard = new Set<IConstructorAssignment>();
     /*
      * Видимые прикладные модули на документ.
      *
@@ -810,10 +824,61 @@ export class RslScopeResolver {
             if (assignment.offset < lowerBound) {
                 break;
             }
-            return assignment.typeName;
+            return assignment.member
+                ? this.memberResultType(module, tree, assignment)
+                : assignment.typeName;
         }
 
         return "";
+    }
+
+    /**
+     * Тип результата вызова метода получателя: `rs = cmd.Execute()`.
+     *
+     * Класс получателя ищется на позиции самого присваивания, а не запроса:
+     * дальше по тексту переменной могли присвоить что-то другое.
+     *
+     * Защита от зацикливания обязательна: у кода вида `a = a.Next()` разрешение
+     * получателя привело бы обратно к этому же присваиванию.
+     */
+    private memberResultType(
+        module: IIndexedModule,
+        tree: RslSymbol,
+        assignment: IConstructorAssignment
+    ): string {
+        const member = assignment.member;
+
+        if (!member || this.memberTypeGuard.has(assignment)) {
+            return "";
+        }
+
+        this.memberTypeGuard.add(assignment);
+        try {
+            const receiverClass = this.resolveReceiverClass(
+                module.uri,
+                tree,
+                assignment.offset,
+                { value: member.receiver } as IRslToken
+            );
+
+            if (!receiverClass) {
+                return "";
+            }
+
+            const resolved = this.resolveMemberInHierarchy(
+                module.uri,
+                tree,
+                assignment.offset,
+                receiverClass,
+                member.method,
+                new Set<string>()
+            );
+
+            const typeName = resolved?.symbol.typeName || "";
+            return normalizeIdentifier(typeName) === "variant" ? "" : typeName;
+        } finally {
+            this.memberTypeGuard.delete(assignment);
+        }
     }
 
     private getConstructorAssignments(
@@ -830,28 +895,54 @@ export class RslScopeResolver {
         for (let index = 0; index + 3 < tokens.length; index++) {
             const target = tokens[index];
             const equals = tokens[index + 1];
-            const constructor = tokens[index + 2];
-            const open = tokens[index + 3];
+            const callee = tokens[index + 2];
+            const next = tokens[index + 3];
 
             if (
                 target.kind !== "identifier" ||
+                /* Слева от точки не цель присваивания, а получатель. */
                 (index > 0 && tokens[index - 1].raw === ".") ||
                 equals.kind !== "symbol" || equals.raw !== "=" ||
-                constructor.kind !== "identifier" ||
-                open.kind !== "symbol" || open.raw !== "("
+                callee.kind !== "identifier"
             ) {
                 continue;
             }
 
             const name = normalizeIdentifier(target.value);
             const values = result.get(name) || [];
-            values.push({
-                offset: target.start,
-                typeName: this.getCallableResultType(
-                    module.uri,
-                    constructor.value
-                )
-            });
+
+            if (next.kind === "symbol" && next.raw === "(") {
+                /* Прямой вызов: конструктор класса или процедура. */
+                values.push({
+                    offset: target.start,
+                    typeName: this.getCallableResultType(
+                        module.uri,
+                        callee.value
+                    )
+                });
+            } else if (
+                next.kind === "symbol" && next.raw === "." &&
+                tokens[index + 4]?.kind === "identifier" &&
+                tokens[index + 5]?.kind === "symbol" &&
+                tokens[index + 5].raw === "("
+            ) {
+                /*
+                 * Вызов метода: `rs = cmd.Execute()`. Тип результата у метода
+                 * известен каталогу, но чтобы его взять, нужно сначала знать
+                 * класс получателя — это делается при выводе, не здесь.
+                 */
+                values.push({
+                    offset: target.start,
+                    typeName: "",
+                    member: {
+                        receiver: callee.value,
+                        method: tokens[index + 4].value
+                    }
+                });
+            } else {
+                continue;
+            }
+
             result.set(name, values);
         }
 

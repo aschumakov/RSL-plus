@@ -23,6 +23,7 @@ const tests = [
     "workspace-resolution.test.js",
     "workspace-worker.test.js",
     "server-services.test.js",
+    "request-races.test.js",
 ];
 
 let failed = false;

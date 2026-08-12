@@ -138,7 +138,14 @@ export function normalizeDiagnosticSettings(
 export function buildLocalRslDiagnostics(
     module: IIndexedModule,
     index: WorkspaceIndex,
-    settings?: IRslDiagnosticSettings
+    settings?: IRslDiagnosticSettings,
+    /*
+     * Отмена проверяется между этапами: расчёт диагностики синхронный, и на
+     * файле 100 КБ занимает больше сотни миллисекунд. Доводить его до конца
+     * для файла, который пользователь покинул, значит задержать тот, который
+     * он ждёт.
+     */
+    isCancelled?: () => boolean
 ): Diagnostic[] {
     const options = normalizeDiagnosticSettings(settings);
 
@@ -179,78 +186,75 @@ export function buildLocalRslDiagnostics(
         return localFacts;
     };
 
-    addSyntaxParserDiagnostics(module, result);
-
-    if (hasCapacity()) {
-        addDocumentedLimitDiagnostics(module, result);
-    }
-
-    if (options.structure && hasCapacity()) {
-        addUnterminatedTokenDiagnostics(module, result);
-    }
-    if (options.structure && hasCapacity()) {
-        addUnrecognizedEscapeDiagnostics(module, result);
-    }
-    if (options.structure && hasCapacity()) {
-        addBracketDiagnostics(module, result);
-    }
-    if (options.structure && hasCapacity()) {
-        addEndDiagnostics(module, result);
-    }
-    if (options.structure && hasCapacity()) {
-        addDuplicateDeclarationDiagnostics(module, result);
-    }
-    if (options.structure && hasCapacity()) {
-        addBasicImportDiagnostics(module, result);
-    }
-    if (options.structure && hasCapacity()) {
-        addImportPlacementDiagnostics(module, result);
-    }
-    if (options.structure && hasCapacity()) {
-        addConstantAssignmentDiagnostics(module, getResolver(), result);
-    }
-    if (options.structure && hasCapacity()) {
-        addLocalVisibilityDiagnostics(module, getResolver(), result);
-    }
-    if (
-        options.structure &&
-        options.dialect === "coreRsl" &&
-        hasCapacity()
-    ) {
-        addCoreDialectDiagnostics(module, getResolver(), result);
-        addReferenceArgumentDiagnostics(module, getResolver(), result);
-    }
-
     /*
-     * Ошибки использования до объявления публикуются раньше предупреждений,
+     * Этапы перечислены таблицей, а не цепочкой if.
+     *
+     * Так между ними есть одна общая точка, где проверяется и лимит
+     * maxProblems, и отмена: расчёт для файла, который пользователь уже
+     * покинул или успел изменить, прекращается на ближайшей границе, а не
+     * доводится до конца. Порядок значим — ошибки идут раньше предупреждений,
      * чтобы maxProblems не скрывал более важные сообщения.
      */
-    if (options.useBeforeDeclaration && hasCapacity()) {
-        addUseBeforeDeclarationDiagnostics(
-            module,
-            getResolver(),
-            getLocalFacts(),
-            result,
-            options.maxProblems
-        );
-    }
+    const stages: readonly [boolean, () => void][] = [
+        [true, () => addSyntaxParserDiagnostics(module, result)],
+        [true, () => addDocumentedLimitDiagnostics(module, result)],
+        [options.structure, () => addUnterminatedTokenDiagnostics(module, result)],
+        [options.structure, () => addUnrecognizedEscapeDiagnostics(module, result)],
+        [options.structure, () => addBracketDiagnostics(module, result)],
+        [options.structure, () => addEndDiagnostics(module, result)],
+        [options.structure, () => addDuplicateDeclarationDiagnostics(module, result)],
+        [options.structure, () => addBasicImportDiagnostics(module, result)],
+        [options.structure, () => addImportPlacementDiagnostics(module, result)],
+        [
+            options.structure,
+            () => addConstantAssignmentDiagnostics(module, getResolver(), result)
+        ],
+        [
+            options.structure,
+            () => addLocalVisibilityDiagnostics(module, getResolver(), result)
+        ],
+        [
+            options.structure && options.dialect === "coreRsl",
+            () => {
+                addCoreDialectDiagnostics(module, getResolver(), result);
+                addReferenceArgumentDiagnostics(module, getResolver(), result);
+            }
+        ],
+        [
+            options.useBeforeDeclaration,
+            () => addUseBeforeDeclarationDiagnostics(
+                module,
+                getResolver(),
+                getLocalFacts(),
+                result,
+                options.maxProblems
+            )
+        ],
+        [
+            options.deprecatedDeclarations,
+            () => addDeprecatedDeclarationDiagnostics(module, result)
+        ],
+        [options.debugBreak, () => addDebugBreakDiagnostics(module, result)],
+        [
+            options.unusedVariables,
+            () => addUnusedDeclarationDiagnostics(
+                module,
+                getResolver(),
+                getLocalFacts(),
+                result,
+                options.maxProblems
+            )
+        ]
+    ];
 
-    if (options.deprecatedDeclarations && hasCapacity()) {
-        addDeprecatedDeclarationDiagnostics(module, result);
-    }
-
-    if (options.debugBreak && hasCapacity()) {
-        addDebugBreakDiagnostics(module, result);
-    }
-
-    if (options.unusedVariables && hasCapacity()) {
-        addUnusedDeclarationDiagnostics(
-            module,
-            getResolver(),
-            getLocalFacts(),
-            result,
-            options.maxProblems
-        );
+    for (const [enabled, run] of stages) {
+        if (!enabled) {
+            continue;
+        }
+        if (!hasCapacity() || isCancelled?.()) {
+            break;
+        }
+        run();
     }
 
     return deduplicateDiagnostics(result).slice(0, options.maxProblems);
@@ -260,20 +264,34 @@ export function buildLocalRslDiagnostics(
 export function buildWorkspaceRslDiagnostics(
     module: IIndexedModule,
     index: WorkspaceIndex,
-    settings?: IRslDiagnosticSettings
+    settings?: IRslDiagnosticSettings,
+    isCancelled?: () => boolean
 ): Diagnostic[] {
     const options = normalizeDiagnosticSettings(settings);
     if (!options.enabled || options.maxProblems === 0) return [];
     const result: Diagnostic[] = [];
-    if (options.structure) {
-        addSelfImportDiagnostics(module, index, result);
+    const stages: readonly [boolean, () => void][] = [
+        [options.structure, () => addSelfImportDiagnostics(module, index, result)],
+        [
+            options.ambiguousReferences,
+            () => addAmbiguousReferenceDiagnostics(module, index, result)
+        ],
+        [
+            options.unusedImports,
+            () => addUnusedImportDiagnostics(module, index, result)
+        ]
+    ];
+
+    for (const [enabled, run] of stages) {
+        if (!enabled) {
+            continue;
+        }
+        if (result.length >= options.maxProblems || isCancelled?.()) {
+            break;
+        }
+        run();
     }
-    if (options.ambiguousReferences && result.length < options.maxProblems) {
-        addAmbiguousReferenceDiagnostics(module, index, result);
-    }
-    if (options.unusedImports && result.length < options.maxProblems) {
-        addUnusedImportDiagnostics(module, index, result);
-    }
+
     return deduplicateDiagnostics(result).slice(0, options.maxProblems);
 }
 
