@@ -1,1 +1,289 @@
-{"version":3,"classes":[{"name":"RsbAddFld","summary":"Класс представляет собой сервис ввода для дополнительных полей запросов/ответов МБР.","members":[{"name":"Size","isMethod":false,"typeName":"Integer","description":"Количество записей в списке."},{"name":"Delete","isMethod":true,"signature":"Delete(FieldID:Integer):Integer","description":""}]},{"name":"RsbMessage","summary":"Класс сообщения МБР, реализован только для работы с механизмом прикладного применения криптографии.","members":[{"name":"AgentID","isMethod":false,"typeName":"Integer","description":"Идентификатор контрагента."},{"name":"DeliveryNotification","isMethod":false,"typeName":"String","description":"Признак \"Ожидать подтверждения о доставке\"."},{"name":"Department","isMethod":false,"typeName":"Integer","description":"Филиал."},{"name":"InsideAbonentID","isMethod":false,"typeName":"Integer","description":"Идентификатор внутреннего абонента."},{"name":"Kind","isMethod":false,"typeName":"Integer","description":"Вид сообщения."},{"name":"MesID","isMethod":false,"typeName":"Integer","description":"Уникальный идентификатор сообщения."},{"name":"OutsideAbonentDate","isMethod":false,"typeName":"Date","description":"Дата сообщения у нашего абонента."},{"name":"OutsideAbonentID","isMethod":false,"typeName":"Integer","description":"Идентификатор внешнего абонента."},{"name":"OutsideAbonentTime","isMethod":false,"typeName":"Time","description":"Время сообщения у нашего абонента."},{"name":"PIB","isMethod":false,"typeName":"String","description":"Блок целевой информации."},{"name":"RelatedRef","isMethod":false,"typeName":"String","description":"Ссылка на сообщение."},{"name":"RespProcessingDescr","isMethod":false,"typeName":"String","description":"Результат обработки сообщения респондентом или транспортной системой."},{"name":"RlsFormID","isMethod":false,"typeName":"Integer","description":"Идентификатор релиза формы."},{"name":"SessionID","isMethod":false,"typeName":"Integer","description":"Идентификатор сеанса загрузки/выгрузки."},{"name":"TpSchemID","isMethod":false,"typeName":"Integer","description":"Идентификатор транспортной схемы."},{"name":"TRN","isMethod":false,"typeName":"String","description":"Референс сообщения."}]},{"name":"RsbRdPm","summary":"Класс представляет собой список связанных поручений решения ФНС.","members":[{"name":"Size","isMethod":false,"typeName":"Integer","description":"Размер списка связанных поручений."},{"name":"AsTArray","isMethod":true,"signature":"AsTArray([stat:Integer]):TArray","description":""}]},{"name":"RsbWlMesLnk","summary":"Класс списка связей учетного объекта с сообщениями.","members":[{"name":"Delete","isMethod":true,"signature":"Delete(recWlMesLnk:TRecHandler):Integer","description":""}]}],"procedures":[{"name":"Canonization2","signature":"Canonization2(file:String, buff:String):Bool","description":"Осуществляет доканонизацию xml-документа."},{"name":"ChangeStatusMesOnStep","signature":"ChangeStatusMesOnStep(MesID:Integer, NewStatus:Integer):Integer","description":"Используется для изменения статуса сообщения на шаге операции."},{"name":"GetDlgFlag","signature":"GetDlgFlag():Bool","description":"Определяет возможность интерфейсной работы."},{"name":"IsDealReverseMode","signature":"IsDealReverseMode():Bool","description":"Определяет тип сделки Forex, по которой формируются сообщения \"прямая\" сделка или \"обратная\" сделка."},{"name":"IsPmCoverMode","signature":"IsPmCoverMode():Bool","description":"Определяет режим формирования сообщения по платежу."},{"name":"UFBSSignature","signature":"UFBSSignature(typeAction:Integer, context:String, file:String, signature:String):Bool","description":"Используется для наложения (проверки) ЭЦП УФЭБС."},{"name":"WldChangeStatus","signature":"WldChangeStatus(ObjID:Integer, ObjKind:Integer, Status:Integer):Integer","description":"Предназначена для изменения статуса учетного объекта МБР с сохранением истории изменений."}],"constants":[]}
+{
+    "version": 3,
+    "classes": [
+        {
+            "name": "RsbAddFld",
+            "summary": "Класс представляет собой сервис ввода для дополнительных полей запросов/ответов МБР.",
+            "members": [
+                {
+                    "name": "Size",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Количество записей в списке."
+                },
+                {
+                    "name": "Delete",
+                    "isMethod": true,
+                    "signature": "Delete(FieldID:Integer):Integer",
+                    "description": "Метод предназначен для удаления записи из списка."
+                },
+                {
+                    "name": "Find",
+                    "isMethod": true,
+                    "signature": "Find (FieldID:Integer, recWladdfld:TRecHandler):Integer",
+                    "description": "Метод предназначен для поиска записи в списке."
+                },
+                {
+                    "name": "First",
+                    "isMethod": true,
+                    "signature": "First ([recWladdfld:TRecHandler]):Integer",
+                    "description": "Метод предназначен для получения первой записи в списке."
+                },
+                {
+                    "name": "Insert",
+                    "isMethod": true,
+                    "signature": "Insert (recWladdfld:TRecHandler):Integer",
+                    "description": "Метод предназначен для добавления записи в список."
+                },
+                {
+                    "name": "IsChanged",
+                    "isMethod": true,
+                    "signature": "IsChanged ():Bool",
+                    "description": "Метод предназначен для получения признаков наличия несохранённых изменений в списке."
+                },
+                {
+                    "name": "Next",
+                    "isMethod": true,
+                    "signature": "Next ([recWladdfld:TRecHandler]):Integer",
+                    "description": "Метод предназначен для получения следующего значения в списке."
+                },
+                {
+                    "name": "Update",
+                    "isMethod": true,
+                    "signature": "Update (recWladdfld:TRecHandler):Integer",
+                    "description": "Метод предназначен для обновления записей списка."
+                }
+            ]
+        },
+        {
+            "name": "RsbMessage",
+            "summary": "Класс сообщения МБР, реализован только для работы с механизмом прикладного применения криптографии.",
+            "members": [
+                {
+                    "name": "AgentID",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Идентификатор контрагента."
+                },
+                {
+                    "name": "DeliveryNotification",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Признак \"Ожидать подтверждения о доставке\"."
+                },
+                {
+                    "name": "Department",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Филиал."
+                },
+                {
+                    "name": "InsideAbonentID",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Идентификатор внутреннего абонента."
+                },
+                {
+                    "name": "Kind",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Вид сообщения."
+                },
+                {
+                    "name": "MesID",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Уникальный идентификатор сообщения."
+                },
+                {
+                    "name": "OutsideAbonentDate",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "Дата сообщения у нашего абонента."
+                },
+                {
+                    "name": "OutsideAbonentID",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Идентификатор внешнего абонента."
+                },
+                {
+                    "name": "OutsideAbonentTime",
+                    "isMethod": false,
+                    "typeName": "Time",
+                    "description": "Время сообщения у нашего абонента."
+                },
+                {
+                    "name": "PIB",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Блок целевой информации."
+                },
+                {
+                    "name": "RelatedRef",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Ссылка на сообщение."
+                },
+                {
+                    "name": "RespProcessingDescr",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Результат обработки сообщения респондентом или транспортной системой."
+                },
+                {
+                    "name": "RlsFormID",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Идентификатор релиза формы."
+                },
+                {
+                    "name": "SessionID",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Идентификатор сеанса загрузки/выгрузки."
+                },
+                {
+                    "name": "TpSchemID",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Идентификатор транспортной схемы."
+                },
+                {
+                    "name": "TRN",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Референс сообщения."
+                },
+                {
+                    "name": "Direct",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "направление сообщения (начальное, ответное)."
+                },
+                {
+                    "name": "Importance",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "важность (приоритет) сообщения."
+                }
+            ]
+        },
+        {
+            "name": "RsbRdPm",
+            "summary": "Класс представляет собой список связанных поручений решения ФНС.",
+            "members": [
+                {
+                    "name": "Size",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Размер списка связанных поручений."
+                },
+                {
+                    "name": "AsTArray",
+                    "isMethod": true,
+                    "signature": "AsTArray([stat:Integer]):TArray",
+                    "description": ""
+                }
+            ]
+        },
+        {
+            "name": "RsbWlMesLnk",
+            "summary": "Класс списка связей учетного объекта с сообщениями.",
+            "members": [
+                {
+                    "name": "Delete",
+                    "isMethod": true,
+                    "signature": "Delete(recWlMesLnk:TRecHandler):Integer",
+                    "description": "Метод предназначен для удаления записи из списка."
+                },
+                {
+                    "name": "Find",
+                    "isMethod": true,
+                    "signature": "Find (ObjType:Integer, ObjID:Integer, MesID:Integer, recWlMesLnk:TRecHandler):Integer",
+                    "description": "Метод предназначен для поиска записи в списке по идентификатору связанного сообщения."
+                },
+                {
+                    "name": "First",
+                    "isMethod": true,
+                    "signature": "First (recWlMesLnk:TRecHandler):Integer",
+                    "description": "Метод предназначен для получения первой записи в списке связей учетного объекта с сообщениями."
+                },
+                {
+                    "name": "Insert",
+                    "isMethod": true,
+                    "signature": "Insert (recWlMesLnk:TRecHandler):Integer",
+                    "description": "Метод предназначен для добавления записи в список."
+                },
+                {
+                    "name": "Last",
+                    "isMethod": true,
+                    "signature": "Last (recWlMesLnk:TRecHandler):Integer",
+                    "description": "Метод предназначен для получения последней записи в списке связей учетного объекта с сообщениями."
+                },
+                {
+                    "name": "Next",
+                    "isMethod": true,
+                    "signature": "Next (recWlMesLnk:TRecHandler):Integer",
+                    "description": "Метод предназначен для получения следующего значения в списке связей учетного объекта с сообщениями."
+                },
+                {
+                    "name": "Prev",
+                    "isMethod": true,
+                    "signature": "Prev (recWlMesLnk:TRecHandler):Integer",
+                    "description": "Метод предназначен для получения предыдущего значения в списке связей учетного объекта с сообщениями."
+                },
+                {
+                    "name": "Save",
+                    "isMethod": true,
+                    "signature": "Save ([ObjID:Integer]):Integer",
+                    "description": "Метод предназначен для сохранения изменений, выполненных в списке, в базе данных."
+                },
+                {
+                    "name": "Update",
+                    "isMethod": true,
+                    "signature": "Update (recWlMesLnk:TRecHandler):Integer",
+                    "description": "Метод предназначен для обновления записей списка связей учетного объекта с сообщениями."
+                }
+            ]
+        }
+    ],
+    "procedures": [
+        {
+            "name": "Canonization2",
+            "signature": "Canonization2(file:String, buff:String):Bool",
+            "description": "Осуществляет доканонизацию xml-документа."
+        },
+        {
+            "name": "ChangeStatusMesOnStep",
+            "signature": "ChangeStatusMesOnStep(MesID:Integer, NewStatus:Integer):Integer",
+            "description": "Используется для изменения статуса сообщения на шаге операции."
+        },
+        {
+            "name": "GetDlgFlag",
+            "signature": "GetDlgFlag():Bool",
+            "description": "Определяет возможность интерфейсной работы."
+        },
+        {
+            "name": "IsDealReverseMode",
+            "signature": "IsDealReverseMode():Bool",
+            "description": "Определяет тип сделки Forex, по которой формируются сообщения \"прямая\" сделка или \"обратная\" сделка."
+        },
+        {
+            "name": "IsPmCoverMode",
+            "signature": "IsPmCoverMode():Bool",
+            "description": "Определяет режим формирования сообщения по платежу."
+        },
+        {
+            "name": "UFBSSignature",
+            "signature": "UFBSSignature(typeAction:Integer, context:String, file:String, signature:String):Bool",
+            "description": "Используется для наложения (проверки) ЭЦП УФЭБС."
+        },
+        {
+            "name": "WldChangeStatus",
+            "signature": "WldChangeStatus(ObjID:Integer, ObjKind:Integer, Status:Integer):Integer",
+            "description": "Предназначена для изменения статуса учетного объекта МБР с сохранением истории изменений."
+        }
+    ],
+    "constants": []
+}

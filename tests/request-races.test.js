@@ -164,6 +164,10 @@ function createRegistry({ uri, source, onParsed }) {
                 onDelta: register("semanticTokensDelta"),
                 onRange: register("semanticTokensRange"),
                 refresh: () => undefined
+            },
+            inlayHint: {
+                on: register("inlayHint"),
+                refresh: () => undefined
             }
         }
     };

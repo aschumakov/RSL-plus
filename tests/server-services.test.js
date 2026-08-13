@@ -355,6 +355,10 @@ async function testOutlineUsesPreparedSnapshotAndReportsTiming() {
                 on: register("semanticTokens"),
                 onDelta: register("semanticTokensDelta"),
                 onRange: register("semanticTokensRange")
+            },
+            inlayHint: {
+                on: register("inlayHint"),
+                refresh: () => undefined
             }
         }
     };
@@ -786,6 +790,10 @@ async function testImportContextDrivesHighlightAndNavigation() {
                     refreshCount++;
                     return Promise.resolve();
                 }
+            },
+            inlayHint: {
+                on: register("inlayHint"),
+                refresh: () => undefined
             }
         }
     };
@@ -1004,6 +1012,10 @@ async function testInteractiveFallbackDoesNotMixVersions() {
                 on: register("semanticTokens"),
                 onDelta: register("semanticTokensDelta"),
                 onRange: register("semanticTokensRange")
+            },
+            inlayHint: {
+                on: register("inlayHint"),
+                refresh: () => undefined
             }
         }
     };

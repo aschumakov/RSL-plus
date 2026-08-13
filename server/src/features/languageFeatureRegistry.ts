@@ -6,10 +6,12 @@ import {
     CompletionItem,
     Definition,
     DocumentHighlightParams,
+    ErrorCodes,
     ExecuteCommandParams,
     Hover,
     Range,
     ReferenceParams,
+    ResponseError,
     SelectionRangeParams,
     TextDocumentPositionParams,
     type Connection,
@@ -55,6 +57,7 @@ import {
 } from "./callHierarchyProvider";
 import { buildRslSignatureHelp } from "./signatureHelpProvider";
 import { buildRslContextCompletions } from "./contextCompletionProvider";
+import { buildRslInlayHints } from "./inlayHintProvider";
 import {
     completionPrefixAt,
     rankCompletionItemsForPrefix
@@ -67,7 +70,11 @@ import {
 import { CompletionTransport } from "./completionTransport";
 import { PresentationFeatureRegistry } from "./presentationFeatureRegistry";
 import { SemanticTokensFeatureRegistry } from "./semanticTokensFeatureRegistry";
-import { buildRslRenameEdit, prepareRslRename } from "./renameProvider";
+import {
+    buildRslRenameEdit,
+    findRslRenameConflict,
+    prepareRslRename
+} from "./renameProvider";
 
 interface IRslCurrentBlockRangeParams {
     textDocument: { uri: string };
@@ -563,6 +570,40 @@ export class RslLanguageFeatureRegistry {
             );
         });
 
+        connection.languages.inlayHint.on(async (
+            params,
+            cancellationToken
+        ) => {
+            const document = documents.get(params.textDocument.uri);
+
+            if (
+                !document ||
+                !this.environment.getSettings(document.uri)
+                    .inlayHints.variableTypes
+            ) {
+                return [];
+            }
+
+            this.environment.noteInteractiveActivity?.();
+            const version = document.version;
+            await ensureDocumentParsed(document);
+
+            if (requestIsStale(document, version, cancellationToken)) {
+                return [];
+            }
+
+            const module = index.getCurrentModule(document.uri, version);
+
+            return module
+                ? buildRslInlayHints(
+                    module,
+                    resolver,
+                    params.range,
+                    () => requestIsStale(document, version, cancellationToken)
+                )
+                : [];
+        });
+
         connection.onPrepareRename?.(async (params, cancellationToken) => {
             const document = documents.get(params.textDocument.uri);
             if (!document) return null;
@@ -597,17 +638,41 @@ export class RslLanguageFeatureRegistry {
              * встанут по сдвинувшимся смещениям и испортят файл.
              */
             const module = index.getCurrentModule(document.uri, version);
-            return module
-                ? buildRslRenameEdit(
-                    module,
-                    index,
-                    resolver,
-                    this.referenceIndex,
-                    document.offsetAt(params.position),
-                    params.newName,
-                    () => cancellationToken.isCancellationRequested
-                )
-                : null;
+
+            if (!module) {
+                return null;
+            }
+
+            const offset = document.offsetAt(params.position);
+            /*
+             * Конфликт проверяется ДО правок и сообщается ошибкой запроса, а не
+             * пустым результатом: пустой результат редактор показывает как
+             * «переименовать нечего», и настоящая причина до пользователя не
+             * доходит.
+             */
+            const conflict = findRslRenameConflict(
+                module,
+                resolver,
+                offset,
+                params.newName
+            );
+
+            if (conflict) {
+                throw new ResponseError(
+                    ErrorCodes.InvalidRequest,
+                    conflict
+                );
+            }
+
+            return buildRslRenameEdit(
+                module,
+                index,
+                resolver,
+                this.referenceIndex,
+                offset,
+                params.newName,
+                () => cancellationToken.isCancellationRequested
+            );
         });
 
         connection.onCodeAction(async (

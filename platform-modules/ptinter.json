@@ -1,1 +1,2063 @@
-{"version":3,"classes":[{"name":"RsbCBDKFindPartyFields","summary":"Класс предназначен для работы со значениями, используемыми для заполнения полей панели при поиске субъекта в ЦБД клиента.","members":[{"name":"FirstName","isMethod":false,"typeName":"String","description":"Имя."},{"name":"LastName","isMethod":false,"typeName":"String","description":"Фамилия."},{"name":"PaperKind","isMethod":false,"typeName":"Integer","description":"Вид удостоверения."},{"name":"PaperNumber","isMethod":false,"typeName":"String","description":"Номер удостоверения."},{"name":"PaperSeries","isMethod":false,"typeName":"String","description":"Серия удостоверения."},{"name":"Patronymic","isMethod":false,"typeName":"String","description":"Отчество."}]},{"name":"RsbCheckAddressError","summary":"Класс ошибки, возникающей при проверке адреса субъекта на соответствие справочнику КЛАДР.","members":[{"name":"CheckType","isMethod":false,"typeName":"Integer","description":"Тип проверки."},{"name":"CHECK_ADDRESS_FORMAL","isMethod":false,"typeName":"Variant","description":"Формальная проверка."},{"name":"CHECK_ADDRESS_KLADR","isMethod":false,"typeName":"Variant","description":"Проверка на соответствие справочнику КЛАДР."},{"name":"CorrectValue","isMethod":false,"typeName":"String","description":"Корректное значение поля для исправления."},{"name":"Field","isMethod":false,"typeName":"Integer","description":"Поле, при проверке которого выявлена ошибка."},{"name":"MustCorrected","isMethod":false,"typeName":"Bool","description":"Признак обязательного исправления."},{"name":"Text","isMethod":false,"typeName":"String","description":"Текст ошибки."}]},{"name":"RsbOfficer","summary":"Объект класса служит для работы с информацией о сотрудниках субъекта.","members":[{"name":"OfficeID","isMethod":false,"typeName":"Integer","description":"Идентификатор отдела."},{"name":"Post","isMethod":false,"typeName":"String","description":"Должность сотрудника."},{"name":"PhoneNumber","isMethod":false,"typeName":"String","description":"Телефон сотрудника."},{"name":"DateFrom","isMethod":false,"typeName":"Date","description":"Дата начала действия полномочий лица, временно пользующегося правом подписи."},{"name":"DateTo","isMethod":false,"typeName":"Date","description":"Дата окончания действия полномочий лица, временно пользующегося правом подписи."},{"name":"HasSignRigh","isMethod":false,"typeName":"Bool","description":"Признак того, что сотрудник имеет право подписи зарплатного реестра."},{"name":"IsFirstPerson","isMethod":false,"typeName":"Bool","description":"Признак наличия у сотрудника права первой подписи."},{"name":"IsSecondPerson","isMethod":false,"typeName":"Bool","description":"Признак наличия у сотрудника права второй подписи."},{"name":"IsMatOtvPerson","isMethod":false,"typeName":"Bool","description":"Признак материальной ответственности сотрудника."},{"name":"IsFirstOfficePerson","isMethod":false,"typeName":"Bool","description":"Признак, определяющий сотрудника, который является начальником подразделения."},{"name":"IsTempSignature","isMethod":false,"typeName":"Bool","description":"Признак наличия у сотрудника временного права подписи."},{"name":"DeletePerson","isMethod":true,"signature":"DeletePerson(PersonID:Integer):Bool","description":""},{"name":"GetFirstOfAll","isMethod":true,"signature":"GetFirstOfAll():Bool","description":""},{"name":"GetFirstPerson","isMethod":true,"signature":"GetFirstPerson():Bool","description":""},{"name":"GetSecondPerson","isMethod":true,"signature":"GetSecondPerson():Bool","description":""},{"name":"GetSignRight","isMethod":true,"signature":"GetSignRight()","description":""},{"name":"GetFirstOfficePerson","isMethod":true,"signature":"GetFirstOfficePerson():Bool","description":""},{"name":"GetTempSignature","isMethod":true,"signature":"GetTempSignature():Bool","description":""},{"name":"GetNext","isMethod":true,"signature":"GetNext():Bool","description":""},{"name":"New","isMethod":true,"signature":"New()","description":""}]},{"name":"RSBParty","summary":"Объект класса служит для работы с информацией о субъекте экономики.","members":[{"name":"AddOwn","isMethod":true,"signature":"AddOwn(PartyKind:Integer)","description":""}]},{"name":"RsbPartyAddress","summary":"Класс адреса субъекта.","members":[{"name":"Address","isMethod":false,"typeName":"String","description":"Сформированная строка адреса."},{"name":"AddressType","isMethod":false,"typeName":"Integer","description":"Тип адреса."},{"name":"Building","isMethod":false,"typeName":"String","description":"Строение."},{"name":"CodeDistrict","isMethod":false,"typeName":"String","description":"Краткое наименование вида города."},{"name":"CodePlace","isMethod":false,"typeName":"String","description":"Тип населенного пункта."},{"name":"CodePlan","isMethod":false,"typeName":"String","description":"Тип планировочной структуры."},{"name":"CodeProvince","isMethod":false,"typeName":"String","description":"Краткое наименование вида района."},{"name":"CodeRegion","isMethod":false,"typeName":"String","description":"Наименование типа населенного пункта."},{"name":"CodeStreet","isMethod":false,"typeName":"String","description":"Наименование типа улицы."},{"name":"Country","isMethod":false,"typeName":"String","description":"Код страны."},{"name":"District","isMethod":false,"typeName":"String","description":"Наименование города."},{"name":"EMail","isMethod":false,"typeName":"String","description":"Адрес электронной почты."},{"name":"FaxNumber","isMethod":false,"typeName":"String","description":"Факс."},{"name":"Fias","isMethod":false,"typeName":"String","description":"Код ФИАС."},{"name":"Flat","isMethod":false,"typeName":"String","description":"Квартира."},{"name":"House","isMethod":false,"typeName":"String","description":"Дом."},{"name":"Kladr","isMethod":false,"typeName":"String","description":"Код КЛАДР."},{"name":"MobilePhone","isMethod":false,"typeName":"String","description":"Номер мобильного телефона."},{"name":"MobileProvider","isMethod":false,"typeName":"String","description":"Оператор мобильной связи."},{"name":"NumCorps","isMethod":false,"typeName":"String","description":"Корпус."},{"name":"Okato","isMethod":false,"typeName":"String","description":"Код ОКАТО."},{"name":"Oktmo","isMethod":false,"typeName":"String","description":"Код ОКТМО."},{"name":"PhoneNumber","isMethod":false,"typeName":"String","description":"Номер телефона."},{"name":"PhoneNumberAd","isMethod":false,"typeName":"String","description":"Дополнительный номер телефона."},{"name":"Place","isMethod":false,"typeName":"String","description":"Населенный пункт."},{"name":"Plan","isMethod":false,"typeName":"String","description":"Планировочная структура."},{"name":"PostIndex","isMethod":false,"typeName":"String","description":"Почтовый индекс."},{"name":"Province","isMethod":false,"typeName":"String","description":"Район."},{"name":"Region","isMethod":false,"typeName":"String","description":"Регион."},{"name":"RegionNumber","isMethod":false,"typeName":"String","description":"Числовой код региона."},{"name":"RS_Mail_Country","isMethod":false,"typeName":"Integer","description":"Код страны в системе RS-Mail."},{"name":"RS_Mail_Node","isMethod":false,"typeName":"Integer","description":"Номер узла в системе RS-Mail."},{"name":"RS_Mail_Region","isMethod":false,"typeName":"Integer","description":"Код района в системе RS-Mail."},{"name":"Telegraph","isMethod":false,"typeName":"String","description":"Телеграф."},{"name":"TelexNumber","isMethod":false,"typeName":"String","description":"Телекс."},{"name":"Territory","isMethod":false,"typeName":"String","description":"Код территории."},{"name":"Delete","isMethod":true,"signature":"Delete()","description":""}]},{"name":"RsbPartyCheckECUPRID","summary":"Класс – обертка над сущностью \"Проверки субъектов в ЕС УПРИД\".","members":[{"name":"CheckDate","isMethod":false,"typeName":"Date","description":"Дата последнего вызова интерфейса RS-Connect."},{"name":"CheckTime","isMethod":false,"typeName":"Time","description":"Время вызова."},{"name":"MessageID","isMethod":false,"typeName":"String","description":"Идентификатор первичного запроса к RS-Connect."},{"name":"ObjectID","isMethod":false,"typeName":"String","description":"Идентификатор учетного объекта в RS-Connect."},{"name":"Oper","isMethod":false,"typeName":"Integer","description":"Пользователь."},{"name":"PersonID","isMethod":false,"typeName":"Integer","description":"Системный идентификатор проверяемого субъекта."},{"name":"RecID","isMethod":false,"typeName":"Integer","description":"Идентификатор записи."},{"name":"ReturnCode","isMethod":false,"typeName":"String","description":"Код ошибки, полученный от ЕC УПРИД в результате выполнения запроса."},{"name":"StatusCode","isMethod":false,"typeName":"String","description":"Код статуса обработки последнего выполненного запроса в RS-Connect."},{"name":"Add","isMethod":true,"signature":"Add():Integer","description":""}]},{"name":"RsbPartyContact","summary":"Класс описывает способы связи субъекта.","members":[{"name":"AddressType","isMethod":false,"typeName":"Integer","description":"Тип адреса."},{"name":"ContactKind","isMethod":false,"typeName":"Integer","description":"Вид способа связи."},{"name":"ContactType","isMethod":false,"typeName":"Integer","description":"Тип способа связи."},{"name":"IsMain","isMethod":false,"typeName":"Bool","description":"Признак основного способа связи."},{"name":"Note","isMethod":false,"typeName":"String","description":"Примечание."},{"name":"Provider","isMethod":false,"typeName":"String","description":"Оператор."},{"name":"RecID","isMethod":false,"typeName":"Integer","description":"Идентификатор записи."},{"name":"Value","isMethod":false,"typeName":"String","description":"Значение."},{"name":"Add","isMethod":true,"signature":"Add(ContactKind:Integer, AddressType:Integer, ContactType:Integer, Value:String):Integer","description":""}]},{"name":"RsbPartyPFPropRSL","summary":"Класс реквизитов ПФР субъекта-физического лица.","members":[{"name":"PersonID","isMethod":false,"typeName":"Integer","description":"Системный идентификатор проверяемого субъекта."},{"name":"RecID","isMethod":false,"typeName":"Integer","description":"Автоинкримент."},{"name":"RegionCode","isMethod":false,"typeName":"String","description":"Код района ПФР."},{"name":"RegNumber","isMethod":false,"typeName":"String","description":"Регистрационный номер ПФР."},{"name":"SynchDate","isMethod":false,"typeName":"Bool","description":"Признак синхронизации данных с ПФР."},{"name":"Add","isMethod":true,"signature":"Add():Integer","description":""}]},{"name":"RsbPartyRegDoc","summary":"Класс является классом регистрационного документа субъекта.","members":[{"name":"BankDate","isMethod":false,"typeName":"Date","description":"Дата операционного дня."},{"name":"DocDate","isMethod":false,"typeName":"Date","description":"Дата ввода документа в систему."},{"name":"DocumentID","isMethod":false,"typeName":"Integer","description":"Идентификатор документа."},{"name":"FinishDate","isMethod":false,"typeName":"Date","description":"Дата окончания действия документа."},{"name":"IsClosed","isMethod":false,"typeName":"Bool","description":"Признак \"Документ недействителен\"."},{"name":"IsEmpty","isMethod":false,"typeName":"Bool","description":"Признак наличия документа с заданными параметрами."},{"name":"IsMain","isMethod":false,"typeName":"Bool","description":"Признак \"Основной регистрационный документ\"."},{"name":"Number","isMethod":false,"typeName":"String","description":"Номер документа."},{"name":"ObjectID","isMethod":false,"typeName":"Integer","description":"Идентификатор объекта."},{"name":"OldCode","isMethod":false,"typeName":"String","description":"Устаревший регистрационный номер."},{"name":"RegDocKind","isMethod":false,"typeName":"Integer","description":"Идентификатор вида регистрационного документа."},{"name":"RegPartyID","isMethod":false,"typeName":"Integer","description":"Идентификатор регистрирующего органа."},{"name":"RegPartyKind","isMethod":false,"typeName":"Integer","description":"Идентификатор вида регистрирующего органа."},{"name":"RegPlace","isMethod":false,"typeName":"String","description":"Место регистрации."},{"name":"Series","isMethod":false,"typeName":"String","description":"Серия документа."},{"name":"StartDate","isMethod":false,"typeName":"Date","description":"Дата начала действия документа."},{"name":"UserID","isMethod":false,"typeName":"Integer","description":"Номер операциониста."},{"name":"Add","isMethod":true,"signature":"Add(RegPartyKind:Integer, RegDocKind:Integer [, DocDate:Date]):Bool","description":""}]},{"name":"RsbPartyTaxExemp","summary":"Класс описывает сведения о налоговых освобождениях субъекта.","members":[{"name":"EndDate","isMethod":false,"typeName":"Date","description":"Дата окончания действия."},{"name":"HasConfirm","isMethod":false,"typeName":"Bool","description":"Признак наличия годового подтверждения права на доход."},{"name":"ID","isMethod":false,"typeName":"Integer","description":"Идентификатор."},{"name":"IssueDate","isMethod":false,"typeName":"Date","description":"Дата выдачи."},{"name":"Recieved","isMethod":false,"typeName":"Date","description":"Дата предоставления."},{"name":"StartDate","isMethod":false,"typeName":"Date","description":"Дата начала действия."},{"name":"Storage","isMethod":false,"typeName":"String","description":"Место хранения."},{"name":"Add","isMethod":true,"signature":"Add(StartDate:Date, HasConfirm:Bool, Storage:String, [Note1:String], [Note2:String], [Note3:String], [Note4:String], [Note5:String]):Bool","description":""}]},{"name":"RsbPersonCitizen","summary":"Класс описывает гражданства субъекта – физического лица.","members":[{"name":"CountryCodeLat3","isMethod":false,"typeName":"String","description":"Трехбуквенный код страны по справочнику стран по ISO."},{"name":"PaperKind","isMethod":false,"typeName":"Integer","description":"Вид документа, удостоверяющего личность."},{"name":"TerritoryID","isMethod":false,"typeName":"Integer","description":"Системный идентификатор территории страны."},{"name":"Add","isMethod":true,"signature":"Add(CountryCodeLat3:String, [TerritoryID:Integer], [PaperKind:Integer]):Integer","description":""}]},{"name":"RsbPersonPaper","summary":"Класс удостоверяющего документа физического лица.","members":[{"name":"IsMain","isMethod":false,"typeName":"Bool","description":"Признак основного удостоверяющего документа."},{"name":"IssuedDate","isMethod":false,"typeName":"Date","description":"Дата выдачи документа, удостоверяющего личность."},{"name":"Issuer","isMethod":false,"typeName":"String","description":"Наименование организации, выдавшей документ."},{"name":"IssuerCode","isMethod":false,"typeName":"String","description":"Код организации, выдавшей документ."},{"name":"Number","isMethod":false,"typeName":"String","description":"Номер документа, удостоверяющего личность."},{"name":"PaperKind","isMethod":false,"typeName":"Integer","description":"Вид документа, удостоверяющего личность."},{"name":"Series","isMethod":false,"typeName":"String","description":"Серия документа, удостоверяющего личность."},{"name":"Delete","isMethod":true,"signature":"Delete():Bool","description":""}]},{"name":"RsbPersonPlaceWork","summary":"Класс сведений о трудоустройстве физического лица.","members":[{"name":"Date","isMethod":false,"typeName":"Date","description":"Дата трудоустройства субъекта."},{"name":"ID","isMethod":false,"typeName":"Integer","description":"Уникальный идентификатор записи."},{"name":"INN","isMethod":false,"typeName":"String","description":"ИНН работодателя субъекта."},{"name":"IsMain","isMethod":false,"typeName":"Bool","description":"Основное место работы субъекта."},{"name":"OGRN","isMethod":false,"typeName":"String","description":"ОГРН работодателя субъекта."},{"name":"PlaceWork","isMethod":false,"typeName":"String","description":"Текстовое описание места работы субъекта."},{"name":"Post","isMethod":false,"typeName":"String","description":"Наименование занимаемой субъектом должности."},{"name":"PostType","isMethod":false,"typeName":"Integer","description":"Тип должности субъекта."},{"name":"Add","isMethod":true,"signature":"Add(PlaceWork:String, Post:String):Bool","description":""}]},{"name":"RsbPtCode","summary":"Объект класса предоставляет доступ к кодам субъекта.","members":[{"name":"CloseCode","isMethod":true,"signature":"CloseCode(CodeKind:Integer, CloseDate:Date):Bool","description":""}]},{"name":"RsbPtNote","summary":"Класс примечаний субъекта.","members":[{"name":"AddNote","isMethod":true,"signature":"AddNote(NoteKind:Integer, Note:Variant, Date:Date):Integer","description":""}]},{"name":"RsbResidentHist","summary":"Класс предназначен для ведения истории резидентности субъекта.","members":[{"name":"Date","isMethod":false,"typeName":"Date","description":"Дата начала действия."},{"name":"IsStateless","isMethod":false,"typeName":"Bool","description":"Признак, определяющий, что физическое лицо является лицом без гражданства."},{"name":"OfshoreZone","isMethod":false,"typeName":"Integer","description":"Оффшорная зона, резидентом которой является субъект."},{"name":"RecID","isMethod":false,"typeName":"Integer","description":"Уникальный идентификатор записи."},{"name":"Add","isMethod":true,"signature":"Add(Date:Date, NRCountry:String, NotResident:Bool, IsStateless:Bool, OfshoreZone:Integer):Integer","description":""}]},{"name":"TRsbLegalProxyList","summary":"Класс предназначен для ведения сведений о доверенности.","members":[{"name":"First","isMethod":true,"signature":"First():Bool","description":""}]}],"procedures":[{"name":"Batch_CBDK_SyncParty","signature":"Batch_CBDK_SyncParty([PartyList:String, ] UseSynch:Bool [, BeginDate:Date] [, BeginTime:Time] [, Enddate:Date] [, EndTime:Time]):Integer","description":"Предназначена для вызова пакетной синхронизации субъектов с ЦБД клиентов."},{"name":"CB_CheckPersnIDCAllow","signature":"CB_CheckPersnIDCAllow(PaperKind:Integer, NotResident:Bool, IsStateless:Bool, Born:Date):Integer","description":"Предназначена для проверки допустимости использования документа в качестве удостоверения личности."},{"name":"CB_DeleteNotetextHist","signature":"CB_DeleteNotetextHist(ID:Integer):Integer","description":"Предназначена для удаления примечания."},{"name":"CB_DelPtProxy","signature":"CB_DelPtProxy(PartyID:Integer, ProxyID:Integer):Integer","description":"Предназначена для удаления субъекта-представителя."},{"name":"CB_GetListPtProxy","signature":"CB_GetListPtProxy(PartyID:Integer, PtPrxArray:TArray):Integer","description":"Предназначена для получения списка представителей субъекта."},{"name":"CB_InsertNotetextHist","signature":"CB_InsertNotetextHist(ObjectType:Integer, DocumentID:String, NoteKind:Integer, Date:Date, ValidToDate:Date, NoteValue:Variant, ID:Integer):Integer","description":"Предназначена для создания примечания."},{"name":"CB_ListPartyPtProxy","signature":"CB_ListPartyPtProxy(PartyID:Integer, UseProxyList:Bool, recptproxy:Record):Integer","description":"Предназначена для выбора представителя из справочника субъектов."},{"name":"CB_ListPtProxy","signature":"CB_ListPtProxy(PartyID:Integer, recptproxy:Record):Integer","description":"Предназначена для выбора представителя субъекта."},{"name":"CB_SetPtProxy","signature":"CB_SetPtProxy(recptproxy:Record):Integer","description":"Предназначена для выбора представителя субъекта."},{"name":"CB_UpdateNotetextHist","signature":"CB_UpdateNotetextHist(ID:Integer, Date:Date, ValidToDate:Date[, NoteValue:Variant]):Integer","description":"Предназначена для обновления примечания."},{"name":"CBDK_FindPartyPanel","signature":"CBDK_FindPartyPanel(Fields:Object, Party:Object, Result:Integer):Integer","description":"Предназначена для вызова панели поиска субъекта в ЦБД клиента."},{"name":"FindAdressContactValue","signature":"FindAdressContactValue(Addr:Record, ContactField:Integer, Value:String, Provider:String):Integer","description":"Предназначена для поиска информации о способах связи субъекта экономики."},{"name":"FindSETTACC_PMAUTO","signature":"FindSETTACC_PMAUTO(PartyID:Integer, FIKind:Integer, FIID:Integer, ServiceKind:Integer, KindOper:Integer, Purpose:Integer, BankID:Integer, settacc:Record):Integer","description":"Выполняет поиск счета для расчета с субъектами при автогенерации платежей."},{"name":"FoundSPI","signature":"FoundSPI(FIID: Integer, Account: String, [settac: Record]):Bool","description":"Ищет стандартную платежную инструкцию (СПИ) по номеру закрытого счета."},{"name":"GetCapital","signature":"GetCapital(onDate:Date, SumOfCapital:Money):Integer","description":"Предназначена для получения значения капитала банка за указанную дату."},{"name":"GetCorAcc","signature":"GetCorAcc(FIID:Integer, Corschem:Integer, KindAcc: Integer, String, Variant [, Origin:Bool, Variant]):Integer","description":"Возвращает номер счета из указанной в документе схемы расчетов."},{"name":"GetFullBankName","signature":"GetFullBankName(PartyID:Integer):String","description":"С помощью процедуры формируется полное наименование банка."},{"name":"GetKladrLevel1","signature":"GetKladrLevel1():Bool","description":"Определяет наличие в системе сведений об адресных объектах первого уровня КЛАДР (регионы)."},{"name":"GetKladrLevel2","signature":"GetKladrLevel2():Bool","description":"Определяет наличие в системе сведений об адресных объектах второго уровня КЛАДР (районы)."},{"name":"GetKladrLevel3","signature":"GetKladrLevel3():Bool","description":"Определяет наличие в системе сведений об адресных объектах третьего уровня КЛАДР (города)."},{"name":"GetKladrLevel4","signature":"GetKladrLevel4():Bool","description":"Определяет наличие в системе сведений об адресных объектах четвертого уровня КЛАДР (населенные пункты)."},{"name":"GetKladrLevel5","signature":"GetKladrLevel5():Bool","description":"Определяет наличие в системе сведений об адресных объектах пятого уровня КЛАДР (улицы)."},{"name":"GetKladrLevel6","signature":"GetKladrLevel6():Bool","description":"Определяет наличие в системе сведений об адресных объектах шестого уровня КЛАДР (дома)."},{"name":"GetNameClient","signature":"GetNameClient(regPath:String, Account: Record, Chapter:Integer [, CodeCurrency:Integer] [, IsPayer : Bool] [, IsAllowLegalForm : Bool]):String","description":"Получает наименование клиента-владельца счета."},{"name":"GetOriginParty","signature":"GetOriginParty(PartyID:Integer [, PARTY:Record]):Integer","description":"Предназначена для получения структуры PARTY оригинального субъекта по внутреннему идентификатору PartyID дублера."},{"name":"GetPartyNames","signature":"GetPartyNames(PartyID:Integer, NameTypeID:Integer [, UseHistory:Bool]):Array","description":"Предназначена для получения списка всех наименований субъекта."},{"name":"GetPartyOnDate","signature":"GetPartyOnDate(PartyID:Integer, pDate:Date, [Party:File| Record| Tbfile| Trechandler], [BankDprt:File| Record| Tbfile| Trechandler], [PtBicDir:File| Record| Tbfile| Trechandler], [Persn:File| Record| Tbfile| Trechandler]):Integer","description":"Предназначена для получения параметров субъекта на заданную дату."},{"name":"GetPersnIDCOnDate","signature":"GetPersnIDCOnDate(PersonID:Integer, PaperKind:Integer, OnDate:Date, PersnIDC:Record):Integer","description":"Предназначена для получения данных удостоверения личности физического лица на заданную дату."},{"name":"GetPtOfficeState","signature":"GetPtOfficeState(PartyID:Integer, OrgDate:Date, Office:Integer|String [, officce_buff:TrecHandler] [, superior_buff:TrecHandler] [, Sort:Integer] [, DateBegin:Date] [, ErrMes:String]):Bool","description":"Определяет состояние подразделения (вышестоящее подразделение, номер сортировки и дата начала действия изменения) на указанную дату."},{"name":"IsBankType","signature":"IsBankType(Party: File, Integer, Record Type:Integer):Bool","description":"Проверяет, является ли банк, заданный параметром Party, банком типа Type."},{"name":"ListCorschem","signature":"ListCorschem(Corschem:Record [, Header:String] [, Flag:Integer, String]):Integer","description":"Предназначена для выбора корсхемы из списка корсхем, при этом возможен выбор из списка с установленным типом коротношений."},{"name":"ListOrgStructure","signature":"ListOrgStructure(PartyID:Integer, OrgDate:Date, officce_buff:TrecHandler [, superior_buff:TrecHandler] [, OnlyForSuperiorID:Integer] [, NoChangeDate:Bool] [, SelectDate:Date]):Bool","description":"Осуществляет выбор подразделения и его вышестоящего подразделения из организационной структуры предприятия, построенной на дату OrgDate."},{"name":"ListPT","signature":"ListPT(PARTY: File, Record, SelectCodeKind:Integer, SelectCode:Integer, PTLIST:Integer, PartyID:Integer, CodeKind:Integer, FromDate:Date, ToDate:Date):Bool","description":"Формирует список, используемый для выбора субъекта из справочника субъектов экономики."},{"name":"ListPText","signature":"ListPText(PARTY:File, Record, PartyID:Integer, AddCond:String [, readOnly:Bool]):Bool","description":"С помощью процедуры формируется список, используемый для выбора субъекта из справочника субъектов экономики."},{"name":"ParseRSMailString","signature":"ParseRSMailString(Value:String, Country:Integer, Region:Integer, Node:Integer):Integer","description":"Предназначена для получения компонентов RSMail.Country, RSMail.Region и RSMail.Node из значения способа связи субъекта экономики."},{"name":"PartyAliesList","signature":"PartyAliesList(PartyID:Integer):Array","description":"Возвращает список наименований субъекта для сравнения."},{"name":"PartyNameAdd","signature":"PartyNameAdd(Name:String, PartyID:Integer):Integer","description":"Предназначена для ввода псевдонима субъекта."},{"name":"PartyNameFreqIncr","signature":"PartyNameFreqIncr(Name:String, PartyID:Integer):Integer","description":"Предназначена для увеличения параметра частоты использования псевдонима."},{"name":"PDN_InsertPDNFINPROCPARTY","signature":"PDN_InsertPDNFINPROCPARTY(Rec:Record):Integer","description":"Предназначена для автоматизации регистрации фактов обработки персональных данных в прикладном исполняемом коде путём создания через вызовы API экземпляров сущностей \"Завершение обработки ПДн субъекта ПДн\"."},{"name":"PDN_InsertPDNPARTYTARGET","signature":"PDN_InsertPDNPARTYTARGET(Rec:Record):Integer","description":"Предназначена для автоматизации регистрации фактов обработки персональных данных в прикладном исполняемом коде путём создания через вызовы API экземпляров сущностей \"Цель обработки ПДн субъекта ПДн\"."},{"name":"PDN_InsertPDNTYPEPARTY","signature":"PDN_InsertPDNTYPEPARTY(Rec:Record):Integer","description":"Предназначена для автоматизации регистрации фактов обработки персональных данных в прикладном исполняемом коде путём создания через вызовы API экземпляров сущностей \"Вид субъекта ПДн\"."},{"name":"PT_BindClientWithBranch","signature":"PT_BindClientWithBranch(PartyID:Long, ServiceKind:Integer, Branch:Integer [, Oper:Integer] [, startDate:Date] [, ForcedSet:Bool]):Bool","description":"Предназначена для постановки заданного субъекта на обслуживание заданного вида в заданном подразделении."},{"name":"PT_CheckClientService","signature":"PT_CheckClientService(ClientID : Long, ServiceKind : Integer, CheckDate : Date, Department : Integer): Integer","description":"Предназначена для проверки наличия открытого обслуживания заданного вида для заданного клиента в филиале текущего пользователя."},{"name":"PT_CheckPersnIDCviaSMEV","signature":"PT_CheckPersnIDCviaSMEV(DOC_SERIE:String, DOC_NUMBER:String, DOC_ISSUEDATE:String, DOC_STATUS:Integer, STATUS_DESC:String, INVALIDITY_REASON:Integer, INVALIDITY_REASON_DESC:String, INVALIDITY_SINCE:Date): Integer","description":"Предназначена для запроса к сервису ФМС СМЭВ с быстрым ответом."},{"name":"PT_CheckPersnNameviaSMEV","signature":"PT_CheckPersnNameviaSMEV(DOC_Name1:String, DOC_Name2:String, DOC_Name3:String, DOC_Birthdate:Date, DOC_Series:String, DOC_Number:String, DOC_IssuedDate:Date, DOC_IssuerCode:String, DOC_Region:String, ResponcePeriod:Integer, DOC_STATUS:Integer, STATUS_DESC:String, INVALIDITY_REASON:Integer, INVALIDITY_REASON_DESC:String, INVALIDITY_SINCE:Date): Integer","description":"Предназначена для расширенной проверки паспорта через СМЭВ."},{"name":"PT_CheckProxySignAuthority","signature":"PT_CheckProxySignAuthority(Account:String, Code_Currency:Integer, Chapter:Integer, PartyID:Integer, ProxyIDArray:Array, WrongProxyID:Integer, Message:String):Integer","description":"Предназначена для проверки права подписи представителя клиента."},{"name":"PT_CloseClientService","signature":"PT_CloseClientService(ClientID:Long, ServiceKind:Integer, CloseDate:Date [, SilentMode:Bool]):Bool","description":"Предназначена для установки даты окончания обслуживания заданного вида для заданного клиента в заданном филиале."},{"name":"PT_CopyPartyParm","signature":"PT_CopyPartyParm(destPartyID: Integer, sourcePartyID: Integer): Integer","description":"Предназначена для копирования параметров субъекта источника sourcePartyID в параметры субъекта потребителя destPartyID, при этом все несовпадающие параметры субъекта потребителя заменяются параметрами субъекта источника."},{"name":"PT_DefinePartyDoubler","signature":"PT_DefinePartyDoubler(PartyObj:Object, EditMode:Bool, PanelMode:Bool):Integer","description":"Предназначена для задания варианта вызова проверки наличия дублеров субъекта: из списка субъектов или из панели субъекта."},{"name":"PT_DeleteClientService","signature":"PT_DeleteClientService(ClientID:Integer, ServiceKind:Integer):Integer","description":"Предназначена для удаления закрытого вида обслуживания клиента."},{"name":"PT_DeletePTBANKRUPTHIST","signature":"PT_DeletePTBANKRUPTHIST(RecID:Integer):Integer","description":"Предназначена для удаления записи истории банкротства субъекта."},{"name":"PT_DeletePTBENEOWNER","signature":"PT_DeletePTBENEOWNER(Id:Integer):Integer","description":"Предназначена для удаления бенефициарного владельца субъекта."},{"name":"PT_FormAddressStr","signature":"PT_FormAddressStr(PartyID:Integer, [AddrType:Integer], [AddrMode:Integer], AddrStr:String):Integer","description":"Предназначена для получения адреса субъекта в строковом представлении."},{"name":"PT_FormAddressStrByGUID","signature":"PT_FormAddressStrByGUID(Guid:String, [AddrMode:Integer], AddrStr:String):Integer","description":"Предназначена для получения адреса ФИАС по GUID в строковом представлении."},{"name":"PT_GetAddressByGUID","signature":"PT_GetAddressByGUID(Guid:String, Address:Record):Integer","description":"Предназначена для получения адреса ФИАС по GUID в формате ФИАС."},{"name":"PT_GetAddressGUID","signature":"PT_GetAddressGUID(PartyID:Integer, [AddrType:Integer], AddrGUID:String):Integer","description":"Предназначена для получения GUID адреса субъекта."},{"name":"PT_GetFIASForAddress","signature":"PT_GetFIASForAddress(Address:Record, FiasGuid:String):Integer","description":"Предназначена для поиска адреса в ФИАС по значениям элементов адреса."},{"name":"PT_GetSimilarForParty","signature":"PT_GetSimilarForParty(PartyID:Integer, LegalForm:Integer, Name1:String, Name2:String, Name3:Integer, BirthDate:Date, ShortName:String, CodeINN:String, ExcludeDoublers:Bool, OriginalArray:Tarray):Integer","description":"Предназначена для получения списка дублеров субъекта."},{"name":"PT_InsUpdPTBANKRUPTHIST","signature":"PT_InsUpdPTBANKRUPTHIST(PtBankruptHistRec:Record):Integer","description":"Предназначена для создания или обновления записи истории банкротства субъекта."},{"name":"PT_InsUpdPTBENEOWNER","signature":"PT_InsUpdPTBENEOWNER(PTBeneownerBuff:Record):Integer","description":"Предназначена для создания или обновления бенефициарного владельца субъекта."},{"name":"PT_SearchOperationForClient","signature":"PT_SearchOperationForClient(Party:Object):Integer","description":"Предназначена для получения информации о наличии отказов в обслуживании в отношении субъекта, вводимого в справочник клиентов АС, совершенных в сторонних организациях, при индивидуальной проверке клиента."},{"name":"PT_SelectLegalProxyHist","signature":"PT_SelectLegalProxyHist([PartyID:Integer] [, Account:String] [, ProxyID:Integer] [, OnlyActive:Bool]):Object","description":"Предназначена для получения сведений о доверенностях."},{"name":"PtCertainCategory","signature":"PtCertainCategory(PartyID:Integer, Flags:Integer):Integer","description":"Предназначена для определения принадлежности физического лица к некоторой категории."},{"name":"PtCertainCategoryWarning","signature":"PtCertainCategoryWarning(PartyID:Integer):String","description":"Предназначена для оповещения пользователя в случае, если физическое лицо относится к некоторой категории."},{"name":"PTOfficeInsert","signature":"PTOfficeInsert(BuffPTOffice:TrecHandler [, BaseOffice:Integer|String] [, Position:Integer] [, ErrMes:String]):Bool","description":"Осуществляет вставку подразделения для учреждения."},{"name":"PTOfficeTree","signature":"PTOfficeTree(PartyID:Integer, SuperiorOfficeID:Integer, OrgDate:Date, Level:Integer):Object","description":"Позволяет получить доступ к дереву подразделений (оргштатной структуре)."},{"name":"SetCapital","signature":"SetCapital(onDate:Date, SumOfCapital:Money):Integer","description":"Устанавливает новое значение капитала банка за указанную дату."},{"name":"UploadFiasXMLFileIntoDBFile","signature":"UploadFiasXMLFileIntoDBFile(XMLFileName:String, DBFileType:Integer):Integer","description":"Предназначена для загрузки xml-файла справочника ФИАС в постоянную или временную таблицу базы данных."},{"name":"XCOMPL_MakePartyNoteText","signature":"XCOMPL_MakePartyNoteText(SystemId:Integer, UpDateAt:Date):String","description":"Предназначена для формирования строки примечания вида <Изменение статуса ПДЛ/%010d/%s>, где %010d – значение параметра SystemId, дополненное нулем до десяти символов, %s – дата."}],"constants":[]}
+{
+    "version": 3,
+    "classes": [
+        {
+            "name": "RsbCBDKFindPartyFields",
+            "summary": "Класс предназначен для работы со значениями, используемыми для заполнения полей панели при поиске субъекта в ЦБД клиента.",
+            "members": [
+                {
+                    "name": "FirstName",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Имя."
+                },
+                {
+                    "name": "LastName",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Фамилия."
+                },
+                {
+                    "name": "PaperKind",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Вид удостоверения."
+                },
+                {
+                    "name": "PaperNumber",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Номер удостоверения."
+                },
+                {
+                    "name": "PaperSeries",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Серия удостоверения."
+                },
+                {
+                    "name": "Patronymic",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Отчество."
+                }
+            ]
+        },
+        {
+            "name": "RsbCheckAddressError",
+            "summary": "Класс ошибки, возникающей при проверке адреса субъекта на соответствие справочнику КЛАДР.",
+            "members": [
+                {
+                    "name": "CheckType",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Тип проверки."
+                },
+                {
+                    "name": "CHECK_ADDRESS_FORMAL",
+                    "isMethod": false,
+                    "typeName": "Variant",
+                    "description": "Формальная проверка."
+                },
+                {
+                    "name": "CHECK_ADDRESS_KLADR",
+                    "isMethod": false,
+                    "typeName": "Variant",
+                    "description": "Проверка на соответствие справочнику КЛАДР."
+                },
+                {
+                    "name": "CorrectValue",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Корректное значение поля для исправления."
+                },
+                {
+                    "name": "Field",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Поле, при проверке которого выявлена ошибка."
+                },
+                {
+                    "name": "MustCorrected",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "Признак обязательного исправления."
+                },
+                {
+                    "name": "Text",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Текст ошибки."
+                }
+            ]
+        },
+        {
+            "name": "RsbOfficer",
+            "summary": "Объект класса служит для работы с информацией о сотрудниках субъекта.",
+            "members": [
+                {
+                    "name": "OfficeID",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Идентификатор отдела."
+                },
+                {
+                    "name": "Post",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Должность сотрудника."
+                },
+                {
+                    "name": "PhoneNumber",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Телефон сотрудника."
+                },
+                {
+                    "name": "DateFrom",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "Дата начала действия полномочий лица, временно пользующегося правом подписи."
+                },
+                {
+                    "name": "DateTo",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "Дата окончания действия полномочий лица, временно пользующегося правом подписи."
+                },
+                {
+                    "name": "HasSignRigh",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "Признак того, что сотрудник имеет право подписи зарплатного реестра."
+                },
+                {
+                    "name": "IsFirstPerson",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "Признак наличия у сотрудника права первой подписи."
+                },
+                {
+                    "name": "IsSecondPerson",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "Признак наличия у сотрудника права второй подписи."
+                },
+                {
+                    "name": "IsMatOtvPerson",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "Признак материальной ответственности сотрудника."
+                },
+                {
+                    "name": "IsFirstOfficePerson",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "Признак, определяющий сотрудника, который является начальником подразделения."
+                },
+                {
+                    "name": "IsTempSignature",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "Признак наличия у сотрудника временного права подписи."
+                },
+                {
+                    "name": "DeletePerson",
+                    "isMethod": true,
+                    "signature": "DeletePerson(PersonID:Integer):Bool",
+                    "description": ""
+                },
+                {
+                    "name": "GetFirstOfAll",
+                    "isMethod": true,
+                    "signature": "GetFirstOfAll():Bool",
+                    "description": "Метод получает запись о первом сотруднике из списка всех сотрудников субъекта."
+                },
+                {
+                    "name": "GetFirstPerson",
+                    "isMethod": true,
+                    "signature": "GetFirstPerson():Bool",
+                    "description": "Метод получает запись о первом сотруднике из списка с правом первой подписи."
+                },
+                {
+                    "name": "GetSecondPerson",
+                    "isMethod": true,
+                    "signature": "GetSecondPerson():Bool",
+                    "description": "Метод получает запись о первом сотруднике из списка с правом второй подписи."
+                },
+                {
+                    "name": "GetSignRight",
+                    "isMethod": true,
+                    "signature": "GetSignRight()",
+                    "description": "Метод позволяет получить первого сотрудника с признаком права подписи зарплатного реестра."
+                },
+                {
+                    "name": "GetFirstOfficePerson",
+                    "isMethod": true,
+                    "signature": "GetFirstOfficePerson():Bool",
+                    "description": "Метод получает запись о первом сотруднике из списка, который является начальником подразделения."
+                },
+                {
+                    "name": "GetTempSignature",
+                    "isMethod": true,
+                    "signature": "GetTempSignature():Bool",
+                    "description": "Метод получает запись о первом сотруднике из списка с временным правом подписи."
+                },
+                {
+                    "name": "GetNext",
+                    "isMethod": true,
+                    "signature": "GetNext():Bool",
+                    "description": "Метод получает запись о следующем сотруднике из списка всех сотрудников субъекта."
+                },
+                {
+                    "name": "New",
+                    "isMethod": true,
+                    "signature": "New()",
+                    "description": "Метод предназначен для добавления нового сотрудника субъекту."
+                }
+            ]
+        },
+        {
+            "name": "RSBParty",
+            "summary": "Объект класса служит для работы с информацией о субъекте экономики.",
+            "members": [
+                {
+                    "name": "AddOwn",
+                    "isMethod": true,
+                    "signature": "AddOwn(PartyKind:Integer)",
+                    "description": "Метод предназначен для добавления вида принадлежности субъекта."
+                },
+                {
+                    "name": "Address",
+                    "isMethod": true,
+                    "signature": "Address (AddressType:Integer):Object",
+                    "description": "Метод возвращает объекта класса RSBPartyAddress типа AddressType."
+                },
+                {
+                    "name": "DeleteOwn",
+                    "isMethod": true,
+                    "signature": "DeleteOwn (PartyKind:Integer)",
+                    "description": "Метод предназначен для удаления вида принадлежности субъекта."
+                },
+                {
+                    "name": "CBDK_SyncQuery",
+                    "isMethod": true,
+                    "signature": "CBDK_SyncQuery ():Integer",
+                    "description": "Метод предназначен для выполнения синхронного запроса на синхронизацию с ЦБД клиента."
+                },
+                {
+                    "name": "CBDK_UnSyncQuery",
+                    "isMethod": true,
+                    "signature": "CBDK_UnSyncQuery ():Integer",
+                    "description": "Метод предназначен для выполнения асинхронного запроса на синхронизацию с ЦБД клиента."
+                },
+                {
+                    "name": "Delete",
+                    "isMethod": true,
+                    "signature": "Delete ():Bool",
+                    "description": "Метод удаления субъекта."
+                },
+                {
+                    "name": "DeleteUnlocked",
+                    "isMethod": true,
+                    "signature": "DeleteUnlocked ()",
+                    "description": "Метод удаляет субъект, независимо от имеющегося обслуживания, а также если такой субъект не закрыт."
+                },
+                {
+                    "name": "InsertRetail",
+                    "isMethod": true,
+                    "signature": "InsertRetail ()",
+                    "description": "Метод вставки клиента физического лица для Розничного обслуживания для текущего подразделения."
+                },
+                {
+                    "name": "IsOwned",
+                    "isMethod": true,
+                    "signature": "IsOwned (PartyKind:Integer):Bool",
+                    "description": "Метод определяет принадлежность субъекта вида PartyKind."
+                },
+                {
+                    "name": "Lock",
+                    "isMethod": true,
+                    "signature": "Lock ():Bool",
+                    "description": "Метод блокировки обновления информации о субъекте в базе данных."
+                },
+                {
+                    "name": "Officer",
+                    "isMethod": true,
+                    "signature": "Officer ():Object",
+                    "description": "Метод возвращает объект класса RsbOfficer."
+                },
+                {
+                    "name": "PartyCheckECUPRID",
+                    "isMethod": true,
+                    "signature": "PartyCheckECUPRID ():Object",
+                    "description": "Метод возвращает объект класса TRsbPartyCheckECUPRID."
+                },
+                {
+                    "name": "PartyContact",
+                    "isMethod": true,
+                    "signature": "PartyContact ():Object",
+                    "description": "Метод возвращает объект типа RsbPartyContact, содержащий способы связи текущего субъекта, и позиционирует объект класса на первую запись способов связи текущего субъекта."
+                },
+                {
+                    "name": "PartyNote",
+                    "isMethod": true,
+                    "signature": "PartyNote ():Object",
+                    "description": "Метод возвращает объект класса RsbPtNote, предназначенный для работы с примечаниями, заданными для субъекта."
+                },
+                {
+                    "name": "PartyPFProp",
+                    "isMethod": true,
+                    "signature": "PartyPFProp ():Object",
+                    "description": "Метод возвращает объект класса RsbPartyPFPropRSL, содержащий реквизиты ПФР."
+                },
+                {
+                    "name": "PartyRegDoc",
+                    "isMethod": true,
+                    "signature": "PartyRegDoc (RegPartyKind:Integer, RegDocKind:Integer [, DocDate:Date]):Object",
+                    "description": "Метод возвращает объект типа RsbPartyRegDoc, соответствующий виду регистрационного документа RegDocKind, который выдан субъекту регистрирующим органом RegPartyKind."
+                },
+                {
+                    "name": "PersonCitizen",
+                    "isMethod": true,
+                    "signature": "PersonCitizen ():Object",
+                    "description": "Метод возвращает объект типа RsbPersonCitizen, если субъект является физическим лицом."
+                },
+                {
+                    "name": "PersonPaper",
+                    "isMethod": true,
+                    "signature": "PersonPaper (PaperKind:Integer):Object",
+                    "description": "Метод возвращает объект класса RsbPersonPaper удостоверяющего документа вида PaperKind."
+                },
+                {
+                    "name": "PersonNote",
+                    "isMethod": true,
+                    "signature": "PersonNote ():Object",
+                    "description": "Метод возвращает объект класса RsbPtNote, предназначенный для работы с примечаниями, заданными для физического лица."
+                },
+                {
+                    "name": "ResidentHist",
+                    "isMethod": true,
+                    "signature": "ResidentHist ():Object",
+                    "description": "Метод возвращает объект типа \"История резидентности субъекта\"."
+                },
+                {
+                    "name": "TaxExemp",
+                    "isMethod": true,
+                    "signature": "TaxExemp ():Object",
+                    "description": "Метод возвращает объект типа \"Сведения о налоговых освобождениях\"."
+                },
+                {
+                    "name": "Update",
+                    "isMethod": true,
+                    "signature": "Update ():Integer",
+                    "description": "Метод записывает изменения информации о субъекте в базу данных."
+                },
+                {
+                    "name": "UnLock",
+                    "isMethod": true,
+                    "signature": "UnLock ():Bool",
+                    "description": "Метод получает значение признака, разрешающего обновление информации о субъекте в базе данных."
+                }
+            ]
+        },
+        {
+            "name": "RsbPartyAddress",
+            "summary": "Класс адреса субъекта.",
+            "members": [
+                {
+                    "name": "Address",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Сформированная строка адреса."
+                },
+                {
+                    "name": "AddressType",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Тип адреса."
+                },
+                {
+                    "name": "Building",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Строение."
+                },
+                {
+                    "name": "CodeDistrict",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Краткое наименование вида города."
+                },
+                {
+                    "name": "CodePlace",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Тип населенного пункта."
+                },
+                {
+                    "name": "CodePlan",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Тип планировочной структуры."
+                },
+                {
+                    "name": "CodeProvince",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Краткое наименование вида района."
+                },
+                {
+                    "name": "CodeRegion",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Наименование типа населенного пункта."
+                },
+                {
+                    "name": "CodeStreet",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Наименование типа улицы."
+                },
+                {
+                    "name": "Country",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Код страны."
+                },
+                {
+                    "name": "District",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Наименование города."
+                },
+                {
+                    "name": "EMail",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Адрес электронной почты."
+                },
+                {
+                    "name": "FaxNumber",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Факс."
+                },
+                {
+                    "name": "Fias",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Код ФИАС."
+                },
+                {
+                    "name": "Flat",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Квартира."
+                },
+                {
+                    "name": "House",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Дом."
+                },
+                {
+                    "name": "Kladr",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Код КЛАДР."
+                },
+                {
+                    "name": "MobilePhone",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Номер мобильного телефона."
+                },
+                {
+                    "name": "MobileProvider",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Оператор мобильной связи."
+                },
+                {
+                    "name": "NumCorps",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Корпус."
+                },
+                {
+                    "name": "Okato",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Код ОКАТО."
+                },
+                {
+                    "name": "Oktmo",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Код ОКТМО."
+                },
+                {
+                    "name": "PhoneNumber",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Номер телефона."
+                },
+                {
+                    "name": "PhoneNumberAd",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Дополнительный номер телефона."
+                },
+                {
+                    "name": "Place",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Населенный пункт."
+                },
+                {
+                    "name": "Plan",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Планировочная структура."
+                },
+                {
+                    "name": "PostIndex",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Почтовый индекс."
+                },
+                {
+                    "name": "Province",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Район."
+                },
+                {
+                    "name": "Region",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Регион."
+                },
+                {
+                    "name": "RegionNumber",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Числовой код региона."
+                },
+                {
+                    "name": "RS_Mail_Country",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Код страны в системе RS-Mail."
+                },
+                {
+                    "name": "RS_Mail_Node",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Номер узла в системе RS-Mail."
+                },
+                {
+                    "name": "RS_Mail_Region",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Код района в системе RS-Mail."
+                },
+                {
+                    "name": "Telegraph",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Телеграф."
+                },
+                {
+                    "name": "TelexNumber",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Телекс."
+                },
+                {
+                    "name": "Territory",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Код территории."
+                },
+                {
+                    "name": "Delete",
+                    "isMethod": true,
+                    "signature": "Delete()",
+                    "description": "Метод позволяет удалить адрес субъекта."
+                },
+                {
+                    "name": "FiasGuid",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "GUID адресного объекта или дома (AOGUID или HOUSEGUID) из ФИАС."
+                },
+                {
+                    "name": "Street",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "улица (к адресу)."
+                },
+                {
+                    "name": "First",
+                    "isMethod": true,
+                    "signature": "First ():Bool",
+                    "description": "Метод предназначен для выбора первого адреса из списка."
+                },
+                {
+                    "name": "Next",
+                    "isMethod": true,
+                    "signature": "Next ():Bool",
+                    "description": "Метод предназначен для выбора следующего адреса из списка."
+                },
+                {
+                    "name": "Last",
+                    "isMethod": true,
+                    "signature": "Last ():Bool",
+                    "description": "Метод предназначен для выбора последнего адреса из списка."
+                },
+                {
+                    "name": "Previous",
+                    "isMethod": true,
+                    "signature": "Previous ():Bool",
+                    "description": "Метод предназначен для выбора предыдущего адреса из списка."
+                }
+            ]
+        },
+        {
+            "name": "RsbPartyCheckECUPRID",
+            "summary": "Класс – обертка над сущностью \"Проверки субъектов в ЕС УПРИД\".",
+            "members": [
+                {
+                    "name": "CheckDate",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "Дата последнего вызова интерфейса RS-Connect."
+                },
+                {
+                    "name": "CheckTime",
+                    "isMethod": false,
+                    "typeName": "Time",
+                    "description": "Время вызова."
+                },
+                {
+                    "name": "MessageID",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Идентификатор первичного запроса к RS-Connect."
+                },
+                {
+                    "name": "ObjectID",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Идентификатор учетного объекта в RS-Connect."
+                },
+                {
+                    "name": "Oper",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Пользователь."
+                },
+                {
+                    "name": "PersonID",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Системный идентификатор проверяемого субъекта."
+                },
+                {
+                    "name": "RecID",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Идентификатор записи."
+                },
+                {
+                    "name": "ReturnCode",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Код ошибки, полученный от ЕC УПРИД в результате выполнения запроса."
+                },
+                {
+                    "name": "StatusCode",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Код статуса обработки последнего выполненного запроса в RS-Connect."
+                },
+                {
+                    "name": "Add",
+                    "isMethod": true,
+                    "signature": "Add():Integer",
+                    "description": "Метод добавляет запись в базу."
+                },
+                {
+                    "name": "Delete",
+                    "isMethod": true,
+                    "signature": "Delete ():Integer",
+                    "description": "Метод удаляет текущую запись."
+                },
+                {
+                    "name": "First",
+                    "isMethod": true,
+                    "signature": "First ():Integer",
+                    "description": "Метод устанавливает позицию на первую запись в базе."
+                },
+                {
+                    "name": "GetByRecID",
+                    "isMethod": true,
+                    "signature": "GetByRecID (RecID:Integer):Integer",
+                    "description": "Метод устанавливает свойства из базы по идентификатору записи."
+                }
+            ]
+        },
+        {
+            "name": "RsbPartyContact",
+            "summary": "Класс описывает способы связи субъекта.",
+            "members": [
+                {
+                    "name": "AddressType",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Тип адреса."
+                },
+                {
+                    "name": "ContactKind",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Вид способа связи."
+                },
+                {
+                    "name": "ContactType",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Тип способа связи."
+                },
+                {
+                    "name": "IsMain",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "Признак основного способа связи."
+                },
+                {
+                    "name": "Note",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Примечание."
+                },
+                {
+                    "name": "Provider",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Оператор."
+                },
+                {
+                    "name": "RecID",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Идентификатор записи."
+                },
+                {
+                    "name": "Value",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Значение."
+                },
+                {
+                    "name": "Add",
+                    "isMethod": true,
+                    "signature": "Add(ContactKind:Integer, AddressType:Integer, ContactType:Integer, Value:String):Integer",
+                    "description": "Метод создает новый способ связи субъекта с заданным параметром."
+                },
+                {
+                    "name": "Delete",
+                    "isMethod": true,
+                    "signature": "Delete ():Integer",
+                    "description": "Метод удаляет запись о способе связи."
+                },
+                {
+                    "name": "First",
+                    "isMethod": true,
+                    "signature": "First ():Bool",
+                    "description": "Метод позволяет спозиционировать класс на первый способ связи."
+                },
+                {
+                    "name": "GetByRecID",
+                    "isMethod": true,
+                    "signature": "GetByRecID (RecID:Integer):Integer",
+                    "description": "Метод позволяет получить способ связи по идентификатору."
+                },
+                {
+                    "name": "GetMain",
+                    "isMethod": true,
+                    "signature": "GetMain (ContactKind:Integer, AddressType:Integer, ContactType:Integer):Integer",
+                    "description": "Метод позволяет получить основной способ связи для записи со значениями полей \"вид способа\", \"тип адреса\" и \"тип способа\"."
+                },
+                {
+                    "name": "Last",
+                    "isMethod": true,
+                    "signature": "Last ():Bool",
+                    "description": "Метод позволяет спозиционировать класс на последний способ связи."
+                },
+                {
+                    "name": "Next",
+                    "isMethod": true,
+                    "signature": "Next ():Bool",
+                    "description": "Метод позволяет спозиционировать класс на следующий способ связи."
+                },
+                {
+                    "name": "Previous",
+                    "isMethod": true,
+                    "signature": "Previous ():Bool",
+                    "description": "Метод позволяет спозиционировать класс на предыдущий способ связи."
+                },
+                {
+                    "name": "SetIsMain",
+                    "isMethod": true,
+                    "signature": "SetIsMain (IsMain:Bool):Integer",
+                    "description": "Метод позволяет установить признак основного способа связи."
+                },
+                {
+                    "name": "SetValue",
+                    "isMethod": true,
+                    "signature": "SetValue (Value:String):Integer",
+                    "description": "Метод позволяет установить значение способа связи."
+                }
+            ]
+        },
+        {
+            "name": "RsbPartyPFPropRSL",
+            "summary": "Класс реквизитов ПФР субъекта-физического лица.",
+            "members": [
+                {
+                    "name": "PersonID",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Системный идентификатор проверяемого субъекта."
+                },
+                {
+                    "name": "RecID",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Автоинкримент."
+                },
+                {
+                    "name": "RegionCode",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Код района ПФР."
+                },
+                {
+                    "name": "RegNumber",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Регистрационный номер ПФР."
+                },
+                {
+                    "name": "SynchDate",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "Признак синхронизации данных с ПФР."
+                },
+                {
+                    "name": "Add",
+                    "isMethod": true,
+                    "signature": "Add():Integer",
+                    "description": "Метод добавляет запись реквизитов ПФР."
+                },
+                {
+                    "name": "Delete",
+                    "isMethod": true,
+                    "signature": "Delete ():Integer",
+                    "description": "Метод удаляет запись реквизитов ПФР."
+                },
+                {
+                    "name": "First",
+                    "isMethod": true,
+                    "signature": "First ():Bool",
+                    "description": "Метод предназначен для получения первой и единственной записи реквизитов ПФР у субъекта."
+                },
+                {
+                    "name": "GetByRecID",
+                    "isMethod": true,
+                    "signature": "GetByRecID (ID:Integer):Integer",
+                    "description": "Метод предназначен для получения записи по уникальному идентификатору."
+                }
+            ]
+        },
+        {
+            "name": "RsbPartyRegDoc",
+            "summary": "Класс является классом регистрационного документа субъекта.",
+            "members": [
+                {
+                    "name": "BankDate",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "Дата операционного дня."
+                },
+                {
+                    "name": "DocDate",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "Дата ввода документа в систему."
+                },
+                {
+                    "name": "DocumentID",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Идентификатор документа."
+                },
+                {
+                    "name": "FinishDate",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "Дата окончания действия документа."
+                },
+                {
+                    "name": "IsClosed",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "Признак \"Документ недействителен\"."
+                },
+                {
+                    "name": "IsEmpty",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "Признак наличия документа с заданными параметрами."
+                },
+                {
+                    "name": "IsMain",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "Признак \"Основной регистрационный документ\"."
+                },
+                {
+                    "name": "Number",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Номер документа."
+                },
+                {
+                    "name": "ObjectID",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Идентификатор объекта."
+                },
+                {
+                    "name": "OldCode",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Устаревший регистрационный номер."
+                },
+                {
+                    "name": "RegDocKind",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Идентификатор вида регистрационного документа."
+                },
+                {
+                    "name": "RegPartyID",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Идентификатор регистрирующего органа."
+                },
+                {
+                    "name": "RegPartyKind",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Идентификатор вида регистрирующего органа."
+                },
+                {
+                    "name": "RegPlace",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Место регистрации."
+                },
+                {
+                    "name": "Series",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Серия документа."
+                },
+                {
+                    "name": "StartDate",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "Дата начала действия документа."
+                },
+                {
+                    "name": "UserID",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Номер операциониста."
+                },
+                {
+                    "name": "Add",
+                    "isMethod": true,
+                    "signature": "Add(RegPartyKind:Integer, RegDocKind:Integer [, DocDate:Date]):Bool",
+                    "description": "Метод предназначен для добавления регистрационного документа."
+                },
+                {
+                    "name": "Delete",
+                    "isMethod": true,
+                    "signature": "Delete ():Bool",
+                    "description": "Метод позволяет удалить регистрационный документ."
+                },
+                {
+                    "name": "First",
+                    "isMethod": true,
+                    "signature": "First ():Bool",
+                    "description": "Метод предназначен для выбора первого документа из списка."
+                },
+                {
+                    "name": "Next",
+                    "isMethod": true,
+                    "signature": "Next ():Bool",
+                    "description": "Метод предназначен для выбора следующего документа из списка."
+                },
+                {
+                    "name": "Last",
+                    "isMethod": true,
+                    "signature": "Last ():Bool",
+                    "description": "Метод предназначен для выбора последнего документа из списка."
+                },
+                {
+                    "name": "Previous",
+                    "isMethod": true,
+                    "signature": "Previous ():Bool",
+                    "description": "Метод предназначен для выбора предыдущего документа из списка."
+                }
+            ]
+        },
+        {
+            "name": "RsbPartyTaxExemp",
+            "summary": "Класс описывает сведения о налоговых освобождениях субъекта.",
+            "members": [
+                {
+                    "name": "EndDate",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "Дата окончания действия."
+                },
+                {
+                    "name": "HasConfirm",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "Признак наличия годового подтверждения права на доход."
+                },
+                {
+                    "name": "ID",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Идентификатор."
+                },
+                {
+                    "name": "IssueDate",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "Дата выдачи."
+                },
+                {
+                    "name": "Recieved",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "Дата предоставления."
+                },
+                {
+                    "name": "StartDate",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "Дата начала действия."
+                },
+                {
+                    "name": "Storage",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Место хранения."
+                },
+                {
+                    "name": "Add",
+                    "isMethod": true,
+                    "signature": "Add(StartDate:Date, HasConfirm:Bool, Storage:String, [Note1:String], [Note2:String], [Note3:String], [Note4:String], [Note5:String]):Bool",
+                    "description": "Метод предназначен для создания новой записи \"Сведения о налоговых освобождениях\"."
+                },
+                {
+                    "name": "Note",
+                    "isMethod": false,
+                    "typeName": "Variant",
+                    "description": "текст примечания."
+                },
+                {
+                    "name": "Delete",
+                    "isMethod": true,
+                    "signature": "Delete ():Bool",
+                    "description": "Метод предназначен для удаления записи о налоговом освобождении."
+                },
+                {
+                    "name": "First",
+                    "isMethod": true,
+                    "signature": "First ():Bool",
+                    "description": "Метод используется для позиционирования класса на первой записи."
+                },
+                {
+                    "name": "Last",
+                    "isMethod": true,
+                    "signature": "Last ():Bool",
+                    "description": "Метод используется для позиционирования класса на последней записи."
+                },
+                {
+                    "name": "Next",
+                    "isMethod": true,
+                    "signature": "Next ():Bool",
+                    "description": "Метод используется для позиционирования класса на следующей записи."
+                },
+                {
+                    "name": "Previous",
+                    "isMethod": true,
+                    "signature": "Previous ():Bool",
+                    "description": "Метод используется для позиционирования класса на предыдущей записи."
+                },
+                {
+                    "name": "SetNote",
+                    "isMethod": true,
+                    "signature": "SetNote (Note:String, [NoteID:Integer]):Bool",
+                    "description": "Метод предназначен для установки примечания"
+                }
+            ]
+        },
+        {
+            "name": "RsbPersonCitizen",
+            "summary": "Класс описывает гражданства субъекта – физического лица.",
+            "members": [
+                {
+                    "name": "CountryCodeLat3",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Трехбуквенный код страны по справочнику стран по ISO."
+                },
+                {
+                    "name": "PaperKind",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Вид документа, удостоверяющего личность."
+                },
+                {
+                    "name": "TerritoryID",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Системный идентификатор территории страны."
+                },
+                {
+                    "name": "Add",
+                    "isMethod": true,
+                    "signature": "Add(CountryCodeLat3:String, [TerritoryID:Integer], [PaperKind:Integer]):Integer",
+                    "description": "Метод предназначен для добавления новой записи гражданства субъекта – физического лица с заданными параметрами."
+                },
+                {
+                    "name": "Delete",
+                    "isMethod": true,
+                    "signature": "Delete ():Bool",
+                    "description": "Метод позволяет удалить запись гражданства субъекта – физического лица."
+                },
+                {
+                    "name": "First",
+                    "isMethod": true,
+                    "signature": "First ():Bool",
+                    "description": "Метод предназначен для выбора первой записи гражданства субъекта – физического лица из списка."
+                },
+                {
+                    "name": "GetByCountryLat3",
+                    "isMethod": true,
+                    "signature": "GetByCountryLat3 (CountryCodeLat3:String):Integer",
+                    "description": "Метод предназначен для добавления новой записи гражданства субъекта – физического лица с заданными параметрами."
+                },
+                {
+                    "name": "Last",
+                    "isMethod": true,
+                    "signature": "Last ():Bool",
+                    "description": "Метод предназначен для выбора последней записи гражданства субъекта – физического лица из списка."
+                },
+                {
+                    "name": "Next",
+                    "isMethod": true,
+                    "signature": "Next ():Bool",
+                    "description": "Метод предназначен для выбора следующей записи гражданства субъекта – физического лица из списка."
+                },
+                {
+                    "name": "Previous",
+                    "isMethod": true,
+                    "signature": "Previous ():Bool",
+                    "description": "Метод предназначен для выбора предыдущей записи гражданства субъекта – физического лица из списка."
+                }
+            ]
+        },
+        {
+            "name": "RsbPersonPaper",
+            "summary": "Класс удостоверяющего документа физического лица.",
+            "members": [
+                {
+                    "name": "IsMain",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "Признак основного удостоверяющего документа."
+                },
+                {
+                    "name": "IssuedDate",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "Дата выдачи документа, удостоверяющего личность."
+                },
+                {
+                    "name": "Issuer",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Наименование организации, выдавшей документ."
+                },
+                {
+                    "name": "IssuerCode",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Код организации, выдавшей документ."
+                },
+                {
+                    "name": "Number",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Номер документа, удостоверяющего личность."
+                },
+                {
+                    "name": "PaperKind",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Вид документа, удостоверяющего личность."
+                },
+                {
+                    "name": "Series",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Серия документа, удостоверяющего личность."
+                },
+                {
+                    "name": "Delete",
+                    "isMethod": true,
+                    "signature": "Delete():Bool",
+                    "description": "Метод позволяет удалить удостоверение."
+                },
+                {
+                    "name": "ValidToDate",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "дата окончания действия документа (устанавливается только для вида документа, для которого разрешено задавать дату окончания)."
+                },
+                {
+                    "name": "First",
+                    "isMethod": true,
+                    "signature": "First ():Bool",
+                    "description": "Метод предназначен для выбора первого документа из списка."
+                },
+                {
+                    "name": "Next",
+                    "isMethod": true,
+                    "signature": "Next ():Bool",
+                    "description": "Метод предназначен для выбора следующего документа из списка."
+                },
+                {
+                    "name": "Last",
+                    "isMethod": true,
+                    "signature": "Last ():Bool",
+                    "description": "Метод предназначен для выбора последнего документа из списка."
+                },
+                {
+                    "name": "Previous",
+                    "isMethod": true,
+                    "signature": "Previous ():Bool",
+                    "description": "Метод предназначен для выбора предыдущего документа из списка."
+                }
+            ]
+        },
+        {
+            "name": "RsbPersonPlaceWork",
+            "summary": "Класс сведений о трудоустройстве физического лица.",
+            "members": [
+                {
+                    "name": "Date",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "Дата трудоустройства субъекта."
+                },
+                {
+                    "name": "ID",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Уникальный идентификатор записи."
+                },
+                {
+                    "name": "INN",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "ИНН работодателя субъекта."
+                },
+                {
+                    "name": "IsMain",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "Основное место работы субъекта."
+                },
+                {
+                    "name": "OGRN",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "ОГРН работодателя субъекта."
+                },
+                {
+                    "name": "PlaceWork",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Текстовое описание места работы субъекта."
+                },
+                {
+                    "name": "Post",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Наименование занимаемой субъектом должности."
+                },
+                {
+                    "name": "PostType",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Тип должности субъекта."
+                },
+                {
+                    "name": "Add",
+                    "isMethod": true,
+                    "signature": "Add(PlaceWork:String, Post:String):Bool",
+                    "description": "Метод предназначен для создания новой записи \"Сведения о трудоустройстве физического лица\"."
+                },
+                {
+                    "name": "Delete",
+                    "isMethod": true,
+                    "signature": "Delete ():Bool",
+                    "description": "Метод позволяет удалять запись о трудоустройстве физического лица."
+                },
+                {
+                    "name": "First",
+                    "isMethod": true,
+                    "signature": "First ():Bool",
+                    "description": "Метод позволяет спозиционировать класс на первую запись."
+                },
+                {
+                    "name": "GetMain",
+                    "isMethod": true,
+                    "signature": "GetMain ():Bool",
+                    "description": "Метод позволяет получить основную запись \"Сведения о трудоустройстве физического лица\"."
+                },
+                {
+                    "name": "Last",
+                    "isMethod": true,
+                    "signature": "Last ():Bool",
+                    "description": "Метод позволяет спозиционировать класс на последнюю запись."
+                },
+                {
+                    "name": "Next",
+                    "isMethod": true,
+                    "signature": "Next ():Bool",
+                    "description": "Метод позволяет спозиционировать класс на следующую запись."
+                },
+                {
+                    "name": "Previous",
+                    "isMethod": true,
+                    "signature": "Previous ():Bool",
+                    "description": "Метод позволяет спозиционировать класс на предыдущую запись."
+                },
+                {
+                    "name": "SetIsMain",
+                    "isMethod": true,
+                    "signature": "SetIsMain (IsMain:Bool):Bool",
+                    "description": "Метод позволяет при установке значения true для редактируемой записи, сбрасывать аналогичное значение для остальных записей."
+                }
+            ]
+        },
+        {
+            "name": "RsbPtCode",
+            "summary": "Объект класса предоставляет доступ к кодам субъекта.",
+            "members": [
+                {
+                    "name": "CloseCode",
+                    "isMethod": true,
+                    "signature": "CloseCode(CodeKind:Integer, CloseDate:Date):Bool",
+                    "description": "Метод закрытия кода указанного вида."
+                },
+                {
+                    "name": "DeleteAll",
+                    "isMethod": true,
+                    "signature": "DeleteAll ():Bool",
+                    "description": "Метод позволяет удалить все коды для данного объекта экономики."
+                },
+                {
+                    "name": "DeleteCode",
+                    "isMethod": true,
+                    "signature": "DeleteCode (CodeKind:Integer):Bool",
+                    "description": "Метод удаляет код субъекта вида CodeKind."
+                },
+                {
+                    "name": "First",
+                    "isMethod": true,
+                    "signature": "First (CodeBuff:TRecHandler):Bool",
+                    "description": "Метод предназначен для выбора первого кода из списка."
+                },
+                {
+                    "name": "GetCode",
+                    "isMethod": true,
+                    "signature": "GetCode (CodeKind:Integer):String",
+                    "description": "Метод предназначен для получения кода субъекта вида CodeKind."
+                },
+                {
+                    "name": "IsCloseCode",
+                    "isMethod": true,
+                    "signature": "IsCloseCode (CodeKind:Integer):Bool",
+                    "description": "Метод возвращает значение TRUE, если код субъекта вида CodeKind закрыт."
+                },
+                {
+                    "name": "IsExist",
+                    "isMethod": true,
+                    "signature": "IsExist (CodeKind:Integer):Bool",
+                    "description": "Метод определяет, существует ли код вида CodeKind субъекта."
+                },
+                {
+                    "name": "Last",
+                    "isMethod": true,
+                    "signature": "Last (CodeBuff:TRecHandler):Bool",
+                    "description": "Метод предназначен для выбора последнего кода из списка."
+                },
+                {
+                    "name": "Next",
+                    "isMethod": true,
+                    "signature": "Next (CodeBuff:TRecHandler):Bool",
+                    "description": "Метод предназначен для выбора следующего кода из списка."
+                },
+                {
+                    "name": "OpenCode",
+                    "isMethod": true,
+                    "signature": "OpenCode (CodeKind:Integer):Bool",
+                    "description": "Метод открывает закрытый код вида CodeKind."
+                },
+                {
+                    "name": "Previous",
+                    "isMethod": true,
+                    "signature": "Previous (CodeBuff:TRecHandler):Bool",
+                    "description": "Метод предназначен для выбора предыдущего кода из списка."
+                },
+                {
+                    "name": "SetCode",
+                    "isMethod": true,
+                    "signature": "SetCode (CodeKind:Integer, NewVal:String [, StartDate:Date] [, EndDate:Date]):Bool",
+                    "description": "Метод изменяет или добавляет код вида CodeKind на значение NewVal."
+                }
+            ]
+        },
+        {
+            "name": "RsbPtNote",
+            "summary": "Класс примечаний субъекта.",
+            "members": [
+                {
+                    "name": "AddNote",
+                    "isMethod": true,
+                    "signature": "AddNote(NoteKind:Integer, Note:Variant, Date:Date):Integer",
+                    "description": "Метод предназначен для добавления примечания для субъекта."
+                },
+                {
+                    "name": "DelNote",
+                    "isMethod": true,
+                    "signature": "DelNote (NoteKind:Integer):Integer",
+                    "description": "Метод предназначен для удаления примечания субъекта."
+                },
+                {
+                    "name": "GetFirst",
+                    "isMethod": true,
+                    "signature": "GetFirst (Date:Date, Note:Record):Integer",
+                    "description": "Метод возвращает первое примечание для субъекта за требуемую дату."
+                },
+                {
+                    "name": "GetNext",
+                    "isMethod": true,
+                    "signature": "GetNext (Note:Record):Integer",
+                    "description": "Метод возвращает следующее примечание субъекта."
+                },
+                {
+                    "name": "ReadNote",
+                    "isMethod": true,
+                    "signature": "ReadNote (NoteKind:Integer, Date:Date):Variant",
+                    "description": "Метод возвращает значение примечания заданного вида для объекта за требуемую дату."
+                }
+            ]
+        },
+        {
+            "name": "RsbResidentHist",
+            "summary": "Класс предназначен для ведения истории резидентности субъекта.",
+            "members": [
+                {
+                    "name": "Date",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "Дата начала действия."
+                },
+                {
+                    "name": "IsStateless",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "Признак, определяющий, что физическое лицо является лицом без гражданства."
+                },
+                {
+                    "name": "OfshoreZone",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Оффшорная зона, резидентом которой является субъект."
+                },
+                {
+                    "name": "RecID",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Уникальный идентификатор записи."
+                },
+                {
+                    "name": "Add",
+                    "isMethod": true,
+                    "signature": "Add(Date:Date, NRCountry:String, NotResident:Bool, IsStateless:Bool, OfshoreZone:Integer):Integer",
+                    "description": "Метод позволяет создать новую запись."
+                },
+                {
+                    "name": "NotResident",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "признак, определяющий, что субъект не является резидентом страны резидентности банка (т.е."
+                },
+                {
+                    "name": "NRCountry",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "страна резидентства (для физических лиц – страна гражданства), параметр представляет собой ссылку на запись страны в справочнике стран по ISO."
+                },
+                {
+                    "name": "Delete",
+                    "isMethod": true,
+                    "signature": "Delete ():Bool",
+                    "description": "Метод позволяет удалить запись."
+                },
+                {
+                    "name": "First",
+                    "isMethod": true,
+                    "signature": "First ():Bool",
+                    "description": "Метод позволяет спозиционировать класс на первую запись."
+                },
+                {
+                    "name": "Get",
+                    "isMethod": true,
+                    "signature": "Get (RecID:Integer):Integer",
+                    "description": "Метод позволяет получить запись по идентификатору."
+                },
+                {
+                    "name": "Last",
+                    "isMethod": true,
+                    "signature": "Last ():Bool",
+                    "description": "Метод позволяет спозиционировать класс на последнюю запись."
+                },
+                {
+                    "name": "Next",
+                    "isMethod": true,
+                    "signature": "Next ():Bool",
+                    "description": "Метод позволяет спозиционировать класс на следующую запись."
+                },
+                {
+                    "name": "Previous",
+                    "isMethod": true,
+                    "signature": "Previous ():Bool",
+                    "description": "Метод позволяет спозиционировать класс на предыдущую запись."
+                }
+            ]
+        },
+        {
+            "name": "TRsbLegalProxyList",
+            "summary": "Класс предназначен для ведения сведений о доверенности.",
+            "members": [
+                {
+                    "name": "First",
+                    "isMethod": true,
+                    "signature": "First():Bool",
+                    "description": "Метод позволяет перейти к первому элементу."
+                },
+                {
+                    "name": "Account",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "номер лицевого счета, к которому относятся данные о доверенности."
+                },
+                {
+                    "name": "BeginDate",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "дата начала действия доверенности."
+                },
+                {
+                    "name": "ChangeDate",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "дата изменения записи."
+                },
+                {
+                    "name": "ChangeTime",
+                    "isMethod": false,
+                    "typeName": "Time",
+                    "description": "время изменения записи."
+                },
+                {
+                    "name": "EndDate",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "дата окончания действия доверенности."
+                },
+                {
+                    "name": "Fi",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "системный код валюты."
+                },
+                {
+                    "name": "Ground",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "основание выдачи."
+                },
+                {
+                    "name": "ID",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "системный идентификатор экземпляра сведений о доверенности."
+                },
+                {
+                    "name": "IsClosed",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "признак закрытой доверенности."
+                },
+                {
+                    "name": "IsEmpty",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "признак наличия документа с заданными параметрами."
+                },
+                {
+                    "name": "NoOperPriv",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "признак запрета на право совершения финансовых операций."
+                },
+                {
+                    "name": "Number",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "номер доверенности."
+                },
+                {
+                    "name": "Oper",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "операционист, изменивший запись."
+                },
+                {
+                    "name": "PartyID",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "субъект экономики."
+                },
+                {
+                    "name": "ProxyID",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "доверенное лицо."
+                },
+                {
+                    "name": "RejectGround",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "причина отмены."
+                },
+                {
+                    "name": "Size",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "количество элементов в контейнере."
+                },
+                {
+                    "name": "Last",
+                    "isMethod": true,
+                    "signature": "Last ():Bool",
+                    "description": "Метод позволяет перейти к последнему элементу."
+                },
+                {
+                    "name": "Move",
+                    "isMethod": true,
+                    "signature": "Move (index:Integer):Bool",
+                    "description": "Метод позволяет перейти к определенному элементу."
+                },
+                {
+                    "name": "Next",
+                    "isMethod": true,
+                    "signature": "Next ():Bool",
+                    "description": "Метод позволяет перейти к следующему элементу."
+                },
+                {
+                    "name": "Previous",
+                    "isMethod": true,
+                    "signature": "Previous ():Bool",
+                    "description": "Метод позволяет перейти к предыдущему элементу."
+                }
+            ]
+        }
+    ],
+    "procedures": [
+        {
+            "name": "Batch_CBDK_SyncParty",
+            "signature": "Batch_CBDK_SyncParty([PartyList:String, ] UseSynch:Bool [, BeginDate:Date] [, BeginTime:Time] [, Enddate:Date] [, EndTime:Time]):Integer",
+            "description": "Предназначена для вызова пакетной синхронизации субъектов с ЦБД клиентов."
+        },
+        {
+            "name": "CB_CheckPersnIDCAllow",
+            "signature": "CB_CheckPersnIDCAllow(PaperKind:Integer, NotResident:Bool, IsStateless:Bool, Born:Date):Integer",
+            "description": "Предназначена для проверки допустимости использования документа в качестве удостоверения личности."
+        },
+        {
+            "name": "CB_DeleteNotetextHist",
+            "signature": "CB_DeleteNotetextHist(ID:Integer):Integer",
+            "description": "Предназначена для удаления примечания."
+        },
+        {
+            "name": "CB_DelPtProxy",
+            "signature": "CB_DelPtProxy(PartyID:Integer, ProxyID:Integer):Integer",
+            "description": "Предназначена для удаления субъекта-представителя."
+        },
+        {
+            "name": "CB_GetListPtProxy",
+            "signature": "CB_GetListPtProxy(PartyID:Integer, PtPrxArray:TArray):Integer",
+            "description": "Предназначена для получения списка представителей субъекта."
+        },
+        {
+            "name": "CB_InsertNotetextHist",
+            "signature": "CB_InsertNotetextHist(ObjectType:Integer, DocumentID:String, NoteKind:Integer, Date:Date, ValidToDate:Date, NoteValue:Variant, ID:Integer):Integer",
+            "description": "Предназначена для создания примечания."
+        },
+        {
+            "name": "CB_ListPartyPtProxy",
+            "signature": "CB_ListPartyPtProxy(PartyID:Integer, UseProxyList:Bool, recptproxy:Record):Integer",
+            "description": "Предназначена для выбора представителя из справочника субъектов."
+        },
+        {
+            "name": "CB_ListPtProxy",
+            "signature": "CB_ListPtProxy(PartyID:Integer, recptproxy:Record):Integer",
+            "description": "Предназначена для выбора представителя субъекта."
+        },
+        {
+            "name": "CB_SetPtProxy",
+            "signature": "CB_SetPtProxy(recptproxy:Record):Integer",
+            "description": "Предназначена для выбора представителя субъекта."
+        },
+        {
+            "name": "CB_UpdateNotetextHist",
+            "signature": "CB_UpdateNotetextHist(ID:Integer, Date:Date, ValidToDate:Date[, NoteValue:Variant]):Integer",
+            "description": "Предназначена для обновления примечания."
+        },
+        {
+            "name": "CBDK_FindPartyPanel",
+            "signature": "CBDK_FindPartyPanel(Fields:Object, Party:Object, Result:Integer):Integer",
+            "description": "Предназначена для вызова панели поиска субъекта в ЦБД клиента."
+        },
+        {
+            "name": "FindAdressContactValue",
+            "signature": "FindAdressContactValue(Addr:Record, ContactField:Integer, Value:String, Provider:String):Integer",
+            "description": "Предназначена для поиска информации о способах связи субъекта экономики."
+        },
+        {
+            "name": "FindSETTACC_PMAUTO",
+            "signature": "FindSETTACC_PMAUTO(PartyID:Integer, FIKind:Integer, FIID:Integer, ServiceKind:Integer, KindOper:Integer, Purpose:Integer, BankID:Integer, settacc:Record):Integer",
+            "description": "Выполняет поиск счета для расчета с субъектами при автогенерации платежей."
+        },
+        {
+            "name": "FoundSPI",
+            "signature": "FoundSPI(FIID: Integer, Account: String, [settac: Record]):Bool",
+            "description": "Ищет стандартную платежную инструкцию (СПИ) по номеру закрытого счета."
+        },
+        {
+            "name": "GetCapital",
+            "signature": "GetCapital(onDate:Date, SumOfCapital:Money):Integer",
+            "description": "Предназначена для получения значения капитала банка за указанную дату."
+        },
+        {
+            "name": "GetCorAcc",
+            "signature": "GetCorAcc(FIID:Integer, Corschem:Integer, KindAcc: Integer, String, Variant [, Origin:Bool, Variant]):Integer",
+            "description": "Возвращает номер счета из указанной в документе схемы расчетов."
+        },
+        {
+            "name": "GetFullBankName",
+            "signature": "GetFullBankName(PartyID:Integer):String",
+            "description": "С помощью процедуры формируется полное наименование банка."
+        },
+        {
+            "name": "GetKladrLevel1",
+            "signature": "GetKladrLevel1():Bool",
+            "description": "Определяет наличие в системе сведений об адресных объектах первого уровня КЛАДР (регионы)."
+        },
+        {
+            "name": "GetKladrLevel2",
+            "signature": "GetKladrLevel2():Bool",
+            "description": "Определяет наличие в системе сведений об адресных объектах второго уровня КЛАДР (районы)."
+        },
+        {
+            "name": "GetKladrLevel3",
+            "signature": "GetKladrLevel3():Bool",
+            "description": "Определяет наличие в системе сведений об адресных объектах третьего уровня КЛАДР (города)."
+        },
+        {
+            "name": "GetKladrLevel4",
+            "signature": "GetKladrLevel4():Bool",
+            "description": "Определяет наличие в системе сведений об адресных объектах четвертого уровня КЛАДР (населенные пункты)."
+        },
+        {
+            "name": "GetKladrLevel5",
+            "signature": "GetKladrLevel5():Bool",
+            "description": "Определяет наличие в системе сведений об адресных объектах пятого уровня КЛАДР (улицы)."
+        },
+        {
+            "name": "GetKladrLevel6",
+            "signature": "GetKladrLevel6():Bool",
+            "description": "Определяет наличие в системе сведений об адресных объектах шестого уровня КЛАДР (дома)."
+        },
+        {
+            "name": "GetNameClient",
+            "signature": "GetNameClient(regPath:String, Account: Record, Chapter:Integer [, CodeCurrency:Integer] [, IsPayer : Bool] [, IsAllowLegalForm : Bool]):String",
+            "description": "Получает наименование клиента-владельца счета."
+        },
+        {
+            "name": "GetOriginParty",
+            "signature": "GetOriginParty(PartyID:Integer [, PARTY:Record]):Integer",
+            "description": "Предназначена для получения структуры PARTY оригинального субъекта по внутреннему идентификатору PartyID дублера."
+        },
+        {
+            "name": "GetPartyNames",
+            "signature": "GetPartyNames(PartyID:Integer, NameTypeID:Integer [, UseHistory:Bool]):Array",
+            "description": "Предназначена для получения списка всех наименований субъекта."
+        },
+        {
+            "name": "GetPartyOnDate",
+            "signature": "GetPartyOnDate(PartyID:Integer, pDate:Date, [Party:File| Record| Tbfile| Trechandler], [BankDprt:File| Record| Tbfile| Trechandler], [PtBicDir:File| Record| Tbfile| Trechandler], [Persn:File| Record| Tbfile| Trechandler]):Integer",
+            "description": "Предназначена для получения параметров субъекта на заданную дату."
+        },
+        {
+            "name": "GetPersnIDCOnDate",
+            "signature": "GetPersnIDCOnDate(PersonID:Integer, PaperKind:Integer, OnDate:Date, PersnIDC:Record):Integer",
+            "description": "Предназначена для получения данных удостоверения личности физического лица на заданную дату."
+        },
+        {
+            "name": "GetPtOfficeState",
+            "signature": "GetPtOfficeState(PartyID:Integer, OrgDate:Date, Office:Integer|String [, officce_buff:TrecHandler] [, superior_buff:TrecHandler] [, Sort:Integer] [, DateBegin:Date] [, ErrMes:String]):Bool",
+            "description": "Определяет состояние подразделения (вышестоящее подразделение, номер сортировки и дата начала действия изменения) на указанную дату."
+        },
+        {
+            "name": "IsBankType",
+            "signature": "IsBankType(Party: File, Integer, Record Type:Integer):Bool",
+            "description": "Проверяет, является ли банк, заданный параметром Party, банком типа Type."
+        },
+        {
+            "name": "ListCorschem",
+            "signature": "ListCorschem(Corschem:Record [, Header:String] [, Flag:Integer, String]):Integer",
+            "description": "Предназначена для выбора корсхемы из списка корсхем, при этом возможен выбор из списка с установленным типом коротношений."
+        },
+        {
+            "name": "ListOrgStructure",
+            "signature": "ListOrgStructure(PartyID:Integer, OrgDate:Date, officce_buff:TrecHandler [, superior_buff:TrecHandler] [, OnlyForSuperiorID:Integer] [, NoChangeDate:Bool] [, SelectDate:Date]):Bool",
+            "description": "Осуществляет выбор подразделения и его вышестоящего подразделения из организационной структуры предприятия, построенной на дату OrgDate."
+        },
+        {
+            "name": "ListPT",
+            "signature": "ListPT(PARTY: File, Record, SelectCodeKind:Integer, SelectCode:Integer, PTLIST:Integer, PartyID:Integer, CodeKind:Integer, FromDate:Date, ToDate:Date):Bool",
+            "description": "Формирует список, используемый для выбора субъекта из справочника субъектов экономики."
+        },
+        {
+            "name": "ListPText",
+            "signature": "ListPText(PARTY:File, Record, PartyID:Integer, AddCond:String [, readOnly:Bool]):Bool",
+            "description": "С помощью процедуры формируется список, используемый для выбора субъекта из справочника субъектов экономики."
+        },
+        {
+            "name": "ParseRSMailString",
+            "signature": "ParseRSMailString(Value:String, Country:Integer, Region:Integer, Node:Integer):Integer",
+            "description": "Предназначена для получения компонентов RSMail.Country, RSMail.Region и RSMail.Node из значения способа связи субъекта экономики."
+        },
+        {
+            "name": "PartyAliesList",
+            "signature": "PartyAliesList(PartyID:Integer):Array",
+            "description": "Возвращает список наименований субъекта для сравнения."
+        },
+        {
+            "name": "PartyNameAdd",
+            "signature": "PartyNameAdd(Name:String, PartyID:Integer):Integer",
+            "description": "Предназначена для ввода псевдонима субъекта."
+        },
+        {
+            "name": "PartyNameFreqIncr",
+            "signature": "PartyNameFreqIncr(Name:String, PartyID:Integer):Integer",
+            "description": "Предназначена для увеличения параметра частоты использования псевдонима."
+        },
+        {
+            "name": "PDN_InsertPDNFINPROCPARTY",
+            "signature": "PDN_InsertPDNFINPROCPARTY(Rec:Record):Integer",
+            "description": "Предназначена для автоматизации регистрации фактов обработки персональных данных в прикладном исполняемом коде путём создания через вызовы API экземпляров сущностей \"Завершение обработки ПДн субъекта ПДн\"."
+        },
+        {
+            "name": "PDN_InsertPDNPARTYTARGET",
+            "signature": "PDN_InsertPDNPARTYTARGET(Rec:Record):Integer",
+            "description": "Предназначена для автоматизации регистрации фактов обработки персональных данных в прикладном исполняемом коде путём создания через вызовы API экземпляров сущностей \"Цель обработки ПДн субъекта ПДн\"."
+        },
+        {
+            "name": "PDN_InsertPDNTYPEPARTY",
+            "signature": "PDN_InsertPDNTYPEPARTY(Rec:Record):Integer",
+            "description": "Предназначена для автоматизации регистрации фактов обработки персональных данных в прикладном исполняемом коде путём создания через вызовы API экземпляров сущностей \"Вид субъекта ПДн\"."
+        },
+        {
+            "name": "PT_BindClientWithBranch",
+            "signature": "PT_BindClientWithBranch(PartyID:Long, ServiceKind:Integer, Branch:Integer [, Oper:Integer] [, startDate:Date] [, ForcedSet:Bool]):Bool",
+            "description": "Предназначена для постановки заданного субъекта на обслуживание заданного вида в заданном подразделении."
+        },
+        {
+            "name": "PT_CheckClientService",
+            "signature": "PT_CheckClientService(ClientID : Long, ServiceKind : Integer, CheckDate : Date, Department : Integer): Integer",
+            "description": "Предназначена для проверки наличия открытого обслуживания заданного вида для заданного клиента в филиале текущего пользователя."
+        },
+        {
+            "name": "PT_CheckPersnIDCviaSMEV",
+            "signature": "PT_CheckPersnIDCviaSMEV(DOC_SERIE:String, DOC_NUMBER:String, DOC_ISSUEDATE:String, DOC_STATUS:Integer, STATUS_DESC:String, INVALIDITY_REASON:Integer, INVALIDITY_REASON_DESC:String, INVALIDITY_SINCE:Date): Integer",
+            "description": "Предназначена для запроса к сервису ФМС СМЭВ с быстрым ответом."
+        },
+        {
+            "name": "PT_CheckPersnNameviaSMEV",
+            "signature": "PT_CheckPersnNameviaSMEV(DOC_Name1:String, DOC_Name2:String, DOC_Name3:String, DOC_Birthdate:Date, DOC_Series:String, DOC_Number:String, DOC_IssuedDate:Date, DOC_IssuerCode:String, DOC_Region:String, ResponcePeriod:Integer, DOC_STATUS:Integer, STATUS_DESC:String, INVALIDITY_REASON:Integer, INVALIDITY_REASON_DESC:String, INVALIDITY_SINCE:Date): Integer",
+            "description": "Предназначена для расширенной проверки паспорта через СМЭВ."
+        },
+        {
+            "name": "PT_CheckProxySignAuthority",
+            "signature": "PT_CheckProxySignAuthority(Account:String, Code_Currency:Integer, Chapter:Integer, PartyID:Integer, ProxyIDArray:Array, WrongProxyID:Integer, Message:String):Integer",
+            "description": "Предназначена для проверки права подписи представителя клиента."
+        },
+        {
+            "name": "PT_CloseClientService",
+            "signature": "PT_CloseClientService(ClientID:Long, ServiceKind:Integer, CloseDate:Date [, SilentMode:Bool]):Bool",
+            "description": "Предназначена для установки даты окончания обслуживания заданного вида для заданного клиента в заданном филиале."
+        },
+        {
+            "name": "PT_CopyPartyParm",
+            "signature": "PT_CopyPartyParm(destPartyID: Integer, sourcePartyID: Integer): Integer",
+            "description": "Предназначена для копирования параметров субъекта источника sourcePartyID в параметры субъекта потребителя destPartyID, при этом все несовпадающие параметры субъекта потребителя заменяются параметрами субъекта источника."
+        },
+        {
+            "name": "PT_DefinePartyDoubler",
+            "signature": "PT_DefinePartyDoubler(PartyObj:Object, EditMode:Bool, PanelMode:Bool):Integer",
+            "description": "Предназначена для задания варианта вызова проверки наличия дублеров субъекта: из списка субъектов или из панели субъекта."
+        },
+        {
+            "name": "PT_DeleteClientService",
+            "signature": "PT_DeleteClientService(ClientID:Integer, ServiceKind:Integer):Integer",
+            "description": "Предназначена для удаления закрытого вида обслуживания клиента."
+        },
+        {
+            "name": "PT_DeletePTBANKRUPTHIST",
+            "signature": "PT_DeletePTBANKRUPTHIST(RecID:Integer):Integer",
+            "description": "Предназначена для удаления записи истории банкротства субъекта."
+        },
+        {
+            "name": "PT_DeletePTBENEOWNER",
+            "signature": "PT_DeletePTBENEOWNER(Id:Integer):Integer",
+            "description": "Предназначена для удаления бенефициарного владельца субъекта."
+        },
+        {
+            "name": "PT_FormAddressStr",
+            "signature": "PT_FormAddressStr(PartyID:Integer, [AddrType:Integer], [AddrMode:Integer], AddrStr:String):Integer",
+            "description": "Предназначена для получения адреса субъекта в строковом представлении."
+        },
+        {
+            "name": "PT_FormAddressStrByGUID",
+            "signature": "PT_FormAddressStrByGUID(Guid:String, [AddrMode:Integer], AddrStr:String):Integer",
+            "description": "Предназначена для получения адреса ФИАС по GUID в строковом представлении."
+        },
+        {
+            "name": "PT_GetAddressByGUID",
+            "signature": "PT_GetAddressByGUID(Guid:String, Address:Record):Integer",
+            "description": "Предназначена для получения адреса ФИАС по GUID в формате ФИАС."
+        },
+        {
+            "name": "PT_GetAddressGUID",
+            "signature": "PT_GetAddressGUID(PartyID:Integer, [AddrType:Integer], AddrGUID:String):Integer",
+            "description": "Предназначена для получения GUID адреса субъекта."
+        },
+        {
+            "name": "PT_GetFIASForAddress",
+            "signature": "PT_GetFIASForAddress(Address:Record, FiasGuid:String):Integer",
+            "description": "Предназначена для поиска адреса в ФИАС по значениям элементов адреса."
+        },
+        {
+            "name": "PT_GetSimilarForParty",
+            "signature": "PT_GetSimilarForParty(PartyID:Integer, LegalForm:Integer, Name1:String, Name2:String, Name3:Integer, BirthDate:Date, ShortName:String, CodeINN:String, ExcludeDoublers:Bool, OriginalArray:Tarray):Integer",
+            "description": "Предназначена для получения списка дублеров субъекта."
+        },
+        {
+            "name": "PT_InsUpdPTBANKRUPTHIST",
+            "signature": "PT_InsUpdPTBANKRUPTHIST(PtBankruptHistRec:Record):Integer",
+            "description": "Предназначена для создания или обновления записи истории банкротства субъекта."
+        },
+        {
+            "name": "PT_InsUpdPTBENEOWNER",
+            "signature": "PT_InsUpdPTBENEOWNER(PTBeneownerBuff:Record):Integer",
+            "description": "Предназначена для создания или обновления бенефициарного владельца субъекта."
+        },
+        {
+            "name": "PT_SearchOperationForClient",
+            "signature": "PT_SearchOperationForClient(Party:Object):Integer",
+            "description": "Предназначена для получения информации о наличии отказов в обслуживании в отношении субъекта, вводимого в справочник клиентов АС, совершенных в сторонних организациях, при индивидуальной проверке клиента."
+        },
+        {
+            "name": "PT_SelectLegalProxyHist",
+            "signature": "PT_SelectLegalProxyHist([PartyID:Integer] [, Account:String] [, ProxyID:Integer] [, OnlyActive:Bool]):Object",
+            "description": "Предназначена для получения сведений о доверенностях."
+        },
+        {
+            "name": "PtCertainCategory",
+            "signature": "PtCertainCategory(PartyID:Integer, Flags:Integer):Integer",
+            "description": "Предназначена для определения принадлежности физического лица к некоторой категории."
+        },
+        {
+            "name": "PtCertainCategoryWarning",
+            "signature": "PtCertainCategoryWarning(PartyID:Integer):String",
+            "description": "Предназначена для оповещения пользователя в случае, если физическое лицо относится к некоторой категории."
+        },
+        {
+            "name": "PTOfficeInsert",
+            "signature": "PTOfficeInsert(BuffPTOffice:TrecHandler [, BaseOffice:Integer|String] [, Position:Integer] [, ErrMes:String]):Bool",
+            "description": "Осуществляет вставку подразделения для учреждения."
+        },
+        {
+            "name": "PTOfficeTree",
+            "signature": "PTOfficeTree(PartyID:Integer, SuperiorOfficeID:Integer, OrgDate:Date, Level:Integer):Object",
+            "description": "Позволяет получить доступ к дереву подразделений (оргштатной структуре)."
+        },
+        {
+            "name": "SetCapital",
+            "signature": "SetCapital(onDate:Date, SumOfCapital:Money):Integer",
+            "description": "Устанавливает новое значение капитала банка за указанную дату."
+        },
+        {
+            "name": "UploadFiasXMLFileIntoDBFile",
+            "signature": "UploadFiasXMLFileIntoDBFile(XMLFileName:String, DBFileType:Integer):Integer",
+            "description": "Предназначена для загрузки xml-файла справочника ФИАС в постоянную или временную таблицу базы данных."
+        },
+        {
+            "name": "XCOMPL_MakePartyNoteText",
+            "signature": "XCOMPL_MakePartyNoteText(SystemId:Integer, UpDateAt:Date):String",
+            "description": "Предназначена для формирования строки примечания вида <Изменение статуса ПДЛ/%010d/%s>, где %010d – значение параметра SystemId, дополненное нулем до десяти символов, %s – дата."
+        }
+    ],
+    "constants": []
+}

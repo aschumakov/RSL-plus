@@ -38,6 +38,9 @@ import {
     buildScalarMemberDiagnostics
 } from "./diagnostics/scalarMemberDiagnostics";
 import {
+    buildUnreachableCodeDiagnostics
+} from "./diagnostics/unreachableCodeDiagnostics";
+import {
     createWorkSlice,
     type IRslWorkSlice
 } from "./core/timeSlice";
@@ -306,6 +309,10 @@ function planLocalRslDiagnostics(
         [options.structure, () => addUnrecognizedEscapeDiagnostics(module, result)],
         [options.structure, () => addBracketDiagnostics(module, result)],
         [options.structure, () => addEndDiagnostics(module, result)],
+        [
+            options.structure,
+            () => result.push(...buildUnreachableCodeDiagnostics(module))
+        ],
         [options.structure, () => addDuplicateDeclarationDiagnostics(module, result)],
         [options.structure, () => addBasicImportDiagnostics(module, result)],
         [options.structure, () => addImportPlacementDiagnostics(module, result)],

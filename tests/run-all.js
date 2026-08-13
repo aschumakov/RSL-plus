@@ -20,6 +20,7 @@ const tests = [
     "unknown-variables.test.js",
     "language-features.test.js",
     "interactive-features.test.js",
+    "language-features-extra.test.js",
     "extended-language-features.test.js",
     "performance-regressions.test.js",
     "quick-fix-extended.test.js",

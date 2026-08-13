@@ -49,7 +49,7 @@
   },
   "CommonInter": {
    "file": "commoninter.json",
-   "classes": 19,
+   "classes": 21,
    "procedures": 196,
    "constants": 0,
    "dependencies": [
@@ -106,7 +106,7 @@
   },
   "ExchangeInter": {
    "file": "exchangeinter.json",
-   "classes": 0,
+   "classes": 1,
    "procedures": 13,
    "constants": 0
   },
@@ -156,7 +156,10 @@
    "file": "lcinter.json",
    "classes": 6,
    "procedures": 7,
-   "constants": 0
+   "constants": 0,
+   "dependencies": [
+    "BankInter"
+   ]
   },
   "LoansFind": {
    "file": "loansfind.json",
@@ -223,7 +226,7 @@
   },
   "PercInter": {
    "file": "percinter.json",
-   "classes": 2,
+   "classes": 4,
    "procedures": 6,
    "constants": 0
   },

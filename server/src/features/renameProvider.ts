@@ -2,7 +2,9 @@ import type { Range, WorkspaceEdit } from "vscode-languageserver";
 
 import { findRslReferencesInWorkspace } from "../analysis/references";
 import type { ReferenceIndex } from "../analysis/referenceIndex";
+import { isReservedWord } from "../language/rslLanguageReference";
 import { RSL_BUILTIN_URI, type RslScopeResolver } from "../scopeResolver";
+import type { RslSymbol } from "../symbols/rslSymbol";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 
 export interface IRslPrepareRenameResult {
@@ -71,6 +73,79 @@ export async function buildRslRenameEdit(
         });
     }
     return { changes };
+}
+
+/**
+ * Причина, по которой переименование выполнять нельзя, или undefined.
+ *
+ * Проверяется ДО правок: Rename меняет файлы, и обнаружить конфликт после — это
+ * уже испорченный код. Проверка та же, что у диагностики повторных объявлений:
+ * конфликтом считается имя, занятое в ТОЙ ЖЕ области. Одноимённые объявления в
+ * разных Macro и пара глобальное/локальное конфликтом не являются — RSL их
+ * допускает, и запрещать их здесь значило бы запрещать больше, чем язык.
+ *
+ * Имя из импортированного модуля здесь не проверяется намеренно: оно даёт не
+ * ошибку, а неоднозначную ссылку, о которой отдельно сообщает ambiguous-reference
+ * — решение остаётся за автором.
+ */
+export function findRslRenameConflict(
+    module: IIndexedModule,
+    resolver: RslScopeResolver,
+    offset: number,
+    newName: string
+): string | undefined {
+    if (!isValidRslIdentifier(newName)) {
+        return `«${newName}» не является допустимым именем RSL`;
+    }
+
+    if (isReservedWord(newName)) {
+        return `«${newName}» — зарезервированное слово RSL`;
+    }
+
+    const target = resolver.resolveAt(module.uri, module.symbolTree, offset);
+
+    if (!target || target.uri === RSL_BUILTIN_URI) {
+        return undefined;
+    }
+
+    if (!isValidRename(target.symbol.name, newName)) {
+        return target.symbol.name.startsWith("{")
+            ? "Общесистемная спецпеременная не может стать обычным именем"
+            : "Обычное имя не может стать общесистемной спецпеременной";
+    }
+
+    const scope = findDeclaringScope(module.symbolTree, target.symbol);
+    const normalized = newName.toLowerCase();
+    const taken = (scope || module.symbolTree).children.find(child =>
+        child !== target.symbol &&
+        child.name.toLowerCase() === normalized
+    );
+
+    return taken
+        ? `В этой же области уже объявлено имя ${taken.name}`
+        : undefined;
+}
+
+/** Область, в которой символ объявлен непосредственно. */
+function findDeclaringScope(
+    scope: RslSymbol,
+    target: RslSymbol
+): RslSymbol | undefined {
+    if (scope.children.includes(target)) {
+        return scope;
+    }
+
+    for (const child of scope.children) {
+        if (child.isContainer) {
+            const found = findDeclaringScope(child, target);
+
+            if (found) {
+                return found;
+            }
+        }
+    }
+
+    return undefined;
 }
 
 export function isValidRslIdentifier(value: string): boolean {

@@ -344,6 +344,29 @@ function inheritanceCycles(modules, owners) {
     return problems;
 }
 
+/** Счётчики в index.json — справочные, но врать они не должны. */
+function refreshCounters(index, modules) {
+    let changed = false;
+
+    for (const module of modules.values()) {
+        const entry = index.modules[module.name];
+        const counts = {
+            classes: module.classes.length,
+            procedures: (module.procedures || []).length,
+            constants: (module.constants || []).length
+        };
+
+        for (const [field, value] of Object.entries(counts)) {
+            if (entry[field] !== value) {
+                entry[field] = value;
+                changed = true;
+            }
+        }
+    }
+
+    return changed;
+}
+
 /**
  * Досчёт dependencies до неподвижной точки.
  *
@@ -351,7 +374,7 @@ function inheritanceCycles(modules, owners) {
  * делаем видимыми базовые классы PaymInter, а у них могут быть свои.
  */
 function fixDependencies(index, modules, owners) {
-    let changed = false;
+    let changed = refreshCounters(index, modules);
 
     for (let pass = 0; pass < 10; pass++) {
         const { requiredDependencies } = collectProblems(

@@ -1066,6 +1066,22 @@ function codes(items) {
                 `предложено: ${members.slice(0, 20).join(", ")}`
         );
 
+        /*
+         * Реквизиты плательщика и получателя — то, из чего платёж состоит.
+         * Первый разбор справки брал только начало топика класса, и половина
+         * состава RsbPayment в каталог не попадала.
+         */
+        const essential = [
+            "Payer", "PayerAccount", "PayerAmount", "PayerBankCode",
+            "PayerName", "Receiver", "ReceiverAccount", "ReceiverAmount",
+            "ReceiverBankCode", "ReceiverName"
+        ];
+        assert.deepStrictEqual(
+            essential.filter(name => !members.includes(name)),
+            [],
+            "Реквизиты плательщика и получателя обязаны быть в составе платежа"
+        );
+
         /* Разрешение члена, а не только список: Hover и переход тоже. */
         const inherited = resolver.resolveMemberReference(
             uri,

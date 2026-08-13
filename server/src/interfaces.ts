@@ -112,6 +112,10 @@ export interface IRslSettings {
     semanticHighlighting: {
         maxFileSizeKb: number;
     };
+    inlayHints: {
+        /** Показывать выведенный тип у объявлений без написанного типа. */
+        variableTypes: boolean;
+    };
     diagnostics?: IRslDiagnosticSettings;
 }
 

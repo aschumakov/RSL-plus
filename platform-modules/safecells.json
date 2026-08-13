@@ -1,1 +1,775 @@
-{"version":3,"classes":[{"name":"RslDSAGRMNT","summary":"Класс используется для работы с дополнительными соглашениями.","members":[{"name":"SetAddAgreementDoc","isMethod":true,"signature":"SetAddAgreementDoc(valDsDoc:Object)","description":""}]},{"name":"RslTBunch","base":"TList","summary":"Класс используется для работы со списком проведенных документов по операции и является наследником класса TList.","members":[{"name":"docType","isMethod":false,"typeName":"Integer","description":"Вид текущего документа в списке."},{"name":"includeCashDoc","isMethod":false,"typeName":"Bool","description":"Признак учета кассовых документов при прохождении по списку."},{"name":"item","isMethod":false,"typeName":"Object","description":"Текущий выбранный объект."}]},{"name":"RslTCellList","base":"TList","summary":"Класс предназначен для работы со списком сейфовых ячеек.","members":[{"name":"ListForAdd","isMethod":true,"signature":"ListForAdd():Bool","description":""}]},{"name":"RslTContract","base":"RslTPersistVarRecord","summary":"Класс предназначен для работы с договором аренды сейфовой ячейки и является наследником класса RslTPersistVarRecord.","members":[{"name":"CellList","isMethod":false,"typeName":"Object","description":"Список сейфовых ячеек."},{"name":"panel","isMethod":false,"typeName":"RslTPanel","description":"Форма для работы с договором."},{"name":"varPart","isMethod":false,"typeName":"Object","description":"Объект переменной части."},{"name":"destroy","isMethod":true,"signature":"destroy():Bool","description":""}]},{"name":"RslTContrClientList","base":"TList","summary":"Класс используется для работы со списком клиентов по договору и является наследником класса TList.","members":[{"name":"find","isMethod":true,"signature":"find(clientCode: Integer):Bool","description":""}]},{"name":"RslTDocument","summary":"Класс используется для работы с записями таблиц ds_docum.dbt, sbdepdoc.dbt, pay_doc.dbt.","members":[{"name":"hasVarPart","isMethod":false,"typeName":"Bool","description":"Признак наличия переменной части."},{"name":"TRUE","isMethod":false,"typeName":"Variant","description":"При наличии переменной части."},{"name":"FALSE","isMethod":false,"typeName":"Variant","description":"В случае отсутствия переменной части."},{"name":"rec","isMethod":false,"typeName":"Record","description":"Буфер записи таблицы."},{"name":"varPart","isMethod":false,"typeName":"Object","description":"Объект, содержащий переменную часть."},{"name":"save","isMethod":true,"signature":"save(NeedLinkDoc:Bool):Bool","description":""}]},{"name":"RslTOpClientList","base":"TList","summary":"Класс используется для работы со списком клиентов по операции и является наследником класса TList.","members":[{"name":"find","isMethod":true,"signature":"find(clientCode: Integer):Bool","description":""}]},{"name":"RslTOperation","summary":"Класс предназначен для описания операции по сейфовой ячейке.","members":[{"name":"AddAgreement","isMethod":false,"typeName":"Object","description":"Объект, содержащий информацию о дополнительном соглашении."},{"name":"CommissionsSum","isMethod":false,"typeName":"MoneyL","description":"Сумма комиссии."},{"name":"contractClientType","isMethod":false,"typeName":"Integer","description":"Тип клиента по договору."},{"name":"FMCheckStatus","isMethod":false,"typeName":"Integer","description":"Статус выполнения функции проверки операции в подсистеме \"Финансовый мониторинг\"."},{"name":"ForfeitCurrCode","isMethod":false,"typeName":"Integer","description":"Валюта платы за просрочку."},{"name":"ForfeitDays","isMethod":false,"typeName":"Integer","description":"Количество дней просрочки."},{"name":"ForfeitSum","isMethod":false,"typeName":"MoneyL","description":"Сумма оплаты просрочки."},{"name":"getPenalty","isMethod":false,"typeName":"Bool","description":"Признак необходимости взимания штрафа при смене сейфовой ячейки."},{"name":"GrntClientType","isMethod":false,"typeName":"Integer","description":"Тип клиента-вносителя залога."},{"name":"ground","isMethod":false,"typeName":"String","description":"Основание."},{"name":"isAddAgrmntInited","isMethod":false,"typeName":"Bool","description":"Признак, показывающий факт инициализации дополнительного соглашения."},{"name":"isPack","isMethod":false,"typeName":"Bool","description":"Признак группового режима."},{"name":"newEndProlongDate","isMethod":false,"typeName":"Date","description":"Дата окончания договора в результате выполнения операции пролонгации."},{"name":"NewOrderDate","isMethod":false,"typeName":"Date","description":"Новая дата приказа."},{"name":"NewOrderNumber","isMethod":false,"typeName":"String","description":"Новый номер приказа."},{"name":"newStartDate","isMethod":false,"typeName":"Date","description":"Новая дата начала действия договора после выполнения операции пролонгации."},{"name":"OldCellNumber","isMethod":false,"typeName":"Integer","description":"Старый номер ячейки при смене ячейки."},{"name":"OldSafeID","isMethod":false,"typeName":"Integer","description":"Старый идентификатор ячейки при смене ячейки."},{"name":"OpAppKey","isMethod":false,"typeName":"String","description":"Идентификатор проводимой операции."},{"name":"contractType","isMethod":false,"typeName":"Integer","description":"Вид договора."},{"name":"opNumber","isMethod":false,"typeName":"Integer","description":"Номер операции."},{"name":"cashier","isMethod":false,"typeName":"Integer","description":"Кассир."},{"name":"status","isMethod":false,"typeName":"Bool","description":"Состояние операции."},{"name":"TRUE","isMethod":false,"typeName":"Variant","description":"При успешном выполнении операции."},{"name":"FALSE","isMethod":false,"typeName":"Variant","description":"В случае возникновения ошибки."},{"name":"contract","isMethod":false,"typeName":"Object","description":"Запись договора аренды."}]},{"name":"RslTOpFootprint","summary":"ContractType – вид договора.","members":[{"name":"contractType","isMethod":false,"typeName":"Integer","description":"Вид договора."},{"name":"opNumber","isMethod":false,"typeName":"Integer","description":"Номер операции."},{"name":"cashier","isMethod":false,"typeName":"Integer","description":"Кассир."},{"name":"status","isMethod":false,"typeName":"Bool","description":"Состояние процесса отката операции."},{"name":"TRUE","isMethod":false,"typeName":"Variant","description":"Успешно."},{"name":"FALSE","isMethod":false,"typeName":"Variant","description":"Ошибка в процессе отката операции."},{"name":"D_STORN","isMethod":false,"typeName":"Variant","description":"Сторнирование."},{"name":"D_DELETE","isMethod":false,"typeName":"Variant","description":"Удаление."},{"name":"contract","isMethod":false,"typeName":"RslTContract","description":"Запись договора аренды."}]},{"name":"RslTOpPenaltyList","base":"TList","summary":"Класс используется для работы со списком взимаемых штрафов и является наследником класса TList.","members":[{"name":"edit","isMethod":true,"signature":"edit()","description":"Вывод на экран стандартной формы для корректировки штрафов."}]},{"name":"RslTRollbackData","summary":"Класс предназначен для работы с данными, используемыми при выполнении отката операций.","members":[{"name":"action","isMethod":false,"typeName":"Integer","description":"Состояние записи."},{"name":"footprint","isMethod":false,"typeName":"Object","description":"Объект класса RslTOpFootPrint."},{"name":"isPack","isMethod":false,"typeName":"Bool","description":"Признак группового режима."}]},{"name":"TList","summary":"Класс реализован на языке С/С++ и не экспортируется в RSL.","members":[{"name":"numItems","isMethod":false,"typeName":"Integer","description":"Количество элементов в списке."},{"name":"item","isMethod":false,"typeName":"Variant","description":"Текущий элемент списка."},{"name":"first","isMethod":true,"signature":"first():Bool","description":""}]}],"procedures":[],"constants":[]}
+{
+    "version": 3,
+    "classes": [
+        {
+            "name": "RslDSAGRMNT",
+            "summary": "Класс используется для работы с дополнительными соглашениями.",
+            "members": [
+                {
+                    "name": "SetAddAgreementDoc",
+                    "isMethod": true,
+                    "signature": "SetAddAgreementDoc(valDsDoc:Object)",
+                    "description": "Метод устанавливает документ для дополнительного соглашения."
+                }
+            ]
+        },
+        {
+            "name": "RslTBunch",
+            "base": "TList",
+            "summary": "Класс используется для работы со списком проведенных документов по операции и является наследником класса TList.",
+            "members": [
+                {
+                    "name": "docType",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Вид текущего документа в списке."
+                },
+                {
+                    "name": "includeCashDoc",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "Признак учета кассовых документов при прохождении по списку."
+                },
+                {
+                    "name": "item",
+                    "isMethod": false,
+                    "typeName": "Object",
+                    "description": "Текущий выбранный объект."
+                }
+            ]
+        },
+        {
+            "name": "RslTCellList",
+            "base": "TList",
+            "summary": "Класс предназначен для работы со списком сейфовых ячеек.",
+            "members": [
+                {
+                    "name": "ListForAdd",
+                    "isMethod": true,
+                    "signature": "ListForAdd():Bool",
+                    "description": "Метод предоставляет на экран скроллинг с возможностью пополнения списка сейфовых ячеек."
+                },
+                {
+                    "name": "ListForLook",
+                    "isMethod": true,
+                    "signature": "ListForLook ():Integer",
+                    "description": "Метод предоставляет на экран скроллинг просмотра сейфовых ячеек."
+                },
+                {
+                    "name": "ListForSelectOne",
+                    "isMethod": true,
+                    "signature": "ListForSelectOne ():Integer",
+                    "description": "Метод предоставляет возможность выбора сейфовой ячейки из списка."
+                },
+                {
+                    "name": "ListForSelectSeveral",
+                    "isMethod": true,
+                    "signature": "ListForSelectSeveral ():Integer",
+                    "description": "Метод предоставляет возможность выбора нескольких сейфовых ячеек из списка."
+                }
+            ]
+        },
+        {
+            "name": "RslTContract",
+            "base": "RslTPersistVarRecord",
+            "summary": "Класс предназначен для работы с договором аренды сейфовой ячейки и является наследником класса RslTPersistVarRecord.",
+            "members": [
+                {
+                    "name": "CellList",
+                    "isMethod": false,
+                    "typeName": "Object",
+                    "description": "Список сейфовых ячеек."
+                },
+                {
+                    "name": "panel",
+                    "isMethod": false,
+                    "typeName": "RslTPanel",
+                    "description": "Форма для работы с договором."
+                },
+                {
+                    "name": "varPart",
+                    "isMethod": false,
+                    "typeName": "Object",
+                    "description": "Объект переменной части."
+                },
+                {
+                    "name": "destroy",
+                    "isMethod": true,
+                    "signature": "destroy():Bool",
+                    "description": ""
+                },
+                {
+                    "name": "clients",
+                    "isMethod": false,
+                    "typeName": "RslTContrClientList",
+                    "description": "список клиентов (арендаторов) по договору, тип RslTContrClientList."
+                },
+                {
+                    "name": "isClaimRegistered",
+                    "isMethod": true,
+                    "signature": "isClaimRegistered ():Bool",
+                    "description": "Метод предназначен для определения наличия исковой ситуации по договору."
+                },
+                {
+                    "name": "setVarPartFormat",
+                    "isMethod": true,
+                    "signature": "setVarPartFormat (NameStruct:String [, NameDic:String]):Bool",
+                    "description": "Метод предназначен для наложения структуры на переменную часть."
+                }
+            ]
+        },
+        {
+            "name": "RslTContrClientList",
+            "base": "TList",
+            "summary": "Класс используется для работы со списком клиентов по договору и является наследником класса TList.",
+            "members": [
+                {
+                    "name": "find",
+                    "isMethod": true,
+                    "signature": "find(clientCode: Integer):Bool",
+                    "description": ""
+                }
+            ]
+        },
+        {
+            "name": "RslTDocument",
+            "summary": "Класс используется для работы с записями таблиц ds_docum.dbt, sbdepdoc.dbt, pay_doc.dbt.",
+            "members": [
+                {
+                    "name": "hasVarPart",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "Признак наличия переменной части."
+                },
+                {
+                    "name": "TRUE",
+                    "isMethod": false,
+                    "typeName": "Variant",
+                    "description": "При наличии переменной части."
+                },
+                {
+                    "name": "FALSE",
+                    "isMethod": false,
+                    "typeName": "Variant",
+                    "description": "В случае отсутствия переменной части."
+                },
+                {
+                    "name": "rec",
+                    "isMethod": false,
+                    "typeName": "Record",
+                    "description": "Буфер записи таблицы."
+                },
+                {
+                    "name": "varPart",
+                    "isMethod": false,
+                    "typeName": "Object",
+                    "description": "Объект, содержащий переменную часть."
+                },
+                {
+                    "name": "save",
+                    "isMethod": true,
+                    "signature": "save(NeedLinkDoc:Bool):Bool",
+                    "description": "Метод предназначен для сохранения изменений записи."
+                },
+                {
+                    "name": "setVarPartFormat",
+                    "isMethod": true,
+                    "signature": "setVarPartFormat (NameStruct:String [, NameDic:String]):Bool",
+                    "description": "Метод предназначен для наложения структуры на переменную часть."
+                }
+            ]
+        },
+        {
+            "name": "RslTOpClientList",
+            "base": "TList",
+            "summary": "Класс используется для работы со списком клиентов по операции и является наследником класса TList.",
+            "members": [
+                {
+                    "name": "find",
+                    "isMethod": true,
+                    "signature": "find(clientCode: Integer):Bool",
+                    "description": ""
+                }
+            ]
+        },
+        {
+            "name": "RslTOperation",
+            "summary": "Класс предназначен для описания операции по сейфовой ячейке.",
+            "members": [
+                {
+                    "name": "AddAgreement",
+                    "isMethod": false,
+                    "typeName": "Object",
+                    "description": "Объект, содержащий информацию о дополнительном соглашении."
+                },
+                {
+                    "name": "CommissionsSum",
+                    "isMethod": false,
+                    "typeName": "MoneyL",
+                    "description": "Сумма комиссии."
+                },
+                {
+                    "name": "contractClientType",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Тип клиента по договору."
+                },
+                {
+                    "name": "FMCheckStatus",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Статус выполнения функции проверки операции в подсистеме \"Финансовый мониторинг\"."
+                },
+                {
+                    "name": "ForfeitCurrCode",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Валюта платы за просрочку."
+                },
+                {
+                    "name": "ForfeitDays",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Количество дней просрочки."
+                },
+                {
+                    "name": "ForfeitSum",
+                    "isMethod": false,
+                    "typeName": "MoneyL",
+                    "description": "Сумма оплаты просрочки."
+                },
+                {
+                    "name": "getPenalty",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "Признак необходимости взимания штрафа при смене сейфовой ячейки."
+                },
+                {
+                    "name": "GrntClientType",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Тип клиента-вносителя залога."
+                },
+                {
+                    "name": "ground",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Основание."
+                },
+                {
+                    "name": "isAddAgrmntInited",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "Признак, показывающий факт инициализации дополнительного соглашения."
+                },
+                {
+                    "name": "isPack",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "Признак группового режима."
+                },
+                {
+                    "name": "newEndProlongDate",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "Дата окончания договора в результате выполнения операции пролонгации."
+                },
+                {
+                    "name": "NewOrderDate",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "Новая дата приказа."
+                },
+                {
+                    "name": "NewOrderNumber",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Новый номер приказа."
+                },
+                {
+                    "name": "newStartDate",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "Новая дата начала действия договора после выполнения операции пролонгации."
+                },
+                {
+                    "name": "OldCellNumber",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Старый номер ячейки при смене ячейки."
+                },
+                {
+                    "name": "OldSafeID",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Старый идентификатор ячейки при смене ячейки."
+                },
+                {
+                    "name": "OpAppKey",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "Идентификатор проводимой операции."
+                },
+                {
+                    "name": "contractType",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Вид договора."
+                },
+                {
+                    "name": "opNumber",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Номер операции."
+                },
+                {
+                    "name": "cashier",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Кассир."
+                },
+                {
+                    "name": "status",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "Состояние операции."
+                },
+                {
+                    "name": "TRUE",
+                    "isMethod": false,
+                    "typeName": "Variant",
+                    "description": "При успешном выполнении операции."
+                },
+                {
+                    "name": "FALSE",
+                    "isMethod": false,
+                    "typeName": "Variant",
+                    "description": "В случае возникновения ошибки."
+                },
+                {
+                    "name": "contract",
+                    "isMethod": false,
+                    "typeName": "Object",
+                    "description": "Запись договора аренды."
+                },
+                {
+                    "name": "oper",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "операционист (контролер), выполняющий операцию."
+                },
+                {
+                    "name": "panel",
+                    "isMethod": false,
+                    "typeName": "Object",
+                    "description": "форма для работы с данными по операции."
+                },
+                {
+                    "name": "docList",
+                    "isMethod": false,
+                    "typeName": "Object",
+                    "description": "список документов по операции."
+                },
+                {
+                    "name": "clientCode",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "код клиента, если в операции участвует один клиент."
+                },
+                {
+                    "name": "multipleClients",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "признак наличия нескольких клиентов, участвующих в операции."
+                },
+                {
+                    "name": "clientList",
+                    "isMethod": false,
+                    "typeName": "Object",
+                    "description": "список клиентов по операции."
+                },
+                {
+                    "name": "penaltyList",
+                    "isMethod": false,
+                    "typeName": "Object",
+                    "description": "список штрафов по операции."
+                },
+                {
+                    "name": "PenaltyClientType",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "тип клиента-плательщика штрафа."
+                },
+                {
+                    "name": "pmntCurrCode",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "код валюты арендной платы."
+                },
+                {
+                    "name": "pmntSum",
+                    "isMethod": false,
+                    "typeName": "Money",
+                    "description": "сумма арендной платы."
+                },
+                {
+                    "name": "pmntIsNonCash",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "признак внесения арендной платы безналичными."
+                },
+                {
+                    "name": "pmntClient",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "код клиента, внесшего арендную плату."
+                },
+                {
+                    "name": "pmntClientType",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "тип клиента-вносителя арендной платы."
+                },
+                {
+                    "name": "pmntFromAccount",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "референс счета, с которого списывается арендная плата."
+                },
+                {
+                    "name": "pmntNds",
+                    "isMethod": false,
+                    "typeName": "MoneyL",
+                    "description": "сумма НДС платы за аренду."
+                },
+                {
+                    "name": "grntCurrCode",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "код валюты залога."
+                },
+                {
+                    "name": "grntSum",
+                    "isMethod": false,
+                    "typeName": "Money",
+                    "description": "cумма залога."
+                },
+                {
+                    "name": "grntIsNonCash",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "признак внесения залога безналичными."
+                },
+                {
+                    "name": "grntFromAccount",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "референс счета, с которого списывается залог."
+                },
+                {
+                    "name": "guaranteer",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "код клиента, внесшего или получившего возврат залога."
+                },
+                {
+                    "name": "expPnltAccount",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "номер счета (вкладного или счета клиента, являющегося юридическим лицом), используемого для внесения платы за просрочку и неустойку при выполнении операции продления/закрытия договора на аренду сей..."
+                },
+                {
+                    "name": "expPnltAccountBranch",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "номер подразделения банка, в котором открыт счет (вкладной или счет клиента, являющегося юридическим лицом), используемый для внесения платы за просрочку и неустойку."
+                },
+                {
+                    "name": "expPnltCurrCode",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "код валюты штрафа за просрочку."
+                },
+                {
+                    "name": "expPnltSum",
+                    "isMethod": false,
+                    "typeName": "Money",
+                    "description": "сумма штрафа за просрочку."
+                },
+                {
+                    "name": "expPnltIsNonCash",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "признак внесения штрафа за просрочку безналичными."
+                },
+                {
+                    "name": "expPnltClient",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "код клиента, внесшего штраф за просрочку."
+                },
+                {
+                    "name": "expPnltFromAccount",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "референс счета, с которого списывается штраф за просрочку."
+                },
+                {
+                    "name": "grntAccount",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "номер счета (вкладного или счета клиента, являющегося юридическим лицом), используемого для внесения/возврата залога при выполнении операции аренды сейфовой ячейки или продлении/закрытии договора н..."
+                },
+                {
+                    "name": "grntAccountBranch",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "номер подразделения банка, в котором открыт счет (вкладной или счет клиента, являющегося юридическим лицом), используемый для внесения/возврата залога."
+                },
+                {
+                    "name": "newEndDate",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "новая дата завершения договора (для операции пролонгации)."
+                },
+                {
+                    "name": "nds",
+                    "isMethod": false,
+                    "typeName": "Money",
+                    "description": "сумма НДС."
+                },
+                {
+                    "name": "ndsOpNumber",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "операция взимания НДС."
+                },
+                {
+                    "name": "NewLicenceDate",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "новая дата лицензии."
+                },
+                {
+                    "name": "NewLicenceNumber",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "новый номер лицензии."
+                },
+                {
+                    "name": "OperationDate",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "дата выполнения операции."
+                },
+                {
+                    "name": "payPeriodBegin",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "дата начала периода оплаты."
+                },
+                {
+                    "name": "payPeriodEnd",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "дата окончания периода оплаты."
+                },
+                {
+                    "name": "pmntPnltAccount",
+                    "isMethod": false,
+                    "typeName": "String",
+                    "description": "номер счета (вкладного или счета клиента, являющегося юридическим лицом), используемого для внесения платы при выполнении операции аренды сейфовой ячейки или продлении договора на аренду."
+                },
+                {
+                    "name": "pmntPnltAccountBranch",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "номер подразделения банка, в котором открыт счет (вкладной или счет клиента, являющегося юридическим лицом), используемый для внесения платы."
+                },
+                {
+                    "name": "RetKey",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "признак возврата ключа."
+                },
+                {
+                    "name": "salesTax",
+                    "isMethod": false,
+                    "typeName": "Money",
+                    "description": "сумма налога с продаж."
+                },
+                {
+                    "name": "salesTaxOpNumber",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "операция взимания налога с продаж."
+                },
+                {
+                    "name": "newTermType",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "новый вид (единица измерения) срока договора."
+                },
+                {
+                    "name": "newTermValue",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "новая длина срока договора."
+                },
+                {
+                    "name": "newTermTail",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "новая длина периода отсрочки в днях."
+                },
+                {
+                    "name": "expirationTerm",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "количество дней просрочки договора с учетом льготы."
+                }
+            ]
+        },
+        {
+            "name": "RslTOpFootprint",
+            "summary": "ContractType – вид договора.",
+            "members": [
+                {
+                    "name": "contractType",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Вид договора."
+                },
+                {
+                    "name": "opNumber",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Номер операции."
+                },
+                {
+                    "name": "cashier",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Кассир."
+                },
+                {
+                    "name": "status",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "Состояние процесса отката операции."
+                },
+                {
+                    "name": "TRUE",
+                    "isMethod": false,
+                    "typeName": "Variant",
+                    "description": "Успешно."
+                },
+                {
+                    "name": "FALSE",
+                    "isMethod": false,
+                    "typeName": "Variant",
+                    "description": "Ошибка в процессе отката операции."
+                },
+                {
+                    "name": "D_STORN",
+                    "isMethod": false,
+                    "typeName": "Variant",
+                    "description": "Сторнирование."
+                },
+                {
+                    "name": "D_DELETE",
+                    "isMethod": false,
+                    "typeName": "Variant",
+                    "description": "Удаление."
+                },
+                {
+                    "name": "contract",
+                    "isMethod": false,
+                    "typeName": "RslTContract",
+                    "description": "Запись договора аренды."
+                },
+                {
+                    "name": "oper",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "операционист (контролер), выполняющий операцию."
+                },
+                {
+                    "name": "action",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "действие по операции (вид отката)."
+                },
+                {
+                    "name": "bunch",
+                    "isMethod": false,
+                    "typeName": "Object",
+                    "description": "список документов по операции."
+                }
+            ]
+        },
+        {
+            "name": "RslTOpPenaltyList",
+            "base": "TList",
+            "summary": "Класс используется для работы со списком взимаемых штрафов и является наследником класса TList.",
+            "members": [
+                {
+                    "name": "edit",
+                    "isMethod": true,
+                    "signature": "edit()",
+                    "description": "Вывод на экран стандартной формы для корректировки штрафов."
+                }
+            ]
+        },
+        {
+            "name": "RslTRollbackData",
+            "summary": "Класс предназначен для работы с данными, используемыми при выполнении отката операций.",
+            "members": [
+                {
+                    "name": "action",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Состояние записи."
+                },
+                {
+                    "name": "footprint",
+                    "isMethod": false,
+                    "typeName": "Object",
+                    "description": "Объект класса RslTOpFootPrint."
+                },
+                {
+                    "name": "isPack",
+                    "isMethod": false,
+                    "typeName": "Bool",
+                    "description": "Признак группового режима."
+                }
+            ]
+        },
+        {
+            "name": "TList",
+            "summary": "Класс реализован на языке С/С++ и не экспортируется в RSL.",
+            "members": [
+                {
+                    "name": "numItems",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Количество элементов в списке."
+                },
+                {
+                    "name": "item",
+                    "isMethod": false,
+                    "typeName": "Variant",
+                    "description": "Текущий элемент списка."
+                },
+                {
+                    "name": "first",
+                    "isMethod": true,
+                    "signature": "first():Bool",
+                    "description": ""
+                }
+            ]
+        }
+    ],
+    "procedures": [],
+    "constants": []
+}

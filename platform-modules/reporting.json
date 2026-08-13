@@ -1,1 +1,355 @@
-{"version":3,"classes":[{"name":"RepBranchFieldFilter","summary":"Класс RepBranchFieldFilter используется для фильтрации объектов по узлам типа ВСП (территориальная/региональная структура).","members":[{"name":"GetAsSqlString","isMethod":true,"signature":"GetAsSqlString(alias:String [, privilege:Integer]):String","description":""}]},{"name":"RepDocInfoServer","summary":"Класс позволяет получить информацию по документу.","members":[{"name":"cacheInformation","isMethod":true,"signature":"cacheInformation(documentQueryText:Object, String)","description":""}]},{"name":"RepOperdaysOpened","summary":"Класс используется для анализа открытых операционных дней по отделениям за период.","members":[{"name":"GetNext","isMethod":true,"signature":"GetNext(repOperdaysOpenedRecord:Object):Bool","description":""}]},{"name":"RepOperdaysOpenedRecord","summary":"Класс представляет собой класс объектов, хранящихся в объекте класса RepOperdaysOpened.","members":[{"name":"branch","isMethod":false,"typeName":"Integer","description":"Идентификатор узла территориальной структуры."},{"name":"maxPhase","isMethod":false,"typeName":"Integer","description":"Номер максимальной фазы операционного дня."},{"name":"minPhase","isMethod":false,"typeName":"Integer","description":"Номер минимальной фазы операционного дня."},{"name":"operDate","isMethod":false,"typeName":"Date","description":"Дата операционного дня."},{"name":"GetBranchName","isMethod":true,"signature":"GetBranchName():String","description":""}]},{"name":"RepParameter","summary":"Класс представляет собой класс обобщенного параметра.","members":[{"name":"getCode","isMethod":true,"signature":"getCode():String","description":""}]},{"name":"RepParameterCollection","summary":"Класс представляет собой коллекцию параметров отчета.","members":[{"name":"add","isMethod":true,"signature":"add(parameter:Object, Tarray)","description":""}]},{"name":"RepParameters","summary":"Класс используется для хранения, сериализации/десериализации параметров выпуска отчета.","members":[{"name":"getValue","isMethod":true,"signature":"getValue(parameterName:String):Variant","description":""}]},{"name":"RepPartyFilter","summary":"Класс RepPartyFilter предназначен для фильтрации субъектов по узлам типа ВСП (территориальная/региональная структура) с учетом вида обслуживания.","members":[{"name":"getAsSqlString","isMethod":true,"signature":"getAsSqlString(partyIdFieldName:String, partyKind:Integer, String [, serviceKind:Integer, String] [, beginDate:Date] [, endDate:Date] [, privilege:Integer]):String","description":""}]},{"name":"RepSqlQuery","summary":"Класс RepSqlQuery представляет собой контейнер для параметризованного SQL-запроса.","members":[{"name":"addParameter","isMethod":true,"signature":"addParameter(name:String [, value:Variant])","description":""}]}],"procedures":[{"name":"repQuietReport","signature":"repQuietReport(parameters:Object, String):String","description":"Определяет характеристики безынтерфейсной обработки файла параметров для отчетных форм подсистем \"Внутренняя отчетность\" и \"Отчеты банка\"."}],"constants":[]}
+{
+    "version": 3,
+    "classes": [
+        {
+            "name": "RepBranchFieldFilter",
+            "summary": "Класс RepBranchFieldFilter используется для фильтрации объектов по узлам типа ВСП (территориальная/региональная структура).",
+            "members": [
+                {
+                    "name": "GetAsSqlString",
+                    "isMethod": true,
+                    "signature": "GetAsSqlString(alias:String [, privilege:Integer]):String",
+                    "description": "Метод используется для получения строки фильтрации, которая должна быть добавлена в условие WHERE PL/SQL запроса выборки (AND <строка фильтрации>)."
+                },
+                {
+                    "name": "IsSuitable",
+                    "isMethod": true,
+                    "signature": "IsSuitable (file:File, Tbfile, privilege:Integer):Bool",
+                    "description": "Метод предназначен для фильтрации объекта, заданного в виде объекта FILE или TBFile."
+                }
+            ]
+        },
+        {
+            "name": "RepDocInfoServer",
+            "summary": "Класс позволяет получить информацию по документу.",
+            "members": [
+                {
+                    "name": "cacheInformation",
+                    "isMethod": true,
+                    "signature": "cacheInformation(documentQueryText:Object, String)",
+                    "description": "Метод выполняет кеширование информации."
+                },
+                {
+                    "name": "getCacheTableName",
+                    "isMethod": true,
+                    "signature": "getCacheTableName ():String",
+                    "description": "Метод возвращает имя представления Oracle, содержащего информацию, полученную методом cacheInformation ()."
+                },
+                {
+                    "name": "getFieldListAsString",
+                    "isMethod": true,
+                    "signature": "getFieldListAsString ([tableAlias:String]):String",
+                    "description": "Метод позволяет сформировать строку со списком полей для использования в SQL-запросах."
+                },
+                {
+                    "name": "getInformation",
+                    "isMethod": true,
+                    "signature": "getInformation (document:File, Record, Tbfile, TRecHandler, docInfo:Record, TRecHandler):Bool",
+                    "description": "Метод используется для получения информации по документу."
+                }
+            ]
+        },
+        {
+            "name": "RepOperdaysOpened",
+            "summary": "Класс используется для анализа открытых операционных дней по отделениям за период.",
+            "members": [
+                {
+                    "name": "GetNext",
+                    "isMethod": true,
+                    "signature": "GetNext(repOperdaysOpenedRecord:Object):Bool",
+                    "description": "Метод предназначен для получения следующего элемента списка открытых операционных дней."
+                },
+                {
+                    "name": "Rewind",
+                    "isMethod": true,
+                    "signature": "Rewind ():Bool",
+                    "description": "Метод предназначен для инициализации итератора по списку открытых операционных дней."
+                },
+                {
+                    "name": "ShouldContinue",
+                    "isMethod": true,
+                    "signature": "ShouldContinue ():Bool",
+                    "description": "Метод предназначен для отображения скроллинга открытых операционных дней."
+                }
+            ]
+        },
+        {
+            "name": "RepOperdaysOpenedRecord",
+            "summary": "Класс представляет собой класс объектов, хранящихся в объекте класса RepOperdaysOpened.",
+            "members": [
+                {
+                    "name": "branch",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Идентификатор узла территориальной структуры."
+                },
+                {
+                    "name": "maxPhase",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Номер максимальной фазы операционного дня."
+                },
+                {
+                    "name": "minPhase",
+                    "isMethod": false,
+                    "typeName": "Integer",
+                    "description": "Номер минимальной фазы операционного дня."
+                },
+                {
+                    "name": "operDate",
+                    "isMethod": false,
+                    "typeName": "Date",
+                    "description": "Дата операционного дня."
+                },
+                {
+                    "name": "GetBranchName",
+                    "isMethod": true,
+                    "signature": "GetBranchName():String",
+                    "description": "Метод предназначен для получения названия (кода) узла территориальной структуры."
+                },
+                {
+                    "name": "GetMaxPhaseName",
+                    "isMethod": true,
+                    "signature": "GetMaxPhaseName ():String",
+                    "description": "Метод предназначен для получения наименования максимальной фазы операционного дня."
+                },
+                {
+                    "name": "GetMinPhaseName",
+                    "isMethod": true,
+                    "signature": "GetMinPhaseName ():String",
+                    "description": "Метод предназначен для получения наименования минимальной фазы операционного дня."
+                }
+            ]
+        },
+        {
+            "name": "RepParameter",
+            "summary": "Класс представляет собой класс обобщенного параметра.",
+            "members": [
+                {
+                    "name": "getCode",
+                    "isMethod": true,
+                    "signature": "getCode():String",
+                    "description": "Метод предназначен для получения кода параметра."
+                },
+                {
+                    "name": "getDisplayedValue",
+                    "isMethod": true,
+                    "signature": "getDisplayedValue ():String",
+                    "description": "Метод предназначен для получения отображаемого значения параметра."
+                },
+                {
+                    "name": "getId",
+                    "isMethod": true,
+                    "signature": "getId ():String",
+                    "description": "Метод предназначен для получения идентификатора параметра."
+                },
+                {
+                    "name": "getName",
+                    "isMethod": true,
+                    "signature": "getName ():String",
+                    "description": "Метод предназначен для получения названия параметра."
+                },
+                {
+                    "name": "getType",
+                    "isMethod": true,
+                    "signature": "getType ():Integer",
+                    "description": "Метод предназначен для получения типа параметра."
+                },
+                {
+                    "name": "getlValue",
+                    "isMethod": true,
+                    "signature": "getlValue ():Variant",
+                    "description": "Метод предназначен для получения значения параметра."
+                },
+                {
+                    "name": "isDefined",
+                    "isMethod": true,
+                    "signature": "isDefined ():Bool",
+                    "description": "Метод предназначен для задания признака установленного значения параметра."
+                },
+                {
+                    "name": "RepParameter",
+                    "isMethod": true,
+                    "signature": "RepParameter (id:String, [type:Integer], value:String):Object",
+                    "description": "Метод предназначен для создания экземпляра класса."
+                },
+                {
+                    "name": "setCharsetConversion",
+                    "isMethod": true,
+                    "signature": "setCharsetConversion (isEnabled:Bool)",
+                    "description": "Метод предназначен для включения/выключения режима преобразования кодировки из OEM в ANSI при вызове методов set* и из ANSI в OEM при вызове методов get*."
+                },
+                {
+                    "name": "setCode",
+                    "isMethod": true,
+                    "signature": "setCode (code:String)",
+                    "description": "Метод предназначен для установки кода параметра."
+                },
+                {
+                    "name": "setDisplayedValue",
+                    "isMethod": true,
+                    "signature": "setDisplayedValue (displayedValue:String)",
+                    "description": "Метод предназначен для установки отображаемого значения параметра."
+                },
+                {
+                    "name": "setName",
+                    "isMethod": true,
+                    "signature": "setName (name:String)",
+                    "description": "Метод предназначен для установки названия параметра."
+                },
+                {
+                    "name": "setValue",
+                    "isMethod": true,
+                    "signature": "setValue (value:String)",
+                    "description": "Метод предназначен для установки значения параметра."
+                }
+            ]
+        },
+        {
+            "name": "RepParameterCollection",
+            "summary": "Класс представляет собой коллекцию параметров отчета.",
+            "members": [
+                {
+                    "name": "add",
+                    "isMethod": true,
+                    "signature": "add(parameter:Object, Tarray)",
+                    "description": "Метод предназначен для добавления параметра, операции или списка операций."
+                },
+                {
+                    "name": "clear",
+                    "isMethod": true,
+                    "signature": "clear ()",
+                    "description": "Метод предназначен для очистки коллекции – удаления всех параметров и списка операций."
+                },
+                {
+                    "name": "get",
+                    "isMethod": true,
+                    "signature": "get (id:String):Variant",
+                    "description": "Метод предназначен для получения объекта параметра по имени."
+                },
+                {
+                    "name": "getValue",
+                    "isMethod": true,
+                    "signature": "getValue (id:String):Variant",
+                    "description": "Метод предназначен для получения значения параметра по его идентификатору."
+                },
+                {
+                    "name": "isEmpty",
+                    "isMethod": true,
+                    "signature": "isEmpty ()",
+                    "description": "Метод предназначен для задания признака отсутствия параметров и операций в коллекции."
+                },
+                {
+                    "name": "load",
+                    "isMethod": true,
+                    "signature": "load (name:String, [path:String])",
+                    "description": "Метод предназначен для выполнения десериализации из xml."
+                },
+                {
+                    "name": "remove",
+                    "isMethod": true,
+                    "signature": "remove (id:String)",
+                    "description": "Метод предназначен для выполнения удаления параметра или списка операций."
+                },
+                {
+                    "name": "RepParameterCollection",
+                    "isMethod": true,
+                    "signature": "RepParameterCollection ()",
+                    "description": "Метод представляет собой конструктор."
+                },
+                {
+                    "name": "save",
+                    "isMethod": true,
+                    "signature": "save (name:String, [path:String])",
+                    "description": "Метод предназначен для выполнения сериализации в xml."
+                }
+            ]
+        },
+        {
+            "name": "RepParameters",
+            "summary": "Класс используется для хранения, сериализации/десериализации параметров выпуска отчета.",
+            "members": [
+                {
+                    "name": "getValue",
+                    "isMethod": true,
+                    "signature": "getValue(parameterName:String):Variant",
+                    "description": "Метод предназначен для получения значения параметра по имени."
+                },
+                {
+                    "name": "load",
+                    "isMethod": true,
+                    "signature": "load (name:String, [path:String])",
+                    "description": "Метод предназначен для загрузки значений параметров из xml."
+                },
+                {
+                    "name": "save",
+                    "isMethod": true,
+                    "signature": "save (name:String, [path:String])",
+                    "description": "Метод предназначен для сохранения значений параметров в xml."
+                },
+                {
+                    "name": "setCharsetConversion",
+                    "isMethod": true,
+                    "signature": "setCharsetConversion (isEnabled:Bool):Bool",
+                    "description": "Метод предназначен для сброса и установки флага конвертации кодировки."
+                },
+                {
+                    "name": "setValue",
+                    "isMethod": true,
+                    "signature": "setValue (parameterName:String, value:Date, Integer, String, Tarray)",
+                    "description": "Метод предназначен для установки значения параметра."
+                }
+            ]
+        },
+        {
+            "name": "RepPartyFilter",
+            "summary": "Класс RepPartyFilter предназначен для фильтрации субъектов по узлам типа ВСП (территориальная/региональная структура) с учетом вида обслуживания.",
+            "members": [
+                {
+                    "name": "getAsSqlString",
+                    "isMethod": true,
+                    "signature": "getAsSqlString(partyIdFieldName:String, partyKind:Integer, String [, serviceKind:Integer, String] [, beginDate:Date] [, endDate:Date] [, privilege:Integer]):String",
+                    "description": "Метод возвращает сформированную строку SQL-выражения для вставки в SQL-запрос."
+                },
+                {
+                    "name": "isSuitable",
+                    "isMethod": true,
+                    "signature": "isSuitable (partyId:Integer, partyKind:Integer [, serviceKind:Integer] [, beginDate:Date] [, endDate:Date] [, privilege:Integer]):Bool",
+                    "description": "Метод используется для проверки субъекта на соответствие параметрам фильтра."
+                }
+            ]
+        },
+        {
+            "name": "RepSqlQuery",
+            "summary": "Класс RepSqlQuery представляет собой контейнер для параметризованного SQL-запроса.",
+            "members": [
+                {
+                    "name": "addParameter",
+                    "isMethod": true,
+                    "signature": "addParameter(name:String [, value:Variant])",
+                    "description": "Метод предназначен для добавления параметра и его значения в коллекцию параметров SQL-запроса."
+                },
+                {
+                    "name": "getCommandText",
+                    "isMethod": true,
+                    "signature": "getCommandText ():String",
+                    "description": "Метод используется для получения текста SQL-запроса."
+                },
+                {
+                    "name": "setCommandText",
+                    "isMethod": true,
+                    "signature": "setCommandText (queryText:String)",
+                    "description": "Метод предназначен для установки текста SQL-запроса."
+                }
+            ]
+        }
+    ],
+    "procedures": [
+        {
+            "name": "repQuietReport",
+            "signature": "repQuietReport(parameters:Object, String):String",
+            "description": "Определяет характеристики безынтерфейсной обработки файла параметров для отчетных форм подсистем \"Внутренняя отчетность\" и \"Отчеты банка\"."
+        }
+    ],
+    "constants": []
+}

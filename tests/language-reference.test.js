@@ -318,6 +318,33 @@ test("каталог прикладных модулей проходит про
     );
 });
 
+test("в состав классов не попадают параметры их методов", () => {
+    /*
+     * Описание параметра выглядит ровно как описание свойства, поэтому импорт
+     * из справки закрывает секцию свойств на следующем заголовке. Классы ниже
+     * ловили такие параметры целыми группами.
+     */
+    const { readCatalog } = require("../build/platform-modules");
+    const { modules } = readCatalog();
+    const leaked = [
+        ["rcbcoreinter", "RcbAttributeValue", "summaryUnit"],
+        ["rcbcoreinter", "RcbNormalizer", "nodeCode"],
+        ["reporting", "RepSqlQuery", "queryText"],
+        ["widinter", "RsbWlAccLnk", "recWlAcc"]
+    ];
+
+    for (const [moduleKey, className, member] of leaked) {
+        const found = modules.get(moduleKey).classes
+            .find(item => item.name === className);
+
+        assert.ok(found, `${className} обязан быть в каталоге`);
+        assert.ok(
+            !(found.members || []).some(item => item.name === member),
+            `${className}.${member} — параметр метода, а не свойство`
+        );
+    }
+});
+
 if (failed > 0) {
     console.error(`\nПройдено: ${passed}\nОшибок: ${failed}`);
     process.exitCode = 1;

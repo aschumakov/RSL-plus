@@ -65,6 +65,7 @@ const defaultSettings: IRslSettings = {
     autoImport: { enabled: true },
     analysis: { workspaceIndexing: "activeImports" },
     semanticHighlighting: { maxFileSizeKb: 512 },
+    inlayHints: { variableTypes: true },
     diagnostics: DEFAULT_DIAGNOSTIC_SETTINGS
 };
 const settingsService = new RslSettingsService(defaultSettings);
@@ -563,6 +564,7 @@ connection.onInitialize((params: InitializeParams) => {
                 range: true
             },
             documentSymbolProvider: true,
+            inlayHintProvider: true,
             documentFormattingProvider: true,
             documentRangeFormattingProvider: true,
             foldingRangeProvider: true

@@ -212,6 +212,12 @@
                "default": 512,
                "description": "Максимальный размер файла для семантической подсветки, КБ. Для больших файлов остаётся обычная подсветка синтаксиса. 0 — без ограничения."
             },
+            "rslPlus.inlayHints.variableTypes": {
+               "scope": "resource",
+               "type": "boolean",
+               "default": true,
+               "description": "Показывать выведенный тип рядом с объявлением, в котором тип не написан: Var doc; и Var doc = TBFile(...) — это Variant, и подсказка сообщает, чем он оказался."
+            },
             "rslPlus.editor.completeBlocksOnEnter": {
                "scope": "resource",
                "type": "boolean",

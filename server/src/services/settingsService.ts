@@ -92,6 +92,7 @@ function mergeSettings(
     const semanticHighlighting = isRecord(input.semanticHighlighting)
         ? input.semanticHighlighting
         : {};
+    const inlayHints = isRecord(input.inlayHints) ? input.inlayHints : {};
     const language = isRecord(input.language) ? input.language : {};
     const dialect = isLanguageDialect(language.dialect)
         ? language.dialect
@@ -121,6 +122,17 @@ function mergeSettings(
                 ? Math.max(0, semanticHighlighting.maxFileSizeKb)
                 : defaults.semanticHighlighting.maxFileSizeKb
         },
+        inlayHints: {
+            /*
+             * Раздел мог отсутствовать в defaults: настройки приходят и от
+             * встроенного snapshot, и от клиента, и от вызывающего кода.
+             * Обращение к отсутствующей секции роняло бы разрешение настроек
+             * целиком, а не теряло одно значение.
+             */
+            variableTypes: typeof inlayHints.variableTypes === "boolean"
+                ? inlayHints.variableTypes
+                : defaults.inlayHints?.variableTypes !== false
+        },
         diagnostics: {
             ...(defaults.diagnostics || {}),
             ...diagnostics,
@@ -136,6 +148,9 @@ function cloneSettings(value: IRslSettings): IRslSettings {
         autoImport: { ...value.autoImport },
         analysis: { ...value.analysis },
         semanticHighlighting: { ...value.semanticHighlighting },
+        inlayHints: {
+            variableTypes: value.inlayHints?.variableTypes !== false
+        },
         diagnostics: {
             ...(value.diagnostics || {})
         }
@@ -152,6 +167,8 @@ function settingsEqual(
         left.analysis.workspaceIndexing === right.analysis.workspaceIndexing &&
         left.semanticHighlighting.maxFileSizeKb ===
             right.semanticHighlighting.maxFileSizeKb &&
+        left.inlayHints?.variableTypes ===
+            right.inlayHints?.variableTypes &&
         JSON.stringify(left.diagnostics || {}) ===
         JSON.stringify(right.diagnostics || {});
 }
