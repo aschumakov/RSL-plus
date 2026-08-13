@@ -1,5 +1,11 @@
 import { CompletionItemKind } from "vscode-languageserver";
 
+import {
+    BLOCK_START_KEYWORDS,
+    canonicalTypeName,
+    DECLARATION_KEYWORDS as DECLARATION_KEYWORD_LIST,
+    DECLARATION_MODIFIERS
+} from "../language/rslLanguageReference";
 import { lexRsl, normalizeIdentifier, type IRslToken } from "../lexer";
 import { readClassDeclarationHeader } from "../parsing/classDeclarationHeader";
 import {
@@ -31,6 +37,13 @@ export interface IRslDeclarationDescriptor {
     returnType?: string;
     baseClassName?: string;
     typeName?: string;
+    /**
+     * Тип написан в объявлении, а не выведен из значения.
+     *
+     * `Var sql: String` и `Var sql = "aaa"` дают одинаковый typeName, но первое
+     * — приведение к типу, а второе — Variant с текущим строковым значением.
+     */
+    typeIsDeclared?: boolean;
     value?: string;
     start: number;
     end: number;
@@ -72,11 +85,17 @@ export interface ICompactDeclarationOptions {
     includeCallableParameters?: boolean;
 }
 
-const BLOCK_START = new Set(["macro", "class", "if", "for", "while", "with"]);
-const DECLARATION_KEYWORDS = new Set([
-    "macro", "class", "var", "const", "file", "record", "array"
-]);
-const MODIFIERS = new Set(["private", "local", "public"]);
+/*
+ * Compact scanner берёт состав ключевых слов из общего справочника языка.
+ *
+ * PUBLIC модификатором больше не считается. Раньше он был им ЗДЕСЬ и не был им
+ * в полном parser-е, поэтому `Public Var x;` давал объявление x в компактной
+ * модели закрытого файла и не давал его в открытом документе: переход по такому
+ * имени работал из соседнего файла и не работал в самом файле.
+ */
+const BLOCK_START = new Set(BLOCK_START_KEYWORDS);
+const DECLARATION_KEYWORDS = new Set(DECLARATION_KEYWORD_LIST);
+const MODIFIERS = new Set(DECLARATION_MODIFIERS);
 
 /**
  * Однопроходный scanner для закрытых импортируемых модулей.
@@ -101,6 +120,9 @@ export function extractCompactDeclarations(
     const blocks: IBlockFrame[] = [];
     let canStartStatement = true;
     let currentLine = -1;
+    /* Глубина скобок: ключевое слово внутри вызова предложения не начинает. */
+    let groupDepth = 0;
+    let afterDot = false;
 
     for (let index = 0; index < tokens.length; index++) {
         const token = tokens[index];
@@ -111,20 +133,38 @@ export function extractCompactDeclarations(
         }
 
         if (token.kind === "symbol") {
+            if (token.raw === "(" || token.raw === "[" || token.raw === "{") {
+                groupDepth++;
+            } else if (
+                token.raw === ")" || token.raw === "]" || token.raw === "}"
+            ) {
+                groupDepth = Math.max(0, groupDepth - 1);
+            }
+
             if (token.raw === ";") {
                 canStartStatement = true;
+                /*
+                 * Глубина сбрасывается на конце оператора: в файле с
+                 * незакрытой скобкой она иначе осталась бы ненулевой до конца
+                 * файла и объявления после ошибки перестали бы находиться.
+                 */
+                groupDepth = 0;
             } else if (token.raw !== ",") {
                 canStartStatement = false;
             }
+            afterDot = token.raw === ".";
             continue;
         }
 
         if (token.kind !== "identifier") {
             canStartStatement = false;
+            afterDot = false;
             continue;
         }
 
         const word = normalizeIdentifier(token.value);
+        const previousAfterDot = afterDot;
+        afterDot = false;
 
         if (word === "end") {
             const closed = blocks.pop();
@@ -137,7 +177,25 @@ export function extractCompactDeclarations(
             continue;
         }
 
-        if (!canStartStatement) {
+        /*
+         * Ключевое слово объявления начинает предложение даже посреди строки.
+         *
+         * Так compact-модель совпадает с полным parser-ом, который завершает
+         * выражение на любом слове-операторе: в `Public Var x;` объявление x
+         * обязано остаться, потому что компилятор ругается ровно на Public.
+         *
+         * Ограничения обязательны: имя после точки — поле записи, и словарь
+         * базы вполне может содержать поле `file`; внутри скобок стоит
+         * аргумент, а не объявление.
+         */
+        if (
+            !canStartStatement &&
+            !(
+                groupDepth === 0 &&
+                !previousAfterDot &&
+                (DECLARATION_KEYWORDS.has(word) || word === "import")
+            )
+        ) {
             continue;
         }
 
@@ -242,6 +300,16 @@ export function extractCompactDeclarations(
                     parsedVariables.lastIndex
                 )
                 : undefined;
+            /*
+             * Явная декларация — это `: Тип` и сами ключевые слова ARRAY, FILE,
+             * RECORD: они и есть тип объекта. Тип, выведенный из значения
+             * инициализатора, декларацией не является.
+             */
+            const declaredType = scanDeclaredType(
+                tokens,
+                parsedVariable.index,
+                parsedVariables.lastIndex
+            ) || declarationKeywordType(keyword);
             const descriptor: IRslDeclarationDescriptor = {
                 kind: "variable",
                 name: nameToken.value,
@@ -256,12 +324,9 @@ export function extractCompactDeclarations(
                 startCharacter: nameToken.character,
                 endLine: nameToken.endLine,
                 endCharacter: nameToken.endCharacter,
-                typeName: scanDeclaredType(
-                    tokens,
-                    parsedVariable.index,
-                    parsedVariables.lastIndex
-                ) || declarationKeywordType(keyword) ||
+                typeName: declaredType ||
                     inferCompactValueType(value, tokens, parsedVariable.index),
+                typeIsDeclared: !!declaredType,
                 value,
                 children: []
             };
@@ -767,6 +832,14 @@ function buildChildren(
                 end: descriptor.selectionEnd
             },
             typeName: descriptor.typeName || descriptor.returnType || "variant",
+            /*
+             * Variant — это либо написанный Variant, либо отсутствие декларации.
+             * Тип результата Macro пишется явно или отсутствует вовсе, поэтому
+             * дополнительного признака ему не нужно.
+             */
+            typeVariant: isVariantTypeName(
+                descriptor.typeName || descriptor.returnType
+            ) || !(descriptor.typeIsDeclared || descriptor.returnType),
             value: descriptor.value,
             parameterText: descriptor.parameterText,
             baseClassName: descriptor.baseClassName,
@@ -990,9 +1063,15 @@ class SyntaxDeclarationExtractor {
             visibility,
             isConstant,
             isProperty,
+            /*
+             * typeName у узла ставит parser и только там, где тип написан: `:
+             * Тип`, ключевые слова ARRAY/FILE/RECORD, объект ошибки в ONERROR.
+             * Иначе тип берётся из инициализатора — и декларацией не считается.
+             */
             typeName: node.typeName
                 ? normalizeType(node.typeName)
                 : inferInitializerType(node),
+            typeIsDeclared: !!node.typeName,
             value: initializerText(this.source, node),
             start: nameToken?.start ?? node.start,
             end: nameToken?.end ?? node.end,
@@ -1100,17 +1179,12 @@ function isDeclaration(node: IRslSyntaxNode): boolean {
         node.kind === "ClassDeclaration";
 }
 
-const STANDARD_TYPES = new Set([
-    "variant", "integer", "double", "doublel", "string", "bool", "date",
-    "time", "datetime", "memaddr", "procref", "methodref", "decimal",
-    "numeric", "money", "moneyl", "specval", "object", "r2m"
-]);
+const normalizeType = canonicalTypeName;
 
-function normalizeType(value: string): string {
-    const normalized = normalizeIdentifier(value).replace(/^@/, "");
-    return STANDARD_TYPES.has(normalized)
-        ? normalized
-        : value.replace(/^@/, "");
+/** Пустой тип — это тоже Variant: декларации нет. */
+function isVariantTypeName(value: string | undefined): boolean {
+    const normalized = normalizeIdentifier(value || "");
+    return !normalized || normalized === "variant";
 }
 
 function inferInitializerType(node: IRslSyntaxNode): string {

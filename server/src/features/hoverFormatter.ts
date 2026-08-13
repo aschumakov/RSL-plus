@@ -96,9 +96,16 @@ function buildDeclaration(
     }
 
     if (kind === CompletionItemKind.Constant) {
-        const value = symbol.value;
-        return value
-            ? `${visibility}Const ${symbol.name} = ${value}`
+        /*
+         * Значение И тип, а не одно из двух: у константы прикладного модуля тип
+         * приходит из справки явно, и раньше он терялся ровно там, где значение
+         * известно — то есть всегда.
+         */
+        const type = objectType.toLowerCase() === "variant"
+            ? ""
+            : `: ${objectType}`;
+        return symbol.value
+            ? `${visibility}Const ${symbol.name}${type} = ${symbol.value}`
             : `${visibility}Const ${symbol.name}: ${objectType}`;
     }
 

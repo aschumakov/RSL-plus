@@ -100,13 +100,34 @@ function codes(items) {
 
         /*
          * Раздел «Встроенные процедуры» руководства (стр. 209–307) описывает
-         * 239 процедур. Число закреплено, чтобы пропажа или дубль в каталоге
-         * были видны сразу, а не проявлялись отсутствующим Completion.
+         * 239 процедур, из которых 13 принадлежат макромодулям RslScr и rslx:
+         * руководство выделяет их в подразделы «Макропроцедуры модуля …» и
+         * требует подключить модуль командой IMPORT. Эти 13 описаны в
+         * platform-modules/rslscr.json и platform-modules/rslx.json, поэтому
+         * встроенными остаются 226.
+         *
+         * Число закреплено, чтобы пропажа или дубль в каталоге были видны
+         * сразу, а не проявлялись отсутствующим Completion.
          */
         assert.strictEqual(
             procedures.length,
-            239,
+            239 - 13,
             "Состав каталога расошёлся с разделом руководства"
+        );
+
+        /* Ни одна из перенесённых процедур не осталась встроенной. */
+        const moved = [
+            "SetScroll", "FindRow", "FindCol", "FillDown", "FillUp",
+            "SetDlgFields", "ScrollMes", "UserFill",
+            "AddMultiAction", "GetMultiCount", "GoToScroll", "RunScroll",
+            "UpdateScroll"
+        ];
+        assert.deepStrictEqual(
+            procedures
+                .map(item => item.name)
+                .filter(name => moved.includes(name)),
+            [],
+            "Процедуры RslScr и rslx доступны только через Import"
         );
 
         const generic = procedures
@@ -388,12 +409,12 @@ function codes(items) {
      * файлам: обход проекта в момент Ctrl+Space — это задержка ровно там, где
      * пользователь ждёт ответа.
      */
-    await test("классы прикладного модуля видны только через Import", () => {
+    await test("классы прикладного модуля видны только через Import", async () => {
         const {
             PlatformModuleCatalog
         } = require("../server/out/builtins/platformModuleCatalog");
         const catalog = new PlatformModuleCatalog({ log: () => undefined });
-        catalog.ensureModules([
+        await catalog.ensureModules([
             "CommonInter", "AcquirerObjects", "BankInter", "middle"
         ]);
 
@@ -458,6 +479,8 @@ function codes(items) {
          * (refreshOpenDependents в server.ts), а не обработчик Completion.
          */
         const cold = new PlatformModuleCatalog({ log: () => undefined });
+        /* Индекс каталога читается асинхронно и до запросов. */
+        await cold.ensureIndexLoaded();
         const coldIndex = new WorkspaceIndex();
         coldIndex.registerWorkspaceFiles([MAIN, MIDDLE]);
         const coldMain = coldIndex.updateOpenModule(MAIN, viaMiddle, 1);
@@ -492,7 +515,7 @@ function codes(items) {
             "Completion не имеет права сам грузить состав модуля"
         );
 
-        cold.ensureModules(coldResolver.visiblePlatformModules(MAIN));
+        await cold.ensureModules(coldResolver.visiblePlatformModules(MAIN));
         assert.ok(
             coldNames().includes("RSL_LoansCarryDoc"),
             "После подготовки состава классы модуля обязаны появиться"
@@ -521,13 +544,13 @@ function codes(items) {
         );
     });
 
-    await test("Completion не читает файл прикладных модулей", () => {
+    await test("Completion не читает файл прикладных модулей", async () => {
         const fs = require("fs");
         const {
             PlatformModuleCatalog
         } = require("../server/out/builtins/platformModuleCatalog");
         const catalog = new PlatformModuleCatalog({ log: () => undefined });
-        catalog.ensureModules([
+        await catalog.ensureModules([
             "CommonInter", "AcquirerObjects", "BankInter", "middle"
         ]);
 
@@ -539,12 +562,21 @@ function codes(items) {
         const resolver = new RslScopeResolver(index, undefined, catalog);
 
         const real = fs.readFileSync;
+        const realAsync = fs.promises.readFile;
         let reads = 0;
-        fs.readFileSync = function (...args) {
-            if (String(args[0]).includes("platform-modules")) {
+        const count = value => {
+            if (String(value).includes("platform-modules")) {
                 reads++;
             }
+        };
+        fs.readFileSync = function (...args) {
+            count(args[0]);
             return real.apply(this, args);
+        };
+        /* Асинхронное чтение считается тоже: запрос его точно так же не ждёт. */
+        fs.promises.readFile = function (...args) {
+            count(args[0]);
+            return realAsync.apply(this, args);
         };
         try {
             resolver.getCompletions(
@@ -554,6 +586,7 @@ function codes(items) {
             );
         } finally {
             fs.readFileSync = real;
+            fs.promises.readFile = realAsync;
         }
 
         assert.strictEqual(
@@ -564,12 +597,12 @@ function codes(items) {
         );
     });
 
-    await test("класс модуля наследует члены стандартного класса", () => {
+    await test("класс модуля наследует члены стандартного класса", async () => {
         const {
             PlatformModuleCatalog
         } = require("../server/out/builtins/platformModuleCatalog");
         const catalog = new PlatformModuleCatalog({ log: () => undefined });
-        catalog.ensureModules([
+        await catalog.ensureModules([
             "CommonInter", "AcquirerObjects", "BankInter", "middle"
         ]);
 
@@ -601,12 +634,12 @@ function codes(items) {
         );
     });
 
-    await test("символы прикладного модуля разрешаются, а не только предлагаются", () => {
+    await test("символы прикладного модуля разрешаются, а не только предлагаются", async () => {
         const {
             PlatformModuleCatalog
         } = require("../server/out/builtins/platformModuleCatalog");
         const catalog = new PlatformModuleCatalog({ log: () => undefined });
-        catalog.ensureModules(["total", "CommonInter"]);
+        await catalog.ensureModules(["total", "CommonInter"]);
 
         /*
          * Без этого имя из модуля попадало в Completion, но resolveAt его не
@@ -647,12 +680,12 @@ function codes(items) {
         assert.strictEqual(klass.symbol.typeName, "RSL_LoansCarryDoc");
     });
 
-    await test("процедуры прикладного модуля предлагаются и знают свой тип", () => {
+    await test("процедуры прикладного модуля предлагаются и знают свой тип", async () => {
         const {
             PlatformModuleCatalog
         } = require("../server/out/builtins/platformModuleCatalog");
         const catalog = new PlatformModuleCatalog({ log: () => undefined });
-        catalog.ensureModules(["total"]);
+        await catalog.ensureModules(["total"]);
 
         /*
          * LnGetRecordSet объявлена как «(Query:String, MsgPrint:Bool): Object»,
@@ -690,17 +723,18 @@ function codes(items) {
      * <модуль>_class_*, и 22 класса молча уходили в счётчик пропущенных.
      * Поэтому здесь проверяется и наличие модуля, и то, ради чего он нужен.
      */
-    await test("RsbFormsInter даёт классы, цепочку наследования и константы", () => {
+    await test("RsbFormsInter даёт классы, цепочку наследования и константы", async () => {
         const {
             PlatformModuleCatalog
         } = require("../server/out/builtins/platformModuleCatalog");
         const catalog = new PlatformModuleCatalog({ log: () => undefined });
 
+        await catalog.ensureIndexLoaded();
         assert.ok(
             catalog.knowsModule("RsbFormsInter"),
             "Модуль экранных форм обязан быть в каталоге"
         );
-        catalog.ensureModules(["RsbFormsInter"]);
+        await catalog.ensureModules(["RsbFormsInter"]);
 
         const source = [
             "Import RsbFormsInter;",
@@ -747,9 +781,17 @@ function codes(items) {
             "RSB_EV_BUTTON_CLICKED"
         );
         assert.ok(constant, "Константы вида события обязаны быть в каталоге");
-        assert.strictEqual(constant.typeName, "Integer");
+        assert.strictEqual(constant.moduleName, "RsbFormsInter");
+        assert.strictEqual(constant.symbol.typeName, "Integer");
+        /* Значение обязано дойти до символа, а не остаться в тексте подписи. */
+        assert.strictEqual(constant.symbol.value, "5");
         assert.ok(
-            constant.documentation,
+            constant.symbol.completionItem.detail.includes("= 5"),
+            "Значение константы обязано быть видно в Completion: " +
+                constant.symbol.completionItem.detail
+        );
+        assert.ok(
+            constant.symbol.documentation,
             "У константы обязано быть описание: иначе Hover покажет пустоту"
         );
 
@@ -761,13 +803,133 @@ function codes(items) {
         );
     });
 
-    await test("состав модуля читается только для импортированных", () => {
+    /*
+     * Константы интерактивного режима из раздела «Поддержка интерактивного
+     * режима»: сообщения диалога, коды возврата обработчика и параметры окна
+     * сообщения. Числовых значений руководство не приводит, поэтому у них есть
+     * тип и описание, но нет значения — придумывать его нельзя.
+     */
+    await test("константы диалога есть в каталоге и описаны", () => {
+        const catalog = getDefaults();
+        const expected = [
+            "DLG_PREINIT", "DLG_INIT", "DLG_INREC", "DLG_OUTREC",
+            "DLG_REMFOCUS", "DLG_SETFOCUS", "DLG_KEY", "DLG_BUTTON",
+            "DLG_MOUSE", "DLG_TIMER", "DLG_SAVE", "DLG_DESTROY",
+            "DLG_INLOOP", "DLG_OUTLOOP", "DLG_SWITCH", "DLG_MSELSTART",
+            "DLG_MSEL", "DLG_MSELEND",
+            "CM_DEFAULT", "CM_CANCEL", "CM_SAVE", "CM_IGNORE", "CM_INSERT",
+            "CM_SELECT", "CM_UPDATE_ADDSCROLL", "CM_MSEL_CONT_CLEAR",
+            "CM_MSEL_STOP_KEEP", "CM_MSEL_STOP_CLEAR",
+            "CM_MSEL_STOP_CLEARALL",
+            "MB_OK", "MB_YES", "MB_NO", "MB_CANCEL", "MB_ERROR",
+            "IND_OK", "IND_YES", "IND_NO", "IND_CANCEL", "IND_ERROR"
+        ];
+
+        for (const name of expected) {
+            const symbol = catalog.findSymbol(name);
+            assert.ok(symbol, `Константа ${name} обязана быть в каталоге`);
+            assert.strictEqual(
+                symbol.typeName,
+                "Integer",
+                `${name}: константы диалога сравниваются с числами`
+            );
+            assert.ok(
+                symbol.documentation.length > 20,
+                `${name}: описание обязано быть по существу`
+            );
+            /*
+             * Значения руководство не называет. Показать выдуманное число хуже,
+             * чем не показать ничего: пользователь сравнит его с полученным от
+             * системы и получит неверный ответ.
+             */
+            assert.strictEqual(
+                symbol.value,
+                "",
+                `${name}: неподтверждённое значение подставлять нельзя`
+            );
+        }
+    });
+
+    /*
+     * Руководство выделяет процедуры RslScr и rslx в подразделы
+     * «Макропроцедуры модуля …» и требует подключить модуль командой IMPORT.
+     * Значит без Import этих имён не существует.
+     */
+    await test("процедуры RslScr и rslx доступны только через Import", async () => {
+        const {
+            PlatformModuleCatalog
+        } = require("../server/out/builtins/platformModuleCatalog");
+        const catalog = new PlatformModuleCatalog({ log: () => undefined });
+        await catalog.ensureModules(["RslScr", "rslx"]);
+
+        const MAIN = "file:///scroll.mac";
+        const build = source => {
+            const index = new WorkspaceIndex();
+            index.registerWorkspaceFiles([MAIN]);
+            const module = index.updateOpenModule(MAIN, source, 1);
+            return {
+                module,
+                resolver: new RslScopeResolver(index, undefined, catalog)
+            };
+        };
+
+        const withImport = build([
+            "Import RslScr, rslx;",
+            "Macro Test()",
+            "  SetScroll (data);",
+            "  Var last = LastUsed;",
+            "  UpdateScroll (rs, 3);",
+            "End;"
+        ].join("\n"));
+
+        for (const name of ["SetScroll", "UpdateScroll", "GoToScroll"]) {
+            const resolved = withImport.resolver.resolveAt(
+                MAIN,
+                withImport.module.symbolTree,
+                withImport.module.source.indexOf(name) >= 0
+                    ? withImport.module.source.indexOf(name) + 1
+                    : 0
+            );
+            assert.ok(
+                name === "GoToScroll" || resolved,
+                `${name} обязана разрешаться при Import`
+            );
+        }
+
+        /* Глобальная переменная модуля — не константа: ей присваивают. */
+        const variable = catalog.findSymbol(["RslScr"], "LastUsed");
+        assert.ok(variable, "Переменные модуля RslScr обязаны быть в каталоге");
+        assert.strictEqual(variable.symbol.typeName, "Integer");
+        assert.ok(variable.symbol.documentation.includes("скроллинг"));
+
+        const withoutImport = build([
+            "Macro Test()",
+            "  SetScroll (data);",
+            "End;"
+        ].join("\n"));
+        assert.strictEqual(
+            withoutImport.resolver.resolveAt(
+                MAIN,
+                withoutImport.module.symbolTree,
+                withoutImport.module.source.indexOf("SetScroll") + 1
+            ),
+            undefined,
+            "Без Import RslScr имени SetScroll не существует"
+        );
+        assert.ok(
+            !getDefaults().findSymbol("SetScroll"),
+            "Процедура модуля не имеет права быть встроенной"
+        );
+    });
+
+    await test("состав модуля читается только для импортированных", async () => {
         const {
             PlatformModuleCatalog
         } = require("../server/out/builtins/platformModuleCatalog");
         const catalog = new PlatformModuleCatalog({ log: () => undefined });
 
         /* Индекс знает про все модули, но их состав ещё не прочитан. */
+        await catalog.ensureIndexLoaded();
         assert.ok(
             catalog.knowsModule("PaymInter") && catalog.moduleCount > 30,
             `Индекс модулей не прочитан: ${catalog.moduleCount}`
@@ -778,15 +940,131 @@ function codes(items) {
             "Индекс не должен тянуть за собой состав: у PaymInter это 186 КБ"
         );
 
-        catalog.ensureModules(["CommonInter"]);
+        await catalog.ensureModules(["CommonInter"]);
+        assert.deepStrictEqual(
+            catalog.dependenciesOf("CommonInter"),
+            ["acquirerobjects"],
+            "Зависимости модуля обязаны быть объявлены в индексе"
+        );
         assert.strictEqual(
             catalog.loadedCount,
-            1,
-            "Читаться обязан только запрошенный модуль"
+            2,
+            "Читаться обязан запрошенный модуль и его объявленные зависимости"
         );
         assert.ok(
             !catalog.findClass(["PaymInter"], "RsbPayDocument"),
             "Непрочитанный модуль не должен отдавать символы"
+        );
+    });
+
+    /*
+     * Контрольный случай межмодульного наследования.
+     *
+     * RsbBBPayment объявлен в BankInter, а его базовый класс RsbPayment — в
+     * PaymInter. Одного `Import BankInter` обязано хватить: состав зависимого
+     * модуля читается транзитивно. При этом сам RsbPayment по имени НЕ виден —
+     * назвать его без `Import PaymInter` компилятор не позволит.
+     */
+    await test("Import BankInter даёт члены, унаследованные из PaymInter", async () => {
+        const {
+            PlatformModuleCatalog
+        } = require("../server/out/builtins/platformModuleCatalog");
+        const catalog = new PlatformModuleCatalog({ log: () => undefined });
+        await catalog.ensureModules(["BankInter"]);
+
+        assert.ok(
+            catalog.loadedCount >= 2,
+            "PaymInter обязан прочитаться как зависимость BankInter"
+        );
+
+        const source = [
+            "Import BankInter;",
+            "Macro Test()",
+            "  Var payment = RsbBBPayment();",
+            "  payment.",
+            "End;"
+        ].join("\n");
+        const uri = "file:///bb.mac";
+        const index = new WorkspaceIndex();
+        index.registerWorkspaceFiles([uri]);
+        const opened = index.updateOpenModule(uri, source, 1);
+        const resolver = new RslScopeResolver(index, undefined, catalog);
+
+        const members = resolver
+            .getCompletions(
+                uri,
+                opened.symbolTree,
+                source.indexOf("  payment.") + 10
+            )
+            .map(item => String(item.label));
+
+        assert.ok(
+            members.length > 0,
+            "Класс RsbBBPayment своих членов не имеет — все они унаследованы"
+        );
+        assert.ok(
+            members.includes("AkkrAddDocs") && members.includes("BaseRate"),
+            "Члены RsbPayment обязаны попадать в подсказку по RsbBBPayment; " +
+                `предложено: ${members.slice(0, 20).join(", ")}`
+        );
+
+        /* Разрешение члена, а не только список: Hover и переход тоже. */
+        const inherited = resolver.resolveMemberReference(
+            uri,
+            opened.symbolTree,
+            source.indexOf("  payment.") + 3,
+            "BaseRate"
+        );
+        assert.ok(inherited, "Унаследованный член обязан разрешаться");
+        assert.strictEqual(inherited.platformModule, "payminter");
+
+        assert.ok(
+            !catalog.findClass(["BankInter"], "RsbPayment"),
+            "Зависимость читается для наследования, но её имена не видны"
+        );
+    });
+
+    /*
+     * Базовый класс прикладного модуля не имеет права разрешаться через
+     * произвольный одноимённый класс проекта.
+     */
+    await test("базовый platform-класс не берётся из workspace", async () => {
+        const {
+            PlatformModuleCatalog
+        } = require("../server/out/builtins/platformModuleCatalog");
+        const catalog = new PlatformModuleCatalog({ log: () => undefined });
+        await catalog.ensureModules(["BankInter"]);
+
+        const MAIN = "file:///main.mac";
+        const source = [
+            "Import BankInter;",
+            "Class RsbPayment",
+            "  Var Impostor;",
+            "End;",
+            "Macro Test()",
+            "  Var payment = RsbBBPayment();",
+            "  payment.",
+            "End;"
+        ].join("\n");
+        const index = new WorkspaceIndex();
+        index.registerWorkspaceFiles([MAIN]);
+        const opened = index.updateOpenModule(MAIN, source, 1);
+        const resolver = new RslScopeResolver(index, undefined, catalog);
+        const members = resolver
+            .getCompletions(
+                MAIN,
+                opened.symbolTree,
+                source.indexOf("  payment.") + 10
+            )
+            .map(item => String(item.label));
+
+        assert.ok(
+            !members.includes("Impostor"),
+            "Класс проекта не имеет права подменять базовый класс модуля"
+        );
+        assert.ok(
+            members.includes("AkkrAddDocs"),
+            `Настоящая база обязана остаться: ${members.slice(0, 10).join(", ")}`
         );
     });
 
@@ -837,14 +1115,33 @@ function codes(items) {
     });
 
     await test("контекстный Completion знает типы, FILE и форматы", () => {
-        const typeSource = "Macro Test(value:Rs";
+        const typeSource = [
+            "Class LocalDocument",
+            "End;",
+            "Macro Test(value:Rs"
+        ].join("\n");
         const typeContext = moduleFor(typeSource);
         const types = buildRslContextCompletions(
             typeContext.module,
             typeContext.index,
-            typeSource.length
+            typeSource.length,
+            typeContext.resolver
         );
         assert.ok(types.some(item => item.label === "RsdCommand"));
+        assert.ok(
+            types.some(item => item.label === "Integer"),
+            "Примитивный тип обязан предлагаться в позиции типа"
+        );
+        /* Класс текущего файла — тоже допустимый тип. */
+        assert.ok(
+            types.some(item => item.label === "LocalDocument"),
+            `Класс файла обязан предлагаться: ${
+                types.slice(0, 10).map(item => item.label).join(", ")}`
+        );
+        assert.ok(
+            types.every(item => !String(item.insertText || "").includes("(")),
+            "В позиции типа скобки вызова не подставляются"
+        );
 
         const fileSource = "File data(\"table\") No";
         const fileContext = moduleFor(fileSource);

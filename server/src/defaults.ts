@@ -5,14 +5,8 @@ import {
     RSL_STANDARD_LIBRARY,
     type IRslBuiltinDefinition
 } from "./builtins/standardLibraryData";
+import { VALUE_TYPE_CONSTANTS } from "./language/rslLanguageReference";
 import { RSL_SYSTEM_SPECIAL_VARIABLES } from "./systemSpecialVariables";
-
-const VALUE_TYPE_CONSTANTS = [
-    "V_UNDEF", "V_INTEGER", "V_MONEY", "V_DECIMAL", "V_DOUBLE",
-    "V_STRING", "V_BOOL", "V_DATE", "V_TIME", "V_DTTM", "V_FILE",
-    "V_STRUC", "V_ARRAY", "V_TXTFILE", "V_DBFFILE", "V_PROC", "V_R2M",
-    "V_MEMADDR"
-] as const;
 
 const SPECIAL_VARIABLES: IRslBuiltinDefinition[] =
     RSL_SYSTEM_SPECIAL_VARIABLES.map(variable => ({

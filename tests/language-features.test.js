@@ -513,7 +513,11 @@ test("Hover показывает значение локальной и импо
         localUri,
         localConstant
     ).value;
-    assert.ok(localHover.includes("Const PDOC_ORIGIN_LOCAL = 2"));
+    /* Значение И тип: тип константы прикладного модуля приходит из справки. */
+    assert.ok(
+        localHover.includes("Const PDOC_ORIGIN_LOCAL: integer = 2"),
+        localHover
+    );
 
     const importedUri = "file:///workspace/primdocext.mac";
     const imported = index.updateExternalModule(
@@ -530,7 +534,10 @@ test("Hover показывает значение локальной и импо
         importedUri,
         importedConstant
     ).value;
-    assert.ok(importedHover.includes("Const PDOC_ORIGIN_SAP = 1"));
+    assert.ok(
+        importedHover.includes("Const PDOC_ORIGIN_SAP: integer = 1"),
+        importedHover
+    );
     assert.ok(
         importedHover.includes("Строка:** 2"),
         importedHover

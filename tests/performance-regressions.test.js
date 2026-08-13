@@ -219,6 +219,12 @@ async function testReadinessOrderForOpenDocument() {
             buildWorkspace: () => {
                 record("межфайловые Problems");
                 return [];
+            },
+            buildLocalAsync(...args) {
+                return Promise.resolve(this.buildLocal(...args));
+            },
+            buildWorkspaceAsync(...args) {
+                return Promise.resolve(this.buildWorkspace(...args));
             }
         },
         {

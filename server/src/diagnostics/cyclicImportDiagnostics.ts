@@ -6,6 +6,7 @@ import {
     DiagnosticSeverity
 } from "vscode-languageserver/node";
 
+import { positionAtOffset } from "../core/documentPosition";
 import { GetImportDefinitionTargetsFromTokens } from "../execMacroDefinition";
 import type { IRslDiagnosticSettings } from "../interfaces";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
@@ -38,8 +39,8 @@ export function buildCyclicImportDiagnostics(
     return [{
         severity: DiagnosticSeverity.Warning,
         range: {
-            start: positionAt(module, reference.start),
-            end: positionAt(module, reference.end)
+            start: positionAtOffset(module.lex.lineStarts, reference.start),
+            end: positionAtOffset(module.lex.lineStarts, reference.end)
         },
         message: "Обнаружен циклический Import: " +
             found.cycle.map(displayModule).join(" → "),
@@ -123,22 +124,3 @@ function displayModule(uri: string): string {
     }
 }
 
-function positionAt(
-    module: IIndexedModule,
-    offset: number
-): { line: number; character: number } {
-    const starts = module.lex.lineStarts;
-    let left = 0;
-    let right = starts.length - 1;
-    let line = 0;
-    while (left <= right) {
-        const middle = (left + right) >>> 1;
-        if (starts[middle] <= offset) {
-            line = middle;
-            left = middle + 1;
-        } else {
-            right = middle - 1;
-        }
-    }
-    return { line, character: Math.max(0, offset - starts[line]) };
-}

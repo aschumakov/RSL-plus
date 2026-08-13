@@ -185,7 +185,8 @@ export class RslLanguageFeatureRegistry {
             const contextual = buildRslContextCompletions(
                 module,
                 index,
-                document.offsetAt(params.position)
+                document.offsetAt(params.position),
+                resolver
             );
             if (contextual !== undefined) {
                 return this.completionTransport.prepare(contextual);
@@ -489,6 +490,24 @@ export class RslLanguageFeatureRegistry {
                 }
 
                 if (resolved.uri === RSL_BUILTIN_URI) {
+                    /*
+                     * У инициализатора базового класса объявления нет, но
+                     * осмысленная цель перехода есть — сам базовый класс.
+                     */
+                    const baseClass = resolver.resolveBaseInitializerClass(
+                        document.uri,
+                        context.tree,
+                        context.offset
+                    );
+
+                    if (baseClass && baseClass.uri !== RSL_BUILTIN_URI) {
+                        outcome = "baseInitializer";
+                        return definitionProvider.createObjectLocationByUri(
+                            baseClass.uri,
+                            baseClass.symbol
+                        );
+                    }
+
                     outcome = "builtin";
                     return null;
                 }

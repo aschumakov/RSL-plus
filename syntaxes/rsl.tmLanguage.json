@@ -46,11 +46,11 @@
          "include": "#strings"
       },
       {
-         "match": "(?i)\\b(debugbreak|import|break|continue|do|else|for|if|elif|return|while|exit|end)\\b",
+         "match": "(?i)\\b(debugbreak|continue|onerror|import|return|break|while|elif|else|with|end|for|if)\\b",
          "name": "keyword.control.rsl"
       },
       {
-         "match": "(?i)\\b(V_GENOBJ|V_DBFFILE|V_TXTFILE|V_ARRAY|V_STRUC|V_FILE|V_UNDEF|V_MONEYL|V_MONEY|V_NUMERIC|V_DECIMAL|V_R2M|V_PROC|V_MEMADDR|V_DTTM|V_TIME|V_DATE|V_BOOL|V_STRING|V_DOUBLEL|V_DOUBLE|V_INTEGER)\\b",
+         "match": "(?i)\\b(v_dbffile|v_decimal|v_doublel|v_integer|v_memaddr|v_numeric|v_txtfile|v_double|v_genobj|v_moneyl|v_string|v_array|v_money|v_struc|v_undef|v_bool|v_date|v_dttm|v_file|v_proc|v_time|v_r2m)\\b",
          "name": "storage.type.rsl"
       },
       {
@@ -99,7 +99,7 @@
    ],
    "repository": {
       "logical_operations": {
-         "match": "(?i)\\b(and|or|not)\\b",
+         "match": "(?i)\\b(and|not|or)\\b",
          "name": "keyword.operator.logical.rsl"
       },
       "rsl_types": {
@@ -111,7 +111,7 @@
          "name": "constant.other.rsl"
       },
       "modificators": {
-         "match": "(?i)\\b(const|private|local|key)\\b",
+         "match": "(?i)\\b(private|append|dialog|normal|const|local|write|blob|sort|btr|dbf|key|mem|txt)\\b",
          "name": "storage.modifier.rsl"
       },
       "function_call": {
@@ -425,7 +425,7 @@
       "storage_types": {
          "patterns": [
             {
-               "match": "(?i)\\b(bool|string|integer|array|tarray|file|tbfile|tbfilelog|record|object)\\b",
+               "match": "(?i)\\b(methodref|tbfilelog|datetime|decimal|doublel|integer|memaddr|numeric|procref|specval|variant|double|moneyl|object|record|string|tarray|tbfile|array|const|money|bool|date|file|time|var)\\b",
                "name": "storage.type.rsl"
             }
          ]
@@ -433,7 +433,7 @@
       "logical_types": {
          "patterns": [
             {
-               "match": "(?i)\\b(null|true|false|this)\\b",
+               "match": "(?i)\\b(false|null|this|true)\\b",
                "name": "constant.language.rsl"
             }
          ]

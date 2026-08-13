@@ -223,7 +223,13 @@ async function testProblemsDoNotWaitForConfigurationRequest() {
                     end: { line: 0, character: 1 }
                 }
             }],
-            buildWorkspace: () => []
+            buildWorkspace: () => [],
+            buildLocalAsync(...args) {
+                return Promise.resolve(this.buildLocal(...args));
+            },
+            buildWorkspaceAsync(...args) {
+                return Promise.resolve(this.buildWorkspace(...args));
+            }
         },
         {
             isParseBusy: () => false,
@@ -454,7 +460,13 @@ async function testOutlineIsReadyBeforeDiagnostics() {
         },
         {
             buildLocal: () => [],
-            buildWorkspace: () => []
+            buildWorkspace: () => [],
+            buildLocalAsync(...args) {
+                return Promise.resolve(this.buildLocal(...args));
+            },
+            buildWorkspaceAsync(...args) {
+                return Promise.resolve(this.buildWorkspace(...args));
+            }
         },
         {
             isParseBusy: requestedUri =>

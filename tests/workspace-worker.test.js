@@ -1062,7 +1062,18 @@ function writeModule(directory, name, source) {
         return action({ directory, cacheFile })
             .finally(() => {
                 configureCompactModuleCache(undefined);
-                fs.rmSync(directory, { recursive: true, force: true });
+                /*
+                 * Повторы обязательны: запись кэша могла ещё держать файл, и на
+                 * Windows rmdir тогда падает с ENOTEMPTY. Без maxRetries тест
+                 * падал примерно один раз из четырёх — на уборке, а не на
+                 * проверке.
+                 */
+                fs.rmSync(directory, {
+                    recursive: true,
+                    force: true,
+                    maxRetries: 10,
+                    retryDelay: 20
+                });
             });
     }
 

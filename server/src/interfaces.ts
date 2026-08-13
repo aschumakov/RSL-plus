@@ -57,10 +57,33 @@ export interface IRslDiagnosticSettings {
     debugBreak?: boolean;
     useBeforeDeclaration?: boolean;
     ambiguousReferences?: boolean;
+    /**
+     * Import модуля, который уже приходит через другой Import этого файла.
+     *
+     * По умолчанию выключено: явный Import — это ещё и страховка от того, что
+     * соседний модуль перестанет импортировать общий.
+     */
+    redundantImports?: boolean;
+    /**
+     * Необъявленные переменные: off | safe | strict.
+     *
+     * По умолчанию off. Компилятор RSL разрешает имена ещё и из RSM, DLM,
+     * встроенных модулей и собственного контекста сборки, поэтому отсутствие
+     * объявления в проекте само по себе ошибкой не является.
+     */
+    unknownVariables?: RslUnknownVariablesSetting;
+    /** Файл со списком известных глобальных имён: одно имя на строку. */
+    unknownVariablesKnownGlobalsFile?: string;
+    /**
+     * Путь к отчёту audit. Если задан, находки уходят в отчёт, а не в Problems.
+     */
+    unknownVariablesAuditFile?: string;
     /** Совместимость синтаксиса и семантики с выбранным окружением RSL. */
     dialect?: RslLanguageDialect;
     maxProblems?: number;
 }
+
+export type RslUnknownVariablesSetting = "off" | "safe" | "strict";
 
 export type RslLanguageDialect = "rsBank" | "coreRsl";
 

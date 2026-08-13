@@ -13,6 +13,7 @@ import {
     resolveActiveDocumentUri
 } from "./diagnosticVisibility";
 import type { RslSettingsService } from "../services/settingsService";
+import type { RslScopeResolver } from "../scopeResolver";
 import type { WorkspaceIndex } from "../workspaceIndex";
 import type { PerformanceLogger } from "../performanceLogger";
 import type { IRslSettings } from "../interfaces";
@@ -24,6 +25,13 @@ export interface IDiagnosticsCoordinatorOptions {
     log(message: string): void;
     performance?: PerformanceLogger;
     onImports(uri: string, imports: readonly string[]): void;
+    /**
+     * Общий resolver сервера.
+     *
+     * Только у него есть каталог прикладных модулей, а от каталога зависит,
+     * считается ли Import-контекст полным.
+     */
+    resolver?: RslScopeResolver;
     localDebounceMs?: number;
     largeLocalDebounceMs?: number;
     workspaceDebounceMs?: number;
@@ -249,12 +257,37 @@ export class DiagnosticsCoordinator {
                     chars: state.module.sourceLength
                 })
                 : undefined;
-            const diagnostics = this.engine.buildLocal(
+            const isCancelled = this.cancelWhenLeftBehind(
+                uri,
+                state.module.version
+            );
+            const diagnostics = await this.engine.buildLocalAsync(
                 state.module,
                 this.index,
                 state.settings.diagnostics,
-                this.cancelWhenLeftBehind(uri, state.module.version)
+                isCancelled,
+                this.options.resolver
             );
+
+            /*
+             * Расчёт шёл порциями, и за это время файл могли покинуть или
+             * изменить. Результат прерванного расчёта неполон, поэтому в кэш он
+             * не попадает: staleLocal остаётся, и при возврате в файл расчёт
+             * начнётся заново.
+             *
+             * Import при этом сообщается всё равно — как и при отмене до начала
+             * расчёта: загрузка импортированных модулей нужна независимо от
+             * того, на какой файл смотрит пользователь.
+             */
+            if (isCancelled()) {
+                if (span) {
+                    performance.end(span, { diagnostics: 0 });
+                }
+                if (state.settings.imports.enabled) {
+                    this.options.onImports(uri, state.module.imports);
+                }
+                return;
+            }
             if (span) {
                 performance.end(span, {
                     diagnostics: diagnostics.length
@@ -309,12 +342,28 @@ export class DiagnosticsCoordinator {
                     chars: state.module.sourceLength
                 })
                 : undefined;
-            const diagnostics = this.engine.buildWorkspace(
+            const isCancelled = this.cancelWhenLeftBehind(
+                uri,
+                state.module.version
+            );
+            const diagnostics = await this.engine.buildWorkspaceAsync(
                 state.module,
                 this.index,
                 state.settings.diagnostics,
-                this.cancelWhenLeftBehind(uri, state.module.version)
+                isCancelled,
+                this.options.resolver
             );
+
+            /* Неполный результат прерванной фазы в кэш не попадает. */
+            if (isCancelled()) {
+                if (span) {
+                    performance.end(span, {
+                        diagnostics: 0,
+                        indexedModules: this.index.size
+                    });
+                }
+                return;
+            }
             if (span) {
                 performance.end(span, {
                     diagnostics: diagnostics.length,

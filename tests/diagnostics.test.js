@@ -769,6 +769,84 @@ test("Workspace-фаза не повторяет parser и локальные д
     assert.ok(!workspaceOnly.some(item => item.code === "unused-declaration"));
 });
 
+/*
+ * Обращение к члену переменной, объявленной скалярным типом.
+ *
+ * Объявление типа в RSL — это приведение: у `Var sql: String` результат любого
+ * присваивания приводится к строке, а у строки нет ни свойств, ни методов.
+ */
+const RECORDSET_SOURCE = [
+    "Class Recordset",
+    "  Macro MoveNext()",
+    "  End;",
+    "End;"
+].join("\n");
+
+test("обращение к члену строки — ошибка", () => {
+    const source = [
+        RECORDSET_SOURCE,
+        "Macro Test(DocKind, id)",
+        "    Var sql: String;",
+        "    sql = \"select t_id_operation from doproper_dbt\";",
+        "    sql = ExecSqlSelect (sql, MakeArray (SqlParam (\"kind\", DocKind)));",
+        "    If (sql.MoveNext())",
+        "        msgbox(\"1111\");",
+        "    End;",
+        "End;"
+    ].join("\n");
+    const index = new WorkspaceIndex();
+    const module = index.updateOpenModule("file:///scalar.mac", source, 1);
+    const found = buildRslDiagnostics(module, index)
+        .filter(item => item.code === "member-on-scalar-type");
+
+    assert.strictEqual(found.length, 1, JSON.stringify(found));
+    assert.strictEqual(found[0].severity, 1, "Это ошибка, а не подсказка");
+    assert.ok(
+        /sql.*String.*MoveNext/.test(found[0].message),
+        found[0].message
+    );
+
+    /* Подчёркивается имя члена, а не вся строка. */
+    const memberStart = source.indexOf("sql.MoveNext") + 4;
+    const lineStart = source.lastIndexOf("\n", memberStart) + 1;
+    assert.strictEqual(
+        found[0].range.start.character,
+        memberStart - lineStart
+    );
+});
+
+test("объявления без приведения к скаляру ошибкой не считаются", () => {
+    const legal = [
+        "    Var sql;",
+        "    Var sql: Variant;",
+        "    Var sql = \"aaa\";",
+        "    Var sql: Object;",
+        "    Var sql: Recordset;"
+    ];
+
+    for (const declaration of legal) {
+        const source = [
+            RECORDSET_SOURCE,
+            "Macro Test()",
+            declaration,
+            "    sql = Recordset ();",
+            "    If (sql.MoveNext())",
+            "    End;",
+            "End;"
+        ].join("\n");
+        const index = new WorkspaceIndex();
+        const module = index.updateOpenModule("file:///legal.mac", source, 1);
+
+        assert.deepStrictEqual(
+            buildRslDiagnostics(module, index)
+                .filter(item => item.code === "member-on-scalar-type")
+                .map(item => item.message),
+            [],
+            `Декларация ${declaration.trim()} обращение к члену допускает`
+        );
+    }
+});
+
 console.log("");
 console.log(`Пройдено: ${passed}`);
 console.log(`Ошибок: ${failed}`);

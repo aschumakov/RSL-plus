@@ -4,7 +4,7 @@
    "description": "RSL / Object RSL language support with diagnostics, navigation and Quick Fixes",
    "author": "Veniamin Rakov + AChumakov",
    "license": "SEE LICENSE IN LICENSE.txt",
-   "version": "1.1.10",
+   "version": "1.1.11",
    "icon": "icon.png",
    "bugs": {
       "url": "https://github.com/aschumakov/RSL-plus/issues"
@@ -240,7 +240,7 @@
                "scope": "resource",
                "type": "boolean",
                "default": true,
-               "description": "Проверять скобки, END, ELSE, повторные объявления и Import."
+               "description": "Проверять скобки, END, ELSE, повторные объявления, Import и обращение к членам у переменных скалярного типа."
             },
             "rslPlus.diagnostics.unusedVariables": {
                "scope": "resource",
@@ -272,6 +272,40 @@
                "default": true,
                "description": "Проверять неоднозначные ссылки из импортированных модулей."
             },
+            "rslPlus.diagnostics.redundantImports": {
+               "scope": "resource",
+               "type": "boolean",
+               "default": true,
+               "description": "Сообщать об Import модуля, который уже приходит через другой Import этого файла. Подсказка, а не ошибка: явный Import — ещё и страховка от того, что соседний модуль перестанет импортировать общий, поэтому решение остаётся за автором кода."
+            },
+            "rslPlus.diagnostics.unknownVariables": {
+               "scope": "resource",
+               "type": "string",
+               "enum": [
+                  "off",
+                  "safe",
+                  "strict"
+               ],
+               "enumDescriptions": [
+                  "Не проверять: компилятор RSL разрешает имена и вне проекта — из RSM, DLM, встроенных модулей и своего контекста сборки.",
+                  "Предупреждать только когда весь Import-контекст файла найден и проиндексирован, а непрозрачных источников символов нет.",
+                  "Предупреждать и при неполном контексте. Ложные срабатывания в этом режиме — ожидаемая плата."
+               ],
+               "default": "off",
+               "description": "Предупреждать об использовании нигде не объявленных переменных."
+            },
+            "rslPlus.diagnostics.unknownVariablesKnownGlobalsFile": {
+               "scope": "resource",
+               "type": "string",
+               "default": "",
+               "description": "Абсолютный путь к файлу со списком известных глобальных переменных, процедур и классов: одно имя на строку, '#' начинает комментарий. Перечисленные имена не считаются необъявленными."
+            },
+            "rslPlus.diagnostics.unknownVariablesAuditFile": {
+               "scope": "resource",
+               "type": "string",
+               "default": "",
+               "description": "Абсолютный путь к JSONL-отчёту audit. Если путь задан, находки о необъявленных переменных уходят в отчёт и не показываются в Problems: файл, позиция, имя, область, наличие VAR, состояние Import-контекста и причина."
+            },
             "rslPlus.diagnostics.maxProblems": {
                "scope": "resource",
                "type": "integer",
@@ -295,6 +329,9 @@
       "vscode:prepublish": "npm test && npm run bundle",
       "bundle": "node build/bundle.js",
       "bench": "npm run compile && node build/benchmark-parse.js",
+      "grammar": "npm run compile && node build/generate-grammar.js --write",
+      "platform-modules": "npm run compile && node build/platform-modules.js",
+      "platform-modules:fix": "npm run compile && node build/platform-modules.js --fix",
       "clean": "tsc -b --clean && node -e \"const fs=require('fs'); for (const dir of ['client/out','server/out']) fs.rmSync(dir,{recursive:true,force:true});\"",
       "compile": "npm run clean && tsc -b",
       "watch": "tsc -b -w",

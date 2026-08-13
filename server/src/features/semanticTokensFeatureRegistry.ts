@@ -13,7 +13,7 @@ import type { RslScopeResolver } from "../scopeResolver";
 import type { IRslToken } from "../lexer";
 import {
     buildRslBasicSemanticTokens,
-    buildRslSemanticTokens
+    buildRslSemanticTokensChunked
 } from "../semanticTokens";
 import type { RslSymbol } from "../symbols/rslSymbol";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
@@ -123,7 +123,7 @@ export class SemanticTokensFeatureRegistry {
                 this.endSpan(span, { cancelled: true, dataInts: 0 });
                 return { data: [] };
             }
-            const result = buildRslSemanticTokens(
+            const result = await buildRslSemanticTokensChunked(
                 module,
                 index,
                 resolver,
@@ -133,9 +133,14 @@ export class SemanticTokensFeatureRegistry {
                     endLine: params.range.end.line,
                     endCharacter: params.range.end.character
                 },
-                /* Отмена проверяется и во время расчёта, а не только до него. */
+                /* Отмена проверяется после каждой порции, а не только до расчёта. */
                 () => requestIsStale(document, version, token)
             );
+
+            if (requestIsStale(document, version, token)) {
+                this.endSpan(span, { cancelled: true, dataInts: 0 });
+                return { data: [] };
+            }
             this.endSpan(span, { cancelled: false, dataInts: result.data.length });
             return result;
         });
@@ -294,7 +299,7 @@ export class SemanticTokensFeatureRegistry {
             });
             return cached.value;
         }
-        const built = buildRslSemanticTokens(
+        const built = await buildRslSemanticTokensChunked(
             module,
             this.environment.index,
             this.environment.resolver,

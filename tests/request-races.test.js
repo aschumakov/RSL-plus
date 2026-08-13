@@ -550,6 +550,147 @@ const SAME_LENGTH = SOURCE.replace("Var local = value;", "Var lokal = value;");
         }
     );
 
+    /*
+     * Переключение вкладки ВО ВРЕМЯ расчёта, а не между этапами.
+     *
+     * Отличие от предыдущего теста принципиальное: там переключение
+     * происходило синхронно внутри правила, то есть до следующей проверки
+     * отмены. Здесь оно назначается через setImmediate — ровно так его
+     * доставляет транспорт, — и обнаружить его можно только если расчёт
+     * действительно вернул управление event loop. Непрерываемый расчёт
+     * доводится до конца и этот тест не проходит.
+     *
+     * Проверяется не только отсутствие публикации: важно, что оставшиеся этапы
+     * не выполнились. Иначе «прерываемость» сводилась бы к молчанию в конце,
+     * а процессорное время всё равно тратилось бы на покинутый файл.
+     */
+    await test(
+        "смена активного файла через setImmediate обрывает оставшиеся этапы",
+        async () => {
+            const first = "file:///d:/races/slow.mac";
+            const second = "file:///d:/races/other.mac";
+            const sources = {
+                [first]: "Macro A()\n  Var unusedA;\nEnd;",
+                [second]: "Macro B()\n  Var unusedB;\nEnd;"
+            };
+            const documents = new Map([
+                [first, createDocument(first, 1, sources[first])],
+                [second, createDocument(second, 1, sources[second])]
+            ]);
+            const index = new WorkspaceIndex();
+            index.registerWorkspaceFiles([first, second]);
+            for (const uri of [first, second]) {
+                index.updateOpenModule(uri, sources[uri], 1);
+            }
+
+            const stagesRun = [];
+            const published = [];
+            const engine = new RslDiagnosticEngine();
+            let coordinator;
+            let switched = false;
+
+            /*
+             * Первый этап НАЗНАЧАЕТ переключение и занимает больше одной порции.
+             *
+             * Оба условия существенны. Переключение назначается через
+             * setImmediate, потому что именно так его приносит транспорт: пока
+             * расчёт не отдаст управление, узнать о нём невозможно. А работы
+             * должно быть больше бюджета порции — иначе прерывать нечего, и
+             * расчёт законно доходит до конца.
+             */
+            const BUSY_MS = 30;
+            engine.register({
+                id: "test-schedule-switch",
+                phase: "local",
+                run: context => {
+                    stagesRun.push(`stage1:${context.module.uri}`);
+                    if (context.module.uri === first && !switched) {
+                        switched = true;
+                        setImmediate(() =>
+                            coordinator.setActiveDocument(second)
+                        );
+                    }
+                    const until = Date.now() + BUSY_MS;
+                    while (Date.now() < until) {
+                        /* Занятое ожидание: так выглядит тяжёлый этап. */
+                    }
+                    return [];
+                }
+            });
+            engine.register({
+                id: "test-stage-after-switch",
+                phase: "local",
+                run: context => {
+                    stagesRun.push(`stage2:${context.module.uri}`);
+                    return [];
+                }
+            });
+
+            coordinator = new DiagnosticsCoordinator(
+                {
+                    sendDiagnostics: params => published.push({
+                        uri: params.uri,
+                        count: params.diagnostics.length
+                    })
+                },
+                {
+                    get: uri => documents.get(uri),
+                    all: () => [...documents.values()]
+                },
+                index,
+                { getAvailable: () => defaults },
+                engine,
+                {
+                    isParseBusy: () => false,
+                    waitForIdle: () => Promise.resolve(),
+                    log: () => undefined,
+                    onImports: () => undefined,
+                    localDebounceMs: 0,
+                    workspaceDebounceMs: 5000,
+                    workspaceMaxWaitMs: 5000
+                }
+            );
+
+            coordinator.setActiveDocument(first);
+            await new Promise(resolve => setTimeout(resolve, 250));
+
+            assert.ok(
+                stagesRun.includes(`stage1:${first}`),
+                `Первый этап обязан выполниться: ${stagesRun.join(", ")}`
+            );
+            assert.ok(
+                !stagesRun.includes(`stage2:${first}`),
+                "Оставшиеся этапы покинутого файла обязаны прекратиться, а " +
+                    `не только не публиковаться: ${stagesRun.join(", ")}`
+            );
+            /*
+             * Пустая публикация для first есть и должна быть: ею
+             * setActiveDocument объявляет, какой файл сейчас показывается.
+             * Недопустимо другое — отдать НАЙДЕННОЕ прерванным расчётом.
+             */
+            assert.ok(
+                published.some(item => item.uri === second),
+                `Новый активный файл обязан быть посчитан: ${
+                    JSON.stringify(published)}`
+            );
+            assert.ok(
+                published
+                    .filter(item => item.uri === first)
+                    .every(item => item.count === 0),
+                `Результат прерванного расчёта публиковать нельзя: ${
+                    JSON.stringify(published)}`
+            );
+            assert.ok(
+                stagesRun.includes(`stage1:${second}`),
+                `Расчёт обязан перейти на новый активный файл: ${
+                    stagesRun.join(", ")}`
+            );
+
+            coordinator.close(first);
+            coordinator.close(second);
+        }
+    );
+
     console.log("");
     console.log(`Пройдено: ${passed}`);
     console.log(`Ошибок: ${failed}`);

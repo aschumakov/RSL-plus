@@ -20,6 +20,24 @@ export interface IRslSymbolInit {
     range: IRange;
     selectionRange?: IRange;
     typeName?: string;
+    /**
+     * Переменная имеет тип Variant, то есть может содержать значение любого
+     * типа, а typeName описывает лишь то, что в ней сейчас.
+     *
+     * Различие содержательное, а не косметическое. `Var sql: String` — это
+     * приведение: переменная останется строкой, чем бы её потом ни присваивали.
+     * `Var sql = "aaa"` объявляет Variant, который сейчас содержит строку, и
+     * следующее присваивание сменит его тип. В typeName и то и другое выглядит
+     * как "string", поэтому без этого признака отличить их невозможно.
+     *
+     * Ставится Variant-ом и явное `Var sql: Variant`, и его отсутствие:
+     * руководство приравнивает переменную без декларации к Variant, и вести
+     * себя они обязаны одинаково.
+     *
+     * Если не задано, выводится из typeName — так поведение мест, которые об
+     * этом признаке не знают, остаётся прежним.
+     */
+    typeVariant?: boolean;
     value?: string;
     documentation?: string;
     builtin?: boolean;
@@ -43,6 +61,8 @@ export class RslSymbol {
     readonly range: IRange;
     readonly selectionRange: IRange;
     readonly typeName: string;
+    /** См. IRslSymbolInit.typeVariant. */
+    readonly isTypeVariant: boolean;
     readonly value: string;
     readonly documentation: string;
     readonly isBuiltin: boolean;
@@ -60,6 +80,8 @@ export class RslSymbol {
             ...(init.selectionRange || init.range)
         });
         this.typeName = init.typeName || "variant";
+        this.isTypeVariant = init.typeVariant ??
+            normalizeIdentifier(this.typeName) === "variant";
         this.value = init.value || "";
         this.documentation = init.documentation || "";
         this.isBuiltin = init.builtin === true;

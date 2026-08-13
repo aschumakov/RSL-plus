@@ -21,17 +21,17 @@ import {
  * поэтому предлагать его наравне со встроенными неверно — подсказка звала бы
  * имя, которого в файле нет.
  *
- * Объём: 61 модуль, 255 классов, 2353 члена и 1555 процедур — 798 КБ. Одним
+ * Объём: 62 модуля, 255 классов, 2353 члена и 1555 процедур — 798 КБ. Одним
  * файлом это пришлось бы разбирать и держать в памяти целиком ради одного-двух
  * импортированных модулей (PaymInter сам по себе 186 КБ). Поэтому данные лежат
  * по файлу на модуль, а индекс (5 КБ) отвечает на вопрос «знаем ли мы такой
  * модуль» без чтения состава.
  *
  * Чтение НИКОГДА не происходит в обработчике интерактивного запроса: состав
- * готовится по событию появления списка Import у документа (см. ensureModules).
- * Модуль, который к моменту запроса ещё не прочитан, просто не даёт символов —
- * они появятся следующим запросом. Синхронно читать 186 КБ на нажатие
- * Ctrl+Space значило бы задержать ответ ровно там, где это заметнее всего.
+ * готовится по событию появления списка Import у документа (см. ensureModules),
+ * асинхронно и с дедупликацией параллельных запросов одного файла. Модуль,
+ * который к моменту запроса ещё не прочитан, просто не даёт символов — они
+ * появятся следующим запросом.
  */
 export interface IPlatformModuleMember {
     name: string;
@@ -63,12 +63,50 @@ export interface IPlatformModuleProcedure {
 export interface IPlatformModuleConstant {
     name: string;
     value: string;
+    /**
+     * Явный тип из справки.
+     *
+     * Если его нет, тип выводится из значения. Раньше вывод был единственным
+     * источником, и константа `RSB_ALIGN_LEFT = "left"` получала Variant вместо
+     * String, а само значение вообще не доходило до RslSymbol: оно попадало
+     * только в текст подписи.
+     */
+    typeName?: string;
     description: string;
+}
+
+/**
+ * Глобальная переменная модуля: `LastUsed` в RslScr.
+ *
+ * Отдельно от константы: её читают И пишут. Показывать её как константу значило
+ * бы соврать о том, что ей можно присваивать.
+ */
+export interface IPlatformModuleVariable {
+    name: string;
+    typeName?: string;
+    description: string;
+}
+
+export interface IPlatformModuleIndexEntry {
+    file: string;
+    /**
+     * Модули, без которых состав этого неполон.
+     *
+     * Класс модуля может наследовать класс другого модуля: `RsbBBPayment` из
+     * BankInter наследует `RsbPayment` из PaymInter. Чтобы одного
+     * `Import BankInter` хватило для получения унаследованных членов, зависимые
+     * модули читаются транзитивно — но их собственные имена при этом НЕ
+     * становятся видимыми: назвать `RsbPayment` без `Import PaymInter` нельзя.
+     */
+    dependencies?: readonly string[];
+    classes?: number;
+    procedures?: number;
+    constants?: number;
 }
 
 interface IPlatformModuleIndex {
     version: number;
-    modules: Record<string, { file: string }>;
+    modules: Record<string, IPlatformModuleIndexEntry>;
 }
 
 interface IPlatformModuleBody {
@@ -76,11 +114,14 @@ interface IPlatformModuleBody {
     classes?: IPlatformModuleClass[];
     procedures?: IPlatformModuleProcedure[];
     constants?: IPlatformModuleConstant[];
+    variables?: IPlatformModuleVariable[];
 }
 
 interface ILoadedModule {
+    /** Имя модуля в написании справки: показывается пользователю. */
+    displayName: string;
     /**
-     * Все символы модуля — классы и процедуры.
+     * Все символы модуля — классы, процедуры и константы.
      *
      * Отдельно от classes: Hover, Signature Help и семантическая подсветка
      * спрашивают символ по имени, не зная, класс это или процедура.
@@ -88,8 +129,25 @@ interface ILoadedModule {
     symbols: ReadonlyMap<string, RslSymbol>;
     classes: ReadonlyMap<string, RslSymbol>;
     completions: readonly CompletionItem[];
+    /** Только классы: нужны в позиции типа, где процедура неуместна. */
+    classCompletions: readonly CompletionItem[];
     /** Тип результата процедуры: нужен для вывода типа переменной. */
     resultTypes: ReadonlyMap<string, string>;
+}
+
+/**
+ * Символ вместе с модулем-владельцем.
+ *
+ * Владелец обязателен для разрешения базового класса: искать его надо в том
+ * модуле, где объявлен производный класс, и в объявленных зависимостях этого
+ * модуля — а не среди произвольных классов проекта.
+ */
+export interface IPlatformSymbol {
+    /** Ключ модуля-владельца в нижнем регистре. */
+    moduleKey: string;
+    /** Имя модуля-владельца в написании справки. */
+    moduleName: string;
+    symbol: RslSymbol;
 }
 
 /** Формат данных; несовпадение версии выключает каталог. */
@@ -99,81 +157,96 @@ const DIRECTORY = "platform-modules";
 export class PlatformModuleCatalog {
     private indexLoaded = false;
     private indexFailed = false;
-    /** Ключ — имя модуля в нижнем регистре, значение — имя файла состава. */
-    private files = new Map<string, string>();
+    private indexPromise?: Promise<void>;
+    /** Ключ — имя модуля в нижнем регистре. */
+    private entries = new Map<string, IPlatformModuleIndexEntry>();
+    private displayNames = new Map<string, string>();
     private loaded = new Map<string, ILoadedModule>();
     private failedModules = new Set<string>();
+    /** Незавершённые чтения: второй запрос того же модуля их переиспользует. */
+    private pendingModules = new Map<string, Promise<void>>();
+    /**
+     * Меняется при каждом изменении состава каталога.
+     *
+     * Кэши, зависящие от того, какие модули уже прочитаны (в частности набор
+     * видимых модулей документа), сбрасываются по этому номеру. Без него первый
+     * же ответ «модулей не видно», выданный до загрузки индекса, оставался в
+     * кэше до следующей правки текста.
+     */
+    private revisionValue = 0;
 
     constructor(private options: { log(message: string): void }) {}
 
-    /** Индекс модулей: 5 КБ, читается один раз. */
-    private ensureIndex(): void {
-        if (this.indexLoaded || this.indexFailed) {
-            return;
-        }
-
-        const filePath = path.join(this.directory(), "index.json");
-
-        try {
-            const parsed = JSON.parse(
-                fs.readFileSync(filePath, "utf8")
-            ) as IPlatformModuleIndex;
-
-            if (parsed.version !== SUPPORTED_VERSION) {
-                this.indexFailed = true;
-                this.options.log(
-                    "Каталог прикладных модулей не подключён: версия формата " +
-                    `${parsed.version}, поддерживается ${SUPPORTED_VERSION}`
-                );
-                return;
-            }
-
-            for (const [name, entry] of Object.entries(parsed.modules || {})) {
-                this.files.set(normalizeIdentifier(name), entry.file);
-            }
-            this.indexLoaded = true;
-        } catch (error) {
-            /*
-             * Отсутствующий или испорченный файл не должен ронять сервер: без
-             * него просто не будет подсказок по прикладным модулям, а весь
-             * остальной язык обязан продолжать работать.
-             */
-            this.indexFailed = true;
-            this.options.log(
-                `Индекс прикладных модулей не прочитан: ${filePath}; ` +
-                errorToString(error)
-            );
-        }
+    get revision(): number {
+        return this.revisionValue;
     }
 
     /**
-     * Готовит состав перечисленных модулей заранее, вне пути запроса.
+     * Индекс модулей: 5 КБ, читается один раз и асинхронно.
+     *
+     * Параллельные вызовы разделяют одно чтение: при открытии нескольких файлов
+     * событие Import приходит по каждому из них почти одновременно.
+     */
+    ensureIndexLoaded(): Promise<void> {
+        if (this.indexLoaded || this.indexFailed) {
+            return Promise.resolve();
+        }
+
+        if (!this.indexPromise) {
+            this.indexPromise = this.loadIndex().finally(() => {
+                this.indexPromise = undefined;
+            });
+        }
+
+        return this.indexPromise;
+    }
+
+    /**
+     * Готовит состав перечисленных модулей и их зависимостей заранее, вне пути
+     * запроса.
      *
      * Вызывается, когда у документа стал известен список Import — то есть
      * после разбора, а не из обработчика Completion.
      */
-    ensureModules(moduleNames: readonly string[]): void {
-        this.ensureIndex();
+    async ensureModules(moduleNames: readonly string[]): Promise<void> {
+        await this.ensureIndexLoaded();
 
-        for (const moduleName of moduleNames) {
-            this.loadModule(normalizeIdentifier(moduleName));
+        const queue = moduleNames.map(name => normalizeIdentifier(name));
+        const visited = new Set<string>();
+
+        while (queue.length > 0) {
+            const batch = queue.filter(key => {
+                if (visited.has(key)) {
+                    return false;
+                }
+                visited.add(key);
+                return true;
+            });
+            queue.length = 0;
+
+            await Promise.all(batch.map(key => this.loadModule(key)));
+
+            for (const key of batch) {
+                for (const dependency of this.dependenciesOf(key)) {
+                    if (!visited.has(dependency)) {
+                        queue.push(dependency);
+                    }
+                }
+            }
         }
     }
 
     /** Знает ли каталог такой модуль; состав при этом не читается. */
     knowsModule(moduleName: string): boolean {
-        this.ensureIndex();
-        return this.files.has(normalizeIdentifier(moduleName));
+        return this.entries.has(normalizeIdentifier(moduleName));
     }
 
     get ready(): boolean {
-        this.ensureIndex();
         return this.indexLoaded;
     }
 
     get moduleCount(): number {
-        this.ensureIndex();
-        return this.files.size;
+        return this.entries.size;
     }
 
     get loadedCount(): number {
@@ -184,29 +257,18 @@ export class PlatformModuleCatalog {
      * Класс, видимый через один из перечисленных модулей.
      *
      * Список модулей вычисляет вызывающий: только он знает, какие Import стоят
-     * в файле и какие из них уже разобраны.
+     * в файле и какие из них уже разобраны. Одинаковые имена классов в разных
+     * модулях разрешаются в порядке перечисления, то есть в порядке Import.
      */
     findClass(
         moduleNames: readonly string[],
         className: string
-    ): RslSymbol | undefined {
-        const key = normalizeIdentifier(className);
-
-        for (const moduleName of moduleNames) {
-            const symbol = this.loaded
-                .get(normalizeIdentifier(moduleName))
-                ?.classes.get(key);
-
-            if (symbol) {
-                return symbol;
-            }
-        }
-
-        return undefined;
+    ): IPlatformSymbol | undefined {
+        return this.lookup(moduleNames, className, "classes");
     }
 
     /**
-     * Любой символ модуля по имени — класс или процедура.
+     * Любой символ модуля по имени — класс, процедура или константа.
      *
      * Нужен Hover, Signature Help и семантической подсветке: без него имя из
      * прикладного модуля предлагалось в Completion, но при наведении и при
@@ -215,16 +277,49 @@ export class PlatformModuleCatalog {
     findSymbol(
         moduleNames: readonly string[],
         name: string
-    ): RslSymbol | undefined {
-        const key = normalizeIdentifier(name);
+    ): IPlatformSymbol | undefined {
+        return this.lookup(moduleNames, name, "symbols");
+    }
 
-        for (const moduleName of moduleNames) {
-            const symbol = this.loaded
-                .get(normalizeIdentifier(moduleName))
-                ?.symbols.get(key);
+    /**
+     * Базовый класс класса прикладного модуля.
+     *
+     * Ищется в модуле-владельце, затем в его объявленных зависимостях —
+     * транзитивно. Классы проекта и не связанных модулей сюда не попадают: имя
+     * `RsbPayment` в базе `RsbBBPayment` означает класс PaymInter, а не
+     * одноимённый класс, который может оказаться где-то в workspace.
+     */
+    findBaseClass(
+        ownerModuleKey: string,
+        baseClassName: string
+    ): IPlatformSymbol | undefined {
+        const key = normalizeIdentifier(baseClassName);
+        const visited = new Set<string>();
+        const queue = [normalizeIdentifier(ownerModuleKey)];
 
-            if (symbol) {
-                return symbol;
+        for (let position = 0; position < queue.length; position++) {
+            const moduleKey = queue[position];
+
+            if (visited.has(moduleKey)) {
+                continue;
+            }
+            visited.add(moduleKey);
+
+            const module = this.loaded.get(moduleKey);
+            const symbol = module?.classes.get(key);
+
+            if (symbol && module) {
+                return {
+                    moduleKey,
+                    moduleName: module.displayName,
+                    symbol
+                };
+            }
+
+            for (const dependency of this.dependenciesOf(moduleKey)) {
+                if (!visited.has(dependency)) {
+                    queue.push(dependency);
+                }
             }
         }
 
@@ -253,17 +348,66 @@ export class PlatformModuleCatalog {
 
     /** Элементы Completion уже прочитанных из перечисленных модулей. */
     completionItems(moduleNames: readonly string[]): CompletionItem[] {
+        return this.collectCompletions(moduleNames, "completions");
+    }
+
+    /** То же, но только классы: для позиции типа. */
+    classCompletionItems(moduleNames: readonly string[]): CompletionItem[] {
+        return this.collectCompletions(moduleNames, "classCompletions");
+    }
+
+    /** Прочитан ли состав модуля; неизвестный модуль считается непрочитанным. */
+    isModuleLoaded(moduleName: string): boolean {
+        return this.loaded.has(normalizeIdentifier(moduleName));
+    }
+
+    /** Объявленные зависимости модуля; для проверок и тестов. */
+    dependenciesOf(moduleName: string): readonly string[] {
+        return this.entries
+            .get(normalizeIdentifier(moduleName))
+            ?.dependencies
+            ?.map(name => normalizeIdentifier(name)) || [];
+    }
+
+    private collectCompletions(
+        moduleNames: readonly string[],
+        field: "completions" | "classCompletions"
+    ): CompletionItem[] {
         const result: CompletionItem[] = [];
 
         for (const moduleName of moduleNames) {
             const module = this.loaded.get(normalizeIdentifier(moduleName));
 
             if (module) {
-                result.push(...module.completions);
+                result.push(...module[field]);
             }
         }
 
         return result;
+    }
+
+    private lookup(
+        moduleNames: readonly string[],
+        name: string,
+        field: "classes" | "symbols"
+    ): IPlatformSymbol | undefined {
+        const key = normalizeIdentifier(name);
+
+        for (const moduleName of moduleNames) {
+            const moduleKey = normalizeIdentifier(moduleName);
+            const module = this.loaded.get(moduleKey);
+            const symbol = module?.[field].get(key);
+
+            if (symbol && module) {
+                return {
+                    moduleKey,
+                    moduleName: module.displayName,
+                    symbol
+                };
+            }
+        }
+
+        return undefined;
     }
 
     private directory(): string {
@@ -271,29 +415,88 @@ export class PlatformModuleCatalog {
             resolveExtensionFile(DIRECTORY);
     }
 
-    private loadModule(key: string): void {
-        if (this.loaded.has(key) || this.failedModules.has(key)) {
-            return;
-        }
-
-        const file = this.files.get(key);
-
-        if (!file) {
-            return;
-        }
-
-        const filePath = path.join(this.directory(), file);
+    private async loadIndex(): Promise<void> {
+        const filePath = path.join(this.directory(), "index.json");
 
         try {
             const parsed = JSON.parse(
-                fs.readFileSync(filePath, "utf8")
+                await fs.promises.readFile(filePath, "utf8")
+            ) as IPlatformModuleIndex;
+
+            if (parsed.version !== SUPPORTED_VERSION) {
+                this.indexFailed = true;
+                this.options.log(
+                    "Каталог прикладных модулей не подключён: версия формата " +
+                    `${parsed.version}, поддерживается ${SUPPORTED_VERSION}`
+                );
+                return;
+            }
+
+            for (const [name, entry] of Object.entries(parsed.modules || {})) {
+                const key = normalizeIdentifier(name);
+                this.entries.set(key, entry);
+                this.displayNames.set(key, name);
+            }
+            this.indexLoaded = true;
+            this.revisionValue++;
+        } catch (error) {
+            /*
+             * Отсутствующий или испорченный файл не должен ронять сервер: без
+             * него просто не будет подсказок по прикладным модулям, а весь
+             * остальной язык обязан продолжать работать.
+             */
+            this.indexFailed = true;
+            this.options.log(
+                `Индекс прикладных модулей не прочитан: ${filePath}; ` +
+                errorToString(error)
+            );
+        }
+    }
+
+    private loadModule(key: string): Promise<void> {
+        if (this.loaded.has(key) || this.failedModules.has(key)) {
+            return Promise.resolve();
+        }
+
+        const pending = this.pendingModules.get(key);
+
+        if (pending) {
+            return pending;
+        }
+
+        const entry = this.entries.get(key);
+
+        if (!entry) {
+            return Promise.resolve();
+        }
+
+        const started = this.readModule(key, entry).finally(() => {
+            this.pendingModules.delete(key);
+        });
+        this.pendingModules.set(key, started);
+        return started;
+    }
+
+    private async readModule(
+        key: string,
+        entry: IPlatformModuleIndexEntry
+    ): Promise<void> {
+        const filePath = path.join(this.directory(), entry.file);
+
+        try {
+            const parsed = JSON.parse(
+                await fs.promises.readFile(filePath, "utf8")
             ) as IPlatformModuleBody;
 
             if (parsed.version !== SUPPORTED_VERSION) {
                 throw new Error(`версия формата ${parsed.version}`);
             }
 
-            this.loaded.set(key, build(key, parsed));
+            this.loaded.set(
+                key,
+                build(this.displayNames.get(key) || key, parsed)
+            );
+            this.revisionValue++;
         } catch (error) {
             this.failedModules.add(key);
             this.options.log(
@@ -304,25 +507,31 @@ export class PlatformModuleCatalog {
     }
 }
 
-function build(key: string, body: IPlatformModuleBody): ILoadedModule {
+function build(
+    displayName: string,
+    body: IPlatformModuleBody
+): ILoadedModule {
     const symbols = new Map<string, RslSymbol>();
     const classes = new Map<string, RslSymbol>();
     const completions: CompletionItem[] = [];
+    const classCompletions: CompletionItem[] = [];
     const resultTypes = new Map<string, string>();
 
     for (const item of body.classes || []) {
         const symbol = new BuiltinSymbol(classDefinition(item));
         const name = normalizeIdentifier(item.name);
         const semantic = symbol.toRslSymbol();
+        const completion = moduleCompletion(symbol, displayName);
         classes.set(name, semantic);
         symbols.set(name, semantic);
-        completions.push(moduleCompletion(symbol, key));
+        completions.push(completion);
+        classCompletions.push(completion);
     }
 
     for (const item of body.procedures || []) {
         const symbol = new BuiltinSymbol(procedureDefinition(item));
         const name = normalizeIdentifier(item.name);
-        completions.push(moduleCompletion(symbol, key));
+        completions.push(moduleCompletion(symbol, displayName));
 
         /* Класс с таким именем важнее: он несёт ещё и состав членов. */
         if (!symbols.has(name)) {
@@ -337,7 +546,17 @@ function build(key: string, body: IPlatformModuleBody): ILoadedModule {
     for (const item of body.constants || []) {
         const symbol = new BuiltinSymbol(constantDefinition(item));
         const name = normalizeIdentifier(item.name);
-        completions.push(moduleCompletion(symbol, key));
+        completions.push(moduleCompletion(symbol, displayName));
+
+        if (!symbols.has(name)) {
+            symbols.set(name, symbol.toRslSymbol());
+        }
+    }
+
+    for (const item of body.variables || []) {
+        const symbol = new BuiltinSymbol(variableDefinition(item));
+        const name = normalizeIdentifier(item.name);
+        completions.push(moduleCompletion(symbol, displayName));
 
         if (!symbols.has(name)) {
             symbols.set(name, symbol.toRslSymbol());
@@ -345,9 +564,11 @@ function build(key: string, body: IPlatformModuleBody): ILoadedModule {
     }
 
     return {
+        displayName,
         symbols,
         classes,
         completions: Object.freeze(completions),
+        classCompletions: Object.freeze(classCompletions),
         resultTypes
     };
 }
@@ -400,10 +621,40 @@ function constantDefinition(
     return {
         name: item.name,
         kind: CompletionItemKind.Constant,
-        /* Тип выводится из значения: другого источника в справке нет. */
-        typeName: /^-?\d+$/.test(item.value) ? "Integer" : "Variant",
+        typeName: item.typeName || inferConstantType(item.value),
         /* Значение показывается рядом с именем: оно и есть смысл константы. */
         signature: `${item.name} = ${item.value}`,
+        value: item.value,
+        summary: item.description
+    };
+}
+
+/** Тип из значения — только когда явного типа в справке нет. */
+function inferConstantType(value: string): string {
+    const text = (value || "").trim();
+
+    if (/^-?\d+$/.test(text)) {
+        return "Integer";
+    }
+    if (/^-?\d+[.,]\d+$/.test(text)) {
+        return "Double";
+    }
+    if (/^(?:"|')/.test(text)) {
+        return "String";
+    }
+    if (/^(?:true|false)$/i.test(text)) {
+        return "Bool";
+    }
+    return "Variant";
+}
+
+function variableDefinition(
+    item: IPlatformModuleVariable
+): IRslBuiltinDefinition {
+    return {
+        name: item.name,
+        kind: CompletionItemKind.Variable,
+        typeName: item.typeName || "Variant",
         summary: item.description
     };
 }

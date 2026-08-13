@@ -19,6 +19,14 @@ export interface IIndexedSymbol {
     uri: string;
     symbolId: SymbolId;
     symbol: RslSymbol;
+    /**
+     * Ключ прикладного модуля-владельца — только у символов platform-каталога.
+     *
+     * Без него базовый класс такого символа искать негде: uri у всех символов
+     * каталога общий (rsl-builtin:), а имя базы имеет смысл только внутри
+     * модуля-владельца и его объявленных зависимостей.
+     */
+    platformModule?: string;
 }
 
 export type ModuleResolution<T> =

@@ -8,6 +8,14 @@ export interface IRslBuiltinDefinition {
     summary?: string;
     insertText?: string;
     /**
+     * Значение константы.
+     *
+     * Отдельно от signature: подпись — текст для Signature Help, а значение
+     * читают Hover и Completion. Раньше значение существовало только внутри
+     * подписи, и в RslSymbol не доходило вообще.
+     */
+    value?: string;
+    /**
      * Имя базового класса — только для классов.
      *
      * Члены базового класса здесь не дублируются: цепочку обходит
@@ -359,61 +367,16 @@ const PROCEDURE_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
         "Показывает окно сообщения с кнопками."
     ),
 
-    /* Скроллинг. */
-    procedure(
-        "SetScroll (FILE, { DlgName, FileName } ...)",
-        "Связывает поля файла с полями диалога."
-    ),
-    procedure(
-        "FindRow (dlg, id)",
-        "Возвращает номер строки скроллинга для поля."
-    ),
-    procedure(
-        "FindCol (dlg, id)",
-        "Возвращает номер колонки скроллинга для поля."
-    ),
-    procedure(
-        "FillDown (dlg, pos)",
-        "Заполняет скроллинг вниз от заданной записи."
-    ),
-    procedure(
-        "FillUp (dlg, pos)",
-        "Заполняет скроллинг вверх от заданной записи."
-    ),
-    procedure(
-        "SetDlgFields (dlg, row)",
-        "Заполняет строку скроллинга данными из файла."
-    ),
-    procedure(
-        "ScrollMes (dlg, cmd, id, key)",
-        "Обрабатывает необработанные сообщения скроллинга."
-    ),
-    procedure(
-        "UserFill (dlg)",
-        "Вызывается перед перерисовкой области скроллинга."
-    ),
-    procedure(
-        "AddMultiAction (rs:Object, key:Integer):Bool",
-        "Регистрирует клавишу перебора выбранных записей."
-    ),
-    procedure(
-        "GetMultiCount (rs:Object):Integer",
-        "Возвращает число выбранных записей скроллинга."
-    ),
-    procedure(
-        "GoToScroll (obj:Object)",
-        "Позиционирует прокрутку на текущую запись."
-    ),
-    procedure(
-        "RunScroll (data:Object, numCol:Integer, colInfo:TArray, " +
-            "uniqName, proc:Variant, head:String, stLine:String, " +
-            "rdOnly:Bool, x:Integer, y:Integer, cx:Integer, cy:Integer):Bool",
-        "Открывает окно прокрутки набора данных RSD."
-    ),
-    procedure(
-        "UpdateScroll (obj:Object, mode:Integer)",
-        "Обновляет окно прокрутки набора данных."
-    ),
+    /*
+     * Скроллинг.
+     *
+     * Процедуры модулей RslScr и rslx здесь НЕ объявляются. Руководство
+     * помещает их в разделы «Макропроцедуры модуля RslScr» и «Макропроцедуры
+     * модуля rslx» и требует подключить модуль командой IMPORT — значит без
+     * Import этих имён не существует, и предлагать их наравне со встроенными
+     * означало бы обещать то, чего в файле нет. Они описаны в
+     * platform-modules/rslscr.json и platform-modules/rslx.json.
+     */
     procedure(
         "GetScrollFieldValue(numfld:Integer, value:Undef):Bool",
         "Читает значение поля текущей строки скроллинга."
@@ -1552,11 +1515,168 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
     classDef("TJavaObj", "Объект Java, полученный от TJavaHost.", [])
 ];
 
+/*
+ * Константы интерактивного режима: сообщения диалога, коды возврата обработчика
+ * и параметры окна сообщения.
+ *
+ * Числовых значений здесь нет намеренно: руководство их не приводит ни в разделе
+ * «Поддержка интерактивного режима», ни в описании MsgBoxEx. Придумать их можно
+ * было бы по аналогии с Turbo Vision, откуда конструкция происходит, но
+ * подставить в подсказку неподтверждённое число хуже, чем не подставить ничего:
+ * пользователь сравнит его с полученным от системы и получит неверный ответ.
+ * Поэтому у констант есть тип и описание, а значение появится, когда найдётся
+ * источник, который его называет.
+ */
+const DIALOG_MESSAGE_CONSTANTS: readonly IRslBuiltinDefinition[] = [
+    constant(
+        "DLG_PREINIT",
+        "Первое сообщение: панель создана, но не отображена. При его " +
+            "обработке создаётся область прокрутки процедурой AddScroll."
+    ),
+    constant(
+        "DLG_INIT",
+        "Панель готова к отображению: можно выполнить инициализацию и " +
+            "установить фокус ввода процедурой SetFocus."
+    ),
+    constant("DLG_INREC", "Фокус ввода установлен в текущее поле."),
+    constant("DLG_OUTREC", "Фокус ввода переносится из текущего поля."),
+    constant("DLG_REMFOCUS", "Фокус ввода вот-вот уйдёт из поля обработчика."),
+    constant(
+        "DLG_SETFOCUS",
+        "Фокус ввода вот-вот будет установлен в текущее поле."
+    ),
+    constant("DLG_KEY", "Пользователь нажал клавишу на клавиатуре."),
+    constant("DLG_BUTTON", "Пользователь щёлкнул мышью на экранной кнопке."),
+    constant("DLG_MOUSE", "Пользователь работает мышью."),
+    constant(
+        "DLG_TIMER",
+        "Истёк интервал, установленный последним вызовом SetTimer."
+    ),
+    constant(
+        "DLG_SAVE",
+        "Запрос на выход из диалога с сохранением внесённых изменений."
+    ),
+    constant(
+        "DLG_DESTROY",
+        "Окно вот-вот будет удалено с экрана; в параметре key передаётся " +
+            "статус завершения: 0 — без сохранения, 1 — с сохранением."
+    ),
+    constant(
+        "DLG_INLOOP",
+        "Вход панели или области прокрутки в цикл выборки сообщений."
+    ),
+    constant(
+        "DLG_OUTLOOP",
+        "Выход панели или области прокрутки из цикла выборки сообщений."
+    ),
+    constant(
+        "DLG_SWITCH",
+        "Переключение между скроллингом и панелью; обработчик может вернуть " +
+            "CM_IGNORE и отменить переключение."
+    ),
+    constant(
+        "DLG_MSELSTART",
+        "Начало обработки выделенных записей; GetMultiCount возвращает их " +
+            "количество."
+    ),
+    constant("DLG_MSEL", "Очередная выделенная запись стала текущей."),
+    constant("DLG_MSELEND", "Обработка выделенных записей завершена.")
+];
+
+const DIALOG_RESULT_CONSTANTS: readonly IRslBuiltinDefinition[] = [
+    constant(
+        "CM_DEFAULT",
+        "Выполнить действия по умолчанию. Возвращается обработчиком, который " +
+            "сообщение не обрабатывает."
+    ),
+    constant(
+        "CM_CANCEL",
+        "Завершить работу с диалоговым окном без сохранения изменений; для " +
+            "DLG_OUTREC и DLG_REMFOCUS — запретить перенос фокуса."
+    ),
+    constant(
+        "CM_SAVE",
+        "Завершить работу с диалоговым окном и сохранить изменения."
+    ),
+    constant(
+        "CM_IGNORE",
+        "Игнорировать нажатие клавиши или кнопки; при DLG_INIT — запретить " +
+            "автоматическую установку фокуса ввода."
+    ),
+    constant(
+        "CM_INSERT",
+        "Вставить новую запись в область прокрутки, встроенную в диалоговую " +
+            "панель, где клавиша [F9] занята выходом с сохранением."
+    ),
+    constant(
+        "CM_SELECT",
+        "Закрыть окно прокрутки, запущенное процедурой RunScroll, с выбором " +
+            "текущей записи."
+    ),
+    constant(
+        "CM_UPDATE_ADDSCROLL",
+        "Обновить скроллинг, добавленный процедурой AddScroll."
+    ),
+    constant(
+        "CM_MSEL_CONT_CLEAR",
+        "Продолжить обработку выделенных записей, сняв выделение с текущей."
+    ),
+    constant(
+        "CM_MSEL_STOP_KEEP",
+        "Прервать обработку выделенных записей, сохранив выделение текущей."
+    ),
+    constant(
+        "CM_MSEL_STOP_CLEAR",
+        "Прервать обработку выделенных записей, сняв выделение с текущей."
+    ),
+    constant(
+        "CM_MSEL_STOP_CLEARALL",
+        "Прервать обработку выделенных записей и снять выделение со всех."
+    )
+];
+
+const MESSAGE_BOX_CONSTANTS: readonly IRslBuiltinDefinition[] = [
+    constant("MB_OK", "Кнопка «ОК» в окне сообщения."),
+    constant("MB_YES", "Кнопка «Да» в окне сообщения."),
+    constant("MB_NO", "Кнопка «Нет» в окне сообщения."),
+    constant("MB_CANCEL", "Кнопка «Отмена» в окне сообщения."),
+    constant(
+        "MB_ERROR",
+        "Цвет фона окна сообщения, применяемый для сообщений об ошибках."
+    ),
+    constant("IND_OK", "Кнопка «ОК» выбрана по умолчанию или нажата."),
+    constant("IND_YES", "Кнопка «Да» выбрана по умолчанию или нажата."),
+    constant("IND_NO", "Кнопка «Нет» выбрана по умолчанию или нажата."),
+    constant("IND_CANCEL", "Кнопка «Отмена» выбрана по умолчанию или нажата."),
+    constant("IND_ERROR", "Код ошибки выполнения процедуры MsgBoxEx.")
+];
+
 export const RSL_STANDARD_LIBRARY: readonly IRslBuiltinDefinition[] =
     Object.freeze([
         ...CLASS_DEFINITIONS,
-        ...PROCEDURE_DEFINITIONS
+        ...PROCEDURE_DEFINITIONS,
+        ...DIALOG_MESSAGE_CONSTANTS,
+        ...DIALOG_RESULT_CONSTANTS,
+        ...MESSAGE_BOX_CONSTANTS
     ]);
+
+/**
+ * Константа интерактивного режима.
+ *
+ * Тип Integer: все они сравниваются с числовыми параметрами обработчика и
+ * возвращаются из него. Значение не указывается — см. комментарий выше.
+ */
+function constant(
+    name: string,
+    summary: string
+): IRslBuiltinDefinition {
+    return {
+        name,
+        kind: CompletionItemKind.Constant,
+        typeName: "Integer",
+        summary
+    };
+}
 
 function procedure(
     signature: string,

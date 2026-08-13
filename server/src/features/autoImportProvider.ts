@@ -12,6 +12,7 @@ import {
 } from "vscode-languageserver";
 
 import type { RslSymbol } from "../symbols/rslSymbol";
+import { KEYWORDS } from "../language/rslLanguageReference";
 import { normalizeIdentifier, tokenAtOffset } from "../lexer";
 import type { RslScopeResolver } from "../scopeResolver";
 import type {
@@ -21,12 +22,8 @@ import type {
 } from "../workspaceIndex";
 import { completionLabelMatchesPrefix } from "./completionRanking";
 
-const NON_IMPORT_IDENTIFIERS = new Set([
-    "and", "array", "break", "class", "const", "continue", "elif", "else",
-    "end", "false", "file", "for", "if", "import", "local", "macro", "not",
-    "null", "onerror", "or", "private", "record", "return", "this", "true",
-    "var", "while", "with"
-]);
+/* Ключевое слово Import-ом не исправляется: см. справочник языка. */
+const NON_IMPORT_IDENTIFIERS = new Set(KEYWORDS);
 
 export interface IAutoImportCandidate {
     uri: string;

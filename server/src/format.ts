@@ -1,8 +1,11 @@
 import {
     BLOCK_START_KEYWORDS,
     BRANCH_KEYWORDS,
-    END_KEYWORD
-} from "./languageMetadata";
+    DECLARATION_KEYWORDS,
+    DECLARATION_MODIFIERS,
+    END_KEYWORD,
+    isDeclarationModifier
+} from "./language/rslLanguageReference";
 
 import {
     IRslToken,
@@ -10,6 +13,22 @@ import {
 } from "./lexer";
 
 export const FORMATTER_REVISION = "spacing-v2";
+
+/**
+ * Объявление, перенесённое запятой на следующую строку.
+ *
+ * Состав модификаторов и ключевых слов берётся из справочника языка, чтобы
+ * список не расходился с parser-ом: раньше здесь стоял свой перечень, в
+ * который входил PUBLIC — слово, которого в языке нет.
+ */
+const CONTINUED_DECLARATION_PATTERN = new RegExp(
+    `^(\\s*(?:(?:${DECLARATION_MODIFIERS.join("|")})\\s+)?` +
+        `(?:${DECLARATION_KEYWORDS.filter(keyword =>
+            keyword !== "macro" && keyword !== "class" && keyword !== "file"
+        ).join("|")})\\s+)` +
+        "([@A-Za-zА-Яа-яЁё_][@A-Za-zА-Яа-яЁё0-9_]*).*?,\\s*$",
+    "i"
+);
 
 interface IContinuationContext {
     kind: "declaration" | "assignment";
@@ -408,9 +427,7 @@ function getNextContinuationContext(
         return code.endsWith("+") ? current : undefined;
     }
 
-    const declarationMatch = code.match(
-        /^(\s*(?:(?:private|local|public)\s+)?(?:var|const|array|record)\s+)([@A-Za-zА-Яа-яЁё_][@A-Za-zА-Яа-яЁё0-9_]*).*?,\s*$/i
-    );
+    const declarationMatch = code.match(CONTINUED_DECLARATION_PATTERN);
 
     if (declarationMatch) {
         return {
@@ -568,6 +585,3 @@ function buildLineStarts(
     return result;
 }
 
-function isDeclarationModifier(value: string): boolean {
-    return value === "private" || value === "local" || value === "public";
-}

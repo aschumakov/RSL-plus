@@ -21,6 +21,8 @@ export class BuiltinSymbol {
     readonly signature: string;
     readonly summary: string;
     readonly insertText: string;
+    /** Значение константы; пусто у всего остального. */
+    readonly value: string;
     /** Имя базового класса; пусто, если класс ничего не наследует. */
     readonly base: string;
     readonly children: readonly BuiltinSymbol[];
@@ -32,6 +34,7 @@ export class BuiltinSymbol {
         this.signature = definition.signature || definition.name;
         this.summary = definition.summary || "";
         this.insertText = definition.insertText || "";
+        this.value = definition.value || "";
         this.base = definition.base || "";
         this.children = Object.freeze(
             (definition.children || []).map(item => new BuiltinSymbol(item))
@@ -71,8 +74,12 @@ export class BuiltinSymbol {
                 : `: ${this.typeName}`;
             return `${this.signature}${suffix}`;
         }
-        return this.kind === CompletionItemKind.Class
-            ? `Class ${this.name}`
+        if (this.kind === CompletionItemKind.Class) {
+            return `Class ${this.name}`;
+        }
+        /* У константы значение и есть главное, что о ней надо сказать. */
+        return this.kind === CompletionItemKind.Constant && this.value
+            ? `${this.name} = ${this.value}: ${this.typeName}`
             : `${this.name}: ${this.typeName}`;
     }
 
@@ -85,6 +92,12 @@ export class BuiltinSymbol {
             range: { start: 0, end: 0 },
             selectionRange: { start: 0, end: 0 },
             typeName: this.typeName,
+            /*
+             * Тип каталога взят из руководства: он объявлен. Variant среди них
+             * встречается и означает ровно Variant.
+             */
+            typeVariant: this.typeName.toLowerCase() === "variant",
+            value: this.value,
             parameterText: parameterText(this.signature, this.name),
             documentation: this.summary,
             builtin: true,

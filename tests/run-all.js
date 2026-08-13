@@ -5,6 +5,7 @@ const { spawnSync } = require("child_process");
 
 const tests = [
     "lexer.test.js",
+    "language-reference.test.js",
     "syntax-conformance.test.js",
     "syntax-parser.test.js",
     "parser-regressions.test.js",
@@ -14,7 +15,9 @@ const tests = [
     "definition.test.js",
     "diagnostic-visibility.test.js",
     "scope-index.test.js",
+    "scope-resolution.test.js",
     "diagnostics.test.js",
+    "unknown-variables.test.js",
     "language-features.test.js",
     "interactive-features.test.js",
     "extended-language-features.test.js",
@@ -24,6 +27,7 @@ const tests = [
     "workspace-worker.test.js",
     "server-services.test.js",
     "request-races.test.js",
+    "interruptible-work.test.js",
 ];
 
 let failed = false;

@@ -9,7 +9,15 @@ import {
 } from "vscode-languageserver";
 
 import { RslSymbol } from "./symbols/rslSymbol";
-import { isRslKeyword, isRslType } from "./syntax/rslIdentifiers";
+import {
+    BLOCK_START_KEYWORDS,
+    DECLARATION_MODIFIERS,
+    deprecatedConstructMessage,
+    END_KEYWORD,
+    isRslKeyword,
+    isRslSystemConstant,
+    isRslType
+} from "./language/rslLanguageReference";
 import { getScopeChain, RslScopeResolver } from "./scopeResolver";
 import {
     GetDynamicMacroReferencesFromTokens,
@@ -19,6 +27,20 @@ import {
 import {
     IRslDiagnosticSettings
 } from "./interfaces";
+import {
+    buildUnknownVariableDiagnostics,
+    normalizeUnknownVariablesMode
+} from "./diagnostics/unknownVariableDiagnostics";
+import {
+    buildRedundantImportDiagnostics
+} from "./diagnostics/redundantImportDiagnostics";
+import {
+    buildScalarMemberDiagnostics
+} from "./diagnostics/scalarMemberDiagnostics";
+import {
+    createWorkSlice,
+    type IRslWorkSlice
+} from "./core/timeSlice";
 import {
     cachedSignificantTokens,
     findUnrecognizedEscapes,
@@ -62,37 +84,11 @@ interface IDiagnosticData {
     replacement?: string;
 }
 
-const BLOCK_START = new Set(["macro", "class", "if", "for", "while", "with"]);
-const END_KEYWORD = "end";
-const MODIFIERS = new Set(["private", "local", "public"]);
+const BLOCK_START = new Set(BLOCK_START_KEYWORDS);
+const MODIFIERS = new Set(DECLARATION_MODIFIERS);
 const VARIABLE_KINDS = new Set<number>([
     CompletionItemKind.Variable,
     CompletionItemKind.Constant
-]);
-const RESERVED_IDENTIFIERS = new Set([
-    "true",
-    "false",
-    "null",
-    "undefined",
-    "valtype",
-    "v_undef",
-    "v_integer",
-    "v_money",
-    "v_decimal",
-    "v_double",
-    "v_string",
-    "v_bool",
-    "v_date",
-    "v_time",
-    "v_dttm",
-    "v_file",
-    "v_struc",
-    "v_array",
-    "v_txtfile",
-    "v_dbffile",
-    "v_proc",
-    "v_r2m",
-    "v_memaddr"
 ]);
 
 export const DEFAULT_DIAGNOSTIC_SETTINGS: Required<IRslDiagnosticSettings> = {
@@ -104,6 +100,16 @@ export const DEFAULT_DIAGNOSTIC_SETTINGS: Required<IRslDiagnosticSettings> = {
     debugBreak: true,
     useBeforeDeclaration: true,
     ambiguousReferences: true,
+    /*
+     * Правило о необъявленных переменных выключено: см.
+     * unknownVariableDiagnostics. Лишний транзитивный Import — включено с
+     * severity Information: это подсказка, а не ошибка, и убирать такой Import
+     * или оставлять его страховкой решает автор кода.
+     */
+    redundantImports: true,
+    unknownVariables: "off",
+    unknownVariablesKnownGlobalsFile: "",
+    unknownVariablesAuditFile: "",
     dialect: "rsBank",
     maxProblems: 200
 };
@@ -123,12 +129,35 @@ export function normalizeDiagnosticSettings(
             settings?.useBeforeDeclaration !== false,
         ambiguousReferences:
             settings?.ambiguousReferences !== false,
+        redundantImports: settings?.redundantImports !== false,
+        unknownVariables: normalizeUnknownVariablesMode(
+            settings?.unknownVariables
+        ),
+        unknownVariablesKnownGlobalsFile:
+            settings?.unknownVariablesKnownGlobalsFile || "",
+        unknownVariablesAuditFile:
+            settings?.unknownVariablesAuditFile || "",
         dialect: settings?.dialect === "coreRsl" ? "coreRsl" : "rsBank",
         maxProblems:
             typeof settings?.maxProblems === "number"
                 ? Math.max(0, Math.floor(settings.maxProblems))
                 : DEFAULT_DIAGNOSTIC_SETTINGS.maxProblems
     };
+}
+
+/**
+ * Этап расчёта диагностик.
+ *
+ * Этапы объявляются списком, а исполняются двумя разными способами: синхронно
+ * (тесты, batch-клиенты) и порциями с возвратом в event loop (сервер). Список
+ * при этом один — иначе прерываемый расчёт проверял бы не то же самое, что
+ * непрерываемый.
+ */
+export interface IRslDiagnosticPlan {
+    stages: readonly (() => void)[];
+    /** Не пора ли остановиться: лимит Problems исчерпан. */
+    hasCapacity(): boolean;
+    finish(): Diagnostic[];
 }
 
 /**
@@ -140,17 +169,82 @@ export function buildLocalRslDiagnostics(
     index: WorkspaceIndex,
     settings?: IRslDiagnosticSettings,
     /*
-     * Отмена проверяется между этапами: расчёт диагностики синхронный, и на
-     * файле 100 КБ занимает больше сотни миллисекунд. Доводить его до конца
-     * для файла, который пользователь покинул, значит задержать тот, который
-     * он ждёт.
+     * Отмена проверяется между этапами: доводить расчёт до конца для файла,
+     * который пользователь покинул, значит задержать тот, который он ждёт.
      */
     isCancelled?: () => boolean
 ): Diagnostic[] {
+    return runDiagnosticPlan(
+        planLocalRslDiagnostics(module, index, settings),
+        isCancelled
+    );
+}
+
+/**
+ * Тот же расчёт порциями.
+ *
+ * Между этапами управление возвращается event loop, и только поэтому проверка
+ * отмены имеет смысл: без паузы уведомление о смене активной вкладки до сервера
+ * ещё не дошло и проверять было бы нечего.
+ */
+export async function buildLocalRslDiagnosticsChunked(
+    module: IIndexedModule,
+    index: WorkspaceIndex,
+    settings?: IRslDiagnosticSettings,
+    isCancelled?: () => boolean,
+    slice: IRslWorkSlice = createWorkSlice()
+): Promise<Diagnostic[]> {
+    return runDiagnosticPlanChunked(
+        planLocalRslDiagnostics(module, index, settings),
+        isCancelled,
+        slice
+    );
+}
+
+function runDiagnosticPlan(
+    plan: IRslDiagnosticPlan,
+    isCancelled?: () => boolean
+): Diagnostic[] {
+    for (const stage of plan.stages) {
+        if (!plan.hasCapacity() || isCancelled?.()) {
+            break;
+        }
+        stage();
+    }
+
+    return plan.finish();
+}
+
+async function runDiagnosticPlanChunked(
+    plan: IRslDiagnosticPlan,
+    isCancelled: (() => boolean) | undefined,
+    slice: IRslWorkSlice
+): Promise<Diagnostic[]> {
+    for (const stage of plan.stages) {
+        /*
+         * Проверка ПОСЛЕ паузы, а не только до неё: за время паузы могли прийти
+         * и смена версии документа, и смена активной вкладки, и отмена запроса.
+         */
+        await slice.yieldIfNeeded();
+
+        if (!plan.hasCapacity() || isCancelled?.()) {
+            return plan.finish();
+        }
+        stage();
+    }
+
+    return plan.finish();
+}
+
+function planLocalRslDiagnostics(
+    module: IIndexedModule,
+    index: WorkspaceIndex,
+    settings?: IRslDiagnosticSettings
+): IRslDiagnosticPlan {
     const options = normalizeDiagnosticSettings(settings);
 
     if (!options.enabled || options.maxProblems === 0) {
-        return [];
+        return emptyPlan();
     }
 
     const result: Diagnostic[] = [];
@@ -214,6 +308,13 @@ export function buildLocalRslDiagnostics(
             () => addLocalVisibilityDiagnostics(module, getResolver(), result)
         ],
         [
+            options.structure,
+            () => result.push(...buildScalarMemberDiagnostics(
+                module,
+                getResolver()
+            ))
+        ],
+        [
             options.structure && options.dialect === "coreRsl",
             () => {
                 addCoreDialectDiagnostics(module, getResolver(), result);
@@ -247,17 +348,12 @@ export function buildLocalRslDiagnostics(
         ]
     ];
 
-    for (const [enabled, run] of stages) {
-        if (!enabled) {
-            continue;
-        }
-        if (!hasCapacity() || isCancelled?.()) {
-            break;
-        }
-        run();
-    }
-
-    return deduplicateDiagnostics(result).slice(0, options.maxProblems);
+    return {
+        stages: enabledStages(stages),
+        hasCapacity,
+        finish: () =>
+            deduplicateDiagnostics(result).slice(0, options.maxProblems)
+    };
 }
 
 /** Workspace-фаза не запускает parser/local rules повторно. */
@@ -265,11 +361,51 @@ export function buildWorkspaceRslDiagnostics(
     module: IIndexedModule,
     index: WorkspaceIndex,
     settings?: IRslDiagnosticSettings,
-    isCancelled?: () => boolean
+    isCancelled?: () => boolean,
+    /**
+     * Общий resolver сервера.
+     *
+     * Для правила о необъявленных переменных он обязателен по существу: только
+     * общий resolver знает про каталог прикладных модулей, а без каталога любой
+     * `Import CommonInter` делал бы контекст непрозрачным — то есть правило
+     * молчало бы всегда.
+     */
+    sharedResolver?: RslScopeResolver
 ): Diagnostic[] {
+    return runDiagnosticPlan(
+        planWorkspaceRslDiagnostics(module, index, settings, sharedResolver),
+        isCancelled
+    );
+}
+
+/** Межфайловая фаза порциями: см. buildLocalRslDiagnosticsChunked. */
+export async function buildWorkspaceRslDiagnosticsChunked(
+    module: IIndexedModule,
+    index: WorkspaceIndex,
+    settings?: IRslDiagnosticSettings,
+    isCancelled?: () => boolean,
+    sharedResolver?: RslScopeResolver,
+    slice: IRslWorkSlice = createWorkSlice()
+): Promise<Diagnostic[]> {
+    return runDiagnosticPlanChunked(
+        planWorkspaceRslDiagnostics(module, index, settings, sharedResolver),
+        isCancelled,
+        slice
+    );
+}
+
+function planWorkspaceRslDiagnostics(
+    module: IIndexedModule,
+    index: WorkspaceIndex,
+    settings?: IRslDiagnosticSettings,
+    sharedResolver?: RslScopeResolver
+): IRslDiagnosticPlan {
     const options = normalizeDiagnosticSettings(settings);
-    if (!options.enabled || options.maxProblems === 0) return [];
+    if (!options.enabled || options.maxProblems === 0) {
+        return emptyPlan();
+    }
     const result: Diagnostic[] = [];
+    const resolver = sharedResolver || new RslScopeResolver(index);
     const stages: readonly [boolean, () => void][] = [
         [options.structure, () => addSelfImportDiagnostics(module, index, result)],
         [
@@ -279,20 +415,53 @@ export function buildWorkspaceRslDiagnostics(
         [
             options.unusedImports,
             () => addUnusedImportDiagnostics(module, index, result)
+        ],
+        [
+            options.redundantImports,
+            () => result.push(...buildRedundantImportDiagnostics(
+                module,
+                index,
+                resolver
+            ))
+        ],
+        [
+            options.unknownVariables !== "off" &&
+                !options.unknownVariablesAuditFile,
+            () => result.push(...buildUnknownVariableDiagnostics(
+                module,
+                resolver,
+                {
+                    mode: options.unknownVariables,
+                    knownGlobalsFile:
+                        options.unknownVariablesKnownGlobalsFile
+                }
+            ))
         ]
     ];
 
-    for (const [enabled, run] of stages) {
-        if (!enabled) {
-            continue;
-        }
-        if (result.length >= options.maxProblems || isCancelled?.()) {
-            break;
-        }
-        run();
-    }
+    return {
+        stages: enabledStages(stages),
+        hasCapacity: () => result.length < options.maxProblems,
+        finish: () =>
+            deduplicateDiagnostics(result).slice(0, options.maxProblems)
+    };
+}
 
-    return deduplicateDiagnostics(result).slice(0, options.maxProblems);
+function enabledStages(
+    stages: readonly [boolean, () => void][]
+): readonly (() => void)[] {
+    return stages
+        .filter(([enabled]) => enabled)
+        .map(([, run]) => run);
+}
+
+/** План выключенной фазы: этапов нет, результат пуст. */
+function emptyPlan(): IRslDiagnosticPlan {
+    return {
+        stages: [],
+        hasCapacity: () => false,
+        finish: () => []
+    };
 }
 
 /** Полный результат для unit-тестов и batch-клиентов. */
@@ -768,48 +937,6 @@ function splitLongStringLiteral(raw: string): string | undefined {
     return parts.map(part => `${quote}${part}${quote}`).join(" +\n");
 }
 
-/*
- * RECORD документацией не объявлен устаревшим (только ARRAY, FILE и
- * специализированные ссылочные типы) — в отличие от прежней версии этой
- * проверки, здесь он не флагуется.
- */
-const DEPRECATED_DECLARATION_MESSAGES = new Map<string, string>([
-    [
-        "array",
-        "Определение ARRAY устарело, от него желательно избавляться по возможности"
-    ],
-    [
-        "file",
-        "Объект типа FILE — устаревшая конструкция; " +
-            "рекомендуется использовать конструкцию Tbfile"
-    ],
-    [
-        "btfileref",
-        "BtFileRef — устаревший специализированный тип; " +
-            "рекомендуется использовать обобщённый объект (TBfile)"
-    ],
-    [
-        "strucref",
-        "StrucRef — устаревший специализированный тип; " +
-            "рекомендуется использовать обобщённый объект (TRecHandler)"
-    ],
-    [
-        "arrayref",
-        "ArrayRef — устаревший специализированный тип; " +
-            "рекомендуется использовать обобщённый объект (TArray)"
-    ],
-    [
-        "txtfileref",
-        "TxtFileRef — устаревший специализированный тип; " +
-            "рекомендуется использовать обобщённый объект"
-    ],
-    [
-        "dbffileref",
-        "DbfFileRef — устаревший специализированный тип; " +
-            "рекомендуется использовать обобщённый объект"
-    ]
-]);
-
 function addDeprecatedDeclarationDiagnostics(
     module: IIndexedModule,
     result: Diagnostic[]
@@ -819,9 +946,7 @@ function addDeprecatedDeclarationDiagnostics(
             continue;
         }
 
-        const message = DEPRECATED_DECLARATION_MESSAGES.get(
-            normalizeIdentifier(token.value)
-        );
+        const message = deprecatedConstructMessage(token.value);
 
         if (!message) {
             continue;
@@ -1842,7 +1967,7 @@ function isReservedIdentifier(value: string): boolean {
 
     return isRslKeyword(normalized) ||
         isRslType(normalized) ||
-        RESERVED_IDENTIFIERS.has(normalized);
+        isRslSystemConstant(normalized);
 }
 
 

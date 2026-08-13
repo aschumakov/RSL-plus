@@ -292,7 +292,13 @@ async function testAbandonedFileDiagnosticsAreNotPublished() {
         return buildLocalRslDiagnostics(module, currentIndex, settings);
       },
       buildWorkspace: (module, currentIndex, settings) =>
-        buildWorkspaceRslDiagnostics(module, currentIndex, settings)
+        buildWorkspaceRslDiagnostics(module, currentIndex, settings),
+      buildLocalAsync(...args) {
+          return Promise.resolve(this.buildLocal(...args));
+      },
+      buildWorkspaceAsync(...args) {
+          return Promise.resolve(this.buildWorkspace(...args));
+      }
     },
     {
       isParseBusy: () => false,
@@ -367,6 +373,12 @@ async function testTwoWavePublicationIsStable() {
       buildWorkspace: (module, currentIndex, settings) => {
         phases.push("workspace");
         return buildWorkspaceRslDiagnostics(module, currentIndex, settings);
+      },
+      buildLocalAsync(...args) {
+          return Promise.resolve(this.buildLocal(...args));
+      },
+      buildWorkspaceAsync(...args) {
+          return Promise.resolve(this.buildWorkspace(...args));
       }
     },
     {

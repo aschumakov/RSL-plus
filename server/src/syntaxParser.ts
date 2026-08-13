@@ -4,6 +4,14 @@ import {
     lexRsl,
     normalizeIdentifier
 } from "./lexer";
+import {
+    BLOCK_BOUNDARY_KEYWORDS,
+    DECLARATION_MODIFIERS,
+    FILE_RECORD_SPECIFIERS as FILE_RECORD_SPECIFIERS_LIST,
+    RESERVED_WORDS,
+    STATEMENT_KEYWORDS as STATEMENT_KEYWORDS_LIST,
+    WORD_OPERATORS as WORD_OPERATORS_LIST
+} from "./language/rslLanguageReference";
 
 export type RslSyntaxKind =
     | "CompilationUnit" | "ImportDeclaration" | "ImportItem"
@@ -85,24 +93,32 @@ interface IParameterListResult {
     end?: number;
 }
 
-const RESERVED = new Set([
-    "and", "if", "record", "array", "import", "return", "const", "macro",
-    "this", "class", "not", "true", "elif", "null", "var", "end",
-    "onerror", "with", "false", "or", "while", "file", "local", "private",
-    "break", "continue", "for"
+/*
+ * Состав ключевых слов, границ блоков и спецификаторов описан один раз в
+ * language/rslLanguageReference. Раньше parser держал собственные копии, и они
+ * расходились с остальными: например ELSE отсутствовал в списке
+ * зарезервированных имён, а PUBLIC числился модификатором в compact-модели, но
+ * не здесь — из-за чего один и тот же файл разбирался по-разному.
+ */
+const RESERVED = new Set(RESERVED_WORDS);
+const BLOCK_BOUNDARIES = new Set(BLOCK_BOUNDARY_KEYWORDS);
+const STATEMENT_KEYWORDS = new Set(STATEMENT_KEYWORDS_LIST);
+const FILE_RECORD_SPECIFIERS = new Set(FILE_RECORD_SPECIFIERS_LIST);
+const WORD_OPERATORS = new Set(WORD_OPERATORS_LIST);
+const MODIFIERS = new Set(DECLARATION_MODIFIERS);
+/**
+ * Слова, на которых выражение обязано закончиться.
+ *
+ * Ни одно из них внутри выражения RSL стоять не может, поэтому встреченное
+ * слово-оператор означает начало следующего предложения. Раньше выражение
+ * останавливалось только на границах блока, и `Public Var x;` целиком уходило в
+ * одно выражение: объявление x пропадало вместе с остальной строкой — при том
+ * что компилятор ругается ровно на одно слово Public.
+ */
+const EXPRESSION_STOP_WORDS = new Set([
+    ...BLOCK_BOUNDARY_KEYWORDS,
+    ...STATEMENT_KEYWORDS_LIST
 ]);
-
-const BLOCK_BOUNDARIES = new Set(["end", "elif", "else", "onerror"]);
-const STATEMENT_KEYWORDS = new Set([
-    "import", "var", "const", "array", "file", "record", "macro",
-    "class", "if", "while", "for", "with", "return", "break",
-    "continue", "onerror", "local", "private"
-]);
-const FILE_RECORD_SPECIFIERS = new Set([
-    "normal", "sort", "key", "write", "append", "mem", "txt", "dbf",
-    "dialog", "blob", "btr"
-]);
-const WORD_OPERATORS = new Set(["and", "or", "not"]);
 const SYMBOL_OPERATORS = new Set([
     "=", "==", "!=", "<", ">", "<=", ">=", "+", "-", "*", "/", "@",
     "%", "&", "|", "^", "~", "?", ":", ".", ",", "("
@@ -725,7 +741,7 @@ class Parser {
     private parseStatement(): IRslSyntaxNode {
         let modifier: IRslToken | undefined;
 
-        if (this.word() === "local" || this.word() === "private") {
+        if (MODIFIERS.has(this.word())) {
             modifier = this.take();
         }
 
@@ -1843,7 +1859,7 @@ class Parser {
         const start = prefix ? prefix.start : this.current().start;
         const expressionTokens = this.consumeExpression(
             new Set([";"]),
-            BLOCK_BOUNDARIES
+            EXPRESSION_STOP_WORDS
         );
         appendAll(used, expressionTokens);
 
@@ -1978,6 +1994,21 @@ class Parser {
 
         /* По правилам RSL перед ELIF, ELSE и END ';' необязательна. */
         if (stop.has(word) || BLOCK_BOUNDARIES.has(word) || this.atEnd()) {
+            return;
+        }
+
+        /*
+         * Выражение, оборванное словом-оператором, уже разобрано в режиме
+         * восстановления — про пропущенную ';' здесь молчим.
+         *
+         * Иначе `Public Var x;` давало бы две жалобы на одно место: настоящая
+         * ошибка тут одна — неизвестное имя Public. Раньше такая строка целиком
+         * уходила в одно выражение, и объявление x пропадало.
+         */
+        if (
+            statement.kind === "ExpressionStatement" &&
+            STATEMENT_KEYWORDS.has(word)
+        ) {
             return;
         }
 
@@ -2421,8 +2452,8 @@ class Parser {
         }
 
         const value = normalizeIdentifier(token.value);
-        return value === "local" || value === "private"
-            ? value
+        return MODIFIERS.has(value)
+            ? value as RslDeclarationModifier
             : undefined;
     }
 

@@ -6,6 +6,11 @@ import {
 
 import { RslSymbol } from "./symbols/rslSymbol";
 import {
+    createWorkSlice,
+    type IRslWorkSlice
+} from "./core/timeSlice";
+import { isNonSymbolIdentifier } from "./language/rslLanguageReference";
+import {
     IRslToken,
     normalizeIdentifier
 } from "./lexer";
@@ -31,13 +36,6 @@ const TOKEN_MODIFIERS = [
     "deprecated"
 ];
 
-const NON_SYMBOL_IDENTIFIERS = new Set([
-    "and", "array", "break", "btr", "class", "const", "continue",
-    "dbf", "dialog", "elif", "else", "end", "false", "file", "for",
-    "if", "import", "key", "local", "macro", "mem", "not", "null",
-    "onerror", "or", "private", "record", "return", "sort", "this",
-    "true", "txt", "var", "while", "with", "write", "append"
-]);
 
 export const RSL_SEMANTIC_TOKENS_LEGEND: SemanticTokensLegend = {
     tokenTypes: TOKEN_TYPES,
@@ -78,6 +76,43 @@ interface IObjectInfo {
  */
 const CANCEL_CHECK_INTERVAL = 1000;
 
+/**
+ * Семантическая подсветка порциями.
+ *
+ * Тот же расчёт, что и синхронный, но каждые 5–10 мс он возвращает управление
+ * event loop и после паузы заново спрашивает, нужен ли ещё результат. Без паузы
+ * проверка отмены во время расчёта почти бесполезна: сообщение об отмене и о
+ * смене активной вкладки приходит транспортом, а транспорт в это время стоит.
+ *
+ * Обход дерева символов и поток токенов идут по всему файлу даже для
+ * Range-запроса, и до лимита 512 КБ это заметная пауза, за которую результата
+ * уже никто не ждёт.
+ */
+export async function buildRslSemanticTokensChunked(
+    module: IIndexedModule,
+    index: WorkspaceIndex,
+    sharedResolver?: RslScopeResolver,
+    range?: IRslSemanticTokenRange,
+    isCancelled: () => boolean = () => false,
+    slice: IRslWorkSlice = createWorkSlice()
+): Promise<SemanticTokens> {
+    const steps = semanticTokenSteps(
+        module,
+        index,
+        sharedResolver,
+        range,
+        isCancelled
+    );
+    let step = steps.next();
+
+    while (!step.done) {
+        await slice.yieldIfNeeded();
+        step = steps.next();
+    }
+
+    return step.value;
+}
+
 export function buildRslSemanticTokens(
     module: IIndexedModule,
     index: WorkspaceIndex,
@@ -94,9 +129,45 @@ export function buildRslSemanticTokens(
      */
     isCancelled: () => boolean = () => false
 ): SemanticTokens {
+    const steps = semanticTokenSteps(
+        module,
+        index,
+        sharedResolver,
+        range,
+        isCancelled
+    );
+    let step = steps.next();
+
+    while (!step.done) {
+        step = steps.next();
+    }
+
+    return step.value;
+}
+
+/**
+ * Один расчёт, две формы исполнения.
+ *
+ * Генератор отдаёт управление на границах порций; синхронный вызов просто
+ * прокручивает его до конца, порционный — вставляет паузу. Так прерываемый и
+ * непрерываемый расчёт заведомо считают одно и то же.
+ */
+function* semanticTokenSteps(
+    module: IIndexedModule,
+    index: WorkspaceIndex,
+    sharedResolver: RslScopeResolver | undefined,
+    range: IRslSemanticTokenRange | undefined,
+    isCancelled: () => boolean
+): Generator<void, SemanticTokens, void> {
     const resolver = sharedResolver || new RslScopeResolver(index);
     const tokens = module.syntax.tokens;
     const objects = collectObjects(module, tokens, isCancelled);
+
+    /*
+     * Граница порции после обхода дерева символов: он идёт по всему файлу даже
+     * для Range-запроса и на большом файле сам по себе занимает миллисекунды.
+     */
+    yield;
 
     if (isCancelled()) {
         return { data: [] };
@@ -128,10 +199,18 @@ export function buildRslSemanticTokens(
     for (let tokenIndex = firstTokenIndex; tokenIndex < tokens.length; tokenIndex++) {
         if (
             tokenIndex % CANCEL_CHECK_INTERVAL === 0 &&
-            tokenIndex > firstTokenIndex &&
-            isCancelled()
+            tokenIndex > firstTokenIndex
         ) {
-            return { data: [] };
+            /*
+             * Пауза ПЕРЕД проверкой отмены. Обратный порядок — проверять, ничего
+             * не отдав event loop, — как раз и был прежним поведением: сообщение
+             * об отмене или о смене вкладки к этому моменту ещё не пришло.
+             */
+            yield;
+
+            if (isCancelled()) {
+                return { data: [] };
+            }
         }
 
         const token = tokens[tokenIndex];
@@ -155,7 +234,7 @@ export function buildRslSemanticTokens(
             continue;
         }
 
-        if (NON_SYMBOL_IDENTIFIERS.has(normalizeIdentifier(token.value))) {
+        if (isNonSymbolIdentifier(token.value)) {
             continue;
         }
 

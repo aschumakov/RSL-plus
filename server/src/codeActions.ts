@@ -12,7 +12,21 @@ import {
 import {
     GetImportDefinitionTargetsFromTokens
 } from "./execMacroDefinition";
+import { DECLARATION_MODIFIERS } from "./language/rslLanguageReference";
 import { IIndexedModule } from "./workspaceIndex";
+
+/**
+ * Одиночное объявление VAR или CONST на всю строку.
+ *
+ * Модификаторы берутся из справочника языка: собственный перечень здесь
+ * содержал PUBLIC, из-за чего Quick Fix «удалить объявление» соглашался
+ * работать со строкой, которую компилятор объявлением не считает.
+ */
+const SINGLE_VARIABLE_DECLARATION_PATTERN = new RegExp(
+    `^\\s*(?:(?:${DECLARATION_MODIFIERS.join("|")})\\s+)?(?:var|const)\\s+` +
+        "[A-Za-z_$][\\w$]*(?:\\s*:\\s*[^;=]+)?(?:\\s*=\\s*[^;]+)?;\\s*$",
+    "i"
+);
 
 interface IDiagnosticData {
     start?: number;
@@ -57,6 +71,14 @@ export function buildRslCodeActions(
                     module,
                     diagnostic,
                     "Удалить повторный Import"
+                );
+                break;
+
+            case "redundant-import":
+                action = createRemoveImportAction(
+                    module,
+                    diagnostic,
+                    "Удалить Import, приходящий через другой модуль"
                 );
                 break;
 
@@ -301,7 +323,7 @@ function createRemoveSingleDeclarationAction(
 
     if (
         declaration.indexOf(",") >= 0 ||
-        !/^\s*(?:(?:private|local|public)\s+)?(?:var|const)\s+[A-Za-z_$][\w$]*(?:\s*:\s*[^;=]+)?(?:\s*=\s*[^;]+)?;\s*$/i.test(declaration)
+        !SINGLE_VARIABLE_DECLARATION_PATTERN.test(declaration)
     ) {
         return undefined;
     }

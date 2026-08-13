@@ -157,30 +157,53 @@ function sendClientPerformance(
 const ACTIVE_DOCUMENT_COALESCE_MS = 60;
 
 let activeDocumentTimer: NodeJS.Timeout | undefined;
+let activeDocumentSentAtMs = 0;
 
 /**
  * Language server использует активный URI, чтобы Problems не терял текущий
  * файл среди групп, которые VS Code сортирует самостоятельно. Resource-
  * настройки вычисляются здесь же, без workspace/configuration round-trip.
  *
- * Уведомления склеиваются: см. ACTIVE_DOCUMENT_COALESCE_MS. Настройки читаются
- * в момент отправки, то есть один раз на серию, а не на каждую вкладку.
+ * ПЕРВОЕ уведомление уходит сразу, склеиваются только следующие за ним
+ * быстрые переключения (см. ACTIVE_DOCUMENT_COALESCE_MS). Раньше задержке
+ * подвергалось любое уведомление, включая одиночный переход в файл: сервер
+ * узнавал об активной вкладке с опозданием и до этого продолжал считать
+ * покинутый файл — то самое время, которого ждёт пользователь.
+ *
+ * Настройки читаются в момент отправки, то есть один раз на серию, а не на
+ * каждую вкладку.
  */
 function notifyActiveDocumentSoon(): void {
     if (activeDocumentTimer) {
         clearTimeout(activeDocumentTimer);
+        activeDocumentTimer = undefined;
     }
 
-    activeDocumentTimer = setTimeout(() => {
-        activeDocumentTimer = undefined;
-        notifyActiveDocument().then(
-            undefined,
-            error => console.error(
-                "RSL: active document notification failed",
-                error
-            )
-        );
-    }, ACTIVE_DOCUMENT_COALESCE_MS);
+    const sinceLastMs = Date.now() - activeDocumentSentAtMs;
+
+    if (sinceLastMs >= ACTIVE_DOCUMENT_COALESCE_MS) {
+        sendActiveDocumentNotification();
+        return;
+    }
+
+    activeDocumentTimer = setTimeout(
+        () => {
+            activeDocumentTimer = undefined;
+            sendActiveDocumentNotification();
+        },
+        ACTIVE_DOCUMENT_COALESCE_MS - sinceLastMs
+    );
+}
+
+function sendActiveDocumentNotification(): void {
+    activeDocumentSentAtMs = Date.now();
+    notifyActiveDocument().then(
+        undefined,
+        error => console.error(
+            "RSL: active document notification failed",
+            error
+        )
+    );
 }
 
 async function notifyActiveDocument(): Promise<void> {

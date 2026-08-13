@@ -3,7 +3,7 @@
  "modules": {
   "AcquirerObjects": {
    "file": "acquirerobjects.json",
-   "classes": 28,
+   "classes": 26,
    "procedures": 0,
    "constants": 0
   },
@@ -11,7 +11,11 @@
    "file": "bankinter.json",
    "classes": 30,
    "procedures": 238,
-   "constants": 0
+   "constants": 0,
+   "dependencies": [
+    "AcquirerObjects",
+    "PaymInter"
+   ]
   },
   "BilFacturaInter": {
    "file": "bilfacturainter.json",
@@ -47,7 +51,10 @@
    "file": "commoninter.json",
    "classes": 19,
    "procedures": 196,
-   "constants": 0
+   "constants": 0,
+   "dependencies": [
+    "AcquirerObjects"
+   ]
   },
   "cryptdlm": {
    "file": "cryptdlm.json",
@@ -203,7 +210,10 @@
    "file": "payminter.json",
    "classes": 47,
    "procedures": 163,
-   "constants": 0
+   "constants": 0,
+   "dependencies": [
+    "BankInter"
+   ]
   },
   "PcRateInter": {
    "file": "pcrateinter.json",
@@ -239,7 +249,10 @@
    "file": "psinter.json",
    "classes": 11,
    "procedures": 31,
-   "constants": 0
+   "constants": 0,
+   "dependencies": [
+    "PaymInter"
+   ]
   },
   "PTInter": {
    "file": "ptinter.json",
@@ -307,6 +320,19 @@
    "procedures": 7,
    "constants": 0
   },
+  "RslScr": {
+   "file": "rslscr.json",
+   "classes": 0,
+   "procedures": 8,
+   "constants": 0,
+   "variables": 7
+  },
+  "rslx": {
+   "file": "rslx.json",
+   "classes": 0,
+   "procedures": 6,
+   "constants": 0
+  },
   "RsSysLog": {
    "file": "rssyslog.json",
    "classes": 1,
@@ -317,7 +343,10 @@
    "file": "safecells.json",
    "classes": 12,
    "procedures": 0,
-   "constants": 0
+   "constants": 0,
+   "dependencies": [
+    "CommonInter"
+   ]
   },
   "SbCrdInter": {
    "file": "sbcrdinter.json",

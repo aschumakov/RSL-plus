@@ -3,7 +3,16 @@ import {
     CompletionItemKind
 } from "vscode-languageserver";
 
-import { RslSymbol } from "./symbols/rslSymbol";
+import { createSymbolId, RslSymbol } from "./symbols/rslSymbol";
+import {
+    buildImportContextState,
+    type IRslImportContextState
+} from "./analysis/importContextState";
+import {
+    displayTypeName,
+    isRslType,
+    PRIMITIVE_TYPES
+} from "./language/rslLanguageReference";
 import {
     IRslToken,
     tokenAtOffset,
@@ -15,6 +24,7 @@ import {
     IIndexedSymbol,
     WorkspaceIndex
 } from "./workspaceIndex";
+import { LruCache } from "./core/lruCache";
 import { getDefaults } from "./defaults";
 import type { BuiltinCatalog } from "./builtins/builtinSymbol";
 import type {
@@ -22,6 +32,15 @@ import type {
 } from "./builtins/platformModuleCatalog";
 
 export const RSL_BUILTIN_URI = "rsl-builtin:/standard-library";
+
+/**
+ * Сколько документов держат свои производные наборы.
+ *
+ * Resolver живёт всё время работы сервера, а ключом здесь служит URI: без
+ * границы обе карты росли бы на каждый открытый за сессию файл и не уменьшались
+ * никогда. Открытых документов одновременно единицы, поэтому запас велик.
+ */
+const DOCUMENT_CACHE_ENTRIES = 32;
 
 export interface IResolvedSymbol {
     uri: string;
@@ -34,10 +53,20 @@ interface IResolutionCache {
     byTokenStart: Map<number, IResolvedSymbol | null>;
 }
 
+/**
+ * Присваивание, из которого можно вывести тип переменной.
+ *
+ * Ни тип, ни класс получателя здесь не вычисляются: и то и другое требует
+ * разрешения имён В ПОЗИЦИИ ВЫЗОВА, а индекс строится один раз на модуль.
+ * Раньше тип прямого вызова считался при построении индекса — глобальным
+ * поиском по всему workspace, без области видимости и без позиции, — и
+ * `x = Get()` получал тип чужого класса Get из произвольного файла проекта.
+ */
 interface IConstructorAssignment {
+    /** Позиция имени цели присваивания. */
     offset: number;
-    /** Тип для прямого вызова: конструктор класса или процедура. */
-    typeName: string;
+    /** Имя в правой части: конструктор класса или процедура. */
+    callee?: string;
     /**
      * Вызов метода получателя: `rs = cmd.Execute()`.
      *
@@ -49,6 +78,26 @@ interface IConstructorAssignment {
         receiver: string;
         method: string;
     };
+}
+
+/**
+ * Ключ присваивания.
+ *
+ * Объявленная переменная адресуется своим symbolId — то есть областью, в
+ * которой объявлена. Переменная без объявления symbolId не имеет, и ключом
+ * становится область самого присваивания плюс имя.
+ *
+ * Раньше ключом было одно имя на весь модуль, и тип «протекал» между
+ * одноимёнными переменными разных Macro, методов и классов: `doc = TBFile(...)`
+ * в одной процедуре задавал тип `doc` во всех остальных. Именно поэтому ключ
+ * теперь всегда содержит область.
+ */
+function declaredAssignmentKey(symbol: RslSymbol): string {
+    return `sym:${symbol.id}`;
+}
+
+function implicitAssignmentKey(scope: RslSymbol, name: string): string {
+    return `scope:${scope.id}/${normalizeIdentifier(name)}`;
 }
 
 /*
@@ -76,6 +125,8 @@ export class RslScopeResolver {
     private resolutionCacheMisses = 0;
     /** Присваивания, тип которых сейчас вычисляется: защита от цикла. */
     private memberTypeGuard = new Set<IConstructorAssignment>();
+    /** Модули, индекс присваиваний которых строится сейчас. */
+    private assignmentIndexInProgress = new WeakSet<IIndexedModule>();
     /*
      * Видимые прикладные модули на документ.
      *
@@ -84,10 +135,21 @@ export class RslScopeResolver {
      * разобраны. Кэш нужен потому, что обход вызывается из Completion, а тот
      * срабатывает на каждое нажатие.
      */
-    private visibleModulesByUri = new Map<
+    private visibleModulesByUri = new LruCache<
         string,
-        { revision: number; modules: readonly string[] }
-    >();
+        { revision: string; modules: readonly string[] }
+    >(DOCUMENT_CACHE_ENTRIES);
+    /*
+     * Полнота Import-контекста на документ.
+     *
+     * Считается обходом транзитивных Import, поэтому кэшируется по тем же двум
+     * ревизиям, что и набор видимых прикладных модулей: состояние зависит и от
+     * индекса проекта, и от того, что успел прочитать каталог.
+     */
+    private importContextStateByUri = new LruCache<
+        string,
+        { revision: string; state: IRslImportContextState }
+    >(DOCUMENT_CACHE_ENTRIES);
 
     constructor(
         private index: WorkspaceIndex,
@@ -127,7 +189,12 @@ export class RslScopeResolver {
             return undefined;
         }
 
-        const closureKey = this.index.getImportClosureKey(uri);
+        /*
+         * Ревизия каталога прикладных модулей входит в ключ: имя, не
+         * разрешившееся до чтения состава модуля, обязано разрешиться после.
+         */
+        const closureKey = `${this.index.getImportClosureKey(uri)}` +
+            `|platform:${this.platformModules?.revision ?? 0}`;
         let cache = this.resolutionByModule.get(module);
 
         if (!cache || cache.closureKey !== closureKey) {
@@ -155,11 +222,85 @@ export class RslScopeResolver {
         return resolved;
     }
 
+    /**
+     * Полнота Import-контекста документа.
+     *
+     * Нужна проверкам, которые делают вывод из отсутствия символа: пока
+     * контекст не complete, «не нашли» и «нет» — разные утверждения.
+     */
+    getImportContextState(uri: string): IRslImportContextState {
+        const revision = `${this.index.revision}:` +
+            `${this.platformModules?.revision ?? 0}`;
+        const cached = this.importContextStateByUri.get(uri);
+
+        if (cached?.revision === revision) {
+            return cached.state;
+        }
+
+        const state = buildImportContextState(
+            this.index,
+            uri,
+            this.platformModules
+        );
+        this.importContextStateByUri.set(uri, { revision, state });
+        return state;
+    }
+
     getCacheStats(): { hits: number; misses: number } {
         return {
             hits: this.resolutionCacheHits,
             misses: this.resolutionCacheMisses
         };
+    }
+
+    /**
+     * Имена, допустимые в позиции типа.
+     *
+     * Примитивы, встроенные классы, классы текущего файла, классы полного
+     * Import-замыкания и классы импортированных прикладных модулей. Классы
+     * неимпортированных файлов сюда НЕ попадают: подставленное имя не
+     * скомпилировалось бы, а Auto Import для позиции типа не предусмотрен.
+     */
+    getTypeCompletions(uri: string, tree: RslSymbol): CompletionItem[] {
+        const result: CompletionItem[] = PRIMITIVE_TYPES.map(name => ({
+            label: displayTypeName(name),
+            kind: CompletionItemKind.TypeParameter,
+            detail: "Тип RSL",
+            insertText: displayTypeName(name)
+        }));
+
+        for (const item of this.builtins.completionItems) {
+            if (item.kind === CompletionItemKind.Class) {
+                result.push(asTypeItem(item));
+            }
+        }
+
+        for (const child of tree.children) {
+            if (child.kind === CompletionItemKind.Class) {
+                result.push(asTypeItem(child.completionItem));
+            }
+        }
+
+        for (const module of this.index.getImportedModules(uri)) {
+            for (const child of module.symbolTree.children) {
+                if (
+                    child.kind === CompletionItemKind.Class &&
+                    !child.isPrivate
+                ) {
+                    result.push(asTypeItem(child.completionItem));
+                }
+            }
+        }
+
+        if (this.platformModules) {
+            for (const item of this.platformModules.classCompletionItems(
+                this.visiblePlatformModules(uri)
+            )) {
+                result.push(asTypeItem(item));
+            }
+        }
+
+        return deduplicateCompletionItems(result);
     }
 
     /** Разрешает имя в позиции типа, не позволяя переменной затенить CLASS. */
@@ -234,41 +375,138 @@ export class RslScopeResolver {
                 : undefined;
         }
 
-        const local = this.resolveInScopeChain(
-            tree,
-            referenceName,
-            offset
-        );
+        const resolved = this.resolveName(uri, tree, referenceName, offset);
 
-        if (local) {
-            return { uri, symbol: local, token };
+        return resolved
+            ? { uri: resolved.uri, symbol: resolved.symbol, token }
+            : undefined;
+    }
+
+    /**
+     * Обычное разрешение имени: только то, что видно компилятору в этой точке.
+     *
+     * Порядок фиксирован и совпадает с правилами языка:
+     *
+     *   1. параметры и локальные переменные текущего Macro или метода;
+     *   2. собственные свойства и методы текущего класса — по имени, без this;
+     *   3. унаследованные свойства и методы;
+     *   4. имена текущего модуля;
+     *   5. полное Import-замыкание;
+     *   6. стандартная библиотека;
+     *   7. импортированные прикладные модули.
+     *
+     * Глобального поиска по workspace здесь НЕТ. Он находил символ в файле,
+     * который документ не импортирует: Hover, Definition, подсветка и вывод типа
+     * показывали имя как известное, а компилятор его не знает. Неимпортированные
+     * имена — дело Auto Import, у которого поиск по проекту свой (см.
+     * findAutoImportCandidates).
+     */
+    resolveName(
+        uri: string,
+        tree: RslSymbol,
+        name: string,
+        offset: number,
+        /*
+         * Ограничение на род символа.
+         *
+         * В позиции вызова годятся только класс, процедура и метод: переменная
+         * с тем же именем вызываемым быть не может. Без этого `service =
+         * Service()` внутри `Var service;` разрешал бы Service в саму
+         * переменную — и тип переменной остался бы неизвестным.
+         */
+        accept: (symbol: RslSymbol) => boolean = () => true
+    ): IIndexedSymbol | undefined {
+        const referenceName = normalizeReferenceIdentifier(name);
+        const chain = getScopeChain(tree, offset);
+        const pick = (scope: RslSymbol): RslSymbol | undefined => {
+            const candidates = getChildrenByName(scope).get(referenceName);
+            return candidates
+                ? selectBestVisibleCandidate(
+                    candidates.filter(accept),
+                    offset
+                )
+                : undefined;
+        };
+
+        /* 1–2: от внутренней области к внешней, кроме самого модуля. */
+        for (let position = chain.length - 1; position >= 1; position--) {
+            const selected = pick(chain[position]);
+
+            if (selected) {
+                return {
+                    uri,
+                    symbolId: selected.id,
+                    symbol: selected
+                };
+            }
         }
 
-        const imported = this.index.findImportedSymbols(
-            uri,
-            referenceName
-        )[0];
+        /* 3: унаследованные члены текущего класса — ближайшего изнутри. */
+        const currentClass = innermostClass(chain);
 
-        if (imported) {
+        if (currentClass) {
+            const inherited = this.resolveInheritedMember(
+                uri,
+                tree,
+                offset,
+                { uri, symbolId: currentClass.id, symbol: currentClass },
+                referenceName
+            );
+
+            if (inherited && accept(inherited.symbol)) {
+                return inherited;
+            }
+
+            /*
+             * Предопределённый инициализатор базового класса: Init + имя базы.
+             * В тексте его объявления нет, поэтому среди детей класса он и не
+             * найдётся — но именем он существует.
+             */
+            const initializer = this.resolveBaseInitializer(
+                uri,
+                tree,
+                referenceName,
+                { uri, symbolId: currentClass.id, symbol: currentClass }
+            );
+
+            if (initializer && accept(initializer.symbol)) {
+                return initializer;
+            }
+        }
+
+        /* 4: имена модуля. */
+        const moduleSymbol = pick(tree);
+
+        if (moduleSymbol) {
             return {
-                uri: imported.uri,
-                symbol: imported.symbol,
-                token
+                uri,
+                symbolId: moduleSymbol.id,
+                symbol: moduleSymbol
             };
         }
 
+        /* 5: полное Import-замыкание. */
+        const imported = this.index
+            .findImportedSymbols(uri, referenceName)
+            .find(item => accept(item.symbol));
+
+        if (imported) {
+            return imported;
+        }
+
+        /* 6: стандартная библиотека. */
         const builtin = this.builtins.findSymbol(referenceName);
 
-        if (builtin) {
+        if (builtin && accept(builtin)) {
             return {
                 uri: RSL_BUILTIN_URI,
-                symbol: builtin,
-                token
+                symbolId: builtin.id,
+                symbol: builtin
             };
         }
 
         /*
-         * Символ импортированного прикладного модуля — последним, после
+         * 7: символ импортированного прикладного модуля — последним, после
          * объявлений файла, импортированных модулей проекта и стандартной
          * библиотеки: он доступен только через Import и не должен перекрывать
          * одноимённое объявление, которое ближе к пользователю.
@@ -278,12 +516,171 @@ export class RslScopeResolver {
             referenceName
         );
 
-        return platform
+        return platform && accept(platform.symbol)
             ? {
                 uri: RSL_BUILTIN_URI,
-                symbol: platform,
-                token
+                symbolId: platform.symbol.id,
+                symbol: platform.symbol,
+                platformModule: platform.moduleKey
             }
+            : undefined;
+    }
+
+    /**
+     * Предопределённый инициализатор базового класса.
+     *
+     * Руководство: «Для инициализации базового класса необходимо вызвать
+     * предопределенный метод, название которого образуется путем добавления к
+     * имени класса приставки Init». То есть `Class (Персона) Сотрудник`
+     * вызывает `InitПерсона` — метод, которого в тексте нет ни у одного из двух
+     * классов.
+     *
+     * Проверяется только НЕПОСРЕДСТВЕННАЯ база: каждый класс инициализирует
+     * свою, а та — свою. Придумывать `InitПрародитель` руководство повода не
+     * даёт.
+     */
+    private resolveBaseInitializer(
+        uri: string,
+        tree: RslSymbol,
+        referenceName: string,
+        classSymbol: IIndexedSymbol
+    ): IIndexedSymbol | undefined {
+        if (!referenceName.startsWith(BASE_INITIALIZER_PREFIX)) {
+            return undefined;
+        }
+
+        const baseName = referenceName.slice(BASE_INITIALIZER_PREFIX.length);
+
+        if (!baseName) {
+            return undefined;
+        }
+
+        const base = this.resolveBaseClass(uri, tree, classSymbol);
+
+        if (
+            !base ||
+            normalizeIdentifier(base.symbol.name) !== baseName
+        ) {
+            return undefined;
+        }
+
+        return {
+            uri: RSL_BUILTIN_URI,
+            symbolId: baseInitializerSymbol(base.symbol).id,
+            symbol: baseInitializerSymbol(base.symbol)
+        };
+    }
+
+    /**
+     * Базовый класс, который инициализирует `Init<База>` в этой позиции.
+     *
+     * Нужно переходу к определению: у самого инициализатора объявления нет, а
+     * осмысленная цель перехода есть — объявление базового класса. Возвращается
+     * НАСТОЯЩИЙ символ класса, с его файлом и позицией, поэтому переход ведёт
+     * туда же, куда переход по имени базы в заголовке `Class (База)`.
+     *
+     * Переименование этим методом не пользуется намеренно: оно работает через
+     * resolveAt и получает синтетический символ, от которого отказывается.
+     * Иначе новое имя для `InitПерсона` переписало бы класс `Персона`.
+     */
+    resolveBaseInitializerClass(
+        uri: string,
+        tree: RslSymbol,
+        offset: number
+    ): IIndexedSymbol | undefined {
+        const module = this.index.getModule(uri);
+
+        if (!module) {
+            return undefined;
+        }
+
+        const token = tokenAtOffset(this.getTokens(module), offset, true);
+
+        if (!token || token.kind !== "identifier") {
+            return undefined;
+        }
+
+        const referenceName = normalizeReferenceIdentifier(token.value);
+
+        if (!referenceName.startsWith(BASE_INITIALIZER_PREFIX)) {
+            return undefined;
+        }
+
+        const currentClass = innermostClass(getScopeChain(tree, offset));
+
+        if (!currentClass) {
+            return undefined;
+        }
+
+        const base = this.resolveBaseClass(uri, tree, {
+            uri,
+            symbolId: currentClass.id,
+            symbol: currentClass
+        });
+
+        return base &&
+            `${BASE_INITIALIZER_PREFIX}${normalizeIdentifier(
+                base.symbol.name
+            )}` === referenceName
+            ? base
+            : undefined;
+    }
+
+    /**
+     * Имя инициализатора базового класса для текущей позиции, если он есть.
+     *
+     * Нужно автодополнению: подсказать `InitПерсона` внутри `Class (Персона)`
+     * иначе неоткуда — объявления с таким именем в проекте не существует.
+     */
+    private baseInitializerCompletion(
+        uri: string,
+        tree: RslSymbol,
+        offset: number
+    ): CompletionItem | undefined {
+        const currentClass = innermostClass(getScopeChain(tree, offset));
+
+        if (!currentClass) {
+            return undefined;
+        }
+
+        const base = this.resolveBaseClass(uri, tree, {
+            uri,
+            symbolId: currentClass.id,
+            symbol: currentClass
+        });
+
+        return base
+            ? baseInitializerSymbol(base.symbol).completionItem
+            : undefined;
+    }
+
+    /**
+     * Член, унаследованный текущим классом.
+     *
+     * Собственные члены сюда не попадают: их уже нашла область видимости. Здесь
+     * обходятся только базовые классы, поэтому обращение `Amount = 1` внутри
+     * метода производного класса разрешается в свойство базового.
+     */
+    private resolveInheritedMember(
+        uri: string,
+        tree: RslSymbol,
+        offset: number,
+        classSymbol: IIndexedSymbol,
+        memberName: string
+    ): IIndexedSymbol | undefined {
+        const base = this.resolveBaseClass(uri, tree, classSymbol);
+
+        return base
+            ? this.resolveMemberInHierarchy(
+                uri,
+                tree,
+                offset,
+                base,
+                memberName,
+                new Set<string>([
+                    `${classSymbol.uri}#${classSymbol.symbol.id}`
+                ])
+            )
             : undefined;
     }
 
@@ -368,6 +765,17 @@ export class RslScopeResolver {
             }
         }
 
+        /*
+         * Инициализатор базового класса — рядом с локальными именами: внутри
+         * `Class (Персона)` он нужен так же часто, как собственные свойства, а
+         * подсказать его больше некому — объявления с таким именем нет.
+         */
+        const initializer = this.baseInitializerCompletion(uri, tree, offset);
+
+        if (initializer) {
+            result.push(withCompletionPriority(initializer, "0"));
+        }
+
         result.push(...this.index.getImportedCompletionItems(uri));
 
         /*
@@ -443,7 +851,13 @@ export class RslScopeResolver {
         }
 
         const cached = this.visibleModulesByUri.get(uri);
-        const revision = this.index.revision;
+        /*
+         * Ревизия каталога входит в ключ наравне с ревизией индекса: состав
+         * зависит и от Import в тексте, и от того, какие модули уже прочитаны.
+         * Индекс каталога читается асинхронно, и первый ответ «модулей не
+         * видно» без этого оставался в кэше до следующей правки текста.
+         */
+        const revision = `${this.index.revision}:${catalog.revision}`;
 
         if (cached?.revision === revision) {
             return cached.modules;
@@ -491,6 +905,12 @@ export class RslScopeResolver {
      * не обязательно в исходном документе: Import у них разные. Для класса
      * стандартной библиотеки модуля нет, и имя разрешается от документа
      * запроса — оттуда поиск всё равно доходит до каталога встроенных классов.
+     *
+     * У класса прикладного модуля владелец известен, и база ищется ТОЛЬКО в нём
+     * и в объявленных зависимостях этого модуля. Раньше здесь начинался общий
+     * поиск от документа запроса, а он доходил до workspace: база `RsbPayment`
+     * класса `RsbBBPayment` могла разрешиться в произвольный одноимённый класс
+     * проекта — и подставить его состав членов.
      */
     private resolveBaseClass(
         requestUri: string,
@@ -501,6 +921,38 @@ export class RslScopeResolver {
 
         if (!baseClassName) {
             return undefined;
+        }
+
+        if (classSymbol.platformModule) {
+            const base = this.platformModules?.findBaseClass(
+                classSymbol.platformModule,
+                baseClassName
+            );
+
+            if (base) {
+                return {
+                    uri: RSL_BUILTIN_URI,
+                    symbolId: base.symbol.id,
+                    symbol: base.symbol,
+                    platformModule: base.moduleKey
+                };
+            }
+
+            /*
+             * Стандартная библиотека — единственный допустимый выход за пределы
+             * модуля и его зависимостей: она видна без Import. Так цепочка
+             * TAcqDocument -> TPersistVarRecord -> TVarRecord доходит до
+             * стандартного TVarRecord, описанного полностью.
+             */
+            const standard = this.builtins.findClass(baseClassName);
+
+            return standard
+                ? {
+                    uri: RSL_BUILTIN_URI,
+                    symbolId: standard.id,
+                    symbol: standard
+                }
+                : undefined;
         }
 
         const classModule = classSymbol.uri === RSL_BUILTIN_URI
@@ -618,7 +1070,12 @@ export class RslScopeResolver {
             return {
                 uri: classSymbol.uri,
                 symbolId: directMember.id,
-                symbol: directMember
+                symbol: directMember,
+                /*
+                 * Владелец наследуется от класса: без этого база класса, до
+                 * которого дошли по цепочке, снова искалась бы вне модуля.
+                 */
+                platformModule: classSymbol.platformModule
             };
         }
 
@@ -679,22 +1136,35 @@ export class RslScopeResolver {
         const receiverName = normalizeIdentifier(receiver.value);
 
         if (receiverName === "this") {
-            const currentClass = getScopeChain(tree, offset)
-                .reverse()
-                .find(scope =>
-                    scope.kind === CompletionItemKind.Class
-                );
+            const currentClass = innermostClass(
+                getScopeChain(tree, offset)
+            );
 
             return currentClass
                 ? { uri, symbolId: currentClass.id, symbol: currentClass }
                 : undefined;
         }
 
-        const receiverObject = this.resolveInScopeChain(
+        /*
+         * Получатель разрешается обычными правилами видимости, включая
+         * унаследованные члены класса: `Payment.Sum` внутри метода производного
+         * класса — это свойство базового, а не неизвестное имя.
+         *
+         * Сначала — только то, чему присваивают значение. Слева от точки стоит
+         * объект, а RSL не различает регистр: без этого фильтра `ledger.Balance`
+         * при наличии класса Ledger разрешался бы в сам класс, и тип получателя
+         * терялся.
+         */
+        const receiverSymbol = this.resolveName(
+            uri,
             tree,
             receiver.value,
-            offset
+            offset,
+            isAssignableObject
         );
+        const receiverObject = receiverSymbol?.uri === uri
+            ? receiverSymbol.symbol
+            : undefined;
         const module = this.index.getModule(uri);
 
         /*
@@ -707,38 +1177,112 @@ export class RslScopeResolver {
          * не содержит Var, поэтому rs нет в дереве символов — а тип у него
          * тем не менее известен из присваивания.
          */
-        if (!receiverObject && !module) {
+        if (!receiverSymbol && !module) {
             return undefined;
         }
 
-        let typeName = receiverObject
-            ? normalizeIdentifier(receiverObject.typeName)
-            : "";
+        /*
+         * Кандидаты в порядке убывания доверия.
+         *
+         * Явно объявленный тип идёт ПЕРВЫМ: по руководству декларация типа —
+         * это приведение, и присваивание её не меняет. `Var sql: String` держит
+         * строку, чем бы её потом ни присваивали.
+         *
+         * Присваивание задаёт тип только там, где декларации нет. Руководство:
+         * «Любая переменная без декларации типа эквивалентна декларации с
+         * использованием ключевого слова Variant. В этом случае переменная может
+         * содержать значение любого типа». Поэтому variant — что явный, что
+         * подразумеваемый — уступает присваиванию, а всё остальное нет.
+         *
+         * Вывод из текста работает только по объявлениям ЭТОГО документа:
+         * позиции символа чужого модуля к нашему token stream отношения не
+         * имеют. Символ из Import или каталога уже несёт готовый тип.
+         */
+        let typeName = this.declaredTypeOf(
+            module,
+            receiverSymbol?.symbol,
+            receiverObject
+        );
 
-        if (module && (!typeName || typeName === "variant")) {
-            if (receiverObject) {
-                typeName = inferDeclaredType(
-                    this.getTokens(module),
-                    receiverObject
-                );
-            }
-
-            if (!typeName || typeName === "variant") {
-                typeName = this.inferAssignedType(
-                    module,
-                    tree,
-                    receiver.value,
-                    offset,
-                    receiverObject?.range.start ?? 0
-                );
-            }
+        /*
+         * Декларации нет — значит Variant, и тип задаёт присваивание.
+         *
+         * Перебора вариантов здесь быть не должно: если переменная объявлена как
+         * String, членов у неё нет, и «не нашли класс String — посмотрим
+         * присваивание» вернуло бы состав типа, к которому приведения не было.
+         */
+        if (!typeName && module && (!receiverSymbol || receiverObject)) {
+            typeName = this.inferAssignedType(
+                module,
+                tree,
+                receiver.value,
+                offset,
+                receiverObject
+            );
         }
 
-        if (!typeName || typeName === "variant") {
+        /*
+         * Получатель мог оказаться не переменной, а вызовом или членом чужого
+         * модуля с объявленным типом: `Config().Value`, свойство импортированного
+         * класса. Тогда годится обычное разрешение без фильтра.
+         */
+        if (!typeName && !receiverSymbol) {
+            const anySymbol = this.resolveName(
+                uri,
+                tree,
+                receiver.value,
+                offset
+            );
+
+            typeName = anySymbol
+                ? normalizeIdentifier(anySymbol.symbol.typeName)
+                : "";
+        }
+
+        if (!typeName || normalizeIdentifier(typeName) === "variant") {
             return undefined;
         }
 
         return this.findClassSymbol(uri, tree, typeName);
+    }
+
+    /**
+     * Явно объявленный тип символа, если он есть.
+     *
+     * Пусто означает «декларации нет», то есть Variant: руководство приравнивает
+     * переменную без декларации к Variant, и такая переменная может содержать
+     * значение любого типа. Всё остальное — приведение, которое присваиванием не
+     * отменяется.
+     *
+     * Второй источник, разбор `: Тип` из текста, нужен там, где symbolTree
+     * пришёл из компактной модели и тип в нём не сохранился.
+     */
+    private declaredTypeOf(
+        module: IIndexedModule | undefined,
+        symbol: RslSymbol | undefined,
+        localSymbol: RslSymbol | undefined
+    ): string {
+        const declared = normalizeIdentifier(symbol?.typeName || "");
+
+        /*
+         * Именно ОБЪЯВЛЕННЫЙ тип. Тип, выведенный из инициализатора
+         * (`Var sql = "aaa"`), декларацией не является: переменная остаётся
+         * Variant, и следующее присваивание её тип меняет.
+         */
+        if (symbol && !symbol.isTypeVariant && declared) {
+            return declared;
+        }
+
+        if (!module || !localSymbol) {
+            return "";
+        }
+
+        const fromText = inferDeclaredType(
+            this.getTokens(module),
+            localSymbol
+        );
+
+        return fromText && fromText !== "variant" ? fromText : "";
     }
 
     private findClassSymbol(
@@ -756,6 +1300,16 @@ export class RslScopeResolver {
             return { uri, symbolId: localClass.id, symbol: localClass };
         }
 
+        /*
+         * Полное Import-замыкание — и на этом поиск по проекту заканчивается.
+         *
+         * Глобального обхода workspace здесь больше нет. Он находил класс в
+         * файле, который текущий документ не импортирует: подсказка и переход
+         * работали, а компилятор такое имя не знает. Хуже того, при двух
+         * одноимённых классах в проекте выбирался произвольный из них — тот, что
+         * первым попал в индекс. Неимпортированные имена остаются делом Auto
+         * Import (см. findAutoImportCandidates).
+         */
         const imported = this.index.findImportedSymbols(uri, normalizedType)
             .find(symbol =>
                 symbol.symbol.kind === CompletionItemKind.Class
@@ -763,14 +1317,6 @@ export class RslScopeResolver {
 
         if (imported) {
             return imported;
-        }
-
-        const workspace = this.index.findSymbols(normalizedType)
-            .find(symbol =>
-                symbol.symbol.kind === CompletionItemKind.Class
-            );
-        if (workspace) {
-            return workspace;
         }
 
         const builtin = this.builtins.findClass(normalizedType);
@@ -795,8 +1341,9 @@ export class RslScopeResolver {
         return platform
             ? {
                 uri: RSL_BUILTIN_URI,
-                symbolId: platform.id,
-                symbol: platform
+                symbolId: platform.symbol.id,
+                symbol: platform.symbol,
+                platformModule: platform.moduleKey
             }
             : undefined;
     }
@@ -809,64 +1356,59 @@ export class RslScopeResolver {
      *
      * Индекс присваиваний строится один раз на immutable module model, поэтому
      * Semantic Tokens не сканирует весь Macro заново для каждого вызова.
-     */
-    /**
-     * Тип из ближайшего предшествующего присваивания.
      *
-     * Имя, а не символ: переменная могла не объявляться через Var, и тогда её
-     * в дереве символов нет, а присваивание есть. declaredAt отсекает
-     * присваивания до объявления, если оно всё-таки было; для неявной
-     * переменной достаточно границы текущей области.
+     * Тип берётся из ближайшего ПРЕДШЕСТВУЮЩЕГО присваивания той же
+     * переменной — не одноимённой. Объявленная переменная адресуется своим
+     * symbolId, переменная без объявления — областью присваивания и именем; для
+     * неявной переменной области просматриваются от текущей к модулю, поэтому
+     * `doc = TBFile(...)` на уровне модуля продолжает давать тип внутри Macro, а
+     * присваивание в соседнем Macro — нет.
      */
     private inferAssignedType(
         module: IIndexedModule,
         tree: RslSymbol,
         receiverName: string,
         offset: number,
-        declaredAt: number
+        declaredSymbol?: RslSymbol
     ): string {
-        const assignments = this.getConstructorAssignments(module).get(
-            normalizeIdentifier(receiverName)
-        );
-        if (!assignments || assignments.length === 0) {
-            return "";
+        const index = this.getConstructorAssignments(module);
+        const keys: string[] = [];
+
+        if (declaredSymbol) {
+            keys.push(declaredAssignmentKey(declaredSymbol));
+        } else {
+            /*
+             * От внутренней области к модулю: одноимённая переменная соседнего
+             * Macro в эту цепочку не попадает никогда.
+             */
+            const chain = getScopeChain(tree, offset);
+            for (let position = chain.length - 1; position >= 0; position--) {
+                keys.push(implicitAssignmentKey(chain[position], receiverName));
+            }
         }
 
-        const scopeChain = getScopeChain(tree, offset);
-        const scope = scopeChain[scopeChain.length - 1] || tree;
-        const last = upperBoundAssignmentOffset(assignments, offset) - 1;
+        for (const key of keys) {
+            const assignments = index.get(key);
 
-        /*
-         * Сначала присваивание в текущей области — оно ближе всего к запросу и
-         * перекрывает всё остальное.
-         */
-        const local = this.nearestAssignment(
-            assignments,
-            last,
-            Math.max(declaredAt, scope.range.start)
-        );
+            if (!assignments || assignments.length === 0) {
+                continue;
+            }
 
-        if (local) {
-            return this.assignedTypeOf(module, tree, local);
+            const last = upperBoundAssignmentOffset(assignments, offset) - 1;
+            const assignment = last >= 0 ? assignments[last] : undefined;
+
+            if (!assignment) {
+                continue;
+            }
+
+            const typeName = this.assignedTypeOf(module, tree, assignment);
+
+            if (typeName) {
+                return typeName;
+            }
         }
 
-        /*
-         * Затем присваивание там, где переменная объявлена.
-         *
-         * Раньше поиск ограничивался текущей областью, и переменная модуля,
-         * использованная внутри Macro, теряла тип: её присваивание находится
-         * ДО начала этого Macro и отбрасывалось. Именно так выглядит частый
-         * случай `private var doc = TBFile(...)` на уровне модуля, а обращение
-         * `doc.rec` — в процедуре: подсказка по doc пропадала полностью.
-         *
-         * Нижняя граница — само объявление: присваивания выше него относятся к
-         * другой, ещё не объявленной переменной с тем же именем.
-         */
-        const declared = declaredAt > 0
-            ? this.nearestAssignment(assignments, last, declaredAt)
-            : undefined;
-
-        return declared ? this.assignedTypeOf(module, tree, declared) : "";
+        return "";
     }
 
     /**
@@ -920,15 +1462,22 @@ export class RslScopeResolver {
     ): string {
         const declared = symbol.typeName;
 
-        if (declared && normalizeIdentifier(declared) !== "variant") {
+        /*
+         * Объявленный тип — это приведение, и присваивание его не меняет.
+         * Руководство: декларация типа необязательна, а переменная без неё
+         * эквивалентна Variant и может содержать значение любого типа. Значит
+         * выводить тип из присваивания следует ровно для таких переменных.
+         *
+         * Тип из инициализатора (`Var sql = "aaa"`) декларацией не считается: он
+         * описывает текущее значение Variant, а не приведение.
+         */
+        if (!symbol.isTypeVariant && declared) {
             return declared;
         }
 
-        if (!isAssignableObject(symbol)) {
-            return declared;
-        }
-
-        const module = this.index.getModule(uri);
+        const module = isAssignableObject(symbol)
+            ? this.index.getModule(uri)
+            : undefined;
 
         if (!module) {
             return declared;
@@ -943,30 +1492,37 @@ export class RslScopeResolver {
             return fromDeclaration;
         }
 
-        return this.inferAssignedType(
+        /*
+         * Присваивание — но только подтверждённое. У неизвестного вызова
+         * inferAssignedType возвращает само имя вызываемого: предположение, что
+         * это ещё не загруженный класс. Показать такое имя как тип значило бы
+         * назвать типом то, что типом не является.
+         */
+        const assigned = this.inferAssignedType(
             module,
             tree,
             symbol.name,
             offset,
-            symbol.range.start
-        ) || declared;
+            symbol
+        );
+
+        return this.isResolvableTypeName(uri, tree, assigned)
+            ? assigned
+            : declared;
     }
 
-    /** Ближайшее присваивание не раньше границы, начиная с индекса. */
-    private nearestAssignment(
-        assignments: readonly IConstructorAssignment[],
-        from: number,
-        lowerBound: number
-    ): IConstructorAssignment | undefined {
-        for (let index = from; index >= 0; index--) {
-            const assignment = assignments[index];
-            if (assignment.offset < lowerBound) {
-                return undefined;
-            }
-            return assignment;
+    /** Существует ли такой тип: примитив языка или разрешимый класс. */
+    private isResolvableTypeName(
+        uri: string,
+        tree: RslSymbol,
+        typeName: string
+    ): boolean {
+        if (!typeName || normalizeIdentifier(typeName) === "variant") {
+            return false;
         }
 
-        return undefined;
+        return isRslType(typeName) ||
+            !!this.findClassSymbol(uri, tree, typeName);
     }
 
     private assignedTypeOf(
@@ -974,9 +1530,18 @@ export class RslScopeResolver {
         tree: RslSymbol,
         assignment: IConstructorAssignment
     ): string {
-        return assignment.member
-            ? this.memberResultType(module, tree, assignment)
-            : assignment.typeName;
+        if (assignment.member) {
+            return this.memberResultType(module, tree, assignment);
+        }
+
+        return assignment.callee
+            ? this.getCallableResultType(
+                module.uri,
+                tree,
+                assignment.callee,
+                assignment.offset
+            )
+            : "";
     }
 
     /**
@@ -1030,14 +1595,29 @@ export class RslScopeResolver {
 
     private getConstructorAssignments(
         module: IIndexedModule
-    ): Map<string, IConstructorAssignment[]> {
-        let result = this.constructorAssignmentsByModule.get(module);
-        if (result) {
-            return result;
+    ): ReadonlyMap<string, IConstructorAssignment[]> {
+        const cached = this.constructorAssignmentsByModule.get(module);
+        if (cached) {
+            return cached;
         }
 
-        result = new Map<string, IConstructorAssignment[]>();
+        /*
+         * Защита от повторного входа.
+         *
+         * Построение индекса разрешает имена целей присваивания, а разрешение
+         * имени в принципе способно дойти до вывода типа — то есть обратно
+         * сюда. Сегодня такого пути нет, но обнаружился бы он переполнением
+         * стека, а не понятной ошибкой. Незавершённый индекс отвечает «нет
+         * присваиваний»: тип просто останется невыведенным.
+         */
+        if (this.assignmentIndexInProgress.has(module)) {
+            return EMPTY_ASSIGNMENTS;
+        }
+        this.assignmentIndexInProgress.add(module);
+
+        const result = new Map<string, IConstructorAssignment[]>();
         const tokens = this.getTokens(module);
+        const tree = module.symbolTree;
 
         for (let index = 0; index + 3 < tokens.length; index++) {
             const target = tokens[index];
@@ -1055,18 +1635,18 @@ export class RslScopeResolver {
                 continue;
             }
 
-            const name = normalizeIdentifier(target.value);
-            const values = result.get(name) || [];
+            let assignment: IConstructorAssignment | undefined;
 
             if (next.kind === "symbol" && next.raw === "(") {
-                /* Прямой вызов: конструктор класса или процедура. */
-                values.push({
+                /*
+                 * Прямой вызов: конструктор класса или процедура. Какой именно —
+                 * решается при выводе типа, разрешением имени callee в позиции
+                 * самого вызова.
+                 */
+                assignment = {
                     offset: target.start,
-                    typeName: this.getCallableResultType(
-                        module.uri,
-                        callee.value
-                    )
-                });
+                    callee: callee.value
+                };
             } else if (
                 next.kind === "symbol" && next.raw === "." &&
                 tokens[index + 4]?.kind === "identifier" &&
@@ -1078,49 +1658,98 @@ export class RslScopeResolver {
                  * известен каталогу, но чтобы его взять, нужно сначала знать
                  * класс получателя — это делается при выводе, не здесь.
                  */
-                values.push({
+                assignment = {
                     offset: target.start,
-                    typeName: "",
                     member: {
                         receiver: callee.value,
                         method: tokens[index + 4].value
                     }
-                });
-            } else {
+                };
+            }
+
+            if (!assignment) {
                 continue;
             }
 
-            result.set(name, values);
+            const key = this.assignmentKeyAt(module.uri, tree, target);
+            const values = result.get(key) || [];
+            values.push(assignment);
+            result.set(key, values);
         }
 
+        this.assignmentIndexInProgress.delete(module);
         this.constructorAssignmentsByModule.set(module, result);
         return result;
+    }
+
+    /**
+     * Ключ, под которым запоминается присваивание.
+     *
+     * Если имя цели разрешается в объявление, ключом становится это объявление:
+     * тогда присваивание внутри Macro корректно относится к переменной модуля,
+     * а не создаёт вторую запись. Если объявления нет — ключом становится
+     * область самого присваивания.
+     */
+    private assignmentKeyAt(
+        uri: string,
+        tree: RslSymbol,
+        target: IRslToken
+    ): string {
+        const declared = this.resolveName(
+            uri,
+            tree,
+            target.value,
+            target.start
+        );
+
+        if (
+            declared?.uri === uri &&
+            isAssignableObject(declared.symbol)
+        ) {
+            return declaredAssignmentKey(declared.symbol);
+        }
+
+        const chain = getScopeChain(tree, target.start);
+        return implicitAssignmentKey(
+            chain[chain.length - 1] || tree,
+            target.value
+        );
     }
 
     /**
      * Тип значения, которое даёт вызов: класс — сам себя, процедура — свой
      * объявленный тип результата.
      *
+     * Имя разрешается В ПОЗИЦИИ ВЫЗОВА и по обычным правилам видимости — то
+     * есть локальная область, текущий класс с базовыми, модуль, Import-замыкание,
+     * стандартная библиотека, импортированные прикладные модули. Раньше здесь
+     * стоял глобальный обход workspace без позиции: `x = Get()` брал тип у
+     * произвольного класса или Macro с именем Get из любого файла проекта.
+     *
      * Неизвестное имя возвращается как есть: тогда это скорее всего имя класса,
      * который просто ещё не загружен, и findClassSymbol попробует его найти.
      */
-    private getCallableResultType(uri: string, name: string): string {
-        const builtin = this.builtins.findSymbol(name);
-        if (builtin) {
-            return builtin.kind === CompletionItemKind.Class
-                ? builtin.name
-                : builtin.typeName;
-        }
-
-        const workspace = this.index.findSymbols(name).find(item =>
-            item.symbol.kind === CompletionItemKind.Class ||
-            item.symbol.kind === CompletionItemKind.Function ||
-            item.symbol.kind === CompletionItemKind.Method
+    private getCallableResultType(
+        uri: string,
+        tree: RslSymbol,
+        name: string,
+        offset: number
+    ): string {
+        const resolved = this.resolveName(
+            uri,
+            tree,
+            name,
+            offset,
+            isCallableSymbol
         );
-        if (workspace) {
-            return workspace.symbol.kind === CompletionItemKind.Class
-                ? workspace.symbol.name
-                : workspace.symbol.typeName;
+
+        if (resolved) {
+            if (resolved.symbol.kind === CompletionItemKind.Class) {
+                return resolved.symbol.name;
+            }
+
+            const typeName = resolved.symbol.typeName;
+            return normalizeIdentifier(typeName) === "variant" ? "" : typeName;
         }
 
         /* Процедура импортированного прикладного модуля. */
@@ -1142,13 +1771,8 @@ export class RslScopeResolver {
             return false;
         }
 
-        const currentClass = getScopeChain(tree, offset)
-            .reverse()
-            .find(scope =>
-                scope.kind === CompletionItemKind.Class
-            );
-
-        return currentClass === classSymbol.symbol;
+        return innermostClass(getScopeChain(tree, offset)) ===
+            classSymbol.symbol;
     }
 
     private getReceiverToken(
@@ -1211,6 +1835,72 @@ export class RslScopeResolver {
     }
 }
 
+/** Приставка предопределённого инициализатора базового класса. */
+const BASE_INITIALIZER_PREFIX = "init";
+
+/** Пустой индекс присваиваний: общий на всех, изменять его никто не должен. */
+const EMPTY_ASSIGNMENTS: ReadonlyMap<string, IConstructorAssignment[]> =
+    new Map<string, IConstructorAssignment[]>();
+
+/*
+ * Инициализаторы строятся один раз на базовый класс: имя разрешается на каждое
+ * нажатие клавиши, а сам символ от позиции запроса не зависит.
+ */
+const baseInitializerCache = new WeakMap<RslSymbol, RslSymbol>();
+
+/**
+ * Символ `Init<База>`.
+ *
+ * Тип результата — variant: руководство о возвращаемом значении инициализатора
+ * ничего не говорит, и придумывать его нельзя. Символ помечен встроенным, поэтому
+ * переименование им отказывается заниматься: в тексте его объявления нет, и
+ * переименовать его значило бы переименовать базовый класс, чего пользователь не
+ * просил.
+ */
+function baseInitializerSymbol(base: RslSymbol): RslSymbol {
+    const cached = baseInitializerCache.get(base);
+
+    if (cached) {
+        return cached;
+    }
+
+    const name = `Init${base.name}`;
+    const parameterText = base.parameterText || "()";
+    const symbol = new RslSymbol({
+        id: createSymbolId(
+            undefined,
+            CompletionItemKind.Method,
+            name
+        ),
+        name,
+        kind: CompletionItemKind.Method,
+        range: { start: 0, end: 0 },
+        selectionRange: { start: 0, end: 0 },
+        parameterText,
+        builtin: true,
+        documentation:
+            `Предопределённый инициализатор базового класса ${base.name}. ` +
+            "Вызывается один раз в определении дочернего класса; место вызова " +
+            "значения не имеет."
+    });
+    baseInitializerCache.set(base, symbol);
+    return symbol;
+}
+
+/**
+ * Элемент для позиции типа: подставляется одно имя, без скобок вызова.
+ *
+ * Класс в completionItem конструктора вставляется как `Name`, но метод и
+ * процедура — как `Name()`; в позиции типа скобки не нужны никогда.
+ */
+function asTypeItem(item: CompletionItem): CompletionItem {
+    return {
+        ...item,
+        insertText: String(item.label),
+        insertTextFormat: undefined
+    };
+}
+
 function withCompletionPriority(
     item: CompletionItem,
     priority: string
@@ -1219,6 +1909,23 @@ function withCompletionPriority(
         ...item,
         sortText: `${priority}_${normalizeIdentifier(String(item.label))}`
     };
+}
+
+/**
+ * Ближайший класс изнутри цепочки областей.
+ *
+ * Цепочка идёт от модуля к внутренней области, поэтому «текущий класс» — это
+ * последний класс в ней, а не первый. Раньше это выражалось тремя способами в
+ * трёх местах, причём один из них брал внешний класс.
+ */
+function innermostClass(chain: readonly RslSymbol[]): RslSymbol | undefined {
+    for (let position = chain.length - 1; position >= 0; position--) {
+        if (chain[position].kind === CompletionItemKind.Class) {
+            return chain[position];
+        }
+    }
+
+    return undefined;
 }
 
 export function getScopeChain(
@@ -1380,6 +2087,13 @@ function inferDeclaredType(
  * результата, и присваивание переменной с тем же именем к нему отношения не
  * имеет.
  */
+/** То, что может стоять в позиции вызова: конструктор класса или процедура. */
+function isCallableSymbol(symbol: RslSymbol): boolean {
+    return symbol.kind === CompletionItemKind.Class ||
+        symbol.kind === CompletionItemKind.Function ||
+        symbol.kind === CompletionItemKind.Method;
+}
+
 function isAssignableObject(symbol: RslSymbol): boolean {
     return symbol.kind === CompletionItemKind.Variable ||
         symbol.kind === CompletionItemKind.Field ||

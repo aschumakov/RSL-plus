@@ -1,7 +1,8 @@
 import {
     BLOCK_START_KEYWORDS,
+    DECLARATION_MODIFIERS,
     END_KEYWORD
-} from "./languageMetadata";
+} from "./language/rslLanguageReference";
 
 import {
     IRslLexResult,
@@ -21,20 +22,21 @@ interface IOpenBlock {
     branchStartLine?: number;
 }
 
-const DECLARATION_MODIFIERS: { [name: string]: boolean } = {
-    private: true,
-    local: true,
-    public: true
-};
+const DECLARATION_MODIFIER_LOOKUP: { [name: string]: boolean } =
+    toLookup(DECLARATION_MODIFIERS);
 
 const BLOCK_START_LOOKUP: { [name: string]: boolean } =
-    BLOCK_START_KEYWORDS.reduce(
-        (result, keyword) => {
-            result[keyword.toLowerCase()] = true;
+    toLookup(BLOCK_START_KEYWORDS);
+
+function toLookup(values: readonly string[]): { [name: string]: boolean } {
+    return values.reduce(
+        (result, value) => {
+            result[value.toLowerCase()] = true;
             return result;
         },
-        Object.create(null)
+        Object.create(null) as { [name: string]: boolean }
     );
+}
 
 const IF_KEYWORD = "if";
 const ELIF_KEYWORD = "elif";
@@ -120,7 +122,7 @@ export function GetFoldingRanges(
             continue;
         }
 
-        if (DECLARATION_MODIFIERS[word]) {
+        if (DECLARATION_MODIFIER_LOOKUP[word]) {
             continue;
         }
 

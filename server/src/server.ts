@@ -16,6 +16,9 @@ import { DiagnosticsCoordinator } from "./diagnostics/diagnosticsCoordinator";
 import { DocumentAnalysisService } from "./services/documentAnalysisService";
 import { RslDefinitionProvider } from "./features/definitionProvider";
 import { DEFAULT_DIAGNOSTIC_SETTINGS } from "./diagnostics";
+import {
+    UnknownVariableAudit
+} from "./diagnostics/unknownVariableAudit";
 import { RslLanguageFeatureRegistry } from "./features/languageFeatureRegistry";
 import {
     GO_TO_BLOCK_END_COMMAND,
@@ -65,7 +68,25 @@ const defaultSettings: IRslSettings = {
     diagnostics: DEFAULT_DIAGNOSTIC_SETTINGS
 };
 const settingsService = new RslSettingsService(defaultSettings);
-const diagnosticEngine = new RslDiagnosticEngine();
+/*
+ * Audit-отчёты по путям из настроек.
+ *
+ * Правило о необъявленных переменных по умолчанию выключено, и включать его
+ * следует не раньше, чем прогон по репозиторию макросов покажет, что ложных
+ * срабатываний в полном контексте не осталось. Отчёт — вход в это решение.
+ */
+const unknownVariableAudits = new Map<string, UnknownVariableAudit>();
+const diagnosticEngine = new RslDiagnosticEngine({
+    audit: (auditFile, findings) => {
+        let audit = unknownVariableAudits.get(auditFile);
+
+        if (!audit) {
+            audit = new UnknownVariableAudit(auditFile, { log: logMessage });
+            unknownVariableAudits.set(auditFile, audit);
+        }
+        audit.append(findings);
+    }
+});
 const referenceIndex = new ReferenceIndex({ log: logMessage });
 const performanceLogger = new PerformanceLogger(message => logMessage(message));
 
@@ -268,7 +289,13 @@ diagnosticsCoordinator = new DiagnosticsCoordinator(
         log: logMessage,
         performance: performanceLogger,
         /* Прикладные модули готовит onImports после разбора: см. выше. */
-        onImports: enqueueActiveImports
+        onImports: enqueueActiveImports,
+        /*
+         * Тот же resolver, что у интерактивных запросов: у него есть каталог
+         * прикладных модулей, без которого Import-контекст любого файла с
+         * `Import CommonInter` выглядел бы неполным.
+         */
+        resolver: scopeResolver
     }
 );
 

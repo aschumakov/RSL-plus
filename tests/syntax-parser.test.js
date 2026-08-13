@@ -272,7 +272,15 @@ const adaptedTreeSource = [
 ].join("\n");
 const adaptedTree = createSymbolTree(adaptedTreeSource);
 
-assert.ok(RSL_PARSER_VERSION.includes("semantic-symbols"));
+/*
+ * Версия разбора инвалидирует дисковый кэш сводок. Проверяется форма, а не
+ * конкретное слово: привязка к слову заставляла править тест при каждом
+ * изменении контракта разбора — то есть ровно тогда, когда версию и надо менять.
+ */
+assert.ok(
+  /^\d{4}-\d{2}-\d{2}-v\d+-[a-z0-9-]+$/.test(RSL_PARSER_VERSION),
+  `Версия разбора обязана быть вида ГГГГ-ММ-ДД-vN-описание: ${RSL_PARSER_VERSION}`
+);
 const adaptedMacro = adaptedTree.children.find(
   item => item.name === "Test"
 );

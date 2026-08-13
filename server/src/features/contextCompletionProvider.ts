@@ -5,8 +5,14 @@ import {
 } from "vscode-languageserver";
 
 import type { RslSymbol } from "../symbols/rslSymbol";
-import { getDefaults } from "../defaults";
+import {
+    DECLARATION_MODIFIERS,
+    displayTypeName,
+    FILE_RECORD_SPECIFIERS,
+    isStatementKeyword
+} from "../language/rslLanguageReference";
 import { cachedSignificantTokens, type IRslToken } from "../lexer";
+import type { RslScopeResolver } from "../scopeResolver";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 
 interface ICallContext {
@@ -16,30 +22,28 @@ interface ICallContext {
 }
 
 const MAX_CONTEXT_COMPLETIONS = 200;
-const RSL_TYPE_NAMES = [
-    "Variant", "Integer", "Money", "Double", "DoubleL", "String",
-    "Bool", "Date", "Time", "Object", "ProcRef", "DateTime", "R2M",
-    "MemAddr"
-];
-const RSL_TYPE_COMPLETIONS: CompletionItem[] = [
-    ...RSL_TYPE_NAMES.map(name => ({
-        label: name,
-        kind: CompletionItemKind.TypeParameter,
-        detail: "Тип RSL",
-        insertText: name
-    })),
-    ...getDefaults().completionItems
-        .filter(item => item.kind === CompletionItemKind.Class)
-        .map(item => ({
-            ...item,
-            insertText: String(item.label),
-            insertTextFormat: undefined
-        }))
-];
-const FILE_MODIFIERS = [
-    "Normal", "Write", "Mem", "Txt", "Btr", "Dbf", "Dialog", "Blob",
-    "Key", "Sort"
-];
+
+/*
+ * Спецификаторы FILE и RECORD и модификаторы объявления берутся из справочника
+ * языка: собственные перечни здесь расходились с parser-ом (в списке
+ * модификаторов был PUBLIC, а среди спецификаторов не было APPEND).
+ */
+const FILE_MODIFIER_ITEMS: CompletionItem[] = FILE_RECORD_SPECIFIERS.map(
+    name => ({
+        label: displayTypeName(name) === name
+            ? name.charAt(0).toUpperCase() + name.slice(1)
+            : displayTypeName(name),
+        kind: CompletionItemKind.Keyword,
+        detail: "Параметр FILE/RECORD",
+        insertText: name.charAt(0).toUpperCase() + name.slice(1)
+    })
+);
+
+const FILE_RECORD_SPECIFIER_LINE = new RegExp(
+    `^\\s*(?:(?:${DECLARATION_MODIFIERS.join("|")})\\s+)?` +
+        "(?:file|record)\\b[^;\\n]*\\)[^;\\n]*$",
+    "iu"
+);
 const FORMAT_SPECIFIERS: Array<[string, string]> = [
     ["l", "выравнивание влево"],
     ["r", "выравнивание вправо"],
@@ -62,7 +66,8 @@ const FORMAT_SPECIFIERS: Array<[string, string]> = [
 export function buildRslContextCompletions(
     module: IIndexedModule,
     index: WorkspaceIndex,
-    offset: number
+    offset: number,
+    resolver?: RslScopeResolver
 ): CompletionItem[] | undefined {
     const tokens = cachedSignificantTokens(module.lex.tokens);
 
@@ -76,7 +81,11 @@ export function buildRslContextCompletions(
         );
     }
 
-    const staticItems = buildStaticContextItems(module.source, offset);
+    const staticItems = buildStaticContextItems(
+        module,
+        offset,
+        resolver
+    );
     if (staticItems) {
         return staticItems;
     }
@@ -138,9 +147,11 @@ export function buildRslContextCompletions(
 }
 
 function buildStaticContextItems(
-    source: string,
-    offset: number
+    module: IIndexedModule,
+    offset: number,
+    resolver?: RslScopeResolver
 ): CompletionItem[] | undefined {
+    const source = module.source;
     const lineStart = Math.max(0, source.lastIndexOf("\n", offset - 1) + 1);
     const line = source.slice(lineStart, offset);
 
@@ -148,19 +159,19 @@ function buildStaticContextItems(
         /(?:^|\b)(?:macro|class|var|const|array)\b[^;\n]*:\s*[\p{L}\p{N}_]*$/iu
             .test(line)
     ) {
-        return RSL_TYPE_COMPLETIONS;
+        /*
+         * В позиции типа предлагаются не только примитивы и встроенные классы,
+         * но и классы самого файла, Import-замыкания и импортированных
+         * прикладных модулей: именно их пишут в `Var doc: TBFile` чаще всего, а
+         * раньше список был статическим и ни одного из них не содержал.
+         */
+        return resolver
+            ? resolver.getTypeCompletions(module.uri, module.symbolTree)
+            : undefined;
     }
 
-    if (
-        /^\s*(?:(?:private|local)\s+)?(?:file|record)\b[^;\n]*\)[^;\n]*$/iu
-            .test(line)
-    ) {
-        return FILE_MODIFIERS.map(name => ({
-            label: name,
-            kind: CompletionItemKind.Keyword,
-            detail: "Параметр FILE/RECORD",
-            insertText: name
-        }));
+    if (FILE_RECORD_SPECIFIER_LINE.test(line)) {
+        return FILE_MODIFIER_ITEMS;
     }
 
     if (
@@ -438,7 +449,3 @@ function positionAt(module: IIndexedModule, offset: number) {
     return { line, character: Math.max(0, offset - starts[line]) };
 }
 
-function isStatementKeyword(value: string): boolean {
-    return /^(?:array|class|const|file|for|if|macro|record|return|var|while|with)$/i
-        .test(value);
-}
