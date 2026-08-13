@@ -19,6 +19,9 @@ const { parseRslSyntax } = require("../server/out/syntaxParser");
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
 const { RslScopeResolver } = require("../server/out/scopeResolver");
 const {
+    buildRslHoverContent
+} = require("../server/out/features/hoverFormatter");
+const {
     buildRslSemanticTokens
 } = require("../server/out/semanticTokens");
 
@@ -325,6 +328,146 @@ test("цепочка присваивания через метод не зац�
     assert.ok(
         resolved === undefined || typeof resolved.symbol.name === "string",
         "Разрешение обязано завершиться, а не зациклиться"
+    );
+});
+
+/*
+ * Переменная модуля, использованная внутри процедуры, не теряет тип.
+ *
+ * Поиск присваивания ограничивался текущей областью, поэтому у частого случая
+ *
+ *     private var doc = TBFile("x.dbt", "r", 0);
+ *     Macro Process()
+ *       if (doc.rec.Field == 0)
+ *
+ * присваивание оказывалось ДО начала процедуры и отбрасывалось: doc оставался
+ * Variant, и подсказка по нему пропадала целиком.
+ */
+test("тип переменной модуля виден внутри процедуры", () => {
+    const source = [
+        "private var rtdocument = TBFile( \"rtdocument.dbt\", \"r\", 0 );",
+        "",
+        "Macro Process()",
+        "    if ( rtdocument.rec == 0 )",
+        "    End;",
+        "End;"
+    ].join("\n");
+    const index = new WorkspaceIndex();
+    const tree = createModule(index, "file:///main.mac", source);
+    const resolver = new RslScopeResolver(index);
+
+    const resolved = resolver.resolveAt(
+        "file:///main.mac",
+        tree,
+        source.indexOf("rec", source.indexOf("if (")) + 1
+    );
+    assert.ok(
+        resolved,
+        "Член TBFile не разрешён: присваивание на уровне модуля потеряно"
+    );
+    assert.strictEqual(resolved.symbol.name, "Rec");
+
+    const names = resolver
+        .getCompletions(
+            "file:///main.mac",
+            tree,
+            source.indexOf("rtdocument.rec") + "rtdocument.".length
+        )
+        .map(item => item.label);
+    assert.ok(
+        names.includes("Rec") && names.includes("AddFilter"),
+        `Члены TBFile обязаны предлагаться: ${names.slice(0, 8).join(", ")}`
+    );
+});
+
+/*
+ * Выведенный тип показывается и в подсказке, и в автодополнении.
+ *
+ * Вывод работал только внутри разрешения членов: по переменной уже предлагались
+ * методы класса, а сама она отображалась как Variant — подсказка противоречила
+ * автодополнению.
+ */
+test("выведенный тип переменной виден в Hover и автодополнении", () => {
+    const source = [
+        "private var rtdocument = TBFile( \"rtdocument.dbt\", \"r\", 0 );",
+        "Macro Process()",
+        "    if ( rtdocument.rec == 0 )",
+        "    End;",
+        "End;"
+    ].join("\n");
+    const uri = "file:///main.mac";
+    const index = new WorkspaceIndex();
+    const tree = createModule(index, uri, source);
+    const resolver = new RslScopeResolver(index);
+    const at = source.indexOf("rtdocument", source.indexOf("if (")) + 2;
+
+    const resolved = resolver.resolveAt(uri, tree, at);
+    assert.ok(resolved, "Переменная обязана разрешаться");
+
+    const effective = resolver.effectiveTypeName(
+        uri,
+        tree,
+        resolved.symbol,
+        at
+    );
+    assert.strictEqual(
+        effective,
+        "TBFile",
+        "Действующий тип переменной обязан выводиться из присваивания"
+    );
+
+    const hover = buildRslHoverContent(index, uri, resolved.symbol, effective)
+        .value;
+    assert.ok(
+        hover.includes("rtdocument: TBFile"),
+        `Hover обязан показывать выведенный тип: ${hover.split("\n")[1]}`
+    );
+
+    const item = resolver
+        .getCompletions(uri, tree, source.indexOf("if (") + 5)
+        .find(entry => entry.label === "rtdocument");
+    assert.ok(item, "Переменная обязана быть в автодополнении");
+    assert.ok(
+        String(item.detail).includes("TBFile"),
+        `В автодополнении обязан быть выведенный тип: ${item.detail}`
+    );
+});
+
+/*
+ * После точки предлагаются только члены.
+ *
+ * Тип Record описывается словарём базы данных, состав его полей расширению
+ * неизвестен. Раньше в этом месте начинался общий список области видимости, и
+ * на `doc.rec.` подсказка предлагала локальные переменные и процедуры файла —
+ * членами они не являются.
+ */
+test("после точки не предлагаются имена из области видимости", () => {
+    const source = [
+        "private var rtdocument = TBFile( \"rtdocument.dbt\", \"r\", 0 );",
+        "Macro Process()",
+        "    Var localValue = 1;",
+        "    if ( rtdocument.rec.FoldSide == 0 )",
+        "    End;",
+        "End;"
+    ].join("\n");
+    const index = new WorkspaceIndex();
+    const tree = createModule(index, "file:///main.mac", source);
+    const resolver = new RslScopeResolver(index);
+
+    const names = resolver
+        .getCompletions(
+            "file:///main.mac",
+            tree,
+            source.indexOf("rtdocument.rec.") + "rtdocument.rec.".length
+        )
+        .map(item => item.label);
+
+    assert.deepStrictEqual(
+        names.filter(name =>
+            ["localValue", "Process", "rtdocument"].includes(name)
+        ),
+        [],
+        `После точки посторонних имён быть не должно: ${names.join(", ")}`
     );
 });
 

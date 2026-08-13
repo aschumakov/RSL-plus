@@ -681,6 +681,86 @@ function codes(items) {
         );
     });
 
+    /*
+     * RsbFormsInter — модуль экранных форм, у него глубокая иерархия визуальных
+     * компонентов и свои константы событий.
+     *
+     * Он ДОЛГО отсутствовал в каталоге незамеченным: топики его классов
+     * называются rsbformsinter_classes_*, а извлечение искало только
+     * <модуль>_class_*, и 22 класса молча уходили в счётчик пропущенных.
+     * Поэтому здесь проверяется и наличие модуля, и то, ради чего он нужен.
+     */
+    await test("RsbFormsInter даёт классы, цепочку наследования и константы", () => {
+        const {
+            PlatformModuleCatalog
+        } = require("../server/out/builtins/platformModuleCatalog");
+        const catalog = new PlatformModuleCatalog({ log: () => undefined });
+
+        assert.ok(
+            catalog.knowsModule("RsbFormsInter"),
+            "Модуль экранных форм обязан быть в каталоге"
+        );
+        catalog.ensureModules(["RsbFormsInter"]);
+
+        const source = [
+            "Import RsbFormsInter;",
+            "Macro Test()",
+            "  Var panel = TRsbPanel();",
+            "  panel.",
+            "End;"
+        ].join("\n");
+        const uri = "file:///forms.mac";
+        const index = new WorkspaceIndex();
+        index.registerWorkspaceFiles([uri]);
+        const opened = index.updateOpenModule(uri, source, 1);
+        const resolver = new RslScopeResolver(index, undefined, catalog);
+
+        const klass = resolver.resolveAt(
+            uri,
+            opened.symbolTree,
+            source.indexOf("TRsbPanel") + 2
+        );
+        assert.ok(klass, "Класс формы обязан разрешаться");
+        assert.strictEqual(klass.symbol.typeName, "TRsbPanel");
+
+        /*
+         * TRsbPanel -> TRsbForm -> TRsbWindow -> TRsbActiveVisualComponent:
+         * члены обязаны собираться по всей цепочке, иначе подсказка по объекту
+         * формы показывает только его собственные свойства.
+         */
+        const members = resolver
+            .getCompletions(uri, opened.symbolTree, source.indexOf("  panel.") + 8)
+            .map(item => item.label);
+
+        assert.ok(
+            members.includes("addControl"),
+            `Собственный член не предложен: ${members.join(", ")}`
+        );
+        assert.ok(
+            members.includes("caption") && members.includes("visible"),
+            "Члены базовых классов формы обязаны попадать в подсказку; " +
+                `предложено: ${members.join(", ")}`
+        );
+
+        const constant = catalog.findSymbol(
+            ["RsbFormsInter"],
+            "RSB_EV_BUTTON_CLICKED"
+        );
+        assert.ok(constant, "Константы вида события обязаны быть в каталоге");
+        assert.strictEqual(constant.typeName, "Integer");
+        assert.ok(
+            constant.documentation,
+            "У константы обязано быть описание: иначе Hover покажет пустоту"
+        );
+
+        const offered = catalog.completionItems(["RsbFormsInter"])
+            .filter(item => /^RSB_EV_/.test(item.label));
+        assert.ok(
+            offered.length >= 10,
+            `Константы событий обязаны предлагаться: ${offered.length}`
+        );
+    });
+
     await test("состав модуля читается только для импортированных", () => {
         const {
             PlatformModuleCatalog

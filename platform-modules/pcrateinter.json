@@ -1,1 +1,1 @@
-{"version":2,"classes":[],"procedures":[{"name":"RT_MakeFactDate","signature":"RT_MakeFactDate([StartDate:Date [, Duration:Integer [, Pitch:Integer [, Basis:Integer]]]]): Date","description":"Возвращает дату, отстоящую от даты StartDate на заданное количество дней."}]}
+{"version":3,"classes":[],"procedures":[{"name":"RT_MakeFactDate","signature":"RT_MakeFactDate([StartDate:Date [, Duration:Integer [, Pitch:Integer [, Basis:Integer]]]]): Date","description":"Возвращает дату, отстоящую от даты StartDate на заданное количество дней."}],"constants":[]}

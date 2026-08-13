@@ -1,1 +1,1 @@
-{"version":2,"classes":[],"procedures":[{"name":"ViewPanel","signature":"ViewPanel(ObjID: Integer, ObjN: Integer): Bool","description":"Предназначена для вызова формы просмотра объекта подсистемы \"Кредитование\"."}]}
+{"version":3,"classes":[],"procedures":[{"name":"ViewPanel","signature":"ViewPanel(ObjID: Integer, ObjN: Integer): Bool","description":"Предназначена для вызова формы просмотра объекта подсистемы \"Кредитование\"."}],"constants":[]}

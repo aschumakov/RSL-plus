@@ -54,6 +54,18 @@ export interface IPlatformModuleProcedure {
     description: string;
 }
 
+/**
+ * Константа модуля: `RSB_EV_MOUSE = 2`.
+ *
+ * В коде их пишут наравне с именами классов — например при разборе вида
+ * события в обработчике, — поэтому в подсказке они нужны не меньше.
+ */
+export interface IPlatformModuleConstant {
+    name: string;
+    value: string;
+    description: string;
+}
+
 interface IPlatformModuleIndex {
     version: number;
     modules: Record<string, { file: string }>;
@@ -63,6 +75,7 @@ interface IPlatformModuleBody {
     version: number;
     classes?: IPlatformModuleClass[];
     procedures?: IPlatformModuleProcedure[];
+    constants?: IPlatformModuleConstant[];
 }
 
 interface ILoadedModule {
@@ -80,7 +93,7 @@ interface ILoadedModule {
 }
 
 /** Формат данных; несовпадение версии выключает каталог. */
-const SUPPORTED_VERSION = 2;
+const SUPPORTED_VERSION = 3;
 const DIRECTORY = "platform-modules";
 
 export class PlatformModuleCatalog {
@@ -321,6 +334,16 @@ function build(key: string, body: IPlatformModuleBody): ILoadedModule {
         }
     }
 
+    for (const item of body.constants || []) {
+        const symbol = new BuiltinSymbol(constantDefinition(item));
+        const name = normalizeIdentifier(item.name);
+        completions.push(moduleCompletion(symbol, key));
+
+        if (!symbols.has(name)) {
+            symbols.set(name, symbol.toRslSymbol());
+        }
+    }
+
     return {
         symbols,
         classes,
@@ -368,6 +391,20 @@ function classDefinition(item: IPlatformModuleClass): IRslBuiltinDefinition {
                 typeName: member.typeName || "Variant",
                 summary: member.description
             })
+    };
+}
+
+function constantDefinition(
+    item: IPlatformModuleConstant
+): IRslBuiltinDefinition {
+    return {
+        name: item.name,
+        kind: CompletionItemKind.Constant,
+        /* Тип выводится из значения: другого источника в справке нет. */
+        typeName: /^-?\d+$/.test(item.value) ? "Integer" : "Variant",
+        /* Значение показывается рядом с именем: оно и есть смысл константы. */
+        signature: `${item.name} = ${item.value}`,
+        summary: item.description
     };
 }
 

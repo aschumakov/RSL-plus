@@ -325,6 +325,19 @@ export class RslScopeResolver {
                         ))
                     );
                 }
+
+                /*
+                 * После точки предлагаются только члены — и ничего, если класс
+                 * получателя неизвестен.
+                 *
+                 * Раньше здесь начинался общий список области видимости, и на
+                 * `doc.rec.` подсказка показывала локальные переменные и
+                 * процедуры файла. Членами они не являются: тип Record
+                 * описывается словарём базы данных, состав его полей
+                 * расширению неизвестен, и честный ответ — пустой список, а не
+                 * посторонние имена.
+                 */
+                return [];
             }
         }
 
@@ -344,7 +357,12 @@ export class RslScopeResolver {
                 }
 
                 result.push(withCompletionPriority(
-                    child.completionItem,
+                    this.completionItemWithInferredType(
+                        uri,
+                        tree,
+                        child,
+                        offset
+                    ),
                     priority
                 ));
             }
@@ -816,20 +834,149 @@ export class RslScopeResolver {
 
         const scopeChain = getScopeChain(tree, offset);
         const scope = scopeChain[scopeChain.length - 1] || tree;
-        const lowerBound = Math.max(declaredAt, scope.range.start);
-        let index = upperBoundAssignmentOffset(assignments, offset) - 1;
+        const last = upperBoundAssignmentOffset(assignments, offset) - 1;
 
-        while (index >= 0) {
-            const assignment = assignments[index--];
-            if (assignment.offset < lowerBound) {
-                break;
-            }
-            return assignment.member
-                ? this.memberResultType(module, tree, assignment)
-                : assignment.typeName;
+        /*
+         * Сначала присваивание в текущей области — оно ближе всего к запросу и
+         * перекрывает всё остальное.
+         */
+        const local = this.nearestAssignment(
+            assignments,
+            last,
+            Math.max(declaredAt, scope.range.start)
+        );
+
+        if (local) {
+            return this.assignedTypeOf(module, tree, local);
         }
 
-        return "";
+        /*
+         * Затем присваивание там, где переменная объявлена.
+         *
+         * Раньше поиск ограничивался текущей областью, и переменная модуля,
+         * использованная внутри Macro, теряла тип: её присваивание находится
+         * ДО начала этого Macro и отбрасывалось. Именно так выглядит частый
+         * случай `private var doc = TBFile(...)` на уровне модуля, а обращение
+         * `doc.rec` — в процедуре: подсказка по doc пропадала полностью.
+         *
+         * Нижняя граница — само объявление: присваивания выше него относятся к
+         * другой, ещё не объявленной переменной с тем же именем.
+         */
+        const declared = declaredAt > 0
+            ? this.nearestAssignment(assignments, last, declaredAt)
+            : undefined;
+
+        return declared ? this.assignedTypeOf(module, tree, declared) : "";
+    }
+
+    /**
+     * Элемент автодополнения с типом из присваивания.
+     *
+     * Вывод запускается только для переменных без объявленного типа, поэтому в
+     * обычном списке он не стоит почти ничего: остальные элементы возвращаются
+     * как есть, без создания нового объекта.
+     */
+    private completionItemWithInferredType(
+        uri: string,
+        tree: RslSymbol,
+        symbol: RslSymbol,
+        offset: number
+    ): CompletionItem {
+        const item = symbol.completionItem;
+
+        if (
+            !isAssignableObject(symbol) ||
+            (symbol.typeName &&
+                normalizeIdentifier(symbol.typeName) !== "variant")
+        ) {
+            return item;
+        }
+
+        const inferred = this.effectiveTypeName(uri, tree, symbol, offset);
+
+        if (!inferred || normalizeIdentifier(inferred) === "variant") {
+            return item;
+        }
+
+        return {
+            ...item,
+            detail: `Переменная: ${symbol.name},\nтип ${inferred}`
+        };
+    }
+
+    /**
+     * Действующий тип символа: объявленный, а если его нет — из присваивания.
+     *
+     * Тот же вывод, что и для обращения к членам, но доступный снаружи. Без
+     * него подсказка и автодополнение показывали `variant` у переменной, по
+     * которой при этом успешно предлагались методы класса: тип выводился
+     * только внутри разрешения членов и никуда больше не попадал.
+     */
+    effectiveTypeName(
+        uri: string,
+        tree: RslSymbol,
+        symbol: RslSymbol,
+        offset: number
+    ): string {
+        const declared = symbol.typeName;
+
+        if (declared && normalizeIdentifier(declared) !== "variant") {
+            return declared;
+        }
+
+        if (!isAssignableObject(symbol)) {
+            return declared;
+        }
+
+        const module = this.index.getModule(uri);
+
+        if (!module) {
+            return declared;
+        }
+
+        const fromDeclaration = inferDeclaredType(
+            this.getTokens(module),
+            symbol
+        );
+
+        if (fromDeclaration && fromDeclaration !== "variant") {
+            return fromDeclaration;
+        }
+
+        return this.inferAssignedType(
+            module,
+            tree,
+            symbol.name,
+            offset,
+            symbol.range.start
+        ) || declared;
+    }
+
+    /** Ближайшее присваивание не раньше границы, начиная с индекса. */
+    private nearestAssignment(
+        assignments: readonly IConstructorAssignment[],
+        from: number,
+        lowerBound: number
+    ): IConstructorAssignment | undefined {
+        for (let index = from; index >= 0; index--) {
+            const assignment = assignments[index];
+            if (assignment.offset < lowerBound) {
+                return undefined;
+            }
+            return assignment;
+        }
+
+        return undefined;
+    }
+
+    private assignedTypeOf(
+        module: IIndexedModule,
+        tree: RslSymbol,
+        assignment: IConstructorAssignment
+    ): string {
+        return assignment.member
+            ? this.memberResultType(module, tree, assignment)
+            : assignment.typeName;
     }
 
     /**
@@ -1224,6 +1371,19 @@ function inferDeclaredType(
     }
 
     return "";
+}
+
+/**
+ * Символы, тип которых имеет смысл выводить из присваивания.
+ *
+ * Только то, чему присваивают значение. У процедуры typeName — это тип
+ * результата, и присваивание переменной с тем же именем к нему отношения не
+ * имеет.
+ */
+function isAssignableObject(symbol: RslSymbol): boolean {
+    return symbol.kind === CompletionItemKind.Variable ||
+        symbol.kind === CompletionItemKind.Field ||
+        symbol.kind === CompletionItemKind.Property;
 }
 
 function isVisibleAt(symbol: RslSymbol, offset: number): boolean {

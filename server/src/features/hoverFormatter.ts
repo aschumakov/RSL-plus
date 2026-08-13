@@ -13,13 +13,21 @@ import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 export function buildRslHoverContent(
     index: WorkspaceIndex,
     uri: string,
-    symbol: RslSymbol
+    symbol: RslSymbol,
+    /*
+     * Тип, выведенный из присваивания, если объявленного нет.
+     *
+     * Считает его резолвер: здесь нет ни области видимости, ни позиции запроса.
+     * Без этого подсказка писала `variant` у переменной, по которой при этом
+     * предлагались методы класса, — то есть противоречила самой себе.
+     */
+    effectiveTypeName?: string
 ): MarkupContent {
     const module = index.getModule(uri);
     const parent = module ? findParent(module.symbolTree, symbol) : undefined;
     const parameter = module ? isParameterNode(module, symbol) : false;
     const lines: string[] = [];
-    const declaration = buildDeclaration(symbol, parameter);
+    const declaration = buildDeclaration(symbol, parameter, effectiveTypeName);
 
     lines.push("```rsl", declaration, "```");
 
@@ -59,10 +67,13 @@ export function buildRslHoverContent(
 
 function buildDeclaration(
     symbol: RslSymbol,
-    parameter: boolean
+    parameter: boolean,
+    effectiveTypeName?: string
 ): string {
     const visibility = symbol.isPrivate ? "Private " : "";
     const kind = symbol.kind;
+    /* Выведенный тип точнее объявленного variant и потому важнее. */
+    const objectType = effectiveTypeName || symbol.typeName || "variant";
 
     if (
         kind === CompletionItemKind.Function ||
@@ -81,18 +92,18 @@ function buildDeclaration(
     }
 
     if (parameter) {
-        return `${symbol.name}: ${symbol.typeName || "variant"}`;
+        return `${symbol.name}: ${objectType}`;
     }
 
     if (kind === CompletionItemKind.Constant) {
         const value = symbol.value;
         return value
             ? `${visibility}Const ${symbol.name} = ${value}`
-            : `${visibility}Const ${symbol.name}: ${symbol.typeName || "variant"}`;
+            : `${visibility}Const ${symbol.name}: ${objectType}`;
     }
 
     const keyword = "Var";
-    return `${visibility}${keyword} ${symbol.name}: ${symbol.typeName || "variant"}`;
+    return `${visibility}${keyword} ${symbol.name}: ${objectType}`;
 }
 
 function extractSignature(symbol: RslSymbol): string {

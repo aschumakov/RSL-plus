@@ -312,7 +312,18 @@ export class RslLanguageFeatureRegistry {
                 contents: buildRslHoverContent(
                     index,
                     resolved.uri,
-                    resolved.symbol
+                    resolved.symbol,
+                    /*
+                     * Тип из присваивания: у переменной без объявленного типа
+                     * подсказка иначе писала variant, хотя методы класса по
+                     * ней уже предлагались.
+                     */
+                    resolver.effectiveTypeName(
+                        document.uri,
+                        context.tree,
+                        resolved.symbol,
+                        context.offset
+                    )
                 ),
                 range: {
                     start: document.positionAt(resolved.token.start),
