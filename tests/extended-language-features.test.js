@@ -958,6 +958,64 @@ function codes(items) {
     });
 
     /*
+     * Холодный каталог: индекс ещё не читан, как при первом же файле в сессии.
+     *
+     * Порядок здесь существенный. Список видимых модулей опирается на индекс
+     * каталога, поэтому считать его ДО загрузки индекса бессмысленно: knowsModule
+     * не знает ни одного имени, список выходит пустым, и загружать оказывается
+     * нечего. Именно так и было: первое событие загружало только индекс, а состав
+     * модулей — лишь второе, то есть символы `Import CommonInter` не разрешались
+     * до следующей правки файла.
+     */
+    await test("холодный каталог готовится с первого события", async () => {
+        const {
+            PlatformModuleCatalog
+        } = require("../server/out/builtins/platformModuleCatalog");
+        const catalog = new PlatformModuleCatalog({ log: () => undefined });
+        const MAIN = "file:///cold.mac";
+        const source = [
+            "Import CommonInter;",
+            "Macro Test()",
+            "  Var doc = RSL_LoansCarryDoc();",
+            "End;"
+        ].join("\n");
+        const index = new WorkspaceIndex();
+        index.registerWorkspaceFiles([MAIN]);
+        const module = index.updateOpenModule(MAIN, source, 1);
+        const resolver = new RslScopeResolver(index, undefined, catalog);
+
+        /* Каталог холодный: имён он пока не знает. */
+        assert.strictEqual(catalog.indexState, "loading");
+        assert.deepStrictEqual(
+            Array.from(resolver.visiblePlatformModules(MAIN)),
+            [],
+            "До загрузки индекса видимых модулей нет — и это не ответ, а " +
+                "отсутствие данных"
+        );
+
+        /* Та же последовательность, что и в server.ts. */
+        await catalog.ensureIndexLoaded();
+        await catalog.ensureModules(resolver.visiblePlatformModules(MAIN));
+
+        assert.deepStrictEqual(
+            Array.from(resolver.visiblePlatformModules(MAIN)),
+            ["CommonInter"]
+        );
+        assert.ok(
+            catalog.isModuleLoaded("CommonInter"),
+            "Состав модуля обязан быть прочитан с первого прохода"
+        );
+        assert.ok(
+            resolver.resolveAt(
+                MAIN,
+                module.symbolTree,
+                source.indexOf("RSL_LoansCarryDoc") + 1
+            ),
+            "Символ модуля обязан разрешаться сразу, а не со второго события"
+        );
+    });
+
+    /*
      * Контрольный случай межмодульного наследования.
      *
      * RsbBBPayment объявлен в BankInter, а его базовый класс RsbPayment — в

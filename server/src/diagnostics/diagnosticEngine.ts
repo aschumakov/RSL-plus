@@ -16,8 +16,10 @@ import { buildImportResolutionDiagnostics } from "./importResolutionDiagnostics"
 import { buildCyclicImportDiagnostics } from "./cyclicImportDiagnostics";
 import {
     collectUnknownVariables,
+    collectUnknownVariablesChunked,
     normalizeUnknownVariablesMode,
-    type IRslUnknownVariableFinding
+    type IRslUnknownVariableFinding,
+    type IRslUnknownVariableOptions
 } from "./unknownVariableDiagnostics";
 import type { IRslDiagnosticSettings } from "../interfaces";
 import { RslScopeResolver } from "../scopeResolver";
@@ -78,6 +80,45 @@ export interface IRslDiagnosticEngineOptions {
     audit?(auditFile: string, findings: readonly IRslUnknownVariableFinding[]): void;
 }
 
+/**
+ * Что нужно audit-прогону, или undefined, если он не запрошен.
+ *
+ * Общее для синхронного и порционного вариантов правила: решение «запускать
+ * или нет» обязано быть одним, иначе режимы разойдутся.
+ */
+function auditRequest(context: IRslDiagnosticContext): {
+    auditFile: string;
+    module: IIndexedModule;
+    resolver: RslScopeResolver;
+    options: IRslUnknownVariableOptions;
+} | undefined {
+    const mode = normalizeUnknownVariablesMode(
+        context.settings?.unknownVariables
+    );
+    const auditFile = context.settings?.unknownVariablesAuditFile || "";
+
+    if (mode === "off" || !auditFile) {
+        return undefined;
+    }
+
+    return {
+        auditFile,
+        module: context.module,
+        resolver: context.resolver || new RslScopeResolver(context.index),
+        options: {
+            mode,
+            /*
+             * Лимита нет намеренно: отчёт для того и существует, чтобы увидеть
+             * полную картину по репозиторию. Отмена при этом соблюдается —
+             * прогон покинутого файла никому не нужен.
+             */
+            knownGlobalsFile:
+                context.settings?.unknownVariablesKnownGlobalsFile,
+            isCancelled: context.isCancelled
+        }
+    };
+}
+
 export class RslDiagnosticEngine {
     private rules: IRslDiagnosticRule[] = [];
 
@@ -122,27 +163,41 @@ export class RslDiagnosticEngine {
             id: "unknown-variables-audit",
             phase: "workspace",
             run: context => {
-                const mode = normalizeUnknownVariablesMode(
-                    context.settings?.unknownVariables
-                );
-                const auditFile =
-                    context.settings?.unknownVariablesAuditFile || "";
+                const audit = this.options.audit;
+                const request = audit && auditRequest(context);
 
-                if (mode === "off" || !auditFile || !this.options.audit) {
+                if (!audit || !request) {
                     return [];
                 }
 
-                this.options.audit(auditFile, collectUnknownVariables(
-                    context.module,
-                    context.resolver || new RslScopeResolver(context.index),
-                    {
-                        mode,
-                        knownGlobalsFile:
-                            context.settings
-                                ?.unknownVariablesKnownGlobalsFile
-                    }
-                ));
+                audit(
+                    request.auditFile,
+                    collectUnknownVariables(
+                        request.module,
+                        request.resolver,
+                        request.options
+                    )
+                );
                 /* Audit не публикует Problems — в этом и смысл режима. */
+                return [];
+            },
+            runChunked: async (context, slice) => {
+                const audit = this.options.audit;
+                const request = audit && auditRequest(context);
+
+                if (!audit || !request) {
+                    return [];
+                }
+
+                audit(
+                    request.auditFile,
+                    await collectUnknownVariablesChunked(
+                        request.module,
+                        request.resolver,
+                        request.options,
+                        slice
+                    )
+                );
                 return [];
             }
         });

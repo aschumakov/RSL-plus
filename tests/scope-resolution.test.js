@@ -410,6 +410,171 @@ async function main() {
     });
 
     /*
+     * ─── Ветвление ─────────────────────────────────────────────────────────
+     *
+     * Последнее по тексту присваивание не значит «последнее исполненное». Пока
+     * анализа потока нет, выбор один: либо не отвечать, либо обещать тип одной
+     * ветки. Обещать нельзя — это члены класса, которого в другой ветке нет.
+     */
+    await test("расходящиеся ветки не дают типа, совпадающие дают", () => {
+        const classes = [
+            "Class A",
+            "  Macro Alpha()",
+            "  End;",
+            "End;",
+            "Class B",
+            "  Macro Beta()",
+            "  End;",
+            "End;"
+        ].join("\n");
+        const cases = [
+            ["    x = A();", "    x = B();", [], "ветки расходятся"],
+            ["    x = A();", "    x = A();", ["Alpha"], "ветки совпадают"]
+        ];
+
+        for (const [thenBranch, elseBranch, expected, label] of cases) {
+            const source = [
+                classes,
+                "Macro Test(cond)",
+                "  Var x;",
+                "  If (cond)",
+                thenBranch,
+                "  Else",
+                elseBranch,
+                "  End;",
+                "  x.",
+                "End;"
+            ].join("\n");
+            const context = open(source);
+
+            assert.deepStrictEqual(
+                membersAt(context, at(source, "  x.") + 4),
+                expected,
+                label
+            );
+        }
+    });
+
+    await test("безусловное присваивание перекрывает условное только совпадая", () => {
+        const classes = [
+            "Class A",
+            "  Macro Alpha()",
+            "  End;",
+            "End;",
+            "Class B",
+            "  Macro Beta()",
+            "  End;",
+            "End;"
+        ].join("\n");
+        const build = unconditional => open([
+            classes,
+            "Macro Test(cond)",
+            "  Var x;",
+            `  x = ${unconditional}();`,
+            "  If (cond)",
+            "    x = A();",
+            "  End;",
+            "  x.",
+            "End;"
+        ].join("\n"));
+
+        const same = build("A");
+        assert.deepStrictEqual(
+            membersAt(same, same.source.indexOf("  x.") + 4),
+            ["Alpha"],
+            "Оба пути дают A"
+        );
+
+        const different = build("B");
+        assert.deepStrictEqual(
+            membersAt(different, different.source.indexOf("  x.") + 4),
+            [],
+            "Путь без ветки даёт B, путь с веткой — A: тип неизвестен"
+        );
+    });
+
+    await test("внутри своей ветки условное присваивание действует", () => {
+        const source = [
+            "Class A",
+            "  Macro Alpha()",
+            "  End;",
+            "End;",
+            "Macro Test(cond)",
+            "  Var x;",
+            "  If (cond)",
+            "    x = A();",
+            "    x.",
+            "  End;",
+            "End;"
+        ].join("\n");
+        const context = open(source);
+
+        assert.deepStrictEqual(
+            membersAt(context, at(source, "    x.") + 6),
+            ["Alpha"],
+            "Точка запроса в том же блоке: присваивание уже выполнилось"
+        );
+    });
+
+    /*
+     * ─── Присваивание через this ────────────────────────────────────────────
+     */
+    await test("тип поля выводится и при присваивании через this", () => {
+        const declarations = [
+            "Class Helper",
+            "  Macro Run()",
+            "  End;",
+            "End;",
+            "Class Doc",
+            "  Var field;"
+        ];
+        /* Присваивание и обращение — в любом сочетании с this и без. */
+        const combinations = [
+            ["    this.field = Helper();", "    this.field."],
+            ["    this.field = Helper();", "    field."],
+            ["    field = Helper();", "    this.field."]
+        ];
+
+        for (const [assignment, access] of combinations) {
+            const source = declarations.concat([
+                "  Macro Fill()",
+                assignment,
+                access,
+                "  End;",
+                "End;"
+            ]).join("\n");
+            const context = open(source);
+
+            assert.deepStrictEqual(
+                membersAt(context, at(source, access) + access.length),
+                ["Run"],
+                `${assignment.trim()} / ${access.trim()}`
+            );
+        }
+    });
+
+    await test("присваивание чужому полю целью не считается", () => {
+        const source = [
+            "Class Helper",
+            "  Macro Run()",
+            "  End;",
+            "End;",
+            "Macro Test(other)",
+            "  other.field = Helper();",
+            "  other.field.",
+            "End;"
+        ].join("\n");
+        const context = open(source);
+
+        assert.deepStrictEqual(
+            membersAt(context, at(source, "  other.field.") + 14),
+            [],
+            "Состав чужого объекта нам неизвестен, и присваивание его полю " +
+                "ничего о нём не сообщает"
+        );
+    });
+
+    /*
      * ─── Декларация типа против присваивания ───────────────────────────────
      *
      * Руководство: «Декларация типа переменных в RSL необязательна… Любая

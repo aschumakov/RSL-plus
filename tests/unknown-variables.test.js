@@ -166,6 +166,91 @@ async function main() {
     });
 
     /*
+     * Ошибка чтения каталога — это не «ещё грузится».
+     *
+     * Пока разницы не было, непрочитанный индекс или битый файл модуля оставляли
+     * контекст в состоянии loading навсегда, а вместе с ним молча и навсегда
+     * выключались все проверки, которым нужен полный контекст.
+     */
+    await test("непрочитанный каталог делает контекст opaque, а не loading", async () => {
+        const previousDirectory = process.env.RSL_PLATFORM_MODULES_DIR;
+        const contextOf = catalog => {
+            const index = new WorkspaceIndex();
+            index.registerWorkspaceFiles([MAIN]);
+            index.updateOpenModule(
+                MAIN,
+                "Import CommonInter;\nMacro T()\nEnd;",
+                1
+            );
+            return new RslScopeResolver(index, undefined, catalog)
+                .getImportContextState(MAIN);
+        };
+
+        try {
+            /* Индекс каталога не читается вовсе. */
+            process.env.RSL_PLATFORM_MODULES_DIR = path.join(
+                os.tmpdir(),
+                "rsl-plus-no-such-catalog"
+            );
+            const withoutIndex = new PlatformModuleCatalog({
+                log: () => undefined
+            });
+            await withoutIndex.ensureModules(["CommonInter"]);
+
+            assert.strictEqual(withoutIndex.indexState, "failed");
+            assert.strictEqual(contextOf(withoutIndex).completeness, "opaque");
+            assert.ok(
+                withoutIndex.revision > 0,
+                "Ошибка меняет состояние каталога, значит и ревизию: иначе " +
+                    "кэши так и останутся с ответом «ещё грузится»"
+            );
+
+            /* Индекс есть, а файл состава испорчен. */
+            const directory = fs.mkdtempSync(
+                path.join(os.tmpdir(), "rsl-plus-catalog-")
+            );
+            fs.writeFileSync(
+                path.join(directory, "index.json"),
+                JSON.stringify({
+                    version: 3,
+                    modules: { CommonInter: { file: "broken.json" } }
+                }),
+                "utf8"
+            );
+            fs.writeFileSync(
+                path.join(directory, "broken.json"),
+                "{ это не JSON",
+                "utf8"
+            );
+            process.env.RSL_PLATFORM_MODULES_DIR = directory;
+            const withBrokenBody = new PlatformModuleCatalog({
+                log: () => undefined
+            });
+            await withBrokenBody.ensureModules(["CommonInter"]);
+
+            assert.strictEqual(withBrokenBody.indexState, "loaded");
+            assert.strictEqual(
+                withBrokenBody.moduleState("CommonInter"),
+                "failed"
+            );
+            const state = contextOf(withBrokenBody);
+            assert.strictEqual(state.completeness, "opaque");
+            assert.deepStrictEqual(Array.from(state.opaque), ["commoninter"]);
+            assert.deepStrictEqual(
+                Array.from(state.pendingPlatformModules),
+                [],
+                "Ждать нечего: файл прочитать не удалось"
+            );
+        } finally {
+            if (previousDirectory === undefined) {
+                delete process.env.RSL_PLATFORM_MODULES_DIR;
+            } else {
+                process.env.RSL_PLATFORM_MODULES_DIR = previousDirectory;
+            }
+        }
+    });
+
+    /*
      * ─── Необъявленные переменные ──────────────────────────────────────────
      */
     await test("правило выключено по умолчанию", () => {
@@ -330,6 +415,75 @@ async function main() {
                 }
             )).sort(),
             ["GlobalRegistry", "StillUnknown"]
+        );
+    });
+
+    await test("сообщение соответствует ошибке компилятора", () => {
+        /*
+         * Проверка называется «необъявленные переменные», но неизвестным может
+         * оказаться и вызов процедуры: MissingProc переменной не является, а
+         * компилятор на всё это отвечает «неопределенный идентификатор».
+         */
+        const source = [
+            "Macro Test()",
+            "  Var known;",
+            "  known = MissingProc();",
+            "End;"
+        ].join("\n");
+        const context = open(source);
+
+        assert.deepStrictEqual(
+            buildUnknownVariableDiagnostics(
+                context.module,
+                context.resolver,
+                { mode: "safe" }
+            ).map(item => item.message),
+            ["Идентификатор MissingProc не определён"]
+        );
+    });
+
+    /*
+     * Обход не имеет права быть ни бесконечным, ни неотменяемым.
+     *
+     * Раньше он проходил весь файл и копил все находки, а лишнее отбрасывалось
+     * уже после: на 692 КБ с 30 тысячами неизвестных имён это пять секунд
+     * работы, из которой в Problems попадали первые двести.
+     */
+    await test("обход ограничен лимитом и прерывается отменой", () => {
+        const lines = ["Macro Test()", "  Var known;"];
+        for (let index = 0; index < 5000; index++) {
+            lines.push(`  known = unknown${index};`);
+        }
+        lines.push("End;");
+        const context = open(lines.join("\n"));
+        const collect = options => collectUnknownVariables(
+            context.module,
+            context.resolver,
+            { mode: "safe", ...options }
+        );
+
+        assert.strictEqual(collect({}).length, 5000, "Без лимита — все");
+        assert.strictEqual(collect({ limit: 200 }).length, 200);
+        assert.strictEqual(collect({ limit: 0 }).length, 0);
+
+        /*
+         * Отмена проверяется раз в тысячу токенов, поэтому обход прекращается
+         * почти сразу, а не на последнем имени.
+         */
+        const cancelled = collect({ isCancelled: () => true });
+        assert.ok(
+            cancelled.length > 0 && cancelled.length < 1000,
+            `Обход обязан прекратиться на первой же проверке: ${
+                cancelled.length}`
+        );
+
+        /* Через настройки лимит берётся из maxProblems. */
+        assert.strictEqual(
+            buildRslDiagnostics(context.module, context.index, {
+                unknownVariables: "safe",
+                maxProblems: 25
+            }).filter(item => item.code === "unknown-variable").length,
+            25
         );
     });
 

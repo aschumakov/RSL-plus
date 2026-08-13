@@ -262,16 +262,12 @@ const documentAnalysis = new DocumentAnalysisService(
         },
         onImports: (uri, imports) => {
             /*
-             * Единственное место, где готовится состав прикладных модулей.
-             *
              * Здесь AST уже построен, то есть список Import окончателен и
              * транзитивные Import разобранных файлов видны. Диагностика
              * сообщает те же Import позже и своего вызова не делает: он был бы
              * повторным для того же файла.
              */
-            platformModules.ensureModules(
-                scopeResolver.visiblePlatformModules(uri)
-            );
+            void preparePlatformModules([uri]);
             enqueueActiveImports(uri, imports);
         }
     }
@@ -693,14 +689,44 @@ function refreshOpenDependents(uri: string): void {
          * этого вызова классы CommonInter, импортированного внутри
          * middle.mac, не появлялись бы до правки активного файла.
          */
-        for (const dependentUri of openDependents) {
-            platformModules.ensureModules(
-                scopeResolver.visiblePlatformModules(dependentUri)
-            );
-        }
-
+        void preparePlatformModules(openDependents);
         languageFeatures?.notifyImportContextChanged(openDependents);
     }
+}
+
+/**
+ * Готовит состав прикладных модулей, видимых перечисленным файлам.
+ *
+ * Порядок здесь существенный, и раньше он был неверным. Список видимых модулей
+ * считается ПОСЛЕ загрузки индекса каталога: пока индекс не прочитан,
+ * knowsModule не знает ни одного имени, и список выходит пустым. Получалось, что
+ * первое событие загружало только индекс, а состав модулей — лишь второе, то
+ * есть символы `Import CommonInter` не разрешались до следующей правки файла.
+ *
+ * После загрузки — обновление Problems и подсветки: обе считались, когда состава
+ * ещё не было, и сами о его появлении не узнают.
+ */
+async function preparePlatformModules(uris: readonly string[]): Promise<void> {
+    await platformModules.ensureIndexLoaded();
+
+    const before = platformModules.revision;
+    await Promise.all(uris.map(uri =>
+        platformModules.ensureModules(
+            scopeResolver.visiblePlatformModules(uri)
+        )
+    ));
+
+    /* Ничего не изменилось — перепроверять и перекрашивать нечего. */
+    if (platformModules.revision === before) {
+        return;
+    }
+
+    for (const uri of uris) {
+        if (documents.get(uri)) {
+            diagnosticsCoordinator.scheduleWorkspace(uri, 0);
+        }
+    }
+    languageFeatures?.notifyImportContextChanged(uris);
 }
 
 connection.onShutdown(async () => {

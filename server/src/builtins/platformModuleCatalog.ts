@@ -154,6 +154,16 @@ export interface IPlatformSymbol {
 const SUPPORTED_VERSION = 3;
 const DIRECTORY = "platform-modules";
 
+/**
+ * Состояние чтения индекса или отдельного модуля.
+ *
+ * `failed` обязано отличаться от `loading`: непрочитанные данные уже не
+ * появятся, и ждать их нечего. Пока разницы не было, ошибка чтения оставляла
+ * Import-контекст в состоянии «ещё грузится» навсегда — а вместе с ним молча и
+ * навсегда выключались проверки, которым нужен полный контекст.
+ */
+export type RslPlatformLoadState = "missing" | "loading" | "loaded" | "failed";
+
 export class PlatformModuleCatalog {
     private indexLoaded = false;
     private indexFailed = false;
@@ -361,6 +371,32 @@ export class PlatformModuleCatalog {
         return this.loaded.has(normalizeIdentifier(moduleName));
     }
 
+    /**
+     * Состояние чтения состава модуля.
+     *
+     * `failed` — файл не прочитан, и сам он не появится: ждать нечего, состав
+     * этого модуля так и останется неизвестным.
+     */
+    moduleState(moduleName: string): RslPlatformLoadState {
+        const key = normalizeIdentifier(moduleName);
+
+        if (this.loaded.has(key)) {
+            return "loaded";
+        }
+        if (this.failedModules.has(key)) {
+            return "failed";
+        }
+        return this.entries.has(key) ? "loading" : "missing";
+    }
+
+    /** Состояние чтения индекса модулей. */
+    get indexState(): RslPlatformLoadState {
+        if (this.indexLoaded) {
+            return "loaded";
+        }
+        return this.indexFailed ? "failed" : "loading";
+    }
+
     /** Объявленные зависимости модуля; для проверок и тестов. */
     dependenciesOf(moduleName: string): readonly string[] {
         return this.entries
@@ -446,6 +482,12 @@ export class PlatformModuleCatalog {
              * остальной язык обязан продолжать работать.
              */
             this.indexFailed = true;
+            /*
+             * Ревизия растёт и при ошибке: состояние каталога изменилось, и
+             * кэши, посчитанные в надежде «сейчас догрузится», обязаны
+             * пересчитаться — иначе Import-контекст останется «загружающимся».
+             */
+            this.revisionValue++;
             this.options.log(
                 `Индекс прикладных модулей не прочитан: ${filePath}; ` +
                 errorToString(error)
@@ -499,6 +541,8 @@ export class PlatformModuleCatalog {
             this.revisionValue++;
         } catch (error) {
             this.failedModules.add(key);
+            /* Ошибка — тоже изменение состояния: см. loadIndex. */
+            this.revisionValue++;
             this.options.log(
                 `Состав прикладного модуля не прочитан: ${filePath}; ` +
                 errorToString(error)

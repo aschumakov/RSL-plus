@@ -10,6 +10,10 @@ import {
     type RslImportContextCompleteness
 } from "../analysis/importContextState";
 import {
+    createWorkSlice,
+    type IRslWorkSlice
+} from "../core/timeSlice";
+import {
     isRslKeyword,
     isRslSystemConstant,
     isRslType
@@ -39,6 +43,25 @@ export type RslUnknownVariablesMode = "off" | "safe" | "strict";
 
 export interface IRslUnknownVariableOptions {
     mode: RslUnknownVariablesMode;
+    /**
+     * Сколько находок нужно вызывающему.
+     *
+     * Обход прекращается на этом числе. Без него проверка проходила весь поток
+     * токенов и копила все находки, а лишнее отбрасывалось уже после: на файле
+     * 709 КБ с 30 тысячами неизвестных имён это 234 мс работы, из которой в
+     * Problems попадали первые двести.
+     *
+     * Audit-режиму нужен полный отчёт, поэтому он передаёт Infinity.
+     */
+    limit?: number;
+    /**
+     * Расчёт больше не нужен: файл покинули или изменили.
+     *
+     * Проверяется раз в CANCEL_CHECK_INTERVAL токенов. Между порциями внешнего
+     * расчёта управление уже возвращалось event loop, поэтому к этому моменту
+     * состояние действительно могло измениться.
+     */
+    isCancelled?(): boolean;
     /**
      * Файл со списком известных глобальных переменных, процедур и классов.
      *
@@ -86,6 +109,52 @@ export function collectUnknownVariables(
     resolver: RslScopeResolver,
     options: IRslUnknownVariableOptions
 ): IRslUnknownVariableFinding[] {
+    const steps = unknownVariableSteps(module, resolver, options);
+    let step = steps.next();
+
+    while (!step.done) {
+        step = steps.next();
+    }
+
+    return step.value;
+}
+
+/**
+ * Тот же обход порциями.
+ *
+ * Нужен audit-режиму: ему требуются ВСЕ находки, а полный проход по файлу в
+ * 700 КБ с тридцатью тысячами неизвестных имён занимает секунды — каждое имя
+ * разрешается по всем правилам видимости. Одним куском такая работа держала бы
+ * event loop, а значит и все интерактивные запросы.
+ */
+export async function collectUnknownVariablesChunked(
+    module: IIndexedModule,
+    resolver: RslScopeResolver,
+    options: IRslUnknownVariableOptions,
+    slice: IRslWorkSlice = createWorkSlice()
+): Promise<IRslUnknownVariableFinding[]> {
+    const steps = unknownVariableSteps(module, resolver, options);
+    let step = steps.next();
+
+    while (!step.done) {
+        await slice.yieldIfNeeded();
+        step = steps.next();
+    }
+
+    return step.value;
+}
+
+/**
+ * Один обход, два способа исполнения: см. semanticTokenSteps.
+ *
+ * Генератор отдаёт управление на тех же границах, где проверяется отмена, —
+ * порционный вызов вставляет туда паузу, синхронный просто прокручивает.
+ */
+function* unknownVariableSteps(
+    module: IIndexedModule,
+    resolver: RslScopeResolver,
+    options: IRslUnknownVariableOptions
+): Generator<void, IRslUnknownVariableFinding[], void> {
     if (options.mode === "off") {
         return [];
     }
@@ -119,18 +188,45 @@ export function collectUnknownVariables(
     const reason: RslUnknownVariableReason = isFullyKnownImportContext(state)
         ? "no-declaration"
         : "incomplete-context";
+    const limit = options.limit ?? Number.POSITIVE_INFINITY;
+
+    if (limit <= 0) {
+        return [];
+    }
+
+    /*
+     * Указатель по диапазонам Import вместо поиска по всем для каждого имени.
+     *
+     * Диапазоны отсортированы, токены тоже, поэтому достаточно двигать один
+     * указатель вперёд. Раньше на каждый идентификатор перебирались все Import
+     * файла — на файле с двумя десятками Import это перебор длиной в два
+     * десятка на каждое имя.
+     */
+    let importIndex = 0;
 
     for (let index = 0; index < tokens.length; index++) {
+        if (index % CANCEL_CHECK_INTERVAL === 0 && index > 0) {
+            /* Пауза перед проверкой отмены: см. semanticTokenSteps. */
+            yield;
+
+            if (options.isCancelled?.()) {
+                return result;
+            }
+        }
+
         const token = tokens[index];
+
+        while (
+            importIndex < importRanges.length &&
+            importRanges[importIndex].end < token.start
+        ) {
+            importIndex++;
+        }
 
         if (
             token.kind !== "identifier" ||
-            !isExpressionIdentifier(
-                tokens,
-                index,
-                declarationStarts,
-                importRanges
-            ) ||
+            isInsideImport(importRanges, importIndex, token) ||
+            !isExpressionIdentifier(tokens, index, declarationStarts) ||
             known.has(normalizeIdentifier(token.value))
         ) {
             continue;
@@ -152,9 +248,31 @@ export function collectUnknownVariables(
             importContext: state.completeness,
             reason
         });
+
+        if (result.length >= limit) {
+            return result;
+        }
     }
 
     return result;
+}
+
+/**
+ * Как часто проверяется отмена: раз в тысячу токенов.
+ *
+ * На каждом токене проверка заметна на файле в сотни килобайт, а раз в тысячу —
+ * нет: отклик на отмену остаётся внутри одной-двух миллисекунд работы.
+ */
+const CANCEL_CHECK_INTERVAL = 1000;
+
+/** Попадает ли токен в диапазон Import, на котором стоит указатель. */
+function isInsideImport(
+    ranges: readonly { start: number; end: number }[],
+    index: number,
+    token: IRslToken
+): boolean {
+    const range = ranges[index];
+    return !!range && range.start <= token.start && token.end <= range.end;
 }
 
 export function buildUnknownVariableDiagnostics(
@@ -171,7 +289,13 @@ export function buildUnknownVariableDiagnostics(
                 character: finding.character + (finding.end - finding.start)
             }
         },
-        message: `Переменная ${finding.name} нигде не объявлена`,
+        /*
+         * Формулировка компилятора, а не своя. Проверка называется
+         * «необъявленные переменные», но неизвестным может оказаться и вызов
+         * процедуры, и имя класса: `MissingProc()` — не переменная, а
+         * компилятор на всё это отвечает «неопределенный идентификатор».
+         */
+        message: `Идентификатор ${finding.name} не определён`,
         source: "RSL parser",
         code: "unknown-variable",
         data: {
@@ -192,8 +316,7 @@ export function buildUnknownVariableDiagnostics(
 function isExpressionIdentifier(
     tokens: readonly IRslToken[],
     index: number,
-    declarationStarts: ReadonlySet<number>,
-    importRanges: readonly { start: number; end: number }[]
+    declarationStarts: ReadonlySet<number>
 ): boolean {
     const token = tokens[index];
     const word = normalizeIdentifier(token.value);
@@ -209,12 +332,6 @@ function isExpressionIdentifier(
 
     /* Имя объявления: сам VAR его и объявляет. */
     if (declarationStarts.has(token.start)) {
-        return false;
-    }
-
-    if (importRanges.some(range =>
-        range.start <= token.start && token.end <= range.end
-    )) {
         return false;
     }
 

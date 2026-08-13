@@ -154,7 +154,14 @@ export function normalizeDiagnosticSettings(
  * непрерываемый.
  */
 export interface IRslDiagnosticPlan {
-    stages: readonly (() => void)[];
+    /**
+     * Этапы получают признак отмены от драйвера.
+     *
+     * Большинству он не нужен: этап короткий и прерывается на своей границе. Но
+     * проверка, обходящая весь поток токенов, обязана спрашивать сама — иначе
+     * один этап становится неделимым куском в сотни миллисекунд.
+     */
+    stages: readonly ((isCancelled?: () => boolean) => void)[];
     /** Не пора ли остановиться: лимит Problems исчерпан. */
     hasCapacity(): boolean;
     finish(): Diagnostic[];
@@ -209,7 +216,7 @@ function runDiagnosticPlan(
         if (!plan.hasCapacity() || isCancelled?.()) {
             break;
         }
-        stage();
+        stage(isCancelled);
     }
 
     return plan.finish();
@@ -230,7 +237,7 @@ async function runDiagnosticPlanChunked(
         if (!plan.hasCapacity() || isCancelled?.()) {
             return plan.finish();
         }
-        stage();
+        stage(isCancelled);
     }
 
     return plan.finish();
@@ -289,7 +296,10 @@ function planLocalRslDiagnostics(
      * доводится до конца. Порядок значим — ошибки идут раньше предупреждений,
      * чтобы maxProblems не скрывал более важные сообщения.
      */
-    const stages: readonly [boolean, () => void][] = [
+    const stages: readonly [
+        boolean,
+        (isCancelled?: () => boolean) => void
+    ][] = [
         [true, () => addSyntaxParserDiagnostics(module, result)],
         [true, () => addDocumentedLimitDiagnostics(module, result)],
         [options.structure, () => addUnterminatedTokenDiagnostics(module, result)],
@@ -406,7 +416,10 @@ function planWorkspaceRslDiagnostics(
     }
     const result: Diagnostic[] = [];
     const resolver = sharedResolver || new RslScopeResolver(index);
-    const stages: readonly [boolean, () => void][] = [
+    const stages: readonly [
+        boolean,
+        (isCancelled?: () => boolean) => void
+    ][] = [
         [options.structure, () => addSelfImportDiagnostics(module, index, result)],
         [
             options.ambiguousReferences,
@@ -427,13 +440,20 @@ function planWorkspaceRslDiagnostics(
         [
             options.unknownVariables !== "off" &&
                 !options.unknownVariablesAuditFile,
-            () => result.push(...buildUnknownVariableDiagnostics(
+            isCancelled => result.push(...buildUnknownVariableDiagnostics(
                 module,
                 resolver,
                 {
                     mode: options.unknownVariables,
                     knownGlobalsFile:
-                        options.unknownVariablesKnownGlobalsFile
+                        options.unknownVariablesKnownGlobalsFile,
+                    /*
+                     * Больше остатка лимита Problems искать незачем: лишнее всё
+                     * равно отбросится, а на большом файле поиск лишнего — это
+                     * сотни миллисекунд.
+                     */
+                    limit: Math.max(0, options.maxProblems - result.length),
+                    isCancelled
                 }
             ))
         ]
@@ -448,8 +468,8 @@ function planWorkspaceRslDiagnostics(
 }
 
 function enabledStages(
-    stages: readonly [boolean, () => void][]
-): readonly (() => void)[] {
+    stages: readonly [boolean, (isCancelled?: () => boolean) => void][]
+): readonly ((isCancelled?: () => boolean) => void)[] {
     return stages
         .filter(([enabled]) => enabled)
         .map(([, run]) => run);

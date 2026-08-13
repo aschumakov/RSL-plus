@@ -26,6 +26,7 @@ import {
 } from "./workspaceIndex";
 import { LruCache } from "./core/lruCache";
 import { getDefaults } from "./defaults";
+import type { IRslSyntaxNode } from "./syntaxParser";
 import type { BuiltinCatalog } from "./builtins/builtinSymbol";
 import type {
     PlatformModuleCatalog
@@ -65,6 +66,19 @@ interface IResolutionCache {
 interface IConstructorAssignment {
     /** Позиция имени цели присваивания. */
     offset: number;
+    /**
+     * Условный блок, внутри которого стоит присваивание.
+     *
+     * Пусто — присваивание выполняется всегда. Иначе оно могло не выполниться, и
+     * за пределами этого блока считать его тип действующим нельзя: у кода
+     *
+     *     If (c) x = A(); Else x = B(); End;
+     *
+     * последнее по тексту присваивание — B, но тип на выходе из IF зависит от
+     * ветки. Ранее выбиралось просто последнее, и подсказка уверенно предлагала
+     * члены B.
+     */
+    guard?: { start: number; end: number };
     /** Имя в правой части: конструктор класса или процедура. */
     callee?: string;
     /**
@@ -189,12 +203,7 @@ export class RslScopeResolver {
             return undefined;
         }
 
-        /*
-         * Ревизия каталога прикладных модулей входит в ключ: имя, не
-         * разрешившееся до чтения состава модуля, обязано разрешиться после.
-         */
-        const closureKey = `${this.index.getImportClosureKey(uri)}` +
-            `|platform:${this.platformModules?.revision ?? 0}`;
+        const closureKey = this.getImportContextKey(uri);
         let cache = this.resolutionByModule.get(module);
 
         if (!cache || cache.closureKey !== closureKey) {
@@ -220,6 +229,19 @@ export class RslScopeResolver {
         );
         cache.byTokenStart.set(token.start, resolved || null);
         return resolved;
+    }
+
+    /**
+     * Ключ, по которому кэшируется всё, что зависит от Import-контекста.
+     *
+     * Кроме Import-замыкания в него входит ревизия каталога прикладных модулей:
+     * имя, не разрешившееся до чтения состава модуля, обязано разрешиться после.
+     * Ключ один на всех потребителей — иначе один из них признавал бы свой кэш
+     * устаревшим, а другой нет, и подсветка расходилась бы с переходом.
+     */
+    getImportContextKey(uri: string): string {
+        return `${this.index.getImportClosureKey(uri)}` +
+            `|platform:${this.platformModules?.revision ?? 0}`;
     }
 
     /**
@@ -1395,13 +1417,13 @@ export class RslScopeResolver {
             }
 
             const last = upperBoundAssignmentOffset(assignments, offset) - 1;
-            const assignment = last >= 0 ? assignments[last] : undefined;
-
-            if (!assignment) {
-                continue;
-            }
-
-            const typeName = this.assignedTypeOf(module, tree, assignment);
+            const typeName = this.reachingAssignedType(
+                module,
+                tree,
+                assignments,
+                last,
+                offset
+            );
 
             if (typeName) {
                 return typeName;
@@ -1409,6 +1431,65 @@ export class RslScopeResolver {
         }
 
         return "";
+    }
+
+    /**
+     * Тип, к которому приводят ВСЕ пути исполнения до этой точки.
+     *
+     * Обход идёт назад от ближайшего присваивания. Присваивание вне условного
+     * блока — или внутри того, который содержит саму точку запроса, — выполняется
+     * гарантированно, и на нём поиск заканчивается. Условное добавляется в число
+     * возможных, и обход продолжается: последним могло выполниться и оно, и
+     * что-то до него.
+     *
+     * Расхождение возможных типов означает, что тип неизвестен: подставить один
+     * из них — значит предложить члены класса, которого в этой ветке нет.
+     * Объединение общих членов было бы точнее, но требует хранить несколько типов
+     * сразу; пока честнее не отвечать.
+     *
+     * Единственное условное присваивание без альтернативы даёт свой тип: путь
+     * либо прошёл через него, либо переменная не инициализирована вовсе, а у
+     * неинициализированной членов всё равно нет.
+     */
+    private reachingAssignedType(
+        module: IIndexedModule,
+        tree: RslSymbol,
+        assignments: readonly IConstructorAssignment[],
+        from: number,
+        offset: number
+    ): string {
+        let result = "";
+
+        for (let index = from; index >= 0; index--) {
+            const assignment = assignments[index];
+            const typeName = this.assignedTypeOf(module, tree, assignment);
+
+            /*
+             * Тип этой ветки неизвестен — значит неизвестен и общий: именно она
+             * могла выполниться последней.
+             */
+            if (!typeName) {
+                return "";
+            }
+
+            if (
+                result &&
+                normalizeIdentifier(result) !== normalizeIdentifier(typeName)
+            ) {
+                return "";
+            }
+            result = typeName;
+
+            const definite = !assignment.guard ||
+                (assignment.guard.start <= offset &&
+                    offset <= assignment.guard.end);
+
+            if (definite) {
+                return result;
+            }
+        }
+
+        return result;
     }
 
     /**
@@ -1618,6 +1699,7 @@ export class RslScopeResolver {
         const result = new Map<string, IConstructorAssignment[]>();
         const tokens = this.getTokens(module);
         const tree = module.symbolTree;
+        const conditionals = getConditionalRanges(module);
 
         for (let index = 0; index + 3 < tokens.length; index++) {
             const target = tokens[index];
@@ -1627,11 +1709,20 @@ export class RslScopeResolver {
 
             if (
                 target.kind !== "identifier" ||
-                /* Слева от точки не цель присваивания, а получатель. */
-                (index > 0 && tokens[index - 1].raw === ".") ||
                 equals.kind !== "symbol" || equals.raw !== "=" ||
                 callee.kind !== "identifier"
             ) {
+                continue;
+            }
+
+            /*
+             * Слева от точки стоит получатель, а не цель присваивания — кроме
+             * одного случая: `this.field = ...` присваивает полю текущего
+             * класса, то есть ровно тому же символу, что и `field = ...`.
+             * Раньше такое присваивание отбрасывалось целиком, и тип поля,
+             * заданный через this, не выводился вовсе.
+             */
+            if (isAfterDot(tokens, index) && !isThisAccess(tokens, index)) {
                 continue;
             }
 
@@ -1670,6 +1761,8 @@ export class RslScopeResolver {
             if (!assignment) {
                 continue;
             }
+
+            assignment.guard = innermostRange(conditionals, target.start);
 
             const key = this.assignmentKeyAt(module.uri, tree, target);
             const values = result.get(key) || [];
@@ -1837,6 +1930,89 @@ export class RslScopeResolver {
 
 /** Приставка предопределённого инициализатора базового класса. */
 const BASE_INITIALIZER_PREFIX = "init";
+
+/**
+ * Конструкции, тело которых может не выполниться.
+ *
+ * WITH сюда не входит: он выполняется всегда. Тело WHILE и FOR может не
+ * выполниться ни разу, поэтому они условные наравне с IF.
+ */
+const CONDITIONAL_NODE_KINDS: ReadonlySet<string> = new Set([
+    "IfStatement",
+    "ElseIfClause",
+    "ElseClause",
+    "WhileStatement",
+    "ForStatement",
+    "OnErrorClause"
+]);
+
+/*
+ * Диапазоны условных блоков считаются один раз на модуль: они нужны каждому
+ * присваиванию, а дерево неизменяемо.
+ */
+const conditionalRangesByModule = new WeakMap<
+    IIndexedModule,
+    readonly { start: number; end: number }[]
+>();
+
+function getConditionalRanges(
+    module: IIndexedModule
+): readonly { start: number; end: number }[] {
+    let result = conditionalRangesByModule.get(module);
+
+    if (!result) {
+        const ranges: { start: number; end: number }[] = [];
+        const visit = (node: IRslSyntaxNode): void => {
+            if (CONDITIONAL_NODE_KINDS.has(node.kind)) {
+                ranges.push({ start: node.start, end: node.end });
+            }
+            node.children.forEach(visit);
+        };
+
+        visit(module.syntax.root);
+        ranges.sort((left, right) => left.start - right.start);
+        result = Object.freeze(ranges);
+        conditionalRangesByModule.set(module, result);
+    }
+
+    return result;
+}
+
+/** Самый внутренний из диапазонов, содержащих offset. */
+function innermostRange(
+    ranges: readonly { start: number; end: number }[],
+    offset: number
+): { start: number; end: number } | undefined {
+    let result: { start: number; end: number } | undefined;
+
+    /*
+     * Диапазоны отсортированы по началу, поэтому подходящие идут подряд до
+     * первого, начинающегося после offset. Самый внутренний — последний из них.
+     */
+    for (const range of ranges) {
+        if (range.start > offset) {
+            break;
+        }
+        if (offset <= range.end) {
+            result = range;
+        }
+    }
+
+    return result;
+}
+
+function isAfterDot(tokens: readonly IRslToken[], index: number): boolean {
+    const previous = tokens[index - 1];
+    return previous?.kind === "symbol" && previous.raw === ".";
+}
+
+/** Стоит ли перед `.имя` именно this: `this.field`. */
+function isThisAccess(tokens: readonly IRslToken[], index: number): boolean {
+    const receiver = tokens[index - 2];
+    return receiver?.kind === "identifier" &&
+        normalizeIdentifier(receiver.value) === "this" &&
+        !isAfterDot(tokens, index - 2);
+}
 
 /** Пустой индекс присваиваний: общий на всех, изменять его никто не должен. */
 const EMPTY_ASSIGNMENTS: ReadonlyMap<string, IConstructorAssignment[]> =

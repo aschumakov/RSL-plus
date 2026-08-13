@@ -169,7 +169,7 @@ export class SemanticTokensFeatureRegistry {
             const cached = this.cache.get(uri);
             return !!cached &&
                 cached.closureKey !==
-                    this.environment.index.getImportClosureKey(uri);
+                    this.environment.resolver.getImportContextKey(uri);
         });
 
         if (!affected) {
@@ -285,7 +285,8 @@ export class SemanticTokensFeatureRegistry {
         }
         this.provisional.delete(uri);
 
-        const closureKey = this.environment.index.getImportClosureKey(uri);
+        const closureKey = this.environment.resolver
+            .getImportContextKey(uri);
         const cached = this.cache.get(uri);
         if (
             cached?.version === module.version &&

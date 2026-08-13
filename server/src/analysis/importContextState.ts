@@ -104,7 +104,8 @@ export function buildImportContextState(
                 collectPlatformModule(
                     platformModules,
                     importName,
-                    pendingPlatform
+                    pendingPlatform,
+                    opaque
                 );
                 continue;
             }
@@ -112,9 +113,17 @@ export function buildImportContextState(
             /*
              * Каталог прикладных модулей ещё не прочитан: имя МОГЛО оказаться
              * прикладным модулем, и считать его отсутствующим рано.
+             *
+             * А если индекс прочитать НЕ УДАЛОСЬ, ждать нечего: состав каталога
+             * так и останется неизвестным, и это непрозрачный источник символов,
+             * а не незавершённая загрузка. Иначе контекст оставался бы
+             * «загружающимся» навсегда, молча выключая проверки, которым нужен
+             * полный контекст.
              */
-            if (platformModules && !platformModules.ready) {
+            if (platformModules?.indexState === "loading") {
                 loading = true;
+            } else if (platformModules?.indexState === "failed") {
+                opaque.add(importName);
             }
 
             const resolution = index.resolveWorkspaceFile(importName);
@@ -174,12 +183,15 @@ export function buildImportContextState(
  * Прикладной модуль и его объявленные зависимости.
  *
  * Непрочитанный состав делает контекст неполным: класс модуля может наследовать
- * класс зависимости, и без неё членов у него не будет.
+ * класс зависимости, и без неё членов у него не будет. Но «ещё не прочитан» и
+ * «прочитать не удалось» — разные вещи: первое пройдёт само, второе нет, и
+ * второе делает источник символов непрозрачным.
  */
 function collectPlatformModule(
     platformModules: PlatformModuleCatalog,
     moduleName: string,
-    pendingPlatform: Set<string>
+    pendingPlatform: Set<string>,
+    opaque: Set<string>
 ): void {
     const queue = [normalizeIdentifier(moduleName)];
     const visited = new Set<string>();
@@ -192,8 +204,12 @@ function collectPlatformModule(
         }
         visited.add(key);
 
-        if (!platformModules.isModuleLoaded(key)) {
+        const state = platformModules.moduleState(key);
+
+        if (state === "loading") {
             pendingPlatform.add(key);
+        } else if (state === "failed" || state === "missing") {
+            opaque.add(key);
         }
 
         queue.push(...platformModules.dependenciesOf(key));
