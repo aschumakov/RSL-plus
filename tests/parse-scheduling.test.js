@@ -474,6 +474,41 @@ async function run() {
         );
     });
 
+    await test("открытый файл не разбирается заново из-за watcher", async () => {
+        /*
+         * Собственное сохранение документа тоже даёт событие файловой системы.
+         * Реакция на него означала полный повторный анализ файла, содержимое
+         * которого не менялось: каждое Ctrl+S оплачивалось лексированием,
+         * разбором, моделью и Problems.
+         */
+        const {
+            shouldHandleWatchedFileChange
+        } = require("../server/out/indexing/watchedFileRouting");
+        const CREATED = 1;
+        const CHANGED = 2;
+        const DELETED = 3;
+
+        assert.strictEqual(
+            shouldHandleWatchedFileChange(CHANGED, true),
+            false,
+            "у открытого файла истина — буфер редактора, а не диск"
+        );
+        assert.strictEqual(
+            shouldHandleWatchedFileChange(CREATED, true),
+            false
+        );
+        assert.strictEqual(
+            shouldHandleWatchedFileChange(CHANGED, false),
+            true,
+            "закрытый файл перечитать нужно"
+        );
+        assert.strictEqual(
+            shouldHandleWatchedFileChange(DELETED, true),
+            true,
+            "удаление меняет разрешение имён у зависимых файлов"
+        );
+    });
+
     if (failed > 0) {
         console.error(`\nПройдено: ${passed}\nОшибок: ${failed}`);
         process.exitCode = 1;

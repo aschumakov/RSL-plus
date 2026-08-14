@@ -280,6 +280,47 @@ test("Форматирование идемпотентно", () => {
 });
 
 console.log("");
+test("форматирование не дорожает быстрее размера файла", () => {
+    /*
+     * Каждая строка лексировалась заново до четырёх раз, причём вместе с
+     * отступом. На глубокой вложенности отступ и составляет почти всю строку,
+     * поэтому цена росла квадратично: 540 мс на 400 уровнях против 10 сейчас.
+     *
+     * Проверяется не абсолютная скорость, а её характер: удвоение вложенности
+     * не имеет права дорожать вчетверо.
+     */
+    const nested = depth => {
+        const lines = ["Macro T()"];
+        for (let level = 0; level < depth; level++) {
+            lines.push(`  If (c${level})`);
+        }
+        lines.push("    x = 1;");
+        for (let level = 0; level < depth; level++) {
+            lines.push("  End;");
+        }
+        lines.push("End;");
+        return lines.join("\n");
+    };
+
+    const measure = source => {
+        const started = process.hrtime.bigint();
+        FormatCode(source, 4);
+        return Number(process.hrtime.bigint() - started) / 1e6;
+    };
+
+    /* Прогрев: первый вызов платит за компиляцию. */
+    measure(nested(50));
+
+    const shallow = Math.max(measure(nested(100)), 0.5);
+    const deep = measure(nested(400));
+
+    assert.ok(
+        deep < shallow * 12,
+        "рост вложенности в 4 раза не должен дорожать больше чем в 12: " +
+            `${shallow.toFixed(1)} мс против ${deep.toFixed(1)} мс`
+    );
+});
+
 console.log(`Пройдено: ${passed}`);
 console.log(`Ошибок: ${failed}`);
 

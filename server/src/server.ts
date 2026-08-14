@@ -40,6 +40,9 @@ import {
     CompactModuleWorkerService
 } from "./indexing/compactModuleWorkerService";
 import { WorkspaceFileDiscoveryService } from "./indexing/workspaceFileDiscoveryService";
+import {
+    shouldHandleWatchedFileChange
+} from "./indexing/watchedFileRouting";
 import { ReferenceIndex } from "./analysis/referenceIndex";
 import {
     PerformanceLogger,
@@ -647,6 +650,15 @@ async function handleWatchedFileChange(
     uri: string,
     type: FileChangeType
 ): Promise<void> {
+    /* Открытый файл живёт по буферу редактора: см. shouldHandleWatchedFileChange. */
+    if (!shouldHandleWatchedFileChange(type, !!documents.get(uri))) {
+        performanceLogger.mark?.("watcher.skipped", {
+            uri,
+            reason: "documentOpen"
+        });
+        return;
+    }
+
     referenceIndex.invalidate(uri);
     definitionProvider.invalidateUri(uri);
     const dependents = workspaceIndex.getDependents(uri);
@@ -661,12 +673,8 @@ async function handleWatchedFileChange(
     }
 
     workspaceIndex.registerWorkspaceFile(uri);
-    const openDocument = documents.get(uri);
 
-    if (openDocument) {
-        documentAnalysis.invalidate(uri);
-        documentAnalysis.changed(openDocument);
-    } else if (workspaceIndex.getModule(uri)) {
+    if (workspaceIndex.getModule(uri)) {
         /* Не загружаем изменённый файл, если он не был частью активного Import-графа. */
         await moduleLoader.reload(uri);
     }

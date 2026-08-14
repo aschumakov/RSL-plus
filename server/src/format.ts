@@ -58,6 +58,8 @@ export function FormatCode(text: string, tabSize: number = 4): string {
     const lines = body.split(/\r\n|\n|\r/);
     const lineStarts = buildLineStarts(body, lex.eol);
     const formatted: string[] = [];
+    /* Выравнивание присваиваний собирается по ходу, без второго прохода. */
+    const alignments: IAssignmentAlignment[] = [];
     const parenthesisStack: number[] = [];
     const lineTokenCursor = new LineTokenCursor(lex.tokens);
     let continuation: IContinuationContext | undefined;
@@ -120,14 +122,40 @@ export function FormatCode(text: string, tabSize: number = 4): string {
             );
         }
 
-        const formattedLine = " ".repeat(indentColumn) + normalizedLine;
-        formatted.push(formattedLine);
+        formatted.push(" ".repeat(indentColumn) + normalizedLine);
 
-        updateParenthesisStack(formattedLine, parenthesisStack);
+        /*
+         * Строка лексируется один раз и БЕЗ отступа.
+         *
+         * Прежде каждая из этих функций лексировала отформатированную строку
+         * сама — до четырёх проходов на строку, и каждый вместе с отступом. На
+         * глубокой вложенности отступ и составляет почти всю строку, поэтому
+         * форматирование росло квадратично: на 400 уровнях 540 мс.
+         *
+         * Колонки внутри строки считаются от её содержимого, поэтому наружу
+         * они отдаются со сдвигом на indentColumn.
+         */
+        const { code: lineCode, tokens: codeTokens } =
+            splitLineCode(normalizedLine);
+
+        updateParenthesisStack(codeTokens, indentColumn, parenthesisStack);
         continuation = getNextContinuationContext(
-            formattedLine,
+            lineCode,
+            codeTokens,
+            indentColumn,
             continuation
         );
+
+        const assignment = getAssignmentAlignment(
+            lineCode,
+            codeTokens,
+            indentColumn,
+            formatted.length - 1
+        );
+
+        if (assignment) {
+            alignments.push(assignment);
+        }
 
         indentLevel = Math.max(
             0,
@@ -138,11 +166,14 @@ export function FormatCode(text: string, tabSize: number = 4): string {
         );
     }
 
-    alignConsecutiveAssignments(formatted);
+    alignConsecutiveAssignments(formatted, alignments);
     return bom + formatted.join(lex.eol);
 }
 
-function alignConsecutiveAssignments(lines: string[]): void {
+function alignConsecutiveAssignments(
+    lines: string[],
+    alignments: readonly IAssignmentAlignment[]
+): void {
     let group: IAssignmentAlignment[] = [];
 
     const flushGroup = (): void => {
@@ -166,31 +197,35 @@ function alignConsecutiveAssignments(lines: string[]): void {
         group = [];
     };
 
-    for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
-        const assignment = getAssignmentAlignment(lines[lineIndex], lineIndex);
+    /*
+     * Группа — подряд идущие присваивания с одинаковым отступом. Раньше цикл
+     * шёл по всем строкам и лексировал каждую заново; теперь по уже собранным
+     * присваиваниям, а разрыв в номерах строк и есть конец группы.
+     */
+    let previousLine = -2;
 
+    for (const assignment of alignments) {
         if (
-            !assignment ||
+            assignment.lineIndex !== previousLine + 1 ||
             (group.length > 0 &&
                 assignment.indentColumn !== group[0].indentColumn)
         ) {
             flushGroup();
         }
 
-        if (assignment) {
-            group.push(assignment);
-        }
+        group.push(assignment);
+        previousLine = assignment.lineIndex;
     }
 
     flushGroup();
 }
 
 function getAssignmentAlignment(
-    line: string,
+    code: string,
+    tokens: readonly IRslToken[],
+    indentColumn: number,
     lineIndex: number
 ): IAssignmentAlignment | undefined {
-    const code = getCodeBeforeLineComment(line);
-    const tokens = lexRsl(code).tokens;
     const operatorIndex = findSimpleAssignmentOperator(tokens);
 
     if (operatorIndex === undefined) {
@@ -204,22 +239,22 @@ function getAssignmentAlignment(
         return undefined;
     }
 
-    const indentColumn = code.length - code.trimStart().length;
     const lhsEndColumn = code
         .substring(0, operator.start)
         .replace(/[ \t]+$/g, "")
         .length;
 
+    /* Колонки внутри содержимого, наружу — с отступом строки. */
     return {
         lineIndex,
         indentColumn,
-        lhsEndColumn,
-        operatorColumn: operator.start
+        lhsEndColumn: indentColumn + lhsEndColumn,
+        operatorColumn: indentColumn + operator.start
     };
 }
 
 function findSimpleAssignmentOperator(
-    tokens: IRslToken[]
+    tokens: readonly IRslToken[]
 ): number | undefined {
     for (let index = 0; index < tokens.length; index++) {
         const token = tokens[index];
@@ -248,7 +283,7 @@ function findSimpleAssignmentOperator(
 }
 
 function findSignificantToken(
-    tokens: IRslToken[],
+    tokens: readonly IRslToken[],
     startIndex: number,
     direction: -1 | 1
 ): IRslToken | undefined {
@@ -390,18 +425,17 @@ function normalizeCodeSegment(segment: string): string {
 }
 
 function updateParenthesisStack(
-    line: string,
+    tokens: readonly IRslToken[],
+    indentColumn: number,
     parenthesisStack: number[]
 ): void {
-    const tokens = lexRsl(line).tokens;
-
     for (const token of tokens) {
         if (token.kind !== "symbol") {
             continue;
         }
 
         if (token.raw === "(") {
-            parenthesisStack.push(token.character);
+            parenthesisStack.push(indentColumn + token.character);
         } else if (
             token.raw === ")" &&
             parenthesisStack.length > 0
@@ -412,10 +446,12 @@ function updateParenthesisStack(
 }
 
 function getNextContinuationContext(
-    line: string,
+    lineCode: string,
+    tokens: readonly IRslToken[],
+    indentColumn: number,
     current: IContinuationContext | undefined
 ): IContinuationContext | undefined {
-    const code = getCodeBeforeLineComment(line).replace(/\s+$/g, "");
+    const code = lineCode.replace(/\s+$/g, "");
 
     if (current) {
         if (current.kind === "declaration") {
@@ -432,7 +468,7 @@ function getNextContinuationContext(
     if (declarationMatch) {
         return {
             kind: "declaration",
-            indentColumn: declarationMatch[1].length
+            indentColumn: indentColumn + declarationMatch[1].length
         };
     }
 
@@ -440,27 +476,40 @@ function getNextContinuationContext(
         return undefined;
     }
 
-    const assignmentColumn = findAssignmentExpressionColumn(code);
+    const assignmentColumn = findAssignmentExpressionColumn(tokens, code);
 
     return assignmentColumn === undefined
         ? undefined
         : {
             kind: "assignment",
-            indentColumn: assignmentColumn
+            indentColumn: indentColumn + assignmentColumn
         };
 }
 
-function getCodeBeforeLineComment(line: string): string {
-    const comment = lexRsl(line).tokens.find(token =>
+/** Код строки без построчного комментария и его токены — за одно лексирование. */
+function splitLineCode(line: string): {
+    code: string;
+    tokens: IRslToken[];
+} {
+    const tokens = lexRsl(line).tokens;
+    const comment = tokens.find(token =>
         token.kind === "comment" && token.raw.startsWith("//")
     );
 
-    return comment ? line.substring(0, comment.start) : line;
+    if (!comment) {
+        return { code: line, tokens };
+    }
+
+    return {
+        code: line.substring(0, comment.start),
+        tokens: tokens.filter(token => token.start < comment.start)
+    };
 }
 
-function findAssignmentExpressionColumn(line: string): number | undefined {
-    const tokens = lexRsl(line).tokens;
-
+function findAssignmentExpressionColumn(
+    tokens: readonly IRslToken[],
+    line: string
+): number | undefined {
     for (let index = 0; index < tokens.length; index++) {
         const token = tokens[index];
 
