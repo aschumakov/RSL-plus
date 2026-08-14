@@ -219,9 +219,19 @@ export class RslLanguageFeatureRegistry {
                 }
                 return result;
             };
+            /*
+             * Бюджет ожидания короткий, а не 200 мс.
+             *
+             * Полный бюджет имел смысл, когда альтернативой был пустой список:
+             * лучше подождать, чем ответить «ничего нет». Теперь есть
+             * приблизительный ответ из быстрого снимка, и ждать модель дольше
+             * пары десятков миллисекунд значит держать список закрытым ровно
+             * тогда, когда пользователь его открыл. Разбор при этом не
+             * отменяется — по его готовности клиент перезапросит список.
+             */
             await waitForParseBudget(
                 ensureDocumentParsed(document, waitMode),
-                INTERACTIVE_PARSE_BUDGET_MS
+                FAST_COMPLETION_BUDGET_MS
             );
             if (requestIsStale(document, version, cancellationToken)) {
                 return finish(
@@ -232,20 +242,20 @@ export class RslLanguageFeatureRegistry {
             const module = this.getRequestModule(document);
             if (!module) {
                 /*
-                 * isIncomplete=true обязателен: полный parse этой версии ещё
-                 * идёт, и клиент должен повторить запрос, а не кэшировать
-                 * пустой список до следующего изменения текста.
-                 */
-                /*
                  * Модели этой версии ещё нет, но отвечать пустым списком
                  * нельзя: пользователь видит его как «в файле ничего нет».
-                 * Объявления берутся из быстрого снимка — без областей
-                 * видимости и типов, зато сразу. isIncomplete заставляет
-                 * клиента перезапросить список, когда модель будет готова.
+                 * Состав — из быстрого снимка плюс то, что уже готово и не
+                 * зависит от модели: встроенные имена и символы прочитанных
+                 * Import. isIncomplete заставляет клиента перезапросить
+                 * список, когда модель будет готова.
                  */
-                const fast = buildRslFastCompletions(
-                    this.environment.getFastDocumentSnapshot(document),
-                    document.offsetAt(params.position)
+                const fast = deduplicateCompletionItems(
+                    buildRslFastCompletions(
+                        this.environment.getFastDocumentSnapshot(document),
+                        document.offsetAt(params.position)
+                    ),
+                    this.defaultCompletionItems,
+                    this.knownImportCompletions(document)
                 );
 
                 return finish(
@@ -1065,6 +1075,41 @@ export class RslLanguageFeatureRegistry {
     }
 
     /**
+     * Экспортируемые имена уже прочитанных Import.
+     *
+     * Не зависят от модели текущего файла: модули из Import разобраны отдельно
+     * и лежат в индексе. Поэтому в приблизительном ответе они законны — в
+     * отличие от локальных областей видимости, которых без модели нет.
+     */
+    private knownImportCompletions(document: TextDocument): CompletionItem[] {
+        const { index } = this.environment;
+
+        if (!index.areImportsEnabled) {
+            return [];
+        }
+
+        const items: CompletionItem[] = [];
+
+        for (const imported of index.getImportedModules(document.uri)) {
+            const from = imported.uri.replace(/^.*[/\\]/, "");
+
+            for (const symbol of imported.symbolTree.children) {
+                if (symbol.isPrivate) {
+                    continue;
+                }
+
+                items.push({
+                    label: symbol.name,
+                    kind: symbol.kind,
+                    detail: from
+                });
+            }
+        }
+
+        return items;
+    }
+
+    /**
      * Модуль ровно той версии, к которой относится запрос.
      *
      * Completion/Hover/Signature Help ждут полный parse не дольше
@@ -1152,6 +1197,15 @@ const INTERACTIVE_PARSE_BUDGET_MS = 200;
  * нескольких открытых файлов даёт такие события пачкой.
  */
 const INLAY_REFRESH_COALESCE_MS = 300;
+
+/*
+ * Сколько Completion согласен ждать модель, прежде чем ответить приблизительно.
+ *
+ * Раньше он ждал весь интерактивный бюджет — 200 мс, — потому что иначе
+ * альтернативой был пустой список. Теперь альтернатива осмысленная, и держать
+ * список закрытым столько времени незачем: пользователь его уже открыл.
+ */
+const FAST_COMPLETION_BUDGET_MS = 25;
 
 /**
  * Список открыт действием пользователя, а не набором текста.

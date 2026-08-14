@@ -182,9 +182,23 @@ function alignConsecutiveAssignments(
             return;
         }
 
-        const targetOperatorColumn = Math.max(
-            ...group.map(item => item.lhsEndColumn)
-        ) + 1;
+        /*
+         * Максимум считается циклом, а не через spread.
+         *
+         * `Math.max(...group.map(...))` передаёт по аргументу на строку, и на
+         * длинной череде присваиваний это выходит за предел числа аргументов:
+         * форматирование файла со 125 тысячами присваиваний падало с
+         * RangeError. Группа ничем не ограничена, поэтому предел достижим.
+         */
+        let widestLhs = 0;
+
+        for (const item of group) {
+            if (item.lhsEndColumn > widestLhs) {
+                widestLhs = item.lhsEndColumn;
+            }
+        }
+
+        const targetOperatorColumn = widestLhs + 1;
 
         for (const item of group) {
             const line = lines[item.lineIndex];
@@ -455,7 +469,7 @@ function getNextContinuationContext(
 
     if (current) {
         if (current.kind === "declaration") {
-            return containsCodeSymbol(code, ";")
+            return containsCodeSymbol(tokens, ";")
                 ? undefined
                 : current;
         }
@@ -540,8 +554,12 @@ function findAssignmentExpressionColumn(
     return undefined;
 }
 
-function containsCodeSymbol(line: string, symbol: string): boolean {
-    return lexRsl(line).tokens.some(token =>
+/* Токены уже посчитаны вызывающим: лексировать строку второй раз незачем. */
+function containsCodeSymbol(
+    tokens: readonly IRslToken[],
+    symbol: string
+): boolean {
+    return tokens.some(token =>
         token.kind === "symbol" && token.raw === symbol
     );
 }

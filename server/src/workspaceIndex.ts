@@ -31,6 +31,13 @@ export interface IWorkspaceIndexOptions {
     importCacheEntries?: number;
     /** Верхняя граница числа external-модулей, не открытых в редакторе. */
     maxExternalModules?: number;
+    /**
+     * Верхняя граница их суммарного объёма.
+     *
+     * Числа модулей недостаточно: одна и та же тысяча сводок может стоить и
+     * десятки мегабайт, и гигабайты — зависит от размеров файлов.
+     */
+    maxExternalBytes?: number;
 }
 
 interface IImportContext {
@@ -62,6 +69,9 @@ export class WorkspaceIndex {
         Number.MAX_SAFE_INTEGER
     );
     private readonly maxExternalModules: number;
+    /** Суммарный объём сводок закрытых файлов и его предел. */
+    private readonly maxExternalBytes: number;
+    private externalBytes = 0;
     private importsEnabled = true;
     private revisionValue = 0;
 
@@ -72,6 +82,16 @@ export class WorkspaceIndex {
         this.maxExternalModules = Math.max(
             1,
             options.maxExternalModules ?? 4000
+        );
+        /*
+         * 256 МБ исходников, из которых построены сводки. Порядок выбран по
+         * тому же принципу, что и в компактном кэше: предел нужен не для
+         * экономии, а чтобы очень большой проект не упирался в память,
+         * оставаясь в пределах числа модулей.
+         */
+        this.maxExternalBytes = Math.max(
+            1,
+            options.maxExternalBytes ?? 256 * 1024 * 1024
         );
     }
 
@@ -387,14 +407,24 @@ export class WorkspaceIndex {
     }
 
     /**
-     * Отмечает external-модуль как недавно загруженный и вытесняет самый
-     * старый, если превышен maxExternalModules. Открытые документы никогда
-     * не участвуют в этом cap.
+     * Отмечает external-модуль как недавно загруженный и вытесняет самые
+     * старые, если превышено число модулей ИЛИ их суммарный объём. Открытые
+     * документы в этом cap не участвуют.
+     *
+     * Одного лимита по числу модулей недостаточно: 4000 сводок по 200 КБ и
+     * 4000 по 2 МБ — это разные величины, и вторая обходится в гигабайты. Объём
+     * считается по длине исходника, из которого сводка построена: это
+     * единственная величина, известная без обхода символов, и она пропорциональна
+     * их числу.
      */
     private touchExternalModule(uri: string): void {
         this.externalModuleOrder.set(uri, true);
+        this.externalBytes += this.modules.get(uri)?.sourceLength ?? 0;
 
-        while (this.externalModuleOrder.size > this.maxExternalModules) {
+        while (
+            this.externalModuleOrder.size > this.maxExternalModules ||
+            this.externalBytes > this.maxExternalBytes
+        ) {
             const oldest = this.externalModuleOrder.peekOldest();
 
             if (oldest === undefined || oldest === uri) {
@@ -402,6 +432,10 @@ export class WorkspaceIndex {
             }
 
             this.externalModuleOrder.delete(oldest);
+            this.externalBytes = Math.max(
+                0,
+                this.externalBytes - (this.modules.get(oldest)?.sourceLength ?? 0)
+            );
             this.removeModule(oldest);
         }
     }

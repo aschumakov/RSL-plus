@@ -428,23 +428,42 @@ test("пересчёт строки совпадает с полным лекс�
  * полного лексирования, то есть путь становится вредным. Отсечка по доле
  * потока — единственное, что удерживает его от этого.
  */
-test("точечный relex работает по всему файлу, а не только в конце", () => {
+test("точечный relex ограничен долей сдвигаемого потока", () => {
     /*
-     * Прежде правка, после которой оставалось больше половины потока, уходила
-     * на полное лексирование: хвосту пересчитываются позиции, и копирование
-     * токенов было дороже самого lexRsl. Теперь дешевле — ограничение снято, и
-     * это проверяется на обоих концах файла.
+     * Порог опущен с 0.5 до 0.85: копирование токена стало в пять раз дешевле,
+     * и середина файла теперь идёт точечным путём. Но при сдвиге почти всего
+     * потока выигрыш вырождается — на 1,1 МБ 95 мс против 98 мс полного
+     * лексирования, а на машине медленнее уже минус. Отсечка обязана остаться.
      */
     const source = bigLexSource(120);
     const lex = lexRsl(source);
 
+    /* Самое начало файла сдвигает почти весь поток — путь обязан отказаться. */
+    const start = source.indexOf("value");
+    let decision;
+    assert.strictEqual(
+        tryIncrementalRelex(
+            source,
+            lex,
+            `${source.slice(0, start + 3)}X${source.slice(start + 3)}`,
+            value => {
+                decision = value;
+            }
+        ),
+        undefined,
+        "при сдвиге почти всего потока выигрыша нет"
+    );
+    assert.strictEqual(decision.reason, "editTooEarly");
+
+    /* Середина и конец — идут точечно и совпадают с полным лексированием. */
+    const lines = source.split("\n");
     const places = [
-        ["начало", source.indexOf("value")],
+        ["середина", lines.slice(0, Math.floor(lines.length * 0.5)).join("\n").length],
         ["конец", source.lastIndexOf("value")]
     ];
 
     for (const [where, offset] of places) {
-        const next = `${source.slice(0, offset + 3)}X${source.slice(offset + 3)}`;
+        const next = `${source.slice(0, offset)}\n${source.slice(offset)}`;
         const incremental = tryIncrementalRelex(source, lex, next);
 
         assert.ok(incremental, `правка в ${where} файла обязана идти точечно`);
@@ -575,13 +594,13 @@ test("причина выбора пути lex попадает в решени�
     assert.ok(applied.editLine > 0, "номер строки правки тоже");
     assert.strictEqual(applied.lineDelta, 1, "Enter добавляет одну строку");
 
-    /* Правка в начале файла теперь тоже точечная — предел на позицию снят. */
+    /* Правка в начале файла сдвигает почти весь поток — выигрыша нет. */
     const early = source.indexOf("value");
     const atStart = reasonOf(`${source.slice(0, early)}X${source.slice(early)}`);
-    assert.strictEqual(atStart.reason, "incremental");
+    assert.strictEqual(atStart.reason, "editTooEarly");
     assert.ok(
-        atStart.shiftedFraction > 0.9,
-        "сдвигается почти весь поток, и путь всё равно применяется"
+        atStart.shiftedFraction > 0.85,
+        "причина обязана называть измеренную долю, а не только сам отказ"
     );
 
     assert.strictEqual(

@@ -509,6 +509,35 @@ async function run() {
         );
     });
 
+    await test("память индекса ограничена объёмом, а не только числом", async () => {
+        /*
+         * Одного лимита по числу модулей недостаточно: тысяча сводок по 200 КБ
+         * и тысяча по 2 МБ — разные величины. Здесь число модулей заведомо в
+         * пределах, и вытеснять обязан именно объём.
+         */
+        const index = new WorkspaceIndex({
+            maxExternalModules: 1000,
+            maxExternalBytes: 300_000
+        });
+        let big = "Macro M()\nEnd;\n";
+
+        while (big.length < 100_000) {
+            big += big;
+        }
+
+        for (let file = 0; file < 10; file++) {
+            const uri = `file:///bulk${file}.mac`;
+            index.registerWorkspaceFile(uri);
+            index.updateExternalModule(uri, big);
+        }
+
+        assert.ok(
+            index.size < 10,
+            `лимит по объёму обязан вытеснять; в индексе ${index.size} из 10`
+        );
+        assert.ok(index.size >= 1, "последний загруженный модуль должен остаться");
+    });
+
     if (failed > 0) {
         console.error(`\nПройдено: ${passed}\nОшибок: ${failed}`);
         process.exitCode = 1;
