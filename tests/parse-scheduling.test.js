@@ -41,13 +41,20 @@ const URI = "file:///scheduling.mac";
 const DEBOUNCE_MS = 60;
 
 /** Служба разбора с одним открытым и активным документом. */
-function createHarness() {
-    let document = TextDocument.create(URI, "rsl", 1, "Macro T()\nEnd;\n");
-    const documents = { get: uri => (uri === URI ? document : undefined) };
+function createHarness(options = {}) {
+    const uri = options.uri || URI;
+    let document = TextDocument.create(uri, "rsl", 1, "Macro T()\nEnd;\n");
+    const others = new Map(options.others || []);
+    const documents = {
+        get: requested => requested === uri
+            ? document
+            : others.get(requested)
+    };
     const index = new WorkspaceIndex();
-    index.registerWorkspaceFiles([URI]);
+    index.registerWorkspaceFiles([uri, ...others.keys()]);
 
     const parsedAt = [];
+    const parsedVersions = [];
     let mark = 0;
     const analysis = new DocumentAnalysisService(
         documents,
@@ -56,36 +63,46 @@ function createHarness() {
         {
             log: () => undefined,
             invalidateProviderCaches: () => undefined,
-            onParsed: () => parsedAt.push(Date.now() - mark),
+            onParsed: module => {
+                parsedAt.push(Date.now() - mark);
+                parsedVersions.push(`${module.uri}@${module.version}`);
+            },
             onImports: () => undefined,
             initialParseDelayMs: 0,
-            changeDebounceMs: DEBOUNCE_MS
+            changeDebounceMs: DEBOUNCE_MS,
+            inactiveParseDelayMs:
+                options.inactiveParseDelayMs ?? DEBOUNCE_MS * 2
         }
     );
 
-    analysis.setActiveDocument(URI);
+    analysis.setActiveDocument(uri);
     analysis.open(document);
 
     return {
         analysis,
+        index,
+        parsedVersions,
+        uri,
         get document() {
             return document;
         },
         /** Пользователь набрал символ; отсчёт до разбора начинается заново. */
         type() {
             document = TextDocument.create(
-                URI,
+                uri,
                 "rsl",
                 document.version + 1,
                 `Macro T()\nEnd;\nMacro M${document.version}()\nEnd;\n`
             );
             parsedAt.length = 0;
+            parsedVersions.length = 0;
             mark = Date.now();
             analysis.changed(document);
             return document;
         },
-        async settle() {
-            await new Promise(resolve => setTimeout(resolve, DEBOUNCE_MS * 4));
+        async settle(multiplier = 4) {
+            await new Promise(resolve =>
+                setTimeout(resolve, DEBOUNCE_MS * multiplier));
             return parsedAt.length > 0 ? parsedAt[0] : undefined;
         }
     };
@@ -162,6 +179,201 @@ async function run() {
         assert.ok(
             elapsed !== undefined,
             "иначе подсветка неактивной вкладки осталась бы базовой навсегда"
+        );
+    });
+
+    /*
+     * ─── Переключение вкладок ───────────────────────────────────────────────
+     *
+     * Уход на другую вкладку снимал назначенный разбор покинутого файла
+     * совсем. Правка, не дождавшаяся своего debounce, пропадала, и при
+     * возвращении файл разбирался заново — та самая «повторная работа».
+     */
+
+    await test("правка не пропадает от ухода на другую вкладку", async () => {
+        const other = "file:///other.mac";
+        const harness = createHarness({
+            others: [[other, TextDocument.create(other, "rsl", 1, "Macro O()\nEnd;\n")]]
+        });
+        const document = harness.type();
+
+        /* Ctrl+Click в другой файл раньше, чем истёк debounce. */
+        harness.analysis.setActiveDocument(other);
+        await harness.settle(8);
+
+        assert.deepStrictEqual(
+            harness.parsedVersions,
+            [`${harness.uri}@${document.version}`],
+            "разбор обязан состояться, просто с отсрочкой"
+        );
+        assert.ok(
+            harness.analysis.isLocalReady(document),
+            "модель покинутого файла обязана быть готова к возвращению"
+        );
+    });
+
+    await test("возврат во вкладку не разбирает её второй раз", async () => {
+        const other = "file:///other.mac";
+        const harness = createHarness({
+            others: [[other, TextDocument.create(other, "rsl", 1, "Macro O()\nEnd;\n")]]
+        });
+        const document = harness.type();
+
+        harness.analysis.setActiveDocument(other);
+        await harness.settle(8);
+        const afterLeaving = harness.parsedVersions.length;
+
+        /* Возвращаемся: модель этой версии уже есть. */
+        harness.analysis.setActiveDocument(harness.uri);
+        await harness.settle(4);
+
+        assert.strictEqual(afterLeaving, 1, "версия A разбирается один раз");
+        assert.deepStrictEqual(
+            harness.parsedVersions,
+            [`${harness.uri}@${document.version}`],
+            "возвращение не имеет права разбирать готовую версию заново"
+        );
+    });
+
+    await test("готовая модель переживает переключение вкладки", async () => {
+        const other = "file:///other.mac";
+        const harness = createHarness({
+            others: [[other, TextDocument.create(other, "rsl", 1, "Macro O()\nEnd;\n")]]
+        });
+        const document = harness.type();
+        await harness.settle();
+        assert.ok(harness.analysis.isLocalReady(document));
+
+        harness.analysis.setActiveDocument(other);
+        harness.analysis.setActiveDocument(harness.uri);
+
+        assert.ok(
+            harness.analysis.isLocalReady(document),
+            "переключение вкладок не инвалидирует уже построенную модель"
+        );
+    });
+
+    await test("серия Enter даёт один разбор, а не по одному на каждый", async () => {
+        const harness = createHarness();
+        let document;
+
+        /* Пять переводов строки подряд быстрее, чем истекает debounce. */
+        for (let index = 0; index < 5; index++) {
+            document = harness.type();
+        }
+
+        await harness.settle();
+
+        assert.deepStrictEqual(
+            harness.parsedVersions,
+            [`${harness.uri}@${document.version}`],
+            "промежуточные версии разбирать незачем — их уже нет на экране"
+        );
+    });
+
+    await test("прерванный разбор продолжается, а не начинается заново", async () => {
+        /*
+         * Большой файл разбирается фазами lex -> parse -> модель. Уход на
+         * другую вкладку обрывает разбор между фазами, и раньше вся работа
+         * выбрасывалась. Здесь проверяется, что после возвращения самая
+         * дорогая фаза не считается второй раз.
+         */
+        const other = "file:///other.mac";
+        const big = ["Macro Big()"];
+        for (let index = 0; index < 4000; index++) {
+            big.push(`  Var someRatherLongVariableName${index} = ${index};`);
+        }
+        big.push("End;");
+
+        const uri = "file:///big.mac";
+        const source = big.join("\n");
+        assert.ok(source.length > 100_000, "нужен файл сверх порога фазового разбора");
+
+        let document = TextDocument.create(uri, "rsl", 1, source);
+        const others = new Map([
+            [other, TextDocument.create(other, "rsl", 1, "Macro O()\nEnd;\n")]
+        ]);
+        const documents = {
+            get: requested => requested === uri ? document : others.get(requested)
+        };
+        const index = new WorkspaceIndex();
+        index.registerWorkspaceFiles([uri, other]);
+
+        const marks = [];
+        const analysis = new DocumentAnalysisService(
+            documents,
+            index,
+            { getAvailable: () => ({ imports: { enabled: false } }) },
+            {
+                log: () => undefined,
+                invalidateProviderCaches: () => undefined,
+                onParsed: () => undefined,
+                onImports: () => undefined,
+                initialParseDelayMs: 0,
+                /*
+                 * Без склейки правок: перебор ниже считает возвраты управления
+                 * от начала разбора, и debounce сдвигал бы отсчёт на время,
+                 * за которое разбор успевает закончиться целиком.
+                 */
+                changeDebounceMs: 0,
+                inactiveParseDelayMs: 0,
+                performance: {
+                    enabled: false,
+                    start: () => undefined,
+                    end: () => undefined,
+                    mark: (event, fields) => marks.push({ event, fields })
+                }
+            }
+        );
+
+        analysis.setActiveDocument(uri);
+        analysis.open(document);
+
+        /*
+         * Момент паузы между фазами зависит от машины и от нагрузки, поэтому
+         * он не угадывается, а перебирается: каждый заход правит текст заново
+         * и уходит на другую вкладку через своё число тиков. Один из заходов
+         * обязан попасть в паузу после parse — там и проверяется, что
+         * продолжение берёт готовый результат.
+         */
+        for (let offset = 1; offset <= 12; offset++) {
+            for (let tick = 0; tick < offset; tick++) {
+                await new Promise(resolve => setImmediate(resolve));
+            }
+
+            analysis.setActiveDocument(other);
+            await new Promise(resolve => setTimeout(resolve, DEBOUNCE_MS * 20));
+
+            if (marks.some(item => item.event === "analysis.resumed")) {
+                break;
+            }
+
+            assert.ok(
+                analysis.isLocalReady(document),
+                "разбор обязан довестись до конца, пусть и в фоне"
+            );
+
+            /* Следующий заход — новая версия и другое число тиков. */
+            document = TextDocument.create(
+                uri,
+                "rsl",
+                document.version + 1,
+                `${source}\nMacro Extra${offset}()\nEnd;\n`
+            );
+            analysis.setActiveDocument(uri);
+            analysis.changed(document);
+        }
+
+        analysis.setActiveDocument(uri);
+        await new Promise(resolve => setTimeout(resolve, DEBOUNCE_MS * 20));
+
+        assert.ok(
+            analysis.isLocalReady(document),
+            "разбор обязан довестись до конца, пусть и в фоне"
+        );
+        assert.ok(
+            marks.some(item => item.event === "analysis.resumed"),
+            "продолжение обязано брать готовый syntax, а не считать его заново"
         );
     });
 

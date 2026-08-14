@@ -91,7 +91,11 @@ interface IValidationTask {
 export class DocumentAnalysisService {
     private parseGeneration = new Map<string, number>();
     private parsedVersions = new Map<string, number>();
-    private parseTimers = new Map<string, NodeJS.Timeout>();
+    /** Назначенный разбор и версия, ради которой он назначен. */
+    private parseTimers = new Map<string, {
+        timer: NodeJS.Timeout;
+        version: number;
+    }>();
     /** Отложенный прогрев Outline; проверяется на актуальность при старте. */
     private outlineTimers = new Map<string, NodeJS.Immediate>();
     private running = new Map<string, Promise<void>>();
@@ -107,7 +111,21 @@ export class DocumentAnalysisService {
     private changeDebounceMs: number;
     private slowParseLogMs: number;
     private initialParseDelayMs: number;
+    /** Отсрочка разбора вкладки, которую покинули, не дождавшись debounce. */
+    private inactiveParseDelayMs: number;
     private activeDocumentUri: string | undefined;
+    /**
+     * Готовые фазы прерванного разбора: uri -> версия и её syntax.
+     *
+     * Разбор большого файла идёт фазами lex -> parse -> модель, и уход на
+     * другую вкладку обрывает его между ними. Раньше вся работа выбрасывалась,
+     * и при возвращении файл разбирался с нуля. Теперь дорогая середина
+     * сохраняется: продолжение той же версии строит только модель.
+     */
+    private phaseCheckpoints = new Map<string, {
+        version: number;
+        syntax: ReturnType<typeof parseRslSyntax>;
+    }>();
 
     constructor(
         private documents: TextDocuments<TextDocument>,
@@ -118,6 +136,7 @@ export class DocumentAnalysisService {
         this.changeDebounceMs = options.changeDebounceMs ?? 90;
         this.slowParseLogMs = options.slowParseLogMs ?? 75;
         this.initialParseDelayMs = options.initialParseDelayMs ?? 50;
+        this.inactiveParseDelayMs = options.inactiveParseDelayMs ?? 400;
     }
 
     get isBusy(): boolean {
@@ -245,6 +264,12 @@ export class DocumentAnalysisService {
 
         this.openedVersions.set(document.uri, document.version);
         /*
+         * Отложенные фазы относятся к прежней версии текста. Совпадение версий
+         * их и так не пропустит, но AST прежней версии незачем держать в
+         * памяти до закрытия файла.
+         */
+        this.phaseCheckpoints.delete(document.uri);
+        /*
          * Снапшот предыдущей версии НЕ удаляется здесь: getFastSnapshot()
          * уже проверяет version перед использованием кэша, а
          * refreshFastSnapshot() передаёт именно этот старый снапшот в
@@ -286,19 +311,33 @@ export class DocumentAnalysisService {
          * конкурируют с активным файлом за parser slot и память. Полный AST
          * будет построен при активации вкладки или явном LSP-запросе.
          *
-         * previousActiveUri исключён из отмены: секцией выше он мог только
-         * что перейти из foreground в background в этом же вызове — это
-         * файл, который пользователь только что редактировал/просматривал,
-         * а не "восстановленная, но не открытая" вкладка. Без этого
-         * исключения его queued-задача отменялась бы немедленно, не
-         * дождавшись даже фонового parse (baг воспроизводится тестом
+         * Назначенный разбор при этом НЕ выбрасывается, а откладывается.
+         * Раньше он снимался совсем, и правка, не дождавшаяся своего debounce,
+         * пропадала: `правка в A → Ctrl+Click в B → возврат в A` заставлял
+         * разбирать A заново, хотя разбор был уже назначен и оплачен.
+         *
+         * previousActiveUri исключён из отмены очереди ниже: секцией выше он
+         * мог только что перейти из foreground в background в этом же вызове —
+         * это файл, который пользователь только что редактировал, а не
+         * "восстановленная, но не открытая" вкладка. Без этого исключения его
+         * queued-задача отменялась бы немедленно, не дождавшись даже фонового
+         * parse (баг воспроизводится тестом
          * testActiveDocumentSurvivesStaleWorkerContention).
          */
         for (const candidate of Array.from(this.parseTimers.keys())) {
-            if (candidate !== uri) {
-                this.cancelTimer(candidate);
-                this.notifyIdleIfSettled(candidate);
+            if (candidate === uri) {
+                continue;
             }
+
+            const pending = this.documents.get(candidate);
+            this.cancelTimer(candidate);
+
+            if (pending && !this.isLocalReady(pending)) {
+                this.scheduleWithDelay(pending, this.inactiveParseDelayMs);
+                continue;
+            }
+
+            this.notifyIdleIfSettled(candidate);
         }
 
         /*
@@ -392,7 +431,7 @@ export class DocumentAnalysisService {
      * нет и запрос иначе ждал бы разбора, который никто не начнёт.
      */
     requestParse(document: TextDocument): void {
-        if (this.isLocalReady(document) || this.isBusyFor(document.uri)) {
+        if (this.isLocalReady(document) || this.hasPendingWorkFor(document)) {
             return;
         }
 
@@ -443,6 +482,7 @@ export class DocumentAnalysisService {
     close(uri: string): void {
         this.cancelTimer(uri);
         this.cancelQueued(uri);
+        this.phaseCheckpoints.delete(uri);
         this.fastSnapshots.delete(uri);
         this.openedVersions.delete(uri);
         this.parsedVersions.delete(uri);
@@ -454,6 +494,7 @@ export class DocumentAnalysisService {
     invalidate(uri: string): void {
         this.cancelQueued(uri);
         this.cancelOutline(uri);
+        this.phaseCheckpoints.delete(uri);
         this.fastSnapshots.delete(uri);
         this.parsedVersions.delete(uri);
         this.notifyIdleIfSettled(uri);
@@ -593,7 +634,7 @@ export class DocumentAnalysisService {
             });
         }, Math.max(0, delay));
 
-        this.parseTimers.set(uri, timer);
+        this.parseTimers.set(uri, { timer, version });
     }
 
     private startValidation(
@@ -986,9 +1027,26 @@ export class DocumentAnalysisService {
             }
         }
 
-        const syntax = parseRslSyntax(text, fastSnapshot.lex, {
-            buildExpressionTree: false
-        });
+        /*
+         * Продолжение прерванного разбора: syntax этой версии уже посчитан.
+         * Повторять самую дорогую фазу незачем — она не зависит ни от того,
+         * какая вкладка активна, ни от того, кто заказал разбор.
+         */
+        const checkpoint = this.phaseCheckpoints.get(uri);
+        const resumed = checkpoint?.version === version;
+        const syntax = resumed
+            ? checkpoint!.syntax
+            : parseRslSyntax(text, fastSnapshot.lex, {
+                buildExpressionTree: false
+            });
+
+        if (resumed) {
+            performance?.mark?.("analysis.resumed", {
+                uri,
+                version,
+                phase: "symbolTree"
+            });
+        }
 
         if (!syntax) {
             if (syntaxSpan) {
@@ -1019,19 +1077,27 @@ export class DocumentAnalysisService {
             })
             : undefined;
         if (phased) {
+            /*
+             * Точка, где разбор чаще всего и обрывают: parse позади, модели
+             * ещё нет. Результат откладывается ДО паузы — иначе проверка ниже
+             * выйдет, и посчитанное пропадёт.
+             */
+            this.phaseCheckpoints.set(uri, { version, syntax });
             await yieldToEventLoop();
         }
 
         if (!this.stillCurrent(uri, version, generation)) {
             if (fullSpan) {
                 performance.end(fullSpan, {
-                    cancelled: true
+                    cancelled: true,
+                    checkpoint: phased
                 });
             }
             return;
         }
 
         const model = createOpenModuleModel(text, syntax);
+        this.phaseCheckpoints.delete(uri);
         if (treeSpan) {
             performance.end(treeSpan, {
                 topLevelSymbols: model.symbolTree.children.length
@@ -1131,12 +1197,37 @@ export class DocumentAnalysisService {
     }
 
     private cancelTimer(uri: string): void {
+        const pending = this.parseTimers.get(uri);
+
+        if (pending) {
+            clearTimeout(pending.timer);
+            this.parseTimers.delete(uri);
+        }
+    }
+
+    /**
+     * Разбор ИМЕННО ЭТОЙ версии уже назначен, идёт или стоит в очереди.
+     *
+     * Отличается от isBusyFor тем, что смотрит на версию. Назначенный разбор
+     * может относиться к прежнему тексту: вкладку покинули, разбор отложили, а
+     * потом файл изменили. Такая занятость не означает, что новую версию
+     * кто-то разберёт, — планировать её всё равно нужно.
+     */
+    private hasPendingWorkFor(document: TextDocument): boolean {
+        const uri = document.uri;
         const timer = this.parseTimers.get(uri);
 
         if (timer) {
-            clearTimeout(timer);
-            this.parseTimers.delete(uri);
+            return timer.version === document.version;
         }
+
+        const queued = this.queued.get(uri);
+
+        if (queued) {
+            return queued.document.version === document.version;
+        }
+
+        return this.running.has(uri);
     }
 
     private cancelQueued(uri: string): void {

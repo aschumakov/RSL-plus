@@ -37,11 +37,23 @@ const SAFE_KINDS = new Set<RslTokenKind>([
     "identifier", "number", "string", "symbol", "whitespace"
 ]);
 
-/** Токены изменённой строки: что заменяем и на каком участке текста. */
+/*
+ * Какую долю файла разрешено перелексировать одним окном.
+ *
+ * Окно теперь может занимать несколько строк, и вставка большого куска текста
+ * сделала бы его сопоставимым с файлом. Тогда точечный путь платит и за relex
+ * окна, и за пересчёт позиций хвоста, то есть заведомо проигрывает полному
+ * лексированию.
+ */
+const MAX_WINDOW_FRACTION = 0.25;
+
+/** Токены изменённых строк: что заменяем и на каком участке текста. */
 interface ILineWindow {
-    /** Номер строки, с которой начинается окно. */
+    /** Номер первой строки окна. */
     line: number;
-    /** Начало строки и конец окна (включая её перевод строки, если он есть). */
+    /** Номер последней строки окна: правка может задеть несколько. */
+    endLine: number;
+    /** Начало первой строки и конец окна (включая перевод строки, если он есть). */
     start: number;
     end: number;
     /** Конец текста строки без перевода строки: правка обязана лежать здесь. */
@@ -113,20 +125,13 @@ export function tryIncrementalRelex(
         return undefined;
     }
 
-    /*
-     * Правка, задевающая перевод строки, меняет количество строк: сдвинулись бы
-     * не только смещения, но и номера строк всего остатка потока.
-     */
-    if (
-        hasLineBreak(previousText, oldStart, oldEnd) ||
-        hasLineBreak(nextText, oldStart, newEnd)
-    ) {
-        return undefined;
-    }
-
     const window = findLineWindow(previousLex, previousText, oldStart, oldEnd);
 
     if (!window) {
+        return undefined;
+    }
+
+    if (window.end - window.start > previousText.length * MAX_WINDOW_FRACTION) {
         return undefined;
     }
 
@@ -163,6 +168,21 @@ export function tryIncrementalRelex(
         endLine: window.line + token.endLine
     }));
 
+    /*
+     * Сколько строк стало больше или меньше.
+     *
+     * Ради этого числа правки с переводом строки прежде отвергались целиком:
+     * у всего остатка потока меняются не только смещения, но и номера строк.
+     * Считать его несложно — переводы строки есть и в старом окне, и в новом,
+     * достаточно сравнить их количество.
+     */
+    const producedNewlines = replacement.filter(
+        token => token.kind === "newline"
+    );
+    const replacedNewlines = window.endLine - window.line +
+        (window.expectTrailingNewline ? 1 : 0);
+    const lineDelta = producedNewlines.length - replacedNewlines;
+
     const tokens = previousLex.tokens.slice(0, window.firstIndex)
         .concat(replacement);
 
@@ -172,27 +192,45 @@ export function tryIncrementalRelex(
         index++
     ) {
         const original = previousLex.tokens[index];
+        /*
+         * Колонки хвоста не меняются: окно кончается либо переводом строки,
+         * либо концом файла, поэтому следующий токен всегда начинает строку.
+         * Исключение — пустое окно в последней строке, где хвоста нет вовсе.
+         */
         tokens.push({
             ...original,
             start: original.start + delta,
             end: original.end + delta,
-            character: original.line === window.line
-                ? original.character + delta
-                : original.character,
-            endCharacter: original.endLine === window.line
-                ? original.endCharacter + delta
-                : original.endCharacter
+            line: original.line + lineDelta,
+            endLine: original.endLine + lineDelta
         });
     }
 
-    const lineStarts = previousLex.lineStarts.map((offset, index) =>
-        index > window.line ? offset + delta : offset
-    );
+    /*
+     * lineStarts собирается из трёх частей: строки до окна остаются как есть,
+     * строки окна берутся из пересчёта, строки после — сдвигаются.
+     */
+    const lineStarts = previousLex.lineStarts.slice(0, window.line + 1);
+
+    for (const token of producedNewlines) {
+        lineStarts.push(token.end);
+    }
+
+    const firstUntouchedLine = window.endLine + 1 +
+        (window.expectTrailingNewline ? 1 : 0);
+
+    for (
+        let index = firstUntouchedLine;
+        index < previousLex.lineStarts.length;
+        index++
+    ) {
+        lineStarts.push(previousLex.lineStarts[index] + delta);
+    }
 
     return {
         tokens,
         eol: previousLex.eol,
-        hasFinalEol: previousLex.hasFinalEol,
+        hasFinalEol: /(?:\r\n|\n|\r)$/.test(nextText),
         hasBom: previousLex.hasBom,
         lineStarts
     };
@@ -212,8 +250,9 @@ function findLineWindow(
     changeEnd: number
 ): ILineWindow | undefined {
     const line = findLineIndex(previousLex.lineStarts, changeStart);
+    const changeEndLine = findLineIndex(previousLex.lineStarts, changeEnd);
 
-    if (line === undefined) {
+    if (line === undefined || changeEndLine === undefined) {
         return undefined;
     }
 
@@ -225,6 +264,7 @@ function findLineWindow(
     let lastIndex = firstIndex - 1;
     let textEnd = previousText.length;
     let end = previousText.length;
+    let endLine = changeEndLine;
     let expectTrailingNewline = false;
 
     /*
@@ -242,22 +282,31 @@ function findLineWindow(
         const token = tokens[index];
 
         if (token.kind === "newline") {
-            /*
-             * Перевод строки входит в окно: без него незакрытый строковый
-             * литерал, «съедающий» перевод строки, выглядел бы законным
-             * однострочным токеном (см. expectTrailingNewline).
-             */
-            textEnd = token.start;
-            end = token.end;
-            expectTrailingNewline = true;
             lastIndex = index;
-            break;
+
+            /*
+             * Окно закрывается на переводе строки последней задетой строки.
+             * Он входит в окно: без него незакрытый строковый литерал,
+             * «съедающий» перевод строки, выглядел бы законным однострочным
+             * токеном (см. expectTrailingNewline). Переводы строки внутри
+             * окна — это правка, изменившая их количество: как раз Enter.
+             */
+            if (token.line >= changeEndLine) {
+                textEnd = token.start;
+                end = token.end;
+                endLine = token.line;
+                expectTrailingNewline = true;
+                break;
+            }
+
+            continue;
         }
 
         if (!SAFE_KINDS.has(token.kind) || token.line !== token.endLine) {
             return undefined;
         }
 
+        endLine = Math.max(endLine, token.endLine);
         lastIndex = index;
     }
 
@@ -276,6 +325,7 @@ function findLineWindow(
      */
     return {
         line,
+        endLine,
         start,
         end,
         textEnd,
@@ -314,12 +364,12 @@ function coversExactly(
             return false;
         }
 
-        const isTrailingNewline = expectTrailingNewline &&
-            index === lastIndex &&
-            token.kind === "newline";
-
+        /*
+         * Перевод строки допустим в любом месте окна: правка могла их и
+         * добавить, и убрать. Требование к хвосту проверяется отдельно, ниже.
+         */
         if (
-            !isTrailingNewline &&
+            token.kind !== "newline" &&
             (!SAFE_KINDS.has(token.kind) || token.line !== token.endLine)
         ) {
             return false;
@@ -334,18 +384,6 @@ function coversExactly(
 
     return !expectTrailingNewline ||
         (lastIndex >= 0 && tokens[lastIndex].kind === "newline");
-}
-
-function hasLineBreak(text: string, start: number, end: number): boolean {
-    for (let index = start; index < end; index++) {
-        const code = text.charCodeAt(index);
-
-        if (code === 10 || code === 13) {
-            return true;
-        }
-    }
-
-    return false;
 }
 
 /** Индекс строки, содержащей смещение; lineStarts возрастает. */

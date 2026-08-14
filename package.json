@@ -125,14 +125,19 @@
          },
          {
             "command": "rsl.smartEnter",
-            "title": "RSL: Новая строка с завершением блока"
+            "title": "RSL: Новая строка с завершением блока (Shift+Enter)"
          }
       ],
       "keybindings": [
          {
             "command": "rsl.smartEnter",
-            "key": "enter",
+            "key": "shift+enter",
             "when": "editorTextFocus && editorLangId == rsl && !editorHasSelection && !editorHasMultipleSelections && !suggestWidgetVisible && !inlineSuggestionVisible && !renameInputVisible && !inSnippetMode"
+         },
+         {
+            "command": "rsl.smartEnter",
+            "key": "enter",
+            "when": "config.rslPlus.editor.completeBlocksOnEnter && editorTextFocus && editorLangId == rsl && !editorHasSelection && !editorHasMultipleSelections && !suggestWidgetVisible && !inlineSuggestionVisible && !renameInputVisible && !inSnippetMode"
          }
       ],
       "menus": {
@@ -222,7 +227,7 @@
                "scope": "resource",
                "type": "boolean",
                "default": true,
-               "description": "При Enter после заголовка IF, WHILE, FOR, WITH, MACRO или CLASS создать строку с отступом и добавить закрывающий END."
+               "description": "Перехватывать обычный Enter, чтобы после заголовка IF, WHILE, FOR, WITH, MACRO или CLASS добавить закрывающий END. Ценой этого каждое нажатие Enter идёт через расширение. По умолчанию выключено: Enter обрабатывает редактор, а завершить блок можно через Shift+Enter."
             },
             "rslPlus.performance.logFile": {
                "scope": "window",

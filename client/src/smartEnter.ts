@@ -49,6 +49,18 @@ export function buildRslSmartEnterSnippet(
         : `${body}${context.eol}End;`;
 }
 
+/**
+ * Snippet обычного перевода строки — без единого пробела отступа.
+ *
+ * Отступ добавляет сам редактор: вставка многострочного snippet повторяет
+ * отступ строки, в которой она происходит (см. buildRslSmartEnterSnippet).
+ * Свой отступ здесь удваивал бы его — ровно это и произошло, когда команда
+ * перестала звать `default:type` и начала вставлять перевод строки сама.
+ */
+export function buildRslPlainEnterSnippet(eol: string): string {
+    return `${eol}$0`;
+}
+
 export function isRslBlockHeader(value: string): boolean {
     const text = value.trim();
     return CONDITION_BLOCK.test(text) ||

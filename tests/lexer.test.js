@@ -452,6 +452,93 @@ test("точечный relex отказывается от правки в на�
     assert.deepStrictEqual(incremental.tokens, lexRsl(atEnd).tokens);
 });
 
+/*
+ * Enter — самая частая правка после набора символа, и до сих пор она уходила на
+ * полное лексирование: любая правка с переводом строки отвергалась, потому что
+ * у всего остатка потока меняются не только смещения, но и номера строк.
+ *
+ * Здесь проверяется не выигрыш, а совпадение: номера строк, колонки и
+ * lineStarts обязаны сойтись с полным лексированием до последнего поля.
+ * Расхождение в них означало бы сдвинутые Problems и подсветку.
+ */
+test("серия Enter пересчитывается точечно и совпадает с полным lex", () => {
+    for (const size of [100, 300, 500]) {
+        let source = bigLexSource(size);
+        assert.ok(
+            source.length > 100_000,
+            `нужен файл больше 100 КБ, получено ${source.length}`
+        );
+
+        let applied = 0;
+
+        /* Начало, середина и конец: в начале путь обязан отказываться. */
+        for (const fraction of [0.05, 0.4, 0.7, 0.95]) {
+            const lex = lexRsl(source);
+            const lines = source.split("\n");
+            const offset = lines
+                .slice(0, Math.floor(lines.length * fraction))
+                .join("\n").length;
+
+            /* Enter, затем ещё один — серия, а не одиночная правка. */
+            for (let press = 0; press < 3; press++) {
+                const next = `${source.slice(0, offset)}\n${source.slice(offset)}`;
+                const incremental = tryIncrementalRelex(
+                    source,
+                    lexRsl(source),
+                    next
+                );
+
+                if (incremental) {
+                    applied++;
+                    const full = lexRsl(next);
+                    assert.deepStrictEqual(
+                        incremental.tokens,
+                        full.tokens,
+                        `${size} КБ, доля ${fraction}: token stream разошёлся`
+                    );
+                    assert.deepStrictEqual(
+                        incremental.lineStarts,
+                        full.lineStarts,
+                        `${size} КБ, доля ${fraction}: lineStarts разошлись`
+                    );
+                    assert.strictEqual(
+                        incremental.hasFinalEol,
+                        full.hasFinalEol
+                    );
+                }
+
+                source = next;
+            }
+
+            void lex;
+        }
+
+        assert.ok(
+            applied > 0,
+            `${size} КБ: ни один Enter не пошёл точечным путём`
+        );
+    }
+});
+
+test("удаление перевода строки тоже пересчитывается точечно", () => {
+    /* Backspace в начале строки склеивает её с предыдущей. */
+    const source = bigLexSource(200);
+    const lex = lexRsl(source);
+    const lines = source.split("\n");
+    const offset = lines
+        .slice(0, Math.floor(lines.length * 0.8))
+        .join("\n").length;
+
+    assert.strictEqual(source.charAt(offset), "\n", "ожидался перевод строки");
+    const next = source.slice(0, offset) + source.slice(offset + 1);
+    const incremental = tryIncrementalRelex(source, lex, next);
+
+    assert.ok(incremental, "склейка строк обязана идти точечным путём");
+    const full = lexRsl(next);
+    assert.deepStrictEqual(incremental.tokens, full.tokens);
+    assert.deepStrictEqual(incremental.lineStarts, full.lineStarts);
+});
+
 console.log("");
 console.log(`Пройдено: ${passed}`);
 console.log(`Ошибок: ${failed}`);

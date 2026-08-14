@@ -9,12 +9,12 @@ import {
     SnippetString,
     SymbolInformation,
     SymbolKind,
-    window,
-    workspace
+    window
 } from "vscode";
 import type { LanguageClient } from "vscode-languageclient/node";
 
 import {
+    buildRslPlainEnterSnippet,
     buildRslSmartEnterSnippet,
     isRslBlockHeader
 } from "./smartEnter";
@@ -61,18 +61,19 @@ async function smartEnter(): Promise<void> {
         return;
     }
 
-    const enabled = workspace.getConfiguration(
-        "rslPlus",
-        editor.document.uri
-    ).get<boolean>("editor.completeBlocksOnEnter", true);
+    /*
+     * Настройка completeBlocksOnEnter здесь НЕ проверяется.
+     *
+     * Она решает ровно одно: перехватывать ли обычный Enter, и делает это
+     * условие в keybinding — то есть до обращения к расширению. Команда же
+     * вызывается ещё и по Shift+Enter, где пользователь попросил завершить
+     * блок явно. Проверка настройки внутри команды ломала именно этот вызов:
+     * при выключенной настройке Shift+Enter уходил в обычный перевод строки.
+     */
     const selection = editor.selection;
 
-    if (
-        !enabled ||
-        !selection.isEmpty ||
-        editor.selections.length !== 1
-    ) {
-        await defaultEnter(editor.document.eol);
+    if (!selection.isEmpty || editor.selections.length !== 1) {
+        await defaultEnter(editor);
         return;
     }
 
@@ -88,7 +89,7 @@ async function smartEnter(): Promise<void> {
         afterCursor.trim().length > 0 ||
         !isRslBlockHeader(beforeCursor)
     ) {
-        await defaultEnter(editor.document.eol);
+        await defaultEnter(editor);
         return;
     }
     const tabSize = typeof editor.options.tabSize === "number"
@@ -107,7 +108,7 @@ async function smartEnter(): Promise<void> {
     });
 
     if (!snippet) {
-        await defaultEnter(editor.document.eol);
+        await defaultEnter(editor);
         return;
     }
 
@@ -135,10 +136,24 @@ function findNextNonEmptyLine(
     return undefined;
 }
 
-async function defaultEnter(eol: EndOfLine): Promise<void> {
-    await commands.executeCommand("default:type", {
-        text: eol === EndOfLine.CRLF ? "\r\n" : "\n"
-    });
+/**
+ * Перевод строки там, где завершать блок нечем.
+ *
+ * `default:type` вставлял перевод строки как обычный текст, минуя обработку
+ * Enter редактором: курсор оказывался в нулевой колонке, и отступ терялся.
+ * Snippet ведёт себя иначе — отступ текущей строки редактор добавляет сам,
+ * поэтому свой отступ здесь не нужен и не допускается.
+ */
+async function defaultEnter(
+    editor: NonNullable<typeof window.activeTextEditor>
+): Promise<void> {
+    const eol = editor.document.eol === EndOfLine.CRLF ? "\r\n" : "\n";
+
+    await editor.insertSnippet(
+        new SnippetString(buildRslPlainEnterSnippet(eol)),
+        editor.selection.active,
+        { undoStopBefore: true, undoStopAfter: true }
+    );
 }
 
 async function foldAllMacros(): Promise<void> {
