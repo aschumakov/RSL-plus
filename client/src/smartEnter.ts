@@ -50,15 +50,18 @@ export function buildRslSmartEnterSnippet(
 }
 
 /**
- * Snippet обычного перевода строки — без единого пробела отступа.
+ * Отступ, который получает новая строка при обычном переводе строки.
  *
- * Отступ добавляет сам редактор: вставка многострочного snippet повторяет
- * отступ строки, в которой она происходит (см. buildRslSmartEnterSnippet).
- * Свой отступ здесь удваивал бы его — ровно это и произошло, когда команда
- * перестала звать `default:type` и начала вставлять перевод строки сама.
+ * Нужен только опциональному перехвату Enter: там команда уже забрала нажатие
+ * и обязана сделать то, что сделал бы редактор. Отступ берётся у строки, а не
+ * у текста до курсора, — Enter из середины отступа не должен его удваивать.
  */
-export function buildRslPlainEnterSnippet(eol: string): string {
-    return `${eol}$0`;
+export function plainEnterIndent(
+    lineText: string,
+    character: number
+): string {
+    const indent = /^[ \t]*/.exec(lineText)?.[0] || "";
+    return indent.slice(0, character);
 }
 
 export function isRslBlockHeader(value: string): boolean {

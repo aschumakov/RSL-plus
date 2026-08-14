@@ -4,6 +4,8 @@ import {
     CodeActionParams,
     CodeActionTriggerKind,
     CompletionItem,
+    type CompletionParams,
+    CompletionTriggerKind,
     Definition,
     DocumentHighlightParams,
     ErrorCodes,
@@ -42,6 +44,9 @@ import {
 import { findRslReferencesInWorkspace } from "../analysis/references";
 import { ReferenceIndex } from "../analysis/referenceIndex";
 import type { IFastDocumentSnapshot } from "../services/fastDocumentSnapshot";
+import {
+    buildRslFastCompletions
+} from "./fastCompletionProvider";
 import type {
     ParseWaitMode
 } from "../services/documentAnalysisService";
@@ -173,7 +178,7 @@ export class RslLanguageFeatureRegistry {
         } = this.environment;
 
         connection.onCompletion(async (
-            params: TextDocumentPositionParams,
+            params: CompletionParams,
             cancellationToken: CancellationToken
         ) => {
             const document = documents.get(params.textDocument.uri);
@@ -185,6 +190,16 @@ export class RslLanguageFeatureRegistry {
             this.environment.noteInteractiveActivity?.();
             const version = document.version;
             /*
+             * Ctrl+Space и trigger-символ — это действие пользователя: он
+             * открыл список и ждёт его сейчас. Такой запрос назначает разбор
+             * сам. Обычный набор букв, наоборот, идёт потоком и лишь ждёт
+             * уже назначенный: иначе именно Completion и снимал бы склейку
+             * правок, ради которой она сделана.
+             */
+            const waitMode: ParseWaitMode = isExplicitCompletion(params)
+                ? "force"
+                : "scheduled";
+            /*
              * Спан покрывает и ожидание модели: по одному лишь analysis.full
              * не видно, какой запрос его вызвал и сколько ждал сам запрос.
              */
@@ -192,7 +207,7 @@ export class RslLanguageFeatureRegistry {
                 ? this.environment.performance.start("completion", {
                     uri: document.uri,
                     version,
-                    waitMode: "scheduled"
+                    waitMode
                 })
                 : undefined;
             const finish = <T>(
@@ -204,13 +219,8 @@ export class RslLanguageFeatureRegistry {
                 }
                 return result;
             };
-            /*
-             * Completion приходит на каждый набранный символ, поэтому ждёт уже
-             * запланированный разбор, а не назначает свой: иначе именно этот
-             * запрос и снимал бы склейку правок, ради которой она сделана.
-             */
             await waitForParseBudget(
-                ensureDocumentParsed(document, "scheduled"),
+                ensureDocumentParsed(document, waitMode),
                 INTERACTIVE_PARSE_BUDGET_MS
             );
             if (requestIsStale(document, version, cancellationToken)) {
@@ -226,9 +236,24 @@ export class RslLanguageFeatureRegistry {
                  * идёт, и клиент должен повторить запрос, а не кэшировать
                  * пустой список до следующего изменения текста.
                  */
+                /*
+                 * Модели этой версии ещё нет, но отвечать пустым списком
+                 * нельзя: пользователь видит его как «в файле ничего нет».
+                 * Объявления берутся из быстрого снимка — без областей
+                 * видимости и типов, зато сразу. isIncomplete заставляет
+                 * клиента перезапросить список, когда модель будет готова.
+                 */
+                const fast = buildRslFastCompletions(
+                    this.environment.getFastDocumentSnapshot(document),
+                    document.offsetAt(params.position)
+                );
+
                 return finish(
-                    { isIncomplete: true, items: [] },
-                    { pendingModel: true, items: 0 }
+                    {
+                        isIncomplete: true,
+                        items: this.completionTransport.prepare(fast).items
+                    },
+                    { pendingModel: true, items: fast.length }
                 );
             }
             const contextual = buildRslContextCompletions(
@@ -291,9 +316,14 @@ export class RslLanguageFeatureRegistry {
 
             this.environment.noteInteractiveActivity?.();
             const version = document.version;
-            /* Как и Completion, приходит по ходу набора текста. */
+            /*
+             * Приходит только на «(» и «,» — то есть всегда по действию
+             * пользователя, а не потоком на каждую букву. Ждать здесь склейку
+             * правок значит показать подсказку параметров с опозданием ровно
+             * в тот момент, когда пользователь начал писать аргументы.
+             */
             await waitForParseBudget(
-                ensureDocumentParsed(document, "scheduled"),
+                ensureDocumentParsed(document, "force"),
                 INTERACTIVE_PARSE_BUDGET_MS
             );
             if (requestIsStale(document, version, cancellationToken)) {
@@ -1122,6 +1152,21 @@ const INTERACTIVE_PARSE_BUDGET_MS = 200;
  * нескольких открытых файлов даёт такие события пачкой.
  */
 const INLAY_REFRESH_COALESCE_MS = 300;
+
+/**
+ * Список открыт действием пользователя, а не набором текста.
+ *
+ * Ctrl+Space и trigger-символ означают, что он ждёт подсказку сейчас. Отсутствие
+ * context — старый клиент; там безопаснее считать запрос явным, иначе подсказка
+ * молчала бы до конца склейки правок.
+ */
+function isExplicitCompletion(params: CompletionParams): boolean {
+    const kind = params.context?.triggerKind;
+
+    return kind === undefined ||
+        kind === CompletionTriggerKind.Invoked ||
+        kind === CompletionTriggerKind.TriggerCharacter;
+}
 
 function errorText(error: unknown): string {
     return error instanceof Error ? error.message : String(error);

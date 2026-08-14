@@ -18,6 +18,12 @@ const {
     TextDocument
 } = require("../server/node_modules/vscode-languageserver-textdocument");
 const {
+    buildRslFastCompletions
+} = require("../server/out/features/fastCompletionProvider");
+const {
+    createFastDocumentSnapshot
+} = require("../server/out/services/fastDocumentSnapshot");
+const {
     DocumentAnalysisService
 } = require("../server/out/services/documentAnalysisService");
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
@@ -71,7 +77,9 @@ function createHarness(options = {}) {
             initialParseDelayMs: 0,
             changeDebounceMs: DEBOUNCE_MS,
             inactiveParseDelayMs:
-                options.inactiveParseDelayMs ?? DEBOUNCE_MS * 2
+                options.inactiveParseDelayMs ?? DEBOUNCE_MS * 2,
+            backgroundQuietMs:
+                options.backgroundQuietMs ?? DEBOUNCE_MS
         }
     );
 
@@ -271,6 +279,44 @@ async function run() {
         );
     });
 
+    await test("фоновый разбор ждёт паузы, а не срока", async () => {
+        /*
+         * Фиксированная отсрочка означала, что разбор покинутого файла
+         * стартует посреди работы в новом и отбирает у него процессор. Теперь
+         * фон ждёт тишины: пока идёт ввод, он переносится.
+         */
+        const other = "file:///other.mac";
+        const harness = createHarness({
+            others: [[other, TextDocument.create(other, "rsl", 1, "Macro O()\nEnd;\n")]],
+            inactiveParseDelayMs: 1,
+            backgroundQuietMs: DEBOUNCE_MS * 3
+        });
+        const document = harness.type();
+        harness.analysis.setActiveDocument(other);
+
+        /* Пользователь продолжает работать в другом файле. */
+        for (let stroke = 0; stroke < 4; stroke++) {
+            await new Promise(resolve => setTimeout(resolve, DEBOUNCE_MS));
+            harness.analysis.noteInteractiveActivity();
+        }
+
+        assert.deepStrictEqual(
+            harness.parsedVersions,
+            [],
+            "пока идёт ввод, фоновый разбор не имеет права занимать процессор"
+        );
+
+        /* Тишина — работа продолжается сама. */
+        await new Promise(resolve =>
+            setTimeout(resolve, DEBOUNCE_MS * 8));
+
+        assert.deepStrictEqual(
+            harness.parsedVersions,
+            [`${harness.uri}@${document.version}`],
+            "на первой же паузе отложенный разбор обязан состояться"
+        );
+    });
+
     await test("прерванный разбор продолжается, а не начинается заново", async () => {
         /*
          * Большой файл разбирается фазами lex -> parse -> модель. Уход на
@@ -317,6 +363,8 @@ async function run() {
                  */
                 changeDebounceMs: 0,
                 inactiveParseDelayMs: 0,
+                /* Ожидание тишины здесь только мешало бы перебору. */
+                backgroundQuietMs: 0,
                 performance: {
                     enabled: false,
                     start: () => undefined,
@@ -374,6 +422,55 @@ async function run() {
         assert.ok(
             marks.some(item => item.event === "analysis.resumed"),
             "продолжение обязано брать готовый syntax, а не считать его заново"
+        );
+    });
+
+    /*
+     * ─── Completion без готовой модели ──────────────────────────────────────
+     *
+     * Пока модель строится, ответом был пустой список — то есть подсказка
+     * выглядела так, будто в файле ничего не объявлено. Быстрый снимок даёт
+     * приблизительный состав сразу.
+     */
+
+    await test("без модели Completion отдаёт состав из быстрого снимка", async () => {
+        const source = [
+            "Class Doc",
+            "  Macro Save()",
+            "  End;",
+            "End;",
+            "Macro Helper(param)",
+            "  Var hidden = 1;",
+            "End;",
+            "Macro Test()",
+            "  ",
+            "End;"
+        ].join("\n");
+        const document = TextDocument.create("file:///fast.mac", "rsl", 1, source);
+        const snapshot = createFastDocumentSnapshot(document);
+        const inTest = source.lastIndexOf("  ") + 2;
+        const labels = buildRslFastCompletions(snapshot, inTest)
+            .map(item => item.label);
+
+        assert.deepStrictEqual(
+            labels,
+            ["Doc", "Save", "Helper", "Test"],
+            "классы, макропроцедуры и методы обязаны быть доступны сразу"
+        );
+
+        /* Параметр чужого Macro не предлагается: компилятор его здесь не видит. */
+        const inHelper = source.indexOf("Var hidden");
+        assert.ok(
+            buildRslFastCompletions(snapshot, inHelper).some(
+                item => item.label === "param"
+            ),
+            "внутри Helper его собственный параметр обязан предлагаться"
+        );
+        assert.ok(
+            !buildRslFastCompletions(snapshot, inTest).some(
+                item => item.label === "param"
+            ),
+            "внутри Test параметр Helper предлагаться не должен"
         );
     });
 

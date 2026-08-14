@@ -11,7 +11,10 @@ import {
     type IRslDeclarationDescriptor,
     type IRslDeclarationSnapshot
 } from "../analysis/declarationExtractor";
-import { tryIncrementalRelex } from "./incrementalLex";
+import {
+    tryIncrementalRelex,
+    type IRslRelexDecision
+} from "./incrementalLex";
 
 /** Лёгкий versioned snapshot: один lexer-проход, presentation кэшируется. */
 export interface IFastDocumentSnapshot {
@@ -40,12 +43,18 @@ export interface IFastDocumentSnapshot {
 
 export function createFastDocumentSnapshot(
     document: TextDocument,
-    previous?: IFastDocumentSnapshot
+    previous?: IFastDocumentSnapshot,
+    onLexDecision?: (decision: IRslRelexDecision) => void
 ): IFastDocumentSnapshot {
     const text = document.getText();
     const lex = (previous &&
-        tryIncrementalRelex(previous.text, previous.lex, text)) ||
+        tryIncrementalRelex(previous.text, previous.lex, text, onLexDecision)) ||
         lexRsl(text);
+
+    /* Первое лексирование сравнивать не с чем: точечный путь тут неприменим. */
+    if (!previous) {
+        onLexDecision?.({ reason: "firstLex" });
+    }
 
     return {
         uri: document.uri,

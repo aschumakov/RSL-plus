@@ -428,28 +428,34 @@ test("пересчёт строки совпадает с полным лекс�
  * полного лексирования, то есть путь становится вредным. Отсечка по доле
  * потока — единственное, что удерживает его от этого.
  */
-test("точечный relex отказывается от правки в начале большого файла", () => {
+test("точечный relex работает по всему файлу, а не только в конце", () => {
+    /*
+     * Прежде правка, после которой оставалось больше половины потока, уходила
+     * на полное лексирование: хвосту пересчитываются позиции, и копирование
+     * токенов было дороже самого lexRsl. Теперь дешевле — ограничение снято, и
+     * это проверяется на обоих концах файла.
+     */
     const source = bigLexSource(120);
     const lex = lexRsl(source);
 
-    const nearStart = source.indexOf("value");
-    const atStart = source.slice(0, nearStart + 3) + "X" +
-        source.slice(nearStart + 3);
-    assert.strictEqual(
-        tryIncrementalRelex(source, lex, atStart),
-        undefined,
-        "Правка в начале файла пересчитала бы позиции почти всему потоку"
-    );
+    const places = [
+        ["начало", source.indexOf("value")],
+        ["конец", source.lastIndexOf("value")]
+    ];
 
-    const nearEnd = source.lastIndexOf("value");
-    const atEnd = source.slice(0, nearEnd + 3) + "X" +
-        source.slice(nearEnd + 3);
-    const incremental = tryIncrementalRelex(source, lex, atEnd);
-    assert.ok(
-        incremental,
-        "Правка в конце файла обязана идти точечным путём: там сдвигать почти нечего"
-    );
-    assert.deepStrictEqual(incremental.tokens, lexRsl(atEnd).tokens);
+    for (const [where, offset] of places) {
+        const next = `${source.slice(0, offset + 3)}X${source.slice(offset + 3)}`;
+        const incremental = tryIncrementalRelex(source, lex, next);
+
+        assert.ok(incremental, `правка в ${where} файла обязана идти точечно`);
+        const full = lexRsl(next);
+        assert.deepStrictEqual(
+            incremental.tokens,
+            full.tokens,
+            `${where}: token stream разошёлся с полным лексированием`
+        );
+        assert.deepStrictEqual(incremental.lineStarts, full.lineStarts);
+    }
 });
 
 /*
@@ -537,6 +543,60 @@ test("удаление перевода строки тоже пересчиты
     const full = lexRsl(next);
     assert.deepStrictEqual(incremental.tokens, full.tokens);
     assert.deepStrictEqual(incremental.lineStarts, full.lineStarts);
+});
+
+test("причина выбора пути lex попадает в решение", () => {
+    /*
+     * По одной длительности lex не видно, почему правка пошла полным путём.
+     * Причины разные и лечатся по-разному, поэтому каждая называется отдельно.
+     */
+    const source = bigLexSource(200);
+    const lex = lexRsl(source);
+    const reasonOf = next => {
+        let decision;
+        tryIncrementalRelex(source, lex, next, value => {
+            decision = value;
+        });
+        return decision;
+    };
+
+    const lines = source.split("\n");
+    const late = lines.slice(0, Math.floor(lines.length * 0.9)).join("\n").length;
+    const applied = reasonOf(`${source.slice(0, late)}\n${source.slice(late)}`);
+    assert.strictEqual(applied.reason, "incremental");
+    /*
+     * Смещение может отличаться от места вставки на один символ: общий префикс
+     * захватывает и вставленный перевод строки, если следующий символ такой же.
+     */
+    assert.ok(
+        applied.editStart >= late && applied.editStart <= late + 1,
+        `позиция правки обязана быть в решении, получено ${applied.editStart}`
+    );
+    assert.ok(applied.editLine > 0, "номер строки правки тоже");
+    assert.strictEqual(applied.lineDelta, 1, "Enter добавляет одну строку");
+
+    /* Правка в начале файла теперь тоже точечная — предел на позицию снят. */
+    const early = source.indexOf("value");
+    const atStart = reasonOf(`${source.slice(0, early)}X${source.slice(early)}`);
+    assert.strictEqual(atStart.reason, "incremental");
+    assert.ok(
+        atStart.shiftedFraction > 0.9,
+        "сдвигается почти весь поток, и путь всё равно применяется"
+    );
+
+    assert.strictEqual(
+        reasonOf(`${source.slice(0, late)}/*${source.slice(late)}`).reason,
+        "multilineConstruct",
+        "открытый комментарий обязан называться своей причиной"
+    );
+
+    /* Маленький файл точечного пути не имеет вовсе. */
+    const small = "Macro T()\nEnd;\n";
+    let smallDecision;
+    tryIncrementalRelex(small, lexRsl(small), `${small}\n`, value => {
+        smallDecision = value;
+    });
+    assert.strictEqual(smallDecision.reason, "smallFile");
 });
 
 console.log("");

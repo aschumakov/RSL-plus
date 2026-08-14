@@ -3,9 +3,9 @@
 const assert = require("assert");
 const extensionManifest = require("../package.json");
 const {
-    buildRslPlainEnterSnippet,
     buildRslSmartEnterSnippet,
-    isRslBlockHeader
+    isRslBlockHeader,
+    plainEnterIndent
 } = require("../client/out/smartEnter");
 
 assert.ok(
@@ -42,18 +42,12 @@ assert.ok(
     ),
     "завершение блока обязано иметь собственное сочетание клавиш"
 );
-/*
- * Перехват Enter включён: без него не добавляется `End;`, а вставить его
- * правилами отступа редактора нельзя — appendText в onEnterRules дописывает
- * текст к строке курсора, а не создаёт закрывающую строку ниже. Цена перехвата
- * снижена в другом месте: Enter больше не заставляет лексировать файл целиком.
- */
 assert.strictEqual(
     extensionManifest.contributes.configuration.properties[
         "rslPlus.editor.completeBlocksOnEnter"
     ].default,
-    true,
-    "по умолчанию Enter завершает блок: иначе End; не появится"
+    false,
+    "по умолчанию Enter не доходит до расширения"
 );
 
 /*
@@ -61,17 +55,8 @@ assert.strictEqual(
  *
  * Отступ строки, в которой вставляется многострочный snippet, редактор
  * добавляет сам. Свой отступ поверх этого удваивал его: после каждого Enter
- * новая строка получала двойной отступ предыдущей. Правило одно на оба snippet,
- * поэтому проверяется на обоих.
+ * новая строка получала двойной отступ предыдущей.
  */
-for (const eol of ["\n", "\r\n"]) {
-    assert.strictEqual(
-        buildRslPlainEnterSnippet(eol),
-        `${eol}$0`,
-        "обычный перевод строки не имеет права нести свой отступ"
-    );
-}
-
 for (const indentUnit of ["    ", "\t"]) {
     const snippet = buildRslSmartEnterSnippet({
         beforeCursor: "        If (c)",
@@ -87,12 +72,76 @@ for (const indentUnit of ["    ", "\t"]) {
     );
 }
 
-/* Конфигурация языка не должна решать про отступ второй раз. */
+/* Отступ обычной новой строки, наоборот, абсолютный: там нет автоотступа. */
+assert.strictEqual(plainEnterIndent("        x = 1;", 14), "        ");
+assert.strictEqual(plainEnterIndent("x = 1;", 6), "");
 assert.strictEqual(
-    require("../language-configuration.json").indentationRules,
-    undefined,
-    "правила отступа складывались бы с отступом от snippet"
+    plainEnterIndent("        x = 1;", 4),
+    "    ",
+    "Enter из середины отступа не должен его удваивать"
 );
+
+/*
+ * Блок целиком дают шаблоны — так это и делают другие расширения. Без них
+ * выключенный перехват Enter означал бы, что End; писать руками.
+ */
+const snippets = require("../snippets/snippets.json");
+const withEnd = Object.values(snippets)
+    .filter(item => /\bend\s*;/i.test(
+        Array.isArray(item.body) ? item.body.join("\n") : String(item.body)
+    ))
+    .map(item => String(item.prefix).toLowerCase());
+
+for (const prefix of ["if", "while", "for", "macro"]) {
+    assert.ok(
+        withEnd.includes(prefix),
+        `шаблон ${prefix} обязан создавать блок вместе с End;`
+    );
+}
+
+/*
+ * Отступ после Enter выполняет ядро редактора: правила декларативные, и
+ * extension host в них не участвует. Это и есть замена перехвату Enter.
+ */
+const indentation = require("../language-configuration.json").indentationRules;
+const increase = new RegExp(
+    indentation.increaseIndentPattern.pattern,
+    indentation.increaseIndentPattern.flags
+);
+const decrease = new RegExp(
+    indentation.decreaseIndentPattern.pattern,
+    indentation.decreaseIndentPattern.flags
+);
+
+for (const line of [
+    "Macro Test()",
+    "Private Macro Test()",
+    "Class Doc",
+    "  If (c)",
+    "  While (x > 0)",
+    "  For (i = 0; i < n; i = i + 1)",
+    "  With (obj)",
+    "  Else",
+    "  Elif (c)",
+    "  OnError"
+]) {
+    assert.ok(increase.test(line), `после ${line} нужен отступ`);
+}
+
+for (const line of ["  End;", "End;", "  Else", "  Elif (c)", "  OnError"]) {
+    assert.ok(decrease.test(line), `${line} обязан выйти на уровень блока`);
+}
+
+for (const line of [
+    "  If (c) x = 1; End;",
+    "  x = 1;",
+    "  iff(x);",
+    "  Var endless = 1;",
+    "  ends = 1;"
+]) {
+    assert.ok(!increase.test(line), `${line} не открывает блок`);
+    assert.ok(!decrease.test(line), `${line} не закрывает блок`);
+}
 
 for (const header of [
     "If (1 == 1)",

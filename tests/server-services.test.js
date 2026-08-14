@@ -1055,11 +1055,20 @@ async function testInteractiveFallbackDoesNotMixVersions() {
         null,
         "Hover не должен отвечать по модели другой версии документа"
     );
-    assert.deepStrictEqual(
-        completion,
-        { isIncomplete: true, items: [] },
+    assert.strictEqual(
+        completion.isIncomplete,
+        true,
         "Completion обязан вернуть именно isIncomplete, чтобы клиент " +
             "повторил запрос после готовности parse"
+    );
+    /*
+     * Пустой список пользователь читает как «в файле ничего не объявлено».
+     * Пока модели нет, состав берётся из быстрого снимка — приблизительный, но
+     * не пустой.
+     */
+    assert.ok(
+        completion.items.length > 0,
+        "до готовности модели ответом обязан быть состав из быстрого снимка"
     );
     assert.strictEqual(signatureHelp, null);
 

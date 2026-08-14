@@ -4,6 +4,7 @@ import {
     EndOfLine,
     env,
     ExtensionContext,
+    Position,
     Range,
     Selection,
     SnippetString,
@@ -14,9 +15,9 @@ import {
 import type { LanguageClient } from "vscode-languageclient/node";
 
 import {
-    buildRslPlainEnterSnippet,
     buildRslSmartEnterSnippet,
-    isRslBlockHeader
+    isRslBlockHeader,
+    plainEnterIndent
 } from "./smartEnter";
 
 const SMART_ENTER_LOOKAHEAD_LINES = 128;
@@ -139,21 +140,30 @@ function findNextNonEmptyLine(
 /**
  * Перевод строки там, где завершать блок нечем.
  *
- * `default:type` вставлял перевод строки как обычный текст, минуя обработку
- * Enter редактором: курсор оказывался в нулевой колонке, и отступ терялся.
- * Snippet ведёт себя иначе — отступ текущей строки редактор добавляет сам,
- * поэтому свой отступ здесь не нужен и не допускается.
+ * Обычная правка, а не snippet: snippet-сессия, её undo-stop и подстановка
+ * $0 — цена, которую обычному переводу строки платить не за что. Отступ
+ * добавляется явно, потому что editor.edit никакого автоотступа не делает.
+ *
+ * Сюда попадают только те, кто включил completeBlocksOnEnter: по умолчанию
+ * Enter до расширения не доходит вовсе.
  */
 async function defaultEnter(
     editor: NonNullable<typeof window.activeTextEditor>
 ): Promise<void> {
     const eol = editor.document.eol === EndOfLine.CRLF ? "\r\n" : "\n";
-
-    await editor.insertSnippet(
-        new SnippetString(buildRslPlainEnterSnippet(eol)),
-        editor.selection.active,
-        { undoStopBefore: true, undoStopAfter: true }
+    const position = editor.selection.active;
+    const indent = plainEnterIndent(
+        editor.document.lineAt(position.line).text,
+        position.character
     );
+
+    await editor.edit(
+        builder => builder.insert(position, `${eol}${indent}`),
+        { undoStopBefore: true, undoStopAfter: false }
+    );
+
+    const landing = new Position(position.line + 1, indent.length);
+    editor.selection = new Selection(landing, landing);
 }
 
 async function foldAllMacros(): Promise<void> {

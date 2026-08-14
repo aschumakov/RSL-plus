@@ -71,5 +71,15 @@
             "open": "'",
             "close": "'"
         }
-    ]
+    ],
+    "indentationRules": {
+        "increaseIndentPattern": {
+            "pattern": "^\\s*(?!.*\\bend\\s*;)(?:(?:(?:private|local)\\s+)?(?:macro|class)\\b|(?:if|while|for|with)\\s*\\(|(?:else|elif|onerror)\\b)",
+            "flags": "i"
+        },
+        "decreaseIndentPattern": {
+            "pattern": "^\\s*(?:end\\b|else\\b|elif\\b|onerror\\b)",
+            "flags": "i"
+        }
+    }
 }

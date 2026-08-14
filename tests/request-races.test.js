@@ -128,7 +128,12 @@ function createRegistry({ uri, source, onParsed, settings }) {
     const module = index.updateOpenModule(uri, source, 1);
     const state = { document: createDocument(uri, 1, source) };
     /** Кто и как просил разбор: forced снимает debounce, requested — нет. */
-    const calls = { forced: 0, requested: 0, fastSnapshots: 0 };
+    const calls = {
+        forced: 0,
+        scheduled: 0,
+        requested: 0,
+        fastSnapshots: 0
+    };
 
     const handlers = {};
     const register = name => callback => {
@@ -192,8 +197,12 @@ function createRegistry({ uri, source, onParsed, settings }) {
             calls.fastSnapshots++;
             return createFastDocumentSnapshot(state.document);
         },
-        ensureDocumentParsed: async () => {
-            calls.forced++;
+        ensureDocumentParsed: async (_document, mode = "force") => {
+            if (mode === "force") {
+                calls.forced++;
+            } else {
+                calls.scheduled++;
+            }
             await onParsed?.(state);
             return module.symbolTree;
         },
@@ -491,6 +500,54 @@ const SAME_LENGTH = SOURCE.replace("Var local = value;", "Var lokal = value;");
             assert.ok(
                 calls.requested > 0,
                 "но разбор всё же должен быть запрошен, иначе модели не будет"
+            );
+        }
+    );
+
+    await test(
+        "Ctrl+Space и точка торопят разбор, набор букв — нет",
+        async () => {
+            /*
+             * Пользователь, открывший список, ждёт его сейчас. Поток букв,
+             * наоборот, идёт на каждый символ, и разбор по нему снимал бы
+             * склейку правок.
+             */
+            const { handlers, calls } = createRegistry({
+                uri: URI,
+                source: SOURCE
+            });
+            const request = context => {
+                calls.forced = 0;
+                calls.scheduled = 0;
+                return handlers.completion(
+                    {
+                        textDocument: { uri: URI },
+                        position: { line: 1, character: 2 },
+                        context
+                    },
+                    { isCancellationRequested: false }
+                );
+            };
+
+            /* Ctrl+Space. */
+            await request({ triggerKind: 1 });
+            assert.strictEqual(calls.forced, 1, "Ctrl+Space назначает разбор");
+
+            /* Точка. */
+            await request({ triggerKind: 2, triggerCharacter: "." });
+            assert.strictEqual(calls.forced, 1, "trigger-символ тоже");
+
+            /* Повторный запрос по неполному списку — это поток набора. */
+            await request({ triggerKind: 3 });
+            assert.strictEqual(
+                calls.forced,
+                0,
+                "набор букв обязан ждать уже назначенный разбор"
+            );
+            assert.strictEqual(
+                calls.scheduled,
+                1,
+                "но модель ему всё равно нужна"
             );
         }
     );

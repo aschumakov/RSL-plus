@@ -12,6 +12,7 @@ import {
     getFastDocumentSymbols,
     type IFastDocumentSnapshot
 } from "./fastDocumentSnapshot";
+import type { IRslRelexDecision } from "./incrementalLex";
 import type { PerformanceLogger } from "../performanceLogger";
 
 /*
@@ -52,11 +53,22 @@ const MAX_VALIDATIONS_PER_TICK = 1;
  */
 const PHASED_ANALYSIS_MIN_CHARS = 100_000;
 
+/*
+ * Сколько прерванных разборов разрешено держать.
+ *
+ * Каждая запись — это AST большого файла, то есть десятки мегабайт. Нужна она
+ * ровно на время одного переключения вкладки: покинутый файл дочитывается в
+ * фоне и точку освобождает. Двух хватает на «ушёл и сразу вернулся».
+ */
+const MAX_PHASE_CHECKPOINTS = 2;
+
 export interface IDocumentAnalysisOptions {
     changeDebounceMs?: number;
     slowParseLogMs?: number;
     initialParseDelayMs?: number;
     inactiveParseDelayMs?: number;
+    /** Пауза в действиях пользователя, после которой можно работать в фоне. */
+    backgroundQuietMs?: number;
     log(message: string): void;
     performance?: PerformanceLogger;
     invalidateProviderCaches(uri: string): void;
@@ -78,6 +90,8 @@ interface IValidationTask {
     document: TextDocument;
     generation: number;
     priority: AnalysisPriority;
+    /** Когда задача встала в очередь: разница со стартом — ожидание слота. */
+    queuedAtMs: number;
     promise: Promise<void>;
     resolve(): void;
     reject(error: unknown): void;
@@ -113,6 +127,16 @@ export class DocumentAnalysisService {
     private initialParseDelayMs: number;
     /** Отсрочка разбора вкладки, которую покинули, не дождавшись debounce. */
     private inactiveParseDelayMs: number;
+    /**
+     * До какого момента считать, что пользователь работает.
+     *
+     * Разбор покинутого файла не выбрасывается, а откладывается — но
+     * фиксированная отсрочка означала, что он всё равно стартует посреди
+     * работы в другом файле и отбирает у неё процессор. Поэтому фоновая работа
+     * ждёт не срок, а паузу: пока идёт ввод или навигация, она переносится.
+     */
+    private interactiveUntilMs = 0;
+    private backgroundQuietMs: number;
     private activeDocumentUri: string | undefined;
     /**
      * Готовые фазы прерванного разбора: uri -> версия и её syntax.
@@ -137,6 +161,47 @@ export class DocumentAnalysisService {
         this.slowParseLogMs = options.slowParseLogMs ?? 75;
         this.initialParseDelayMs = options.initialParseDelayMs ?? 50;
         this.inactiveParseDelayMs = options.inactiveParseDelayMs ?? 400;
+        this.backgroundQuietMs = options.backgroundQuietMs ?? 1500;
+    }
+
+    /**
+     * Пользователь что-то сделал: ввод текста, переключение вкладки, запрос.
+     *
+     * Фоновый разбор после этого ждёт паузы. Активный документ отсрочка не
+     * задевает: у него своя очередь и свой приоритет.
+     */
+    noteInteractiveActivity(): void {
+        this.interactiveUntilMs = Date.now() + this.backgroundQuietMs;
+    }
+
+    /** Сколько ещё ждать тишины; 0 — можно работать. */
+    private quietDelayMs(): number {
+        return Math.max(0, this.interactiveUntilMs - Date.now());
+    }
+
+    /**
+     * Откладывает готовые фазы, вытесняя самые старые.
+     *
+     * Контрольная точка держит AST целиком, и без предела их накопилось бы
+     * столько, сколько файлов пользователь успел покинуть посреди разбора. Двух
+     * достаточно: они нужны на время одного переключения, а не как кэш.
+     */
+    private rememberCheckpoint(
+        uri: string,
+        version: number,
+        syntax: ReturnType<typeof parseRslSyntax>
+    ): void {
+        this.phaseCheckpoints.delete(uri);
+        this.phaseCheckpoints.set(uri, { version, syntax });
+
+        while (this.phaseCheckpoints.size > MAX_PHASE_CHECKPOINTS) {
+            const oldest = this.phaseCheckpoints.keys().next().value;
+
+            if (oldest === undefined) {
+                break;
+            }
+            this.phaseCheckpoints.delete(oldest);
+        }
     }
 
     get isBusy(): boolean {
@@ -263,6 +328,8 @@ export class DocumentAnalysisService {
         }
 
         this.openedVersions.set(document.uri, document.version);
+        /* Ввод текста — самый частый признак того, что пользователь работает. */
+        this.noteInteractiveActivity();
         /*
          * Отложенные фазы относятся к прежней версии текста. Совпадение версий
          * их и так не пропустит, но AST прежней версии незачем держать в
@@ -295,6 +362,8 @@ export class DocumentAnalysisService {
     setActiveDocument(uri: string | undefined): void {
         const previousActiveUri = this.activeDocumentUri;
         this.activeDocumentUri = uri;
+        /* Переключение вкладки — тоже работа пользователя, а не пауза. */
+        this.noteInteractiveActivity();
 
         for (const task of this.foregroundQueue) {
             task.priority = "background";
@@ -512,13 +581,23 @@ export class DocumentAnalysisService {
                 chars: document.getText().length
             })
             : undefined;
+        let decision: IRslRelexDecision | undefined;
         const snapshot = createFastDocumentSnapshot(
             document,
-            this.fastSnapshots.get(document.uri)
+            this.fastSnapshots.get(document.uri),
+            value => {
+                decision = value;
+            }
         );
         if (span) {
             performance.end(span, {
-                tokens: snapshot.lex.tokens.length
+                tokens: snapshot.lex.tokens.length,
+                /* Почему lex пошёл полным путём, а не точечным. */
+                lexReason: decision?.reason,
+                editStart: decision?.editStart,
+                editLine: decision?.editLine,
+                shiftedFraction: decision?.shiftedFraction,
+                windowChars: decision?.windowChars
             });
         }
         this.fastSnapshots.set(document.uri, snapshot);
@@ -627,6 +706,28 @@ export class DocumentAnalysisService {
                 current.uri === this.activeDocumentUri
                     ? "foreground"
                     : "background";
+
+            /*
+             * Фоновая работа переносится, пока пользователь работает.
+             *
+             * Иначе разбор покинутого файла стартует ровно посреди работы в
+             * новом и отбирает у неё процессор — при том, что результат никто
+             * не ждёт. Перенос повторяется, поэтому «через 400 мс» превратилось
+             * в «на первой же паузе».
+             */
+            const quiet = priority === "background" ? this.quietDelayMs() : 0;
+
+            if (quiet > 0) {
+                this.options.performance?.mark?.("analysis.deferred", {
+                    uri,
+                    version,
+                    reason: "userActive",
+                    waitMs: quiet
+                });
+                this.scheduleWithDelay(current, quiet);
+                return;
+            }
+
             this.startValidation(current, generation, priority).catch(error => {
                 this.options.log(
                     `Validation failed: ${uri}\n${errorToString(error)}`
@@ -683,6 +784,7 @@ export class DocumentAnalysisService {
             document,
             generation,
             priority,
+            queuedAtMs: Date.now(),
             promise,
             resolve: resolveTask,
             reject: rejectTask
@@ -879,6 +981,14 @@ export class DocumentAnalysisService {
             return;
         }
 
+        this.options.performance?.mark?.("analysis.dequeued", {
+            uri,
+            version: task.document.version,
+            priority: task.priority,
+            /* Ожидание слота: сколько задача простояла в очереди. */
+            queueWaitMs: Date.now() - task.queuedAtMs
+        });
+
         Promise.resolve()
             .then(() => this.validate(task.document, task.generation))
             .then(
@@ -1027,6 +1137,9 @@ export class DocumentAnalysisService {
             }
         }
 
+        /* Отсюда и до следующего возврата управления поток занят непрерывно. */
+        let blockingSinceMs = Date.now();
+
         /*
          * Продолжение прерванного разбора: syntax этой версии уже посчитан.
          * Повторять самую дорогую фазу незачем — она не зависит ни от того,
@@ -1066,7 +1179,9 @@ export class DocumentAnalysisService {
         if (syntaxSpan) {
             performance.end(syntaxSpan, {
                 syntaxTokens: syntax.tokens.length,
-                parserDiagnostics: syntax.diagnostics.length
+                parserDiagnostics: syntax.diagnostics.length,
+                resumed,
+                blockingMs: blockingMs(blockingSinceMs)
             });
         }
         const treeSpan = performance?.enabled
@@ -1082,8 +1197,9 @@ export class DocumentAnalysisService {
              * ещё нет. Результат откладывается ДО паузы — иначе проверка ниже
              * выйдет, и посчитанное пропадёт.
              */
-            this.phaseCheckpoints.set(uri, { version, syntax });
+            this.rememberCheckpoint(uri, version, syntax);
             await yieldToEventLoop();
+            blockingSinceMs = Date.now();
         }
 
         if (!this.stillCurrent(uri, version, generation)) {
@@ -1100,7 +1216,8 @@ export class DocumentAnalysisService {
         this.phaseCheckpoints.delete(uri);
         if (treeSpan) {
             performance.end(treeSpan, {
-                topLevelSymbols: model.symbolTree.children.length
+                topLevelSymbols: model.symbolTree.children.length,
+                blockingMs: blockingMs(blockingSinceMs)
             });
         }
 
@@ -1250,6 +1367,17 @@ export class DocumentAnalysisService {
 
 function yieldToEventLoop(): Promise<void> {
     return new Promise(resolve => setImmediate(resolve));
+}
+
+/**
+ * Сколько подряд фаза держала основной поток.
+ *
+ * Именно эта величина видна пользователю как «редактор не отвечает»: сумма
+ * длительностей ни о чём не говорит, если между ними управление возвращалось.
+ * Считается по времени между возвратами.
+ */
+function blockingMs(sinceMs: number): number {
+    return Date.now() - sinceMs;
 }
 
 function errorToString(error: unknown): string {

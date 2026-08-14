@@ -476,6 +476,7 @@ languageFeatures = new RslLanguageFeatureRegistry({
     noteInteractiveActivity: () => {
         moduleLoader.noteInteractiveActivity();
         workspaceDiscovery.noteInteractiveActivity();
+        documentAnalysis.noteInteractiveActivity();
     },
     log: logMessage,
     performance: performanceLogger

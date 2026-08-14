@@ -226,8 +226,8 @@
             "rslPlus.editor.completeBlocksOnEnter": {
                "scope": "resource",
                "type": "boolean",
-               "default": true,
-               "description": "Перехватывать обычный Enter, чтобы после заголовка IF, WHILE, FOR, WITH, MACRO или CLASS добавить закрывающий END. Ценой этого каждое нажатие Enter идёт через расширение. По умолчанию выключено: Enter обрабатывает редактор, а завершить блок можно через Shift+Enter."
+               "default": false,
+               "description": "Перехватывать обычный Enter, чтобы после заголовка IF, WHILE, FOR, WITH, MACRO или CLASS добавить закрывающий END. Ценой этого каждое нажатие Enter идёт через расширение и зависит от его загруженности. По умолчанию выключено: Enter обрабатывает сам редактор, блок целиком дают шаблоны if, while, for и macro, а завершить уже написанный заголовок можно через Shift+Enter."
             },
             "rslPlus.performance.logFile": {
                "scope": "window",

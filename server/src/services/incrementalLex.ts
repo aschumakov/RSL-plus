@@ -9,26 +9,6 @@ import {
 export const INCREMENTAL_LEX_MIN_CHARS = 50_000;
 
 /*
- * Какую долю token stream разрешено пересчитывать точечной правкой.
- *
- * Стоимость incremental relex определяется не размером правки, а числом
- * токенов ПОСЛЕ неё: всем им заново вычисляются позиции. Замеры (npm run
- * bench --scenario=relex) показывают, что для правки в начале файла путь
- * оказывается медленнее полного лексирования:
- *
- *   доля токенов после правки | 550КБ            | 1.1МБ
- *   100%                      | 46.5 против 40.0 | 109.7 против 92.1
- *    50%                      | 23.4 против 40.0 | 34.4 против 92.1
- *    25%                      |  7.3 против 40.0 | 30.5 против 92.1
- *     5%                      |  5.3 против 40.0 |  9.2 против 92.1
- *
- * Поэтому правка, задевающая больше половины потока, отправляется на полный
- * lexRsl: так путь никогда не оказывается медленнее альтернативы, а там, где
- * применяется, даёт от 1.7 до 12 раз.
- */
-const MAX_SHIFTED_TOKEN_FRACTION = 0.5;
-
-/*
  * comment/square/newline/bom могут менять состояние lexer за пределами
  * одного токена (многострочные конструкции), поэтому правка внутри них
  * всегда уходит на полный relex.
@@ -46,6 +26,24 @@ const SAFE_KINDS = new Set<RslTokenKind>([
  * лексированию.
  */
 const MAX_WINDOW_FRACTION = 0.25;
+
+/**
+ * Почему правка пошла точечным путём или полным.
+ *
+ * По одной длительности lex этого не видно, а причины разные и лечатся
+ * по-разному: `multilineConstruct` — строка, комментарий или SQL-блок через
+ * границу окна, `windowTooLarge` — большая вставка.
+ */
+export interface IRslRelexDecision {
+    reason: "incremental" | "firstLex" | "smallFile" | "unchanged" |
+        "multilineConstruct" | "windowTooLarge" | "unsplittableEdit";
+    /** Смещение правки: видно, в какой части файла её сделали. */
+    editStart?: number;
+    editLine?: number;
+    windowChars?: number;
+    shiftedFraction?: number;
+    lineDelta?: number;
+}
 
 /** Токены изменённых строк: что заменяем и на каком участке текста. */
 interface ILineWindow {
@@ -100,13 +98,26 @@ interface ILineWindow {
 export function tryIncrementalRelex(
     previousText: string,
     previousLex: IRslLexResult,
-    nextText: string
+    nextText: string,
+    onDecision?: (decision: IRslRelexDecision) => void
 ): IRslLexResult | undefined {
+    /*
+     * Причина решения уходит в лог: по одной длительности lex не видно, почему
+     * правка пошла полным путём — файл мал, правка в начале, окно велико или в
+     * него попала многострочная конструкция.
+     */
+    const decide = (
+        reason: IRslRelexDecision["reason"],
+        fields?: Partial<IRslRelexDecision>
+    ): void => onDecision?.({ reason, ...fields });
+
     if (previousText.length < INCREMENTAL_LEX_MIN_CHARS) {
+        decide("smallFile");
         return undefined;
     }
 
     if (previousText === nextText) {
+        decide("unchanged");
         return previousLex;
     }
 
@@ -122,34 +133,52 @@ export function tryIncrementalRelex(
     const newEnd = nextText.length - suffix;
 
     if (oldEnd < oldStart || newEnd < prefix) {
+        decide("unsplittableEdit", { editStart: oldStart });
         return undefined;
     }
 
     const window = findLineWindow(previousLex, previousText, oldStart, oldEnd);
 
     if (!window) {
+        decide("multilineConstruct", { editStart: oldStart });
         return undefined;
     }
 
     if (window.end - window.start > previousText.length * MAX_WINDOW_FRACTION) {
+        decide("windowTooLarge", {
+            editStart: oldStart,
+            editLine: window.line,
+            windowChars: window.end - window.start
+        });
         return undefined;
     }
 
     /*
-     * Правка в начале файла пересчитала бы позиции почти всему потоку, и это
-     * дороже, чем просто пролексировать документ заново (см.
-     * MAX_SHIFTED_TOKEN_FRACTION). Проверка стоит до relex строки, чтобы не
-     * платить даже за него.
+     * Позиция правки больше не ограничивает путь.
+     *
+     * Раньше правка, после которой оставалось больше половины потока,
+     * отправлялась на полное лексирование: хвосту пересчитываются позиции, и
+     * копирование через spread делало это дороже самого lexRsl. Токен теперь
+     * собирается перечислением полей, а массив выделяется сразу нужной длины
+     * (см. shiftToken), и путь выгоден по всему файлу — замеры на правке,
+     * сдвигающей почти весь поток:
+     *
+     *   размер | сдвиг потока | точечный | полный
+     *    255КБ |          98% |   8.4 мс | 23.3 мс
+     *    515КБ |          98% |  15.4 мс | 46.9 мс
+     *
+     * То есть Enter в начале большого файла ускорился примерно втрое там, где
+     * прежде не ускорялся вовсе.
      */
     const shifted = previousLex.tokens.length - window.lastIndex - 1;
-    if (shifted > previousLex.tokens.length * MAX_SHIFTED_TOKEN_FRACTION) {
-        return undefined;
-    }
-
     const delta = nextText.length - previousText.length;
     const sliceEnd = window.end + delta;
 
     if (sliceEnd < window.start) {
+        decide("unsplittableEdit", {
+            editStart: oldStart,
+            editLine: window.line
+        });
         return undefined;
     }
 
@@ -157,16 +186,18 @@ export function tryIncrementalRelex(
     const produced = lexRsl(slice).tokens;
 
     if (!coversExactly(produced, slice.length, window.expectTrailingNewline)) {
+        decide("multilineConstruct", {
+            editStart: oldStart,
+            editLine: window.line
+        });
         return undefined;
     }
 
-    const replacement: IRslToken[] = produced.map(token => ({
-        ...token,
-        start: window.start + token.start,
-        end: window.start + token.end,
-        line: window.line + token.line,
-        endLine: window.line + token.endLine
-    }));
+    const replacement: IRslToken[] = produced.map(token => shiftToken(
+        token,
+        window.start,
+        window.line
+    ));
 
     /*
      * Сколько строк стало больше или меньше.
@@ -183,27 +214,37 @@ export function tryIncrementalRelex(
         (window.expectTrailingNewline ? 1 : 0);
     const lineDelta = producedNewlines.length - replacedNewlines;
 
-    const tokens = previousLex.tokens.slice(0, window.firstIndex)
-        .concat(replacement);
+    /*
+     * Массив собирается один раз нужной длины, без push и без промежуточных
+     * concat: перекладывание хвоста — самая массовая операция этого пути, и
+     * именно она определяла, применим он вообще или нет.
+     */
+    const tailStart = window.lastIndex + 1;
+    const tailLength = previousLex.tokens.length - tailStart;
+    const tokens: IRslToken[] = new Array(
+        window.firstIndex + replacement.length + tailLength
+    );
 
-    for (
-        let index = window.lastIndex + 1;
-        index < previousLex.tokens.length;
-        index++
-    ) {
-        const original = previousLex.tokens[index];
-        /*
-         * Колонки хвоста не меняются: окно кончается либо переводом строки,
-         * либо концом файла, поэтому следующий токен всегда начинает строку.
-         * Исключение — пустое окно в последней строке, где хвоста нет вовсе.
-         */
-        tokens.push({
-            ...original,
-            start: original.start + delta,
-            end: original.end + delta,
-            line: original.line + lineDelta,
-            endLine: original.endLine + lineDelta
-        });
+    for (let index = 0; index < window.firstIndex; index++) {
+        tokens[index] = previousLex.tokens[index];
+    }
+
+    for (let index = 0; index < replacement.length; index++) {
+        tokens[window.firstIndex + index] = replacement[index];
+    }
+
+    /*
+     * Колонки хвоста не меняются: окно кончается либо переводом строки, либо
+     * концом файла, поэтому следующий токен всегда начинает строку.
+     */
+    const tailOffset = window.firstIndex + replacement.length;
+
+    for (let index = 0; index < tailLength; index++) {
+        tokens[tailOffset + index] = shiftToken(
+            previousLex.tokens[tailStart + index],
+            delta,
+            lineDelta
+        );
     }
 
     /*
@@ -226,6 +267,14 @@ export function tryIncrementalRelex(
     ) {
         lineStarts.push(previousLex.lineStarts[index] + delta);
     }
+
+    decide("incremental", {
+        editStart: oldStart,
+        editLine: window.line,
+        windowChars: window.end - window.start,
+        shiftedFraction: shifted / previousLex.tokens.length,
+        lineDelta
+    });
 
     return {
         tokens,
@@ -384,6 +433,42 @@ function coversExactly(
 
     return !expectTrailingNewline ||
         (lastIndex >= 0 && tokens[lastIndex].kind === "newline");
+}
+
+/**
+ * Тот же токен, сдвинутый по смещению и по номеру строки.
+ *
+ * Поля перечислены явно, а не скопированы через spread. Разница на потоке из
+ * 200 тысяч токенов — 9 мс против 46, то есть spread и был той ценой, из-за
+ * которой правку в начале файла приходилось отправлять на полное
+ * лексирование (см. MAX_SHIFTED_TOKEN_FRACTION).
+ *
+ * squareKind ставится только когда он есть: лишнее поле со значением undefined
+ * сделало бы токен неотличимым по смыслу, но отличимым при сравнении с полным
+ * лексированием — а на этом сравнении держится проверка всего пути.
+ */
+function shiftToken(
+    token: IRslToken,
+    offsetDelta: number,
+    lineDelta: number
+): IRslToken {
+    const shifted: IRslToken = {
+        kind: token.kind,
+        raw: token.raw,
+        value: token.value,
+        start: token.start + offsetDelta,
+        end: token.end + offsetDelta,
+        line: token.line + lineDelta,
+        character: token.character,
+        endLine: token.endLine + lineDelta,
+        endCharacter: token.endCharacter
+    };
+
+    if (token.squareKind !== undefined) {
+        shifted.squareKind = token.squareKind;
+    }
+
+    return shifted;
 }
 
 /** Индекс строки, содержащей смещение; lineStarts возрастает. */
