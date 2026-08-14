@@ -345,6 +345,72 @@ test("в состав классов не попадают параметры и
     }
 });
 
+/*
+ * ─── Числовые константы ─────────────────────────────────────────────────────
+ *
+ * Тип брался по виду токена, и всякое число оказывалось Integer: `$0` —
+ * денежная константа, а подсказка называла её целым.
+ *
+ * Формы взяты из раздела «Типы данных» руководства дословно.
+ */
+
+test("тип числовой константы соответствует её записи", () => {
+    const expected = [
+        ["2345", "integer"],
+        ["1236", "integer"],
+        ["4356.234", "double"],
+        ["345.", "double"],
+        [".1234", "double"],
+        ["1231.2341e-23", "double"],
+        ["$146", "money"],
+        ["$765.23", "money"],
+        ["$0", "money"],
+        ["#F2", "integer"],
+        ["#125ab2", "integer"]
+    ];
+
+    for (const [literal, type] of expected) {
+        assert.strictEqual(
+            reference.numericLiteralType(literal),
+            type,
+            `${literal} обязан иметь тип ${type}`
+        );
+    }
+
+    /* Константа без единой цифры недействительна — типа у неё нет. */
+    for (const invalid of ["$", "$.", "#", ""]) {
+        assert.strictEqual(
+            reference.numericLiteralType(invalid),
+            "",
+            `${invalid || "пустая строка"} — не число`
+        );
+    }
+});
+
+test("лексер собирает число целиком", () => {
+    const { lexRsl } = require("../server/out/lexer");
+    const literalOf = source => lexRsl(`Var x = ${source};`).tokens
+        .filter(token => token.kind === "number")
+        .map(token => token.raw)
+        .join("|");
+
+    /* Раньше `.1234` распадалось на оператор доступа и целое число, а у
+     * `1231.2341e-23` знак показателя уходил в отдельный токен. */
+    assert.strictEqual(literalOf(".1234"), ".1234");
+    assert.strictEqual(literalOf("1231.2341e-23"), "1231.2341e-23");
+    assert.strictEqual(literalOf("1.5e+3"), "1.5e+3");
+    assert.strictEqual(literalOf("$0"), "$0");
+
+    /* Точка после значения — обращение к члену, а не начало числа. */
+    const members = lexRsl("Var y = rs.0;").tokens
+        .filter(token => token.kind === "number")
+        .map(token => token.raw);
+    assert.deepStrictEqual(members, ["0"], "rs.0 — не литерал");
+
+    /* Минус после имени — вычитание, а не показатель степени. */
+    assert.strictEqual(literalOf("count-1"), "1");
+});
+
 if (failed > 0) {
     console.error(`\nПройдено: ${passed}\nОшибок: ${failed}`);
     process.exitCode = 1;

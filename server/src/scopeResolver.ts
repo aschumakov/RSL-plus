@@ -82,6 +82,15 @@ interface IConstructorAssignment {
     /** Имя в правой части: конструктор класса или процедура. */
     callee?: string;
     /**
+     * Голое имя в правой части: `MessageText = TStringList;`.
+     *
+     * Отличается от callee тем, что типом считается только класс. Пропустить
+     * такое имя через getCallableResultType нельзя: у `callback = SomeMacro`
+     * переменная получила бы тип результата процедуры, хотя присвоена сама
+     * процедура, а не то, что она возвращает.
+     */
+    bareClass?: string;
+    /**
      * Вызов метода получателя: `rs = cmd.Execute()`.
      *
      * Тип здесь нельзя посчитать на этапе разбора токенов: сначала нужно
@@ -1592,6 +1601,110 @@ export class RslScopeResolver {
             : declared;
     }
 
+    /**
+     * Тип из самого объявления: написанный либо выведенный из инициализатора.
+     *
+     * Отличается от effectiveTypeName тем, что не смотрит на присваивания ниже
+     * по тексту — и потому не строит индекс присваиваний всего файла. Для
+     * подсказки у объявления этого достаточно: она показывает тип начального
+     * значения, а не того, что переменной присвоят позже.
+     *
+     * Замер, ради которого это выделено: первый запрос подсказок после каждой
+     * правки стоил 11 мс на файле 54 КБ и 27 мс на 224 КБ, потому что индекс
+     * строился заново для каждой новой модели — при том, что редактор просит
+     * подсказки только для видимых строк.
+     */
+    declarationTypeName(
+        uri: string,
+        tree: RslSymbol,
+        symbol: RslSymbol
+    ): string {
+        const declared = symbol.typeName;
+
+        if (!symbol.isTypeVariant && declared) {
+            return declared;
+        }
+
+        const module = isAssignableObject(symbol)
+            ? this.index.getModule(uri)
+            : undefined;
+
+        if (!module) {
+            return declared;
+        }
+
+        const tokens = this.getTokens(module);
+        const fromDeclaration = inferDeclaredType(tokens, symbol);
+
+        if (fromDeclaration && fromDeclaration !== "variant") {
+            return fromDeclaration;
+        }
+
+        const initializer = this.initializerTypeName(
+            uri,
+            tree,
+            tokens,
+            symbol
+        );
+
+        return this.isResolvableTypeName(uri, tree, initializer)
+            ? initializer
+            : declared;
+    }
+
+    /**
+     * Тип инициализатора объявления: `Var doc = TBFile (...)`.
+     *
+     * Разбирается ровно то, что стоит сразу за `=` и занимает весь остаток
+     * оператора: вызов `Имя (…)` или голое `Имя`. Выражение сложнее этого
+     * типом не считается — угадывать тип у `a + b` неоткуда.
+     */
+    private initializerTypeName(
+        uri: string,
+        tree: RslSymbol,
+        tokens: IRslToken[],
+        symbol: RslSymbol
+    ): string {
+        const nameIndex = lowerBoundByStart(tokens, symbol.range.start);
+
+        if (
+            nameIndex >= tokens.length ||
+            tokens[nameIndex].start !== symbol.range.start
+        ) {
+            return "";
+        }
+
+        let index = nameIndex + 1;
+
+        /* Написанный тип пропускается: `Var doc: Variant = TBFile ()`. */
+        if (
+            tokens[index]?.kind === "symbol" && tokens[index].raw === ":" &&
+            tokens[index + 1]?.kind === "identifier"
+        ) {
+            index += 2;
+        }
+
+        const equals = tokens[index];
+
+        if (
+            !equals || equals.kind !== "symbol" || equals.raw !== "=" ||
+            tokens[index + 1]?.kind !== "identifier"
+        ) {
+            return "";
+        }
+
+        const value = tokens[index + 1];
+        const after = tokens[index + 2];
+
+        if (endsStatement(after)) {
+            return this.bareClassName(uri, tree, value.value, value.start);
+        }
+
+        return after.kind === "symbol" && after.raw === "("
+            ? this.getCallableResultType(uri, tree, value.value, value.start)
+            : "";
+    }
+
     /** Существует ли такой тип: примитив языка или разрешимый класс. */
     private isResolvableTypeName(
         uri: string,
@@ -1615,6 +1728,15 @@ export class RslScopeResolver {
             return this.memberResultType(module, tree, assignment);
         }
 
+        if (assignment.bareClass) {
+            return this.bareClassName(
+                module.uri,
+                tree,
+                assignment.bareClass,
+                assignment.offset
+            );
+        }
+
         return assignment.callee
             ? this.getCallableResultType(
                 module.uri,
@@ -1623,6 +1745,40 @@ export class RslScopeResolver {
                 assignment.offset
             )
             : "";
+    }
+
+    /**
+     * Имя класса, если справа от `=` стоит именно класс.
+     *
+     * Для всего остального — пусто. Процедура, переменная и ссылка на
+     * процедуру справа типом не считаются: `callback = SomeMacro` присваивает
+     * саму процедуру, и тип её результата к переменной отношения не имеет.
+     */
+    private bareClassName(
+        uri: string,
+        tree: RslSymbol,
+        name: string,
+        offset: number
+    ): string {
+        const resolved = this.resolveName(
+            uri,
+            tree,
+            name,
+            offset,
+            symbol => symbol.kind === CompletionItemKind.Class
+        );
+
+        if (resolved) {
+            return resolved.symbol.name;
+        }
+
+        /* Класс импортированного прикладного модуля. */
+        const platform = this.platformModules?.findClass(
+            this.visiblePlatformModules(uri),
+            name
+        );
+
+        return platform ? platform.symbol.name : "";
     }
 
     /**
@@ -1755,6 +1911,16 @@ export class RslScopeResolver {
                         receiver: callee.value,
                         method: tokens[index + 4].value
                     }
+                };
+            } else if (endsStatement(next)) {
+                /*
+                 * Голое имя: `MessageText = TStringList;`. Классом оно окажется
+                 * или нет — решается при выводе типа; здесь запоминается только
+                 * то, что справа стоит одно имя и больше ничего.
+                 */
+                assignment = {
+                    offset: target.start,
+                    bareClass: callee.value
                 };
             }
 
@@ -2193,6 +2359,12 @@ function getChildrenByName(scope: RslSymbol): Map<string, RslSymbol[]> {
     }
 
     return result;
+}
+
+/** Конец выражения справа от `=`: дальше присваиваемого значения нет. */
+function endsStatement(token: IRslToken | undefined): boolean {
+    return !token ||
+        (token.kind === "symbol" && (token.raw === ";" || token.raw === ","));
 }
 
 function inferDeclaredType(

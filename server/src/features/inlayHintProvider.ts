@@ -76,17 +76,18 @@ function createHint(
         return undefined;
     }
 
-    const typeName = resolver.effectiveTypeName(
+    /*
+     * Только объявление и его инициализатор.
+     *
+     * Присваивания ниже по тексту подсказке не нужны: она стоит у объявления и
+     * говорит о начальном значении. Общий effectiveTypeName ради них строил
+     * индекс присваиваний всего файла — на каждую новую модель, то есть на
+     * каждую правку, при том что редактор просит подсказки для видимых строк.
+     */
+    const typeName = resolver.declarationTypeName(
         module.uri,
         module.symbolTree,
-        symbol,
-        /*
-         * Позиция запроса — сразу за именем: тип берётся из присваиваний ДО
-         * объявления и самого объявления, а не из того, что будет присвоено
-         * ниже. Иначе подсказка у `Var doc;` показывала бы тип, которого в этой
-         * строке ещё нет.
-         */
-        symbol.selectionRange.end
+        symbol
     );
 
     if (!typeName || typeName.toLowerCase() === "variant") {

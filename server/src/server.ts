@@ -13,7 +13,10 @@ import { TextDocument } from "vscode-languageserver-textdocument";
 import { RslSymbol } from "./symbols/rslSymbol";
 import { RslDiagnosticEngine } from "./diagnostics/diagnosticEngine";
 import { DiagnosticsCoordinator } from "./diagnostics/diagnosticsCoordinator";
-import { DocumentAnalysisService } from "./services/documentAnalysisService";
+import {
+    DocumentAnalysisService,
+    type ParseWaitMode
+} from "./services/documentAnalysisService";
 import { RslDefinitionProvider } from "./features/definitionProvider";
 import { DEFAULT_DIAGNOSTIC_SETTINGS } from "./diagnostics";
 import {
@@ -463,6 +466,7 @@ languageFeatures = new RslLanguageFeatureRegistry({
     getFastDocumentSnapshot: document =>
         documentAnalysis.getFastSnapshot(document),
     ensureDocumentParsed,
+    requestDocumentParse,
     ensureImportedSymbol: (uri, symbolName) =>
         moduleLoader.ensureImportedSymbol(uri, symbolName),
     findAutoImportModules: (symbolName, options) =>
@@ -612,10 +616,16 @@ documents.onDidChangeContent(change => {
 });
 
 async function ensureDocumentParsed(
-    document: TextDocument
+    document: TextDocument,
+    mode: ParseWaitMode = "force"
 ): Promise<RslSymbol | undefined> {
     /* Интерактивный LSP-запрос не должен отменять уже запланированные Problems. */
-    return documentAnalysis.ensureParsed(document);
+    return documentAnalysis.ensureParsed(document, mode);
+}
+
+/** Разбор нужен, но торопить его незачем: см. DocumentAnalysisService. */
+function requestDocumentParse(document: TextDocument): void {
+    documentAnalysis.requestParse(document);
 }
 
 connection.onDidChangeWatchedFiles(change => {

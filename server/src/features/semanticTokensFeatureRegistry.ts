@@ -24,6 +24,13 @@ export interface ISemanticTokensFeatureEnvironment {
     index: WorkspaceIndex;
     resolver: RslScopeResolver;
     ensureDocumentParsed(document: TextDocument): Promise<RslSymbol | undefined>;
+    /**
+     * Просит разобрать документ, не снимая debounce набора текста.
+     *
+     * Подсветка приходит на каждое нажатие клавиши, и разбор по её запросу
+     * означал бы полный разбор на каждый символ.
+     */
+    requestDocumentParse?(document: TextDocument): void;
     getSettings(uri: string): IRslSettings;
     noteInteractiveActivity?(): void;
     performance?: PerformanceLogger;
@@ -111,7 +118,18 @@ export class SemanticTokensFeatureRegistry {
             this.environment.noteInteractiveActivity?.();
             const version = document.version;
             const span = this.startSpan("semanticTokens.range", document);
-            await this.environment.ensureDocumentParsed(document);
+
+            if (this.documentIsTooLarge(document)) {
+                this.endSpan(span, { cancelled: true, dataInts: 0 });
+                return { data: [] };
+            }
+
+            /*
+             * Готовая модель не форсируется — как и в запросе на весь файл.
+             * Раньше здесь стоял await разбора, и подсветка видимого куска
+             * снимала склейку правок на каждое нажатие клавиши.
+             */
+            this.requestParse(document);
             await yieldToEventLoop();
             const module = index.getModule(document.uri);
             if (
@@ -120,6 +138,9 @@ export class SemanticTokensFeatureRegistry {
                 requestIsStale(document, version, token) ||
                 this.isTooLarge(module)
             ) {
+                /* Модель ещё строится: по её готовности клиента попросят
+                 * перезапросить токены (см. notifyParsed). */
+                this.provisional.add(document.uri);
                 this.endSpan(span, { cancelled: true, dataInts: 0 });
                 return { data: [] };
             }
@@ -255,10 +276,15 @@ export class SemanticTokensFeatureRegistry {
          * а по его готовности сервер просит клиента перезапросить токены
          * (notifyParsed).
          */
+        if (this.documentIsTooLarge(document)) {
+            this.endSpan(span, { cancelled: true, dataInts: 0 });
+            return { data: [] };
+        }
+
         let module = this.environment.index.getCurrentModule(uri, version);
 
         if (!module) {
-            void this.environment.ensureDocumentParsed(document);
+            this.requestParse(document);
             this.provisional.add(uri);
             const basic = buildRslBasicSemanticTokens(
                 this.environment.getFastLexTokens?.(document) || []
@@ -362,6 +388,47 @@ export class SemanticTokensFeatureRegistry {
         fields: Record<string, string | number | boolean | null | undefined>
     ): void {
         if (span) this.environment.performance!.end(span, fields);
+    }
+
+    /**
+     * Разбор запланирован, но не приближен.
+     *
+     * Fallback на ensureDocumentParsed нужен для окружений, где новый метод не
+     * передан: без него подсветка осталась бы базовой навсегда.
+     */
+    private requestParse(document: TextDocument): void {
+        if (this.environment.requestDocumentParse) {
+            this.environment.requestDocumentParse(document);
+            return;
+        }
+
+        void this.environment.ensureDocumentParsed(document);
+    }
+
+    /**
+     * Размер проверяется до базовой подсветки, а не только после разбора.
+     *
+     * Прежняя проверка принимала модуль, то есть работала лишь тогда, когда
+     * модель уже построена. До этого файл любого размера успевал целиком
+     * пройти через buildRslBasicSemanticTokens ради временной подсветки,
+     * которую настройка как раз и запрещает.
+     */
+    private documentIsTooLarge(document: TextDocument): boolean {
+        const maxFileSizeKb = this.environment.getSettings(document.uri)
+            .semanticHighlighting.maxFileSizeKb;
+        const chars = document.getText().length;
+        const tooLarge = maxFileSizeKb > 0 && chars > maxFileSizeKb * 1024;
+
+        if (tooLarge) {
+            this.environment.performance?.mark("semanticTokens.skipped", {
+                uri: document.uri,
+                chars,
+                maxFileSizeKb,
+                reason: "fileSize"
+            });
+        }
+
+        return tooLarge;
     }
 
     private isTooLarge(module: IIndexedModule): boolean {

@@ -4,7 +4,8 @@ import {
     BLOCK_START_KEYWORDS,
     canonicalTypeName,
     DECLARATION_KEYWORDS as DECLARATION_KEYWORD_LIST,
-    DECLARATION_MODIFIERS
+    DECLARATION_MODIFIERS,
+    numericLiteralType
 } from "../language/rslLanguageReference";
 import { lexRsl, normalizeIdentifier, type IRslToken } from "../lexer";
 import { readClassDeclarationHeader } from "../parsing/classDeclarationHeader";
@@ -441,7 +442,9 @@ function inferCompactValueType(
         index > nameIndex && token.kind === "symbol" && token.raw === "="
     );
     const first = equalsIndex >= 0 ? tokens[equalsIndex + 1] : undefined;
-    if (first?.kind === "number") return "integer";
+    if (first?.kind === "number") {
+        return numericLiteralType(first.raw) || "variant";
+    }
     if (first?.kind === "string" || first?.kind === "square") return "string";
     if (
         first?.kind === "identifier" &&
@@ -1196,7 +1199,9 @@ function inferInitializerType(node: IRslSyntaxNode): string {
     );
     if (!first) return "variant";
     if (first.kind === "string" || first.kind === "square") return "string";
-    if (first.kind === "number") return "integer";
+    if (first.kind === "number") {
+        return numericLiteralType(first.raw) || "variant";
+    }
     if (
         first.kind === "identifier" &&
         ["true", "false"].includes(normalizeIdentifier(first.value))

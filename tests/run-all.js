@@ -29,6 +29,7 @@ const tests = [
     "server-services.test.js",
     "request-races.test.js",
     "interruptible-work.test.js",
+    "parse-scheduling.test.js",
 ];
 
 let failed = false;

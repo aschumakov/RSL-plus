@@ -236,6 +236,72 @@ test("выведенный тип показывается там, где тип
     assert.ok(hints.every(hint => /выведен/.test(String(hint.tooltip))));
 });
 
+test("подсказка называет тип константы её типом", () => {
+    const context = open([
+        "Macro Test()",
+        "  Var allSum = $0;",
+        "  Var count = 2345;",
+        "  Var rate = 4356.234;",
+        "  Var mask = #F2;",
+        "End;"
+    ]);
+    const hints = buildRslInlayHints(
+        context.module,
+        context.resolver,
+        { start: { line: 0, character: 0 }, end: { line: 10, character: 0 } }
+    );
+
+    assert.deepStrictEqual(
+        hints.map(hint => hint.label),
+        [": Money", ": Integer", ": Double", ": Integer"],
+        "знак доллара задаёт денежную константу, а не целое"
+    );
+});
+
+test("подсказка не зависит от размера файла", () => {
+    /*
+     * Подсказка стоит у объявления и говорит о его инициализаторе — значит
+     * присваивания ниже по тексту ей не нужны. Общий вывод типа ради них
+     * строил индекс присваиваний всего файла, и первый запрос после каждой
+     * правки дорожал вместе с файлом: 11 мс на 54 КБ, 27 мс на 224 КБ. Здесь
+     * проверяется не скорость, а её независимость от объёма.
+     */
+    const declarations = ["Class Doc", "End;", "Macro Test()", "  Var doc = Doc();"];
+    const tail = [];
+
+    for (let index = 0; index < 4000; index++) {
+        tail.push(`  Var noise${index} = Doc();`);
+        tail.push(`  noise${index} = Doc();`);
+    }
+    tail.push("End;");
+
+    const visible = { start: { line: 3, character: 0 }, end: { line: 3, character: 99 } };
+    const measure = lines => {
+        const context = open(lines);
+        const started = process.hrtime.bigint();
+        const hints = buildRslInlayHints(context.module, context.resolver, visible);
+        return {
+            ms: Number(process.hrtime.bigint() - started) / 1e6,
+            hints
+        };
+    };
+
+    const small = measure([...declarations, "End;"]);
+    const large = measure([...declarations, ...tail]);
+
+    assert.deepStrictEqual(
+        large.hints.map(hint => hint.label),
+        small.hints.map(hint => hint.label),
+        "подсказка для видимой строки не зависит от того, что ниже"
+    );
+    assert.ok(
+        large.ms < small.ms + 25,
+        "запрос для одной видимой строки не имеет права сканировать весь файл; " +
+            `${small.ms.toFixed(1)} мс против ${large.ms.toFixed(1)} мс на ` +
+            `${tail.length} строк ниже`
+    );
+});
+
 test("inlay hints считаются только для запрошенного диапазона", () => {
     const context = open([
         "Class Doc",

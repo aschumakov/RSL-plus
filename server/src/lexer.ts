@@ -246,7 +246,20 @@ export function lexRsl(
             continue;
         }
 
-        if (isDigit(current)) {
+        /*
+         * Число с плавающей точкой может начинаться с точки: руководство даёт
+         * «4356.234, 345., .1234» одним перечислением. Раньше `.1234`
+         * распадалось на оператор доступа и целое число.
+         *
+         * Точка начинает число только там, где обращения к члену быть не
+         * может: `rs.0` — не литерал, а `= .5` — литерал.
+         */
+        if (
+            isDigit(current) ||
+            (current === "." &&
+                isDigit(text.charAt(position.index + 1)) &&
+                !endsValueExpression(tokens))
+        ) {
             const start = snapshot(position);
 
             while (
@@ -257,6 +270,7 @@ export function lexRsl(
                 position.character++;
             }
 
+            consumeExponentSign(text, position);
             pushSnapshotToken(tokens, text, "number", start, position);
             continue;
         }
@@ -460,6 +474,62 @@ function isDigit(value: string): boolean {
 
     const code = value.charCodeAt(0);
     return code >= 48 && code <= 57;
+}
+
+/**
+ * Знак и цифры показателя степени: хвост `-23` у `1231.2341e-23`.
+ *
+ * Сам `e` забирает isNumberPart вместе с буквами, а знак — нет, и число
+ * распадалось на три токена. Продолжение берётся только после `e`/`E`, иначе
+ * `count-1` стало бы одним числом.
+ */
+function consumeExponentSign(text: string, position: IPosition): void {
+    const previous = text.charAt(position.index - 1);
+
+    if (previous !== "e" && previous !== "E") {
+        return;
+    }
+
+    const sign = text.charAt(position.index);
+
+    if (
+        (sign !== "+" && sign !== "-") ||
+        !isDigit(text.charAt(position.index + 1))
+    ) {
+        return;
+    }
+
+    position.index++;
+    position.character++;
+
+    while (
+        position.index < text.length &&
+        isDigit(text.charAt(position.index))
+    ) {
+        position.index++;
+        position.character++;
+    }
+}
+
+/**
+ * Перед точкой стоит значение, у которого можно взять член.
+ *
+ * Отличает `rs.0` от литерала `.5`: в первом случае точка — оператор доступа,
+ * и числом её начинать нельзя.
+ */
+function endsValueExpression(tokens: readonly IRslToken[]): boolean {
+    const previous = tokens[tokens.length - 1];
+
+    if (!previous) {
+        return false;
+    }
+
+    return previous.kind === "identifier" ||
+        previous.kind === "number" ||
+        previous.kind === "string" ||
+        previous.kind === "square" ||
+        (previous.kind === "symbol" &&
+            (previous.raw === ")" || previous.raw === "]"));
 }
 
 function isNumberPart(value: string): boolean {

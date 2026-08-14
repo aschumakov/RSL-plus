@@ -66,6 +66,14 @@ export interface IDocumentAnalysisOptions {
 
 type AnalysisPriority = "foreground" | "background";
 
+/**
+ * Кто ждёт разбор и вправе ли он торопить его.
+ *
+ * `force` — запрос от действия пользователя; `scheduled` — запрос, который
+ * редактор шлёт сам по ходу набора текста (см. ensureParsed).
+ */
+export type ParseWaitMode = "force" | "scheduled";
+
 interface IValidationTask {
     document: TextDocument;
     generation: number;
@@ -370,9 +378,51 @@ export class DocumentAnalysisService {
             : this.refreshFastSnapshot(document);
     }
 
-    async ensureParsed(document: TextDocument): Promise<RslSymbol | undefined> {
+    /**
+     * Разбор запрошен, но debounce не снимается.
+     *
+     * Так ведёт себя всё, что редактор шлёт сам, без действия пользователя:
+     * Semantic Tokens и Inlay Hints приходят сразу за каждым нажатием клавиши.
+     * Форсируя разбор, они превращали 90-мс склейку правок в разбор на каждый
+     * символ — по замеру 1 мс вместо 107 мс до разбора, то есть debounce не
+     * работал вовсе.
+     *
+     * Если разбор этой версии уже запланирован — не делается ничего: таймер
+     * отработает сам. Планирование нужно для неактивной вкладки, где таймера
+     * нет и запрос иначе ждал бы разбора, который никто не начнёт.
+     */
+    requestParse(document: TextDocument): void {
+        if (this.isLocalReady(document) || this.isBusyFor(document.uri)) {
+            return;
+        }
+
+        this.scheduleWithDelay(document, this.changeDebounceMs);
+    }
+
+    /**
+     * Готовая модель этой версии.
+     *
+     * `force` — за запросом стоит действие пользователя (переход к объявлению,
+     * переименование, Hover): ждать здесь debounce значит заставить его ждать
+     * без причины.
+     *
+     * `scheduled` — запрос пришёл по ходу набора текста. Он дожидается уже
+     * запланированного разбора, но не приближает его: иначе склейка правок
+     * снимается тем же запросом, ради которого делается.
+     */
+    async ensureParsed(
+        document: TextDocument,
+        mode: ParseWaitMode = "force"
+    ): Promise<RslSymbol | undefined> {
         if (this.isLocalReady(document)) {
             return this.index.getModule(document.uri)?.symbolTree;
+        }
+
+        if (mode === "scheduled" && this.isBusyFor(document.uri)) {
+            await this.whenIdle(document.uri);
+            return this.isLocalReady(document)
+                ? this.index.getModule(document.uri)?.symbolTree
+                : undefined;
         }
 
         this.cancelTimer(document.uri);

@@ -42,6 +42,9 @@ import {
 import { findRslReferencesInWorkspace } from "../analysis/references";
 import { ReferenceIndex } from "../analysis/referenceIndex";
 import type { IFastDocumentSnapshot } from "../services/fastDocumentSnapshot";
+import type {
+    ParseWaitMode
+} from "../services/documentAnalysisService";
 import {
     RSL_BUILTIN_URI,
     RslScopeResolver
@@ -90,7 +93,12 @@ export interface IRslLanguageFeatureEnvironment {
     definitionProvider: RslDefinitionProvider;
     referenceIndex?: ReferenceIndex;
     getFastDocumentSnapshot(document: TextDocument): IFastDocumentSnapshot;
-    ensureDocumentParsed(document: TextDocument): Promise<RslSymbol | undefined>;
+    ensureDocumentParsed(
+        document: TextDocument,
+        mode?: ParseWaitMode
+    ): Promise<RslSymbol | undefined>;
+    /** Разбор нужен, но debounce набора текста не снимается. */
+    requestDocumentParse?(document: TextDocument): void;
     ensureImportedSymbol?(
         fromUri: string,
         symbolName: string
@@ -127,6 +135,9 @@ export class RslLanguageFeatureRegistry {
     private completionTransport = new CompletionTransport();
     private presentationFeatures: PresentationFeatureRegistry;
     private semanticTokensFeatures: SemanticTokensFeatureRegistry;
+    /** Файлы, которым отдали пустые подсказки: модель тогда не была готова. */
+    private pendingInlayHints = new Set<string>();
+    private inlayRefreshTimer: NodeJS.Timeout | undefined;
 
     constructor(private environment: IRslLanguageFeatureEnvironment) {
         this.referenceIndex = environment.referenceIndex || new ReferenceIndex();
@@ -173,12 +184,40 @@ export class RslLanguageFeatureRegistry {
 
             this.environment.noteInteractiveActivity?.();
             const version = document.version;
+            /*
+             * Спан покрывает и ожидание модели: по одному лишь analysis.full
+             * не видно, какой запрос его вызвал и сколько ждал сам запрос.
+             */
+            const span = this.environment.performance?.enabled
+                ? this.environment.performance.start("completion", {
+                    uri: document.uri,
+                    version,
+                    waitMode: "scheduled"
+                })
+                : undefined;
+            const finish = <T>(
+                result: T,
+                fields: Record<string, string | number | boolean>
+            ): T => {
+                if (span) {
+                    this.environment.performance!.end(span, fields);
+                }
+                return result;
+            };
+            /*
+             * Completion приходит на каждый набранный символ, поэтому ждёт уже
+             * запланированный разбор, а не назначает свой: иначе именно этот
+             * запрос и снимал бы склейку правок, ради которой она сделана.
+             */
             await waitForParseBudget(
-                ensureDocumentParsed(document),
+                ensureDocumentParsed(document, "scheduled"),
                 INTERACTIVE_PARSE_BUDGET_MS
             );
             if (requestIsStale(document, version, cancellationToken)) {
-                return { isIncomplete: false, items: [] };
+                return finish(
+                    { isIncomplete: false, items: [] },
+                    { cancelled: true, items: 0 }
+                );
             }
             const module = this.getRequestModule(document);
             if (!module) {
@@ -187,7 +226,10 @@ export class RslLanguageFeatureRegistry {
                  * идёт, и клиент должен повторить запрос, а не кэшировать
                  * пустой список до следующего изменения текста.
                  */
-                return { isIncomplete: true, items: [] };
+                return finish(
+                    { isIncomplete: true, items: [] },
+                    { pendingModel: true, items: 0 }
+                );
             }
             const contextual = buildRslContextCompletions(
                 module,
@@ -196,12 +238,18 @@ export class RslLanguageFeatureRegistry {
                 resolver
             );
             if (contextual !== undefined) {
-                return this.completionTransport.prepare(contextual);
+                return finish(
+                    this.completionTransport.prepare(contextual),
+                    { source: "context", items: contextual.length }
+                );
             }
             const context = this.getPositionContext(params);
 
             if (!context || isBlockedToken(context.token)) {
-                return { isIncomplete: false, items: [] };
+                return finish(
+                    { isIncomplete: false, items: [] },
+                    { blocked: true, items: 0 }
+                );
             }
 
             const prefix = completionPrefixAt(
@@ -223,8 +271,11 @@ export class RslLanguageFeatureRegistry {
                     )
                     : []
             );
-            return this.completionTransport.prepare(
-                rankCompletionItemsForPrefix(items, prefix)
+            return finish(
+                this.completionTransport.prepare(
+                    rankCompletionItemsForPrefix(items, prefix)
+                ),
+                { source: "scope", items: items.length }
             );
         });
 
@@ -240,8 +291,9 @@ export class RslLanguageFeatureRegistry {
 
             this.environment.noteInteractiveActivity?.();
             const version = document.version;
+            /* Как и Completion, приходит по ходу набора текста. */
             await waitForParseBudget(
-                ensureDocumentParsed(document),
+                ensureDocumentParsed(document, "scheduled"),
                 INTERACTIVE_PARSE_BUDGET_MS
             );
             if (requestIsStale(document, version, cancellationToken)) {
@@ -351,7 +403,11 @@ export class RslLanguageFeatureRegistry {
 
             this.environment.noteInteractiveActivity?.();
             const version = document.version;
-            await ensureDocumentParsed(document);
+            /*
+             * Подсветка вхождений идёт за курсором, а он двигается на каждый
+             * набранный символ. Это фон, а не действие пользователя.
+             */
+            await ensureDocumentParsed(document, "scheduled");
             if (requestIsStale(document, version, cancellationToken)) {
                 return [];
             }
@@ -586,22 +642,58 @@ export class RslLanguageFeatureRegistry {
 
             this.environment.noteInteractiveActivity?.();
             const version = document.version;
-            await ensureDocumentParsed(document);
+            const span = this.environment.performance?.enabled
+                ? this.environment.performance.start("inlayHints", {
+                    uri: document.uri,
+                    version,
+                    lines: params.range.end.line - params.range.start.line
+                })
+                : undefined;
+            const module = index.getCurrentModule(document.uri, version);
 
-            if (requestIsStale(document, version, cancellationToken)) {
+            /*
+             * Разбор не форсируется: подсказки приходят на каждое нажатие
+             * клавиши, и ожидание модели здесь снимало склейку правок. Пока
+             * модели нет — подсказок нет, а по её готовности клиента просят
+             * запросить их заново (notifyParsed).
+             */
+            if (!module) {
+                this.environment.requestDocumentParse?.(document);
+                this.pendingInlayHints.add(document.uri);
+                if (span) {
+                    this.environment.performance!.end(span, {
+                        provisional: true,
+                        hints: 0
+                    });
+                }
                 return [];
             }
 
-            const module = index.getCurrentModule(document.uri, version);
+            if (requestIsStale(document, version, cancellationToken)) {
+                if (span) {
+                    this.environment.performance!.end(span, {
+                        cancelled: true,
+                        hints: 0
+                    });
+                }
+                return [];
+            }
 
-            return module
-                ? buildRslInlayHints(
-                    module,
-                    resolver,
-                    params.range,
-                    () => requestIsStale(document, version, cancellationToken)
-                )
-                : [];
+            const hints = buildRslInlayHints(
+                module,
+                resolver,
+                params.range,
+                () => requestIsStale(document, version, cancellationToken)
+            );
+
+            if (span) {
+                this.environment.performance!.end(span, {
+                    cancelled: false,
+                    hints: hints.length
+                });
+            }
+
+            return hints;
         });
 
         connection.onPrepareRename?.(async (params, cancellationToken) => {
@@ -901,10 +993,45 @@ export class RslLanguageFeatureRegistry {
      */
     notifyParsed(uri: string): void {
         this.semanticTokensFeatures.notifyParsed(uri);
+        this.refreshInlayHintsIfPending(uri);
+    }
+
+    /**
+     * Подсказки типов были запрошены до готовности модели и вернулись пустыми.
+     *
+     * Сам клиент о готовности не знает, и без этой просьбы подсказки появились
+     * бы только со следующей правкой документа. Запросы объединяются: разбор
+     * нескольких открытых файлов даёт их пачкой.
+     */
+    private refreshInlayHintsIfPending(uri: string): void {
+        if (!this.pendingInlayHints.delete(uri) || this.inlayRefreshTimer) {
+            return;
+        }
+
+        this.inlayRefreshTimer = setTimeout(() => {
+            this.inlayRefreshTimer = undefined;
+            try {
+                const result = this.environment.connection.languages
+                    .inlayHint?.refresh?.();
+                void Promise.resolve(result).catch(error =>
+                    this.environment.log(
+                        `Inlay hint refresh failed: ${errorText(error)}`
+                    )
+                );
+            } catch (error) {
+                this.environment.log(
+                    `Inlay hint refresh failed: ${errorText(error)}`
+                );
+            }
+        }, INLAY_REFRESH_COALESCE_MS);
     }
 
     dispose(): void {
         this.semanticTokensFeatures.dispose();
+        if (this.inlayRefreshTimer) {
+            clearTimeout(this.inlayRefreshTimer);
+            this.inlayRefreshTimer = undefined;
+        }
     }
 
     /**
@@ -989,6 +1116,16 @@ function isBlockedToken(token?: IRslToken): boolean {
  * getRequestModule().
  */
 const INTERACTIVE_PARSE_BUDGET_MS = 200;
+
+/*
+ * Как часто разрешено просить клиента перезапросить подсказки типов. Разбор
+ * нескольких открытых файлов даёт такие события пачкой.
+ */
+const INLAY_REFRESH_COALESCE_MS = 300;
+
+function errorText(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+}
 
 function waitForParseBudget(
     pending: Promise<unknown>,

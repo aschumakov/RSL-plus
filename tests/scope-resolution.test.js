@@ -971,6 +971,78 @@ async function main() {
         );
     });
 
+    /*
+     * ─── Голое имя класса справа от «=» ─────────────────────────────────────
+     *
+     * `Var list = TStringList;` создаёт объект так же, как `TStringList()`, но
+     * в индекс присваиваний попадали только формы со скобками. Тип оставался
+     * Variant, и автодополнение по такой переменной молчало.
+     *
+     * Типом считается только класс. Пропустить голое имя через разрешение
+     * вызова нельзя: у `callback = SomeMacro` переменная получила бы тип
+     * результата процедуры, хотя присвоена сама процедура.
+     */
+    const CLASSES = [
+        "Class TStringList",
+        "  Macro Add(s)",
+        "  End;",
+        "End;",
+        "Macro SomeMacro():TStringList",
+        "End;"
+    ].join("\n");
+
+    /** Тип переменной list в позиции её использования. */
+    function listTypeOf(body) {
+        const source = `${CLASSES}\nMacro T()\n${body}\n  list.\nEnd;`;
+        const context = open(source);
+        const offset = source.indexOf("  list.") + 7;
+        const resolved = context.resolver.resolveName(
+            MAIN,
+            context.module.symbolTree,
+            "list",
+            offset
+        );
+
+        return resolved
+            ? context.resolver.effectiveTypeName(
+                MAIN,
+                context.module.symbolTree,
+                resolved.symbol,
+                offset
+            )
+            : undefined;
+    }
+
+    await test("голое имя класса справа от = задаёт тип", async () => {
+        assert.strictEqual(listTypeOf("  Var list = TStringList;"),
+            "TStringList", "инициализация при объявлении");
+        assert.strictEqual(
+            listTypeOf("  Var list;\n  list = TStringList;"),
+            "TStringList",
+            "отдельное присваивание"
+        );
+        assert.strictEqual(listTypeOf("  Var list = TStringList();"),
+            "TStringList", "форма со скобками не сломана");
+    });
+
+    await test("голым классом считается только класс", async () => {
+        assert.notStrictEqual(
+            listTypeOf("  Var list = SomeMacro;"),
+            "TStringList",
+            "присвоена сама процедура, а не то, что она возвращает"
+        );
+        assert.notStrictEqual(
+            listTypeOf("  Var other = TStringList();\n  Var list = other;"),
+            "TStringList",
+            "переменная справа типом не является"
+        );
+        assert.strictEqual(
+            listTypeOf("  Var list: String = TStringList;"),
+            "string",
+            "написанный тип — приведение, присваивание его не меняет"
+        );
+    });
+
     if (failed > 0) {
         console.error(`\nПройдено: ${passed}\nОшибок: ${failed}`);
         process.exitCode = 1;

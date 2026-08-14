@@ -50,6 +50,7 @@ const defaults = {
     autoImport: { enabled: false },
     analysis: { workspaceIndexing: "activeImports" },
     semanticHighlighting: { maxFileSizeKb: 512 },
+    inlayHints: { variableTypes: true },
     diagnostics: {}
 };
 
@@ -121,11 +122,13 @@ function createDocument(uri, version, text) {
  * onParsed вызывается вместо реального разбора: тест решает, что произойдёт за
  * время ожидания — в частности, успеет ли документ измениться.
  */
-function createRegistry({ uri, source, onParsed }) {
+function createRegistry({ uri, source, onParsed, settings }) {
     const index = new WorkspaceIndex();
     index.registerWorkspaceFiles([uri]);
     const module = index.updateOpenModule(uri, source, 1);
     const state = { document: createDocument(uri, 1, source) };
+    /** Кто и как просил разбор: forced снимает debounce, requested — нет. */
+    const calls = { forced: 0, requested: 0, fastSnapshots: 0 };
 
     const handlers = {};
     const register = name => callback => {
@@ -185,19 +188,32 @@ function createRegistry({ uri, source, onParsed }) {
             findDynamicDefinition: async () => undefined,
             createObjectLocationByUri: () => ({ uri, range: null })
         },
-        getFastDocumentSnapshot: () =>
-            createFastDocumentSnapshot(state.document),
+        getFastDocumentSnapshot: () => {
+            calls.fastSnapshots++;
+            return createFastDocumentSnapshot(state.document);
+        },
         ensureDocumentParsed: async () => {
+            calls.forced++;
             await onParsed?.(state);
             return module.symbolTree;
         },
-        getSettings: () => defaults,
+        requestDocumentParse: () => {
+            calls.requested++;
+            /*
+             * Разбор запрошен, но не начат — а документ за это время может
+             * уйти вперёд. Обработчики подсветки после этого возвращают
+             * управление event loop, поэтому правка успевает примениться
+             * ровно там же, где раньше её применял ensureDocumentParsed.
+             */
+            void onParsed?.(state);
+        },
+        getSettings: () => settings || defaults,
         supportsRefresh: () => false,
         log: () => undefined
     });
     registry.register();
 
-    return { handlers, state, index, registry, module };
+    return { handlers, state, index, registry, module, calls };
 }
 
 /** Документ ушёл вперёд, пока обработчик ждал разбора. */
@@ -431,6 +447,83 @@ const SAME_LENGTH = SOURCE.replace("Var local = value;", "Var lokal = value;");
             assert.ok(
                 second.data.length > 0,
                 "Пустой результат отменённого запроса попал в кэш"
+            );
+        }
+    );
+
+    await test(
+        "Semantic Tokens и подсказки не форсируют разбор",
+        async () => {
+            /*
+             * Оба запроса редактор шлёт сам на каждое нажатие клавиши. Если
+             * они снимают debounce, полный разбор идёт на каждый набранный
+             * символ — при том, что ради этого debounce и существует.
+             */
+            const { handlers, calls, state } = createRegistry({
+                uri: URI,
+                source: SOURCE
+            });
+
+            /* Документ ушёл вперёд: модели этой версии ещё нет. */
+            bumpVersion(state, CHANGED);
+            calls.forced = 0;
+            calls.requested = 0;
+            await handlers.semanticTokens(
+                { textDocument: { uri: URI } },
+                { isCancellationRequested: false }
+            );
+            await handlers.inlayHint(
+                {
+                    textDocument: { uri: URI },
+                    range: {
+                        start: { line: 0, character: 0 },
+                        end: { line: 6, character: 0 }
+                    }
+                },
+                { isCancellationRequested: false }
+            );
+
+            assert.strictEqual(
+                calls.forced,
+                0,
+                "ни подсветка, ни подсказки не имеют права торопить разбор"
+            );
+            assert.ok(
+                calls.requested > 0,
+                "но разбор всё же должен быть запрошен, иначе модели не будет"
+            );
+        }
+    );
+
+    await test(
+        "слишком большой файл не лексируется ради базовой подсветки",
+        async () => {
+            /*
+             * Ограничение размера проверялось по модулю, то есть только после
+             * его построения. До этого файл любого размера успевал целиком
+             * пройти лексер ради временной подсветки — ровно того, что
+             * настройка и запрещает.
+             */
+            const { handlers, calls } = createRegistry({
+                uri: URI,
+                source: SOURCE,
+                settings: {
+                    ...defaults,
+                    semanticHighlighting: { maxFileSizeKb: 0.001 }
+                }
+            });
+
+            calls.fastSnapshots = 0;
+            const result = await handlers.semanticTokens(
+                { textDocument: { uri: URI } },
+                { isCancellationRequested: false }
+            );
+
+            assert.deepStrictEqual(result.data, []);
+            assert.strictEqual(
+                calls.fastSnapshots,
+                0,
+                "токены запрещённого по размеру файла не должны строиться"
             );
         }
     );
