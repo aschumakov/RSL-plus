@@ -15,7 +15,11 @@ import {
     normalizeIdentifier
 } from "./lexer";
 import { RslScopeResolver } from "./scopeResolver";
-import { collectFormatSpecifierTokenStarts } from "./parsing/outputFormParser";
+import {
+    collectFormatSpecifierTokenStarts,
+    parseOutputForms,
+    type IRslOutputForm
+} from "./parsing/outputFormParser";
 import { IIndexedModule, WorkspaceIndex } from "./workspaceIndex";
 
 const TOKEN_TYPES = [
@@ -68,13 +72,14 @@ interface IObjectInfo {
  * идентификаторов после завершения разбора.
  */
 /*
- * Как часто проверяется отмена.
+ * Как часто возвращается управление и проверяется отмена.
  *
- * Проверка на каждом токене заметна на горячем пути, а раз в тысячу — нет:
- * файл в 512 КБ даёт порядка сотни проверок, то есть отклик на отмену внутри
- * одного-двух миллисекунд работы.
+ * Проверка на каждом токене заметна на горячем пути, а раз в триста — нет.
+ * Тысяча оказалась слишком много: на каждый идентификатор приходится обращение к
+ * resolver, и тысяча токенов складывалась в 23 мс непрерывной работы — столько
+ * же, сколько занимал самый долгий подготовительный проход.
  */
-const CANCEL_CHECK_INTERVAL = 1000;
+const CANCEL_CHECK_INTERVAL = 300;
 
 /**
  * Семантическая подсветка порциями.
@@ -174,10 +179,11 @@ function* semanticTokenSteps(
     }
     const objectInfoByObject = new Map<RslSymbol, IObjectInfo>();
     const declarationByRange = new Map<string, IObjectInfo>();
+    const identifiersByName = buildIdentifiersByName(tokens);
 
     objects.forEach(info => {
         objectInfoByObject.set(info.symbol, info);
-        const token = findDeclarationToken(tokens, info.symbol);
+        const token = findDeclarationToken(identifiersByName, info.symbol);
 
         if (token) {
             declarationByRange.set(
@@ -187,11 +193,36 @@ function* semanticTokenSteps(
         }
     });
 
+    /*
+     * Граница порции перед разбором инструкций вывода: он идёт по всему потоку
+     * токенов и на модуле 700 КБ занимает несколько миллисекунд.
+     */
+    yield;
+
+    if (isCancelled()) {
+        return { data: [] };
+    }
+
     const entries: ISemanticEntry[] = [];
+    /*
+     * Один разбор на оба потребителя.
+     *
+     * И спецификаторы, и сами инструкции вывода берутся из общего результата:
+     * он считается за один проход по файлу и запоминается на версию текста,
+     * поэтому второе обращение здесь бесплатно.
+     */
+    const outputForms = parseOutputForms(module.lex.tokens);
     const formatSpecifierStarts = collectFormatSpecifierTokenStarts(
         module.lex.tokens
     );
-    appendOutputFormEntries(module.lex.tokens, entries, range);
+    appendOutputFormEntries(outputForms, entries, range);
+
+    yield;
+
+    if (isCancelled()) {
+        return { data: [] };
+    }
+
     const firstTokenIndex = range
         ? lowerBoundByLine(tokens, Math.max(0, range.startLine))
         : 0;
@@ -350,7 +381,7 @@ export function buildRslBasicSemanticTokens(
     range?: IRslSemanticTokenRange
 ): SemanticTokens {
     const entries: ISemanticEntry[] = [];
-    appendOutputFormEntries(lexTokens, entries, range);
+    appendOutputFormEntries(parseOutputForms(lexTokens), entries, range);
     const specifiers = collectFormatSpecifierTokenStarts(lexTokens);
 
     for (const token of lexTokens) {
@@ -382,15 +413,15 @@ export function buildRslBasicSemanticTokens(
 }
 
 function appendOutputFormEntries(
-    tokens: readonly IRslToken[],
+    /*
+     * Готовые инструкции вывода, а не весь поток токенов: искать их здесь
+     * заново значило бы пройти файл ещё раз ровно за тем же самым.
+     */
+    forms: readonly IRslOutputForm[],
     entries: ISemanticEntry[],
     range?: IRslSemanticTokenRange
 ): void {
-    for (const token of tokens) {
-        if (token.kind !== "square" || token.squareKind !== "output") {
-            continue;
-        }
-
+    for (const { form: token } of forms) {
         const lines = token.raw.split(/\r\n|\n|\r/);
         let absoluteOffset = token.start;
 
@@ -659,29 +690,56 @@ function findSignatureRange(
 }
 
 
-function findDeclarationToken(
-    tokens: IRslToken[],
-    symbol: RslSymbol
-): IRslToken | undefined {
-    const name = normalizeIdentifier(symbol.name);
-    const firstIndex = lowerBoundByStart(tokens, symbol.range.start);
+/**
+ * Вхождения каждого имени по всему файлу, по одному проходу.
+ *
+ * Нужен для поиска токена объявления. Прежде тот поиск шёл перебором от начала
+ * символа до его КОНЦА, а у Macro и Class конец — это конец тела: на модуле
+ * 700 КБ обход всех объектов складывался в 50 мс непрерывной работы, и это была
+ * самая долгая порция подсветки. С индексом на объект приходится двоичный поиск.
+ */
+function buildIdentifiersByName(
+    tokens: IRslToken[]
+): Map<string, IRslToken[]> {
+    const result = new Map<string, IRslToken[]>();
 
-    for (let index = firstIndex; index < tokens.length; index++) {
-        const token = tokens[index];
-
-        if (token.start > symbol.range.end) {
-            break;
+    for (const token of tokens) {
+        if (token.kind !== "identifier") {
+            continue;
         }
 
-        if (
-            token.kind === "identifier" &&
-            normalizeIdentifier(token.value) === name
-        ) {
-            return token;
+        const name = normalizeIdentifier(token.value);
+        const list = result.get(name);
+
+        if (list) {
+            list.push(token);
+        } else {
+            result.set(name, [token]);
         }
     }
 
-    return undefined;
+    return result;
+}
+
+function findDeclarationToken(
+    identifiersByName: Map<string, IRslToken[]>,
+    symbol: RslSymbol
+): IRslToken | undefined {
+    const occurrences = identifiersByName.get(
+        normalizeIdentifier(symbol.name)
+    );
+
+    if (!occurrences) {
+        return undefined;
+    }
+
+    /* Первое вхождение имени внутри символа — то же, что находил перебор. */
+    const first = lowerBoundByStart(occurrences, symbol.range.start);
+
+    return first < occurrences.length &&
+        occurrences[first].start <= symbol.range.end
+        ? occurrences[first]
+        : undefined;
 }
 
 function lowerBoundByStart(tokens: IRslToken[], offset: number): number {

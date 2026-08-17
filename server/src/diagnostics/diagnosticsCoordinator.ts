@@ -15,6 +15,7 @@ import {
 import type { RslSettingsService } from "../services/settingsService";
 import type { RslScopeResolver } from "../scopeResolver";
 import type { WorkspaceIndex } from "../workspaceIndex";
+import type { RslDiagnosticStageObserver } from "../diagnostics";
 import type { PerformanceLogger } from "../performanceLogger";
 import type { IRslSettings } from "../interfaces";
 
@@ -261,12 +262,14 @@ export class DiagnosticsCoordinator {
                 uri,
                 state.module.version
             );
+            const stages = this.watchStages(span !== undefined);
             const diagnostics = await this.engine.buildLocalAsync(
                 state.module,
                 this.index,
                 state.settings.diagnostics,
                 isCancelled,
-                this.options.resolver
+                this.options.resolver,
+                stages.observer
             );
 
             /*
@@ -290,7 +293,8 @@ export class DiagnosticsCoordinator {
             }
             if (span) {
                 performance.end(span, {
-                    diagnostics: diagnostics.length
+                    diagnostics: diagnostics.length,
+                    ...stages.fields()
                 });
             }
             this.localCache.set(uri, diagnostics);
@@ -346,12 +350,14 @@ export class DiagnosticsCoordinator {
                 uri,
                 state.module.version
             );
+            const stages = this.watchStages(span !== undefined);
             const diagnostics = await this.engine.buildWorkspaceAsync(
                 state.module,
                 this.index,
                 state.settings.diagnostics,
                 isCancelled,
-                this.options.resolver
+                this.options.resolver,
+                stages.observer
             );
 
             /* Неполный результат прерванной фазы в кэш не попадает. */
@@ -367,7 +373,8 @@ export class DiagnosticsCoordinator {
             if (span) {
                 performance.end(span, {
                     diagnostics: diagnostics.length,
-                    indexedModules: this.index.size
+                    indexedModules: this.index.size,
+                    ...stages.fields()
                 });
             }
             this.workspaceCache.set(uri, diagnostics);
@@ -542,6 +549,37 @@ export class DiagnosticsCoordinator {
                 `Slow ${phase} diagnostics: ${uri}; version=${version}; ms=${elapsed}`
             );
         }
+    }
+
+    /**
+     * Следит, какая порция расчёта заняла поток дольше всех.
+     *
+     * Из суммарного времени фазы этого не видно: между порциями управление
+     * возвращается редактору, а внутри порции — нет, поэтому именно самая долгая
+     * порция и есть задержка, которую видит запрос пользователя. Записывается
+     * она полем к записи фазы, а не отдельной строкой на каждую порцию: их на
+     * один файл десятки.
+     */
+    private watchStages(enabled: boolean): {
+        observer: RslDiagnosticStageObserver | undefined;
+        fields(): Record<string, string | number>;
+    } {
+        if (!enabled) {
+            return { observer: undefined, fields: () => ({}) };
+        }
+
+        let worst = 0;
+        let worstName = "";
+
+        return {
+            observer: (name, milliseconds) => {
+                if (milliseconds > worst) {
+                    worst = milliseconds;
+                    worstName = name;
+                }
+            },
+            fields: () => ({ worstStage: worstName, worstStageMs: worst })
+        };
     }
 
     private logFailure(phase: string, uri: string, error: unknown): void {

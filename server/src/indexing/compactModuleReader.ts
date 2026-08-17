@@ -68,6 +68,14 @@ export function configureCompactModuleCache(
     cacheFilePath: string | undefined,
     log?: (message: string) => void
 ): void {
+    /*
+     * Смена настройки — это смена хоста или сессии, а память на последние файлы
+     * принадлежит прежней. Заодно это единственный способ проверить сам кэш на
+     * диске: память опрашивается раньше него и по тому же отпечатку, поэтому без
+     * сброса «перезапуск» в тесте отвечал бы из памяти и проверял бы её, а не
+     * кэш.
+     */
+    memo.clear();
     diskCache.configure(cacheFilePath, log);
 }
 

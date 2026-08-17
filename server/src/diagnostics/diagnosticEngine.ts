@@ -21,6 +21,7 @@ import {
     type IRslUnknownVariableFinding,
     type IRslUnknownVariableOptions
 } from "./unknownVariableDiagnostics";
+import type { RslDiagnosticStageObserver } from "../diagnostics";
 import type { IRslDiagnosticSettings } from "../interfaces";
 import { RslScopeResolver } from "../scopeResolver";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
@@ -46,6 +47,14 @@ export interface IRslDiagnosticContext {
      * прикладных модулей, а от него зависит, полон ли Import-контекст.
      */
     resolver?: RslScopeResolver;
+    /**
+     * Длительность отдельной порции расчёта.
+     *
+     * Между порциями управление возвращается редактору, а внутри — нет, поэтому
+     * самая долгая порция и есть та задержка, которую видит запрос
+     * пользователя. По суммарному времени фазы этого не видно.
+     */
+    onStage?: RslDiagnosticStageObserver;
 }
 
 export interface IRslDiagnosticRule {
@@ -137,7 +146,8 @@ export class RslDiagnosticEngine {
                 context.index,
                 context.settings,
                 context.isCancelled,
-                slice
+                slice,
+                context.onStage
             )
         });
         this.register({
@@ -156,7 +166,8 @@ export class RslDiagnosticEngine {
                 context.settings,
                 context.isCancelled,
                 context.resolver,
-                slice
+                slice,
+                context.onStage
             )
         });
         this.register({
@@ -275,7 +286,8 @@ export class RslDiagnosticEngine {
         index: WorkspaceIndex,
         settings?: IRslDiagnosticSettings,
         isCancelled?: () => boolean,
-        resolver?: RslScopeResolver
+        resolver?: RslScopeResolver,
+        onStage?: RslDiagnosticStageObserver
     ): Promise<Diagnostic[]> {
         return this.buildPhaseAsync(
             "local",
@@ -283,7 +295,8 @@ export class RslDiagnosticEngine {
             index,
             settings,
             isCancelled,
-            resolver
+            resolver,
+            onStage
         );
     }
 
@@ -292,7 +305,8 @@ export class RslDiagnosticEngine {
         index: WorkspaceIndex,
         settings?: IRslDiagnosticSettings,
         isCancelled?: () => boolean,
-        resolver?: RslScopeResolver
+        resolver?: RslScopeResolver,
+        onStage?: RslDiagnosticStageObserver
     ): Promise<Diagnostic[]> {
         return this.buildPhaseAsync(
             "workspace",
@@ -300,7 +314,8 @@ export class RslDiagnosticEngine {
             index,
             settings,
             isCancelled,
-            resolver
+            resolver,
+            onStage
         );
     }
 
@@ -372,7 +387,8 @@ export class RslDiagnosticEngine {
         index: WorkspaceIndex,
         settings?: IRslDiagnosticSettings,
         isCancelled?: () => boolean,
-        resolver?: RslScopeResolver
+        resolver?: RslScopeResolver,
+        onStage?: RslDiagnosticStageObserver
     ): Promise<Diagnostic[]> {
         const options = normalizeDiagnosticSettings(settings);
         if (!options.enabled || options.maxProblems === 0) {
@@ -410,7 +426,8 @@ export class RslDiagnosticEngine {
                     maxProblems: remaining
                 },
                 isCancelled,
-                resolver
+                resolver,
+                onStage
             };
             const produced = rule.runChunked
                 ? await rule.runChunked(context, slice)

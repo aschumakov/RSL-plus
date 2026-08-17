@@ -164,11 +164,49 @@ export interface IRslDiagnosticPlan {
      * проверка, обходящая весь поток токенов, обязана спрашивать сама — иначе
      * один этап становится неделимым куском в сотни миллисекунд.
      */
-    stages: readonly ((isCancelled?: () => boolean) => void)[];
+    stages: readonly IRslNamedDiagnosticStage[];
     /** Не пора ли остановиться: лимит Problems исчерпан. */
     hasCapacity(): boolean;
     finish(): Diagnostic[];
 }
+
+/**
+ * Этап с именем.
+ *
+ * Имя нужно не для порядка: без него замер длительности порций отвечал «самая
+ * долгая — двадцать вторая», и приходилось пересчитывать этапы вручную, чтобы
+ * понять, какую проверку смотреть.
+ */
+export interface IRslNamedDiagnosticStage {
+    name: string;
+    run: IRslDiagnosticStage;
+}
+
+/** Строка таблицы этапов: имя, признак включённости, работа. */
+type IRslDiagnosticStageEntry = [string, boolean, IRslDiagnosticStage];
+
+/** Кому сообщать длительность порции: см. IRslNamedDiagnosticStage. */
+export type RslDiagnosticStageObserver = (
+    name: string,
+    milliseconds: number
+) => void;
+
+/**
+ * Этап расчёта; true в ответе означает «работа не окончена».
+ *
+ * Обходы, которые спрашивают resolver про каждое место файла, на большом модуле
+ * занимают поток на десятки миллисекунд подряд, а управление возвращается
+ * event loop только МЕЖДУ этапами — значит такой обход целиком стоит в очереди
+ * перед запросом пользователя. Возвращая true, этап отдаёт управление и
+ * продолжает с того же места при следующем вызове.
+ *
+ * Способ один для обоих режимов: синхронный драйвер вызывает этап в цикле до
+ * конца, порционный — с паузой между вызовами. Иначе прерываемый расчёт
+ * проверял бы не то же самое, что непрерываемый.
+ */
+export type IRslDiagnosticStage = (
+    isCancelled?: () => boolean
+) => void | boolean;
 
 /**
  * Единая точка построения диагностик RSL.
@@ -202,12 +240,15 @@ export async function buildLocalRslDiagnosticsChunked(
     index: WorkspaceIndex,
     settings?: IRslDiagnosticSettings,
     isCancelled?: () => boolean,
-    slice: IRslWorkSlice = createWorkSlice()
+    slice: IRslWorkSlice = createWorkSlice(),
+    /* Длительность порций: по ней видно, какая проверка держит поток. */
+    onStage?: RslDiagnosticStageObserver
 ): Promise<Diagnostic[]> {
     return runDiagnosticPlanChunked(
         planLocalRslDiagnostics(module, index, settings),
         isCancelled,
-        slice
+        slice,
+        onStage
     );
 }
 
@@ -216,10 +257,15 @@ function runDiagnosticPlan(
     isCancelled?: () => boolean
 ): Diagnostic[] {
     for (const stage of plan.stages) {
-        if (!plan.hasCapacity() || isCancelled?.()) {
-            break;
+        let unfinished = true;
+
+        while (unfinished) {
+            if (!plan.hasCapacity() || isCancelled?.()) {
+                return plan.finish();
+            }
+            /* Без паузы порции идут подряд: работа та же, что и одним куском. */
+            unfinished = stage.run(isCancelled) === true;
         }
-        stage(isCancelled);
     }
 
     return plan.finish();
@@ -228,19 +274,28 @@ function runDiagnosticPlan(
 async function runDiagnosticPlanChunked(
     plan: IRslDiagnosticPlan,
     isCancelled: (() => boolean) | undefined,
-    slice: IRslWorkSlice
+    slice: IRslWorkSlice,
+    onStage?: RslDiagnosticStageObserver
 ): Promise<Diagnostic[]> {
     for (const stage of plan.stages) {
-        /*
-         * Проверка ПОСЛЕ паузы, а не только до неё: за время паузы могли прийти
-         * и смена версии документа, и смена активной вкладки, и отмена запроса.
-         */
-        await slice.yieldIfNeeded();
+        let unfinished = true;
 
-        if (!plan.hasCapacity() || isCancelled?.()) {
-            return plan.finish();
+        while (unfinished) {
+            /*
+             * Проверка ПОСЛЕ паузы, а не только до неё: за время паузы могли
+             * прийти и смена версии документа, и смена активной вкладки, и
+             * отмена запроса.
+             */
+            await slice.yieldIfNeeded();
+
+            if (!plan.hasCapacity() || isCancelled?.()) {
+                return plan.finish();
+            }
+
+            const started = onStage ? Date.now() : 0;
+            unfinished = stage.run(isCancelled) === true;
+            onStage?.(stage.name, Date.now() - started);
         }
-        stage(isCancelled);
     }
 
     return plan.finish();
@@ -299,32 +354,57 @@ function planLocalRslDiagnostics(
      * доводится до конца. Порядок значим — ошибки идут раньше предупреждений,
      * чтобы maxProblems не скрывал более важные сообщения.
      */
-    const stages: readonly [
-        boolean,
-        (isCancelled?: () => boolean) => void
-    ][] = [
-        [true, () => addSyntaxParserDiagnostics(module, result)],
-        [true, () => addDocumentedLimitDiagnostics(module, result)],
-        [options.structure, () => addUnterminatedTokenDiagnostics(module, result)],
-        [options.structure, () => addUnrecognizedEscapeDiagnostics(module, result)],
-        [options.structure, () => addBracketDiagnostics(module, result)],
-        [options.structure, () => addEndDiagnostics(module, result)],
+    const stages: readonly IRslDiagnosticStageEntry[] = [
+        ["parser", true, () => addSyntaxParserDiagnostics(module, result)],
+        ["limits", true, () => addDocumentedLimitDiagnostics(module, result)],
         [
+            "unterminated",
+            options.structure,
+            () => addUnterminatedTokenDiagnostics(module, result)
+        ],
+        [
+            "escapes",
+            options.structure,
+            () => addUnrecognizedEscapeDiagnostics(module, result)
+        ],
+        [
+            "brackets",
+            options.structure,
+            () => addBracketDiagnostics(module, result)
+        ],
+        ["end", options.structure, () => addEndDiagnostics(module, result)],
+        [
+            "unreachable",
             options.structure,
             () => result.push(...buildUnreachableCodeDiagnostics(module))
         ],
-        [options.structure, () => addDuplicateDeclarationDiagnostics(module, result)],
-        [options.structure, () => addBasicImportDiagnostics(module, result)],
-        [options.structure, () => addImportPlacementDiagnostics(module, result)],
         [
+            "duplicates",
             options.structure,
-            () => addConstantAssignmentDiagnostics(module, getResolver(), result)
+            () => addDuplicateDeclarationDiagnostics(module, result)
         ],
         [
+            "imports",
+            options.structure,
+            () => addBasicImportDiagnostics(module, result)
+        ],
+        [
+            "importPlacement",
+            options.structure,
+            () => addImportPlacementDiagnostics(module, result)
+        ],
+        [
+            "constantAssignment",
+            options.structure,
+            createConstantAssignmentStage(module, getResolver, result)
+        ],
+        [
+            "localVisibility",
             options.structure,
             () => addLocalVisibilityDiagnostics(module, getResolver(), result)
         ],
         [
+            "scalarMembers",
             options.structure,
             () => result.push(...buildScalarMemberDiagnostics(
                 module,
@@ -332,28 +412,50 @@ function planLocalRslDiagnostics(
             ))
         ],
         [
+            "coreDialect",
             options.structure && options.dialect === "coreRsl",
             () => {
                 addCoreDialectDiagnostics(module, getResolver(), result);
                 addReferenceArgumentDiagnostics(module, getResolver(), result);
             }
         ],
+        /*
+         * Справочник объявлений строится отдельным этапом.
+         *
+         * Он нужен двум последним проверкам, а строился ленивым вызовом внутри
+         * первой из них — и его время складывалось с её собственным в один
+         * неделимый кусок. Отдельным этапом это две порции вместо одной.
+         */
         [
+            "declarationFacts",
+            options.useBeforeDeclaration || options.unusedVariables,
+            () => {
+                getLocalFacts();
+            }
+        ],
+        [
+            "useBeforeDeclaration",
             options.useBeforeDeclaration,
-            () => addUseBeforeDeclarationDiagnostics(
+            createUseBeforeDeclarationStage(
                 module,
-                getResolver(),
-                getLocalFacts(),
+                getResolver,
+                getLocalFacts,
                 result,
                 options.maxProblems
             )
         ],
         [
+            "deprecated",
             options.deprecatedDeclarations,
             () => addDeprecatedDeclarationDiagnostics(module, result)
         ],
-        [options.debugBreak, () => addDebugBreakDiagnostics(module, result)],
         [
+            "debugBreak",
+            options.debugBreak,
+            () => addDebugBreakDiagnostics(module, result)
+        ],
+        [
+            "unused",
             options.unusedVariables,
             () => addUnusedDeclarationDiagnostics(
                 module,
@@ -402,12 +504,14 @@ export async function buildWorkspaceRslDiagnosticsChunked(
     settings?: IRslDiagnosticSettings,
     isCancelled?: () => boolean,
     sharedResolver?: RslScopeResolver,
-    slice: IRslWorkSlice = createWorkSlice()
+    slice: IRslWorkSlice = createWorkSlice(),
+    onStage?: RslDiagnosticStageObserver
 ): Promise<Diagnostic[]> {
     return runDiagnosticPlanChunked(
         planWorkspaceRslDiagnostics(module, index, settings, sharedResolver),
         isCancelled,
-        slice
+        slice,
+        onStage
     );
 }
 
@@ -423,46 +527,58 @@ function planWorkspaceRslDiagnostics(
     }
     const result: Diagnostic[] = [];
     const resolver = sharedResolver || new RslScopeResolver(index);
-    const stages: readonly [
-        boolean,
-        (isCancelled?: () => boolean) => void
-    ][] = [
-        [options.structure, () => addSelfImportDiagnostics(module, index, result)],
+    const stages: readonly IRslDiagnosticStageEntry[] = [
         [
+            "selfImport",
+            options.structure,
+            () => addSelfImportDiagnostics(module, index, result)
+        ],
+        [
+            "ambiguousReferences",
             options.ambiguousReferences,
             () => addAmbiguousReferenceDiagnostics(module, index, result)
         ],
         [
+            "unusedImports",
             options.unusedImports,
             () => addUnusedImportDiagnostics(module, index, result)
         ],
         [
+            "redundantImports",
             options.redundantImports,
-            () => result.push(...buildRedundantImportDiagnostics(
-                module,
-                index,
-                resolver
-            ))
+            () => {
+                result.push(...buildRedundantImportDiagnostics(
+                    module,
+                    index,
+                    resolver
+                ));
+            }
         ],
         [
+            "unknownVariables",
             options.unknownVariables !== "off" &&
                 !options.unknownVariablesAuditFile,
-            isCancelled => result.push(...buildUnknownVariableDiagnostics(
-                module,
-                resolver,
-                {
-                    mode: options.unknownVariables,
-                    knownGlobalsFile:
-                        options.unknownVariablesKnownGlobalsFile,
-                    /*
-                     * Больше остатка лимита Problems искать незачем: лишнее всё
-                     * равно отбросится, а на большом файле поиск лишнего — это
-                     * сотни миллисекунд.
-                     */
-                    limit: Math.max(0, options.maxProblems - result.length),
-                    isCancelled
-                }
-            ))
+            isCancelled => {
+                result.push(...buildUnknownVariableDiagnostics(
+                    module,
+                    resolver,
+                    {
+                        mode: options.unknownVariables,
+                        knownGlobalsFile:
+                            options.unknownVariablesKnownGlobalsFile,
+                        /*
+                         * Больше остатка лимита Problems искать незачем: лишнее
+                         * всё равно отбросится, а на большом файле поиск
+                         * лишнего — это сотни миллисекунд.
+                         */
+                        limit: Math.max(
+                            0,
+                            options.maxProblems - result.length
+                        ),
+                        isCancelled
+                    }
+                ));
+            }
         ]
     ];
 
@@ -475,11 +591,11 @@ function planWorkspaceRslDiagnostics(
 }
 
 function enabledStages(
-    stages: readonly [boolean, (isCancelled?: () => boolean) => void][]
-): readonly ((isCancelled?: () => boolean) => void)[] {
+    stages: readonly IRslDiagnosticStageEntry[]
+): readonly IRslNamedDiagnosticStage[] {
     return stages
-        .filter(([enabled]) => enabled)
-        .map(([, run]) => run);
+        .filter(([, enabled]) => enabled)
+        .map(([name, , run]) => ({ name, run }));
 }
 
 /** План выключенной фазы: этапов нет, результат пуст. */
@@ -530,6 +646,27 @@ function addSyntaxParserDiagnostics(
 }
 
 /** Ограничения из сводки синтаксиса, проверяемые без построения новых AST. */
+/* Ограничения RSL: длина идентификатора и строкового литерала в символах. */
+const IDENTIFIER_LIMIT = 80;
+const STRING_LIMIT = 2047;
+const FILE_STEM_LIMIT = 24;
+
+/**
+ * Число символов, а не единиц UTF-16.
+ *
+ * Считается перебором без создания массива: вызывается на каждом токене, длина
+ * которого дошла до предела, а таких в обычном файле нет вовсе.
+ */
+function countCharacters(value: string): number {
+    let count = 0;
+
+    for (const _character of value) {
+        count++;
+    }
+
+    return count;
+}
+
 function addDocumentedLimitDiagnostics(
     module: IIndexedModule,
     result: Diagnostic[]
@@ -537,8 +674,15 @@ function addDocumentedLimitDiagnostics(
     for (const token of module.lex.tokens) {
         if (
             token.kind === "identifier" &&
+            /*
+             * Дешёвая проверка идёт первой. Число символов может быть только
+             * меньше числа единиц UTF-16, поэтому короткое по единицам имя
+             * заведомо короткое и по символам — а перебор символов через
+             * Array.from создавал массив на каждый идентификатор файла.
+             */
+            token.value.length > IDENTIFIER_LIMIT &&
             !isSpecialName(token.value) &&
-            Array.from(token.value).length > 80
+            countCharacters(token.value) > IDENTIFIER_LIMIT
         ) {
             result.push(createTokenDiagnostic(
                 token,
@@ -548,7 +692,8 @@ function addDocumentedLimitDiagnostics(
             ));
         } else if (
             token.kind === "string" &&
-            Array.from(token.value).length > 2047
+            token.value.length > STRING_LIMIT &&
+            countCharacters(token.value) > STRING_LIMIT
         ) {
             result.push(createTokenDiagnostic(
                 token,
@@ -579,7 +724,10 @@ function addDocumentedLimitDiagnostics(
     const fileName = moduleFileName(module.uri);
     const extension = path.extname(fileName);
     const stem = path.basename(fileName, extension);
-    if (/^\.mac$/iu.test(extension) && Array.from(stem).length > 24) {
+    if (
+        /^\.mac$/iu.test(extension) &&
+        countCharacters(stem) > FILE_STEM_LIMIT
+    ) {
         result.push(createOffsetDiagnostic(
             module,
             0,
@@ -621,47 +769,93 @@ function addImportPlacementDiagnostics(
     }
 }
 
-function addConstantAssignmentDiagnostics(
+/* Токенов за одну порцию: подобрано по замеру, примерно 5 мс работы. */
+const CONSTANT_SCAN_CHUNK = 6000;
+
+/**
+ * Проверка присваивания константам — возобновляемым этапом.
+ *
+ * Проверка спрашивает у resolver каждое присваивание в файле, и на модуле в
+ * 700 КБ это был самый долгий этап расчёта: около 30 мс непрерывной занятости
+ * потока.
+ */
+function createConstantAssignmentStage(
+    module: IIndexedModule,
+    getResolver: () => RslScopeResolver,
+    result: Diagnostic[]
+): IRslDiagnosticStage {
+    /* Общее для всех порций считается один раз — на первой из них. */
+    let declarationStarts: Set<number> | undefined;
+    let cursor = 0;
+
+    return () => {
+        if (!declarationStarts) {
+            const starts = new Set<number>();
+            walkScopes(module.symbolTree, scope => {
+                for (const child of scope.children) {
+                    if (child.kind === CompletionItemKind.Constant) {
+                        starts.add(findObjectNameRange(module, child).start);
+                    }
+                }
+            });
+            declarationStarts = starts;
+        }
+
+        const tokens = cachedSignificantTokens(module.lex.tokens);
+        const last = Math.min(
+            cursor + CONSTANT_SCAN_CHUNK,
+            tokens.length - 1
+        );
+
+        for (let index = cursor; index < last; index++) {
+            addConstantAssignmentDiagnostic(
+                module,
+                getResolver(),
+                declarationStarts,
+                tokens[index],
+                tokens[index + 1],
+                result
+            );
+        }
+
+        cursor = Math.max(cursor + CONSTANT_SCAN_CHUNK, last);
+        return cursor < tokens.length - 1;
+    };
+}
+
+function addConstantAssignmentDiagnostic(
     module: IIndexedModule,
     resolver: RslScopeResolver,
+    declarationStarts: ReadonlySet<number>,
+    token: IRslToken,
+    next: IRslToken,
     result: Diagnostic[]
 ): void {
-    const tokens = cachedSignificantTokens(module.lex.tokens);
-    const declarationStarts = new Set<number>();
-    walkScopes(module.symbolTree, scope => {
-        for (const child of scope.children) {
-            if (child.kind === CompletionItemKind.Constant) {
-                declarationStarts.add(findObjectNameRange(module, child).start);
-            }
-        }
-    });
-
-    for (let index = 0; index + 1 < tokens.length; index++) {
-        const token = tokens[index];
-        const next = tokens[index + 1];
-        if (
-            token.kind !== "identifier" ||
-            next.kind !== "symbol" ||
-            next.raw !== "=" ||
-            declarationStarts.has(token.start)
-        ) {
-            continue;
-        }
-        const resolved = resolver.resolveAt(
-            module.uri,
-            module.symbolTree,
-            token.start
-        );
-        if (resolved?.symbol.kind !== CompletionItemKind.Constant) {
-            continue;
-        }
-        result.push(createTokenDiagnostic(
-            token,
-            DiagnosticSeverity.Error,
-            `Константе ${token.value} нельзя присваивать новое значение`,
-            "assignment-to-constant"
-        ));
+    if (
+        token.kind !== "identifier" ||
+        next.kind !== "symbol" ||
+        next.raw !== "=" ||
+        declarationStarts.has(token.start)
+    ) {
+        return;
     }
+
+    const resolved = resolver.resolveAt(
+        module.uri,
+        module.symbolTree,
+        token.start
+    );
+
+    if (resolved?.symbol.kind !== CompletionItemKind.Constant) {
+        return;
+    }
+
+    result.push(createTokenDiagnostic(
+        token,
+        DiagnosticSeverity.Error,
+        `Константе ${token.value} нельзя присваивать новое значение`,
+        "assignment-to-constant"
+    ));
 }
 
 /*
@@ -1390,101 +1584,194 @@ function addUnusedDeclarationDiagnostics(
     }
 }
 
-function addUseBeforeDeclarationDiagnostics(
+/*
+ * Вхождений имени за одну порцию: подобрано по замеру, примерно 5 мс работы.
+ *
+ * Резать пришлось именно по вхождениям, а не по объявлениям: на файле 700 КБ
+ * все 25 мс этапа уходили на ОДНО объявление, имя которого встречается в модуле
+ * тысячи раз, — по числу объявлений такой этап не делится вовсе.
+ */
+const USE_BEFORE_DECLARATION_CHUNK = 400;
+
+/**
+ * Использование до объявления — возобновляемым этапом.
+ *
+ * Для каждого объявления проверка обходит вхождения его имени выше по тексту и
+ * на сомнительных спрашивает resolver. На большом модуле это был самый долгий
+ * этап расчёта.
+ */
+function createUseBeforeDeclarationStage(
+    module: IIndexedModule,
+    getResolver: () => RslScopeResolver,
+    getLocalFacts: () => ILocalDiagnosticFacts,
+    result: Diagnostic[],
+    maxProblems: number
+): IRslDiagnosticStage {
+    /* Оба справочника переживают порции: считать их заново незачем. */
+    let memberNameStarts: Set<number> | undefined;
+    const nestedScopesByScope = new Map<RslSymbol, RslSymbol[]>();
+    let declarationIndex = 0;
+    /* Сколько вхождений текущего объявления уже просмотрено. */
+    let occurrenceIndex = 0;
+
+    return () => {
+        const facts = getLocalFacts();
+        const resolver = getResolver();
+
+        if (!memberNameStarts) {
+            memberNameStarts = collectMemberNameStarts(module.syntax.tokens);
+        }
+
+        let budget = USE_BEFORE_DECLARATION_CHUNK;
+
+        while (budget > 0 && declarationIndex < facts.declarations.length) {
+            if (result.length >= maxProblems) {
+                return false;
+            }
+
+            const step = addUseBeforeDeclarationDiagnostic(
+                module,
+                resolver,
+                facts,
+                memberNameStarts,
+                nestedScopesByScope,
+                facts.declarations[declarationIndex],
+                occurrenceIndex,
+                budget,
+                result
+            );
+
+            if (step.finished) {
+                declarationIndex++;
+                occurrenceIndex = 0;
+            } else {
+                occurrenceIndex = step.nextOccurrence;
+            }
+
+            budget -= step.examined;
+        }
+
+        return declarationIndex < facts.declarations.length;
+    };
+}
+
+/** Сколько вхождений просмотрено и дошло ли дело до конца объявления. */
+interface IUseBeforeDeclarationStep {
+    examined: number;
+    finished: boolean;
+    nextOccurrence: number;
+}
+
+function addUseBeforeDeclarationDiagnostic(
     module: IIndexedModule,
     resolver: RslScopeResolver,
     facts: ILocalDiagnosticFacts,
-    result: Diagnostic[],
-    maxProblems: number
-): void {
-    const code = module.syntax.tokens;
-    const memberNameStarts = collectMemberNameStarts(code);
-    const nestedScopesByScope = new Map<RslSymbol, RslSymbol[]>();
+    memberNameStarts: ReadonlySet<number>,
+    nestedScopesByScope: Map<RslSymbol, RslSymbol[]>,
+    declaration: IDeclarationInfo,
+    /* С какого вхождения продолжать: предыдущая порция кончилась на нём. */
+    fromOccurrence: number,
+    budget: number,
+    result: Diagnostic[]
+): IUseBeforeDeclarationStep {
+    const done: IUseBeforeDeclarationStep = {
+        examined: 1,
+        finished: true,
+        nextOccurrence: 0
+    };
+    const scope = declaration.scope;
 
-    for (const declaration of facts.declarations) {
-        if (result.length >= maxProblems) {
+    if (
+        declaration.parameter ||
+        (
+            scope.kind !== CompletionItemKind.Function &&
+            scope.kind !== CompletionItemKind.Method
+        )
+    ) {
+        return done;
+    }
+
+    const symbol = declaration.symbol;
+
+    /*
+     * Повреждённое или неоднозначное дерево не должно превращать
+     * служебные слова RSL (IF, VAR и т. п.) в объявления переменных.
+     */
+    if (isReservedIdentifier(symbol.name)) {
+        return done;
+    }
+
+    const name = normalizeIdentifier(symbol.name);
+    let nestedScopes = nestedScopesByScope.get(scope);
+
+    if (!nestedScopes) {
+        nestedScopes = scope.children
+            .filter(child => child.isContainer);
+        nestedScopesByScope.set(scope, nestedScopes);
+    }
+
+    const occurrences = facts.identifierIndex.get(name) || [];
+    const first = Math.max(
+        fromOccurrence,
+        lowerBoundTokenStart(occurrences, scope.range.start)
+    );
+    const limit = Math.min(occurrences.length, first + budget);
+    let index = first;
+
+    for (; index < limit; index++) {
+        const token = occurrences[index];
+
+        if (token.start >= symbol.range.start) {
+            /* Вхождения дальше объявления к «до объявления» не относятся. */
             break;
         }
 
-        const scope = declaration.scope;
-
         if (
-            declaration.parameter ||
-            (
-                scope.kind !== CompletionItemKind.Function &&
-                scope.kind !== CompletionItemKind.Method
+            facts.declarationRangeKeys.has(offsetRangeKey(
+                token.start,
+                token.end
+            )) ||
+            memberNameStarts.has(token.start) ||
+            nestedScopes.some(child =>
+                child !== scope &&
+                child.range.start <= token.start &&
+                token.end <= child.range.end
             )
         ) {
             continue;
         }
 
-        const symbol = declaration.symbol;
-
-        /*
-         * Повреждённое или неоднозначное дерево не должно превращать
-         * служебные слова RSL (IF, VAR и т. п.) в объявления переменных.
-         */
-        if (isReservedIdentifier(symbol.name)) {
-            continue;
-        }
-
-        const name = normalizeIdentifier(symbol.name);
-        let nestedScopes = nestedScopesByScope.get(scope);
-
-        if (!nestedScopes) {
-            nestedScopes = scope.children
-                .filter(child => child.isContainer);
-            nestedScopesByScope.set(scope, nestedScopes);
-        }
-
-        const occurrences = facts.identifierIndex.get(name) || [];
-        const use = findTokenInRange(
-            occurrences,
-            scope.range.start,
-            symbol.range.start,
-            token => {
-                if (
-                    facts.declarationRangeKeys.has(offsetRangeKey(
-                        token.start,
-                        token.end
-                    )) ||
-                    memberNameStarts.has(token.start) ||
-                    nestedScopes.some(child =>
-                        child !== scope &&
-                        child.range.start <= token.start &&
-                        token.end <= child.range.end
-                    )
-                ) {
-                    return false;
-                }
-
-                const resolved = resolver.resolveAt(
-                    module.uri,
-                    module.symbolTree,
-                    token.start
-                );
-
-                return !resolved;
-            }
-        );
-
-        if (!use) {
+        if (resolver.resolveAt(module.uri, module.symbolTree, token.start)) {
             continue;
         }
 
         result.push(createTokenDiagnostic(
-            use,
+            token,
             DiagnosticSeverity.Error,
             `Переменная ${symbol.name} используется до объявления`,
             "use-before-declaration",
             false,
             {
-                start: use.start,
-                end: use.end,
+                start: token.start,
+                end: token.end,
                 name: symbol.name
             }
         ));
+
+        /* Сообщение на объявление одно: первое использование и есть ответ. */
+        return { examined: index - first + 1, finished: true, nextOccurrence: 0 };
     }
+
+    const examined = Math.max(1, index - first);
+    /* Дошли до предела бюджета, а не до конца — продолжим со следующей порции. */
+    const finished = index >= occurrences.length ||
+        occurrences[index].start >= symbol.range.start;
+
+    return {
+        examined,
+        finished,
+        nextOccurrence: finished ? 0 : index
+    };
 }
 
 function addDuplicateDeclarationDiagnostics(

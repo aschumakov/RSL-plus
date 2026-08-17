@@ -23,9 +23,12 @@ import type { IRslDeclarationDescriptor } from "../analysis/declarationExtractor
  */
 export function buildRslFastCompletions(
     snapshot: IFastDocumentSnapshot,
-    offset: number
+    offset: number,
+    /* Готовые объявления, если вызывающий уже их извлёк: за запрос — один раз. */
+    known?: readonly IRslDeclarationDescriptor[]
 ): CompletionItem[] {
-    const declarations = getFastDocumentDeclarations(snapshot).declarations;
+    const declarations = known ||
+        getFastDocumentDeclarations(snapshot).declarations;
     const items = new Map<string, CompletionItem>();
 
     const add = (
@@ -36,8 +39,15 @@ export function buildRslFastCompletions(
          * Локальные переменные чужого Macro в подсказку не попадают: областей
          * видимости здесь нет, и предложить их значило бы предложить то, что
          * компилятор в этой позиции не увидит. Верхний уровень виден всегда.
+         *
+         * Метод класса — тот же случай: самостоятельным именем он не
+         * вызывается, только через объект. Вне своего класса его в списке
+         * простых имён быть не должно.
          */
-        if (!insideCurrentBlock && declaration.kind === "variable") {
+        const hidden = declaration.kind === "variable" ||
+            (declaration.kind === "macro" && declaration.isMethod);
+
+        if (!insideCurrentBlock && hidden) {
             return;
         }
 
@@ -95,13 +105,36 @@ export function buildRslFastMemberCompletions(
         return undefined;
     }
 
+    const tokens = snapshot.lex.tokens;
     const className = findReceiverType(
-        snapshot.lex.tokens,
+        tokens,
         receiver.name,
-        receiver.index
+        receiver.index,
+        findEnclosingBlockStart(tokens, receiver.index)
     );
 
     return className ? findClassMembers(className) : undefined;
+}
+
+/** Последний токен, начинающийся не позже смещения; поток упорядочен. */
+function tokenIndexBefore(
+    tokens: readonly IRslToken[],
+    offset: number
+): number {
+    let low = 0;
+    let high = tokens.length;
+
+    while (low < high) {
+        const middle = (low + high) >>> 1;
+
+        if (tokens[middle].start < offset) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+
+    return low - 1;
 }
 
 /** Имя перед точкой, на которой стоит курсор. */
@@ -109,17 +142,20 @@ function findReceiverBeforeDot(
     tokens: readonly IRslToken[],
     offset: number
 ): { name: string; index: number } | undefined {
+    /*
+     * Позиция ищется двоичным поиском, а не перебором с конца потока: на файле
+     * 1 МБ обращение в его начале обходилось в несколько миллисекунд только на
+     * то, чтобы дойти до нужного токена.
+     */
     let dotIndex = -1;
 
-    /*
-     * Ищем последний значимый токен перед курсором. Двоичный поиск здесь не
-     * нужен: обращение к члену начинается в паре токенов от позиции запроса.
-     */
-    for (let index = tokens.length - 1; index >= 0; index--) {
+    for (let index = tokenIndexBefore(tokens, offset); index >= 0; index--) {
         const token = tokens[index];
 
-        if (token.end > offset || token.kind === "whitespace" ||
-            token.kind === "newline") {
+        if (
+            token.end > offset || token.kind === "whitespace" ||
+            token.kind === "newline"
+        ) {
             continue;
         }
 
@@ -146,18 +182,77 @@ function findReceiverBeforeDot(
     return undefined;
 }
 
+/* Слова, открывающие блок: их закрывает END. */
+const BLOCK_OPENERS = new Set(["macro", "class", "if", "while", "for", "with"]);
+
+/**
+ * Начало объемлющего Macro, метода или класса — граница поиска типа.
+ *
+ * Без неё поиск шёл назад по всему файлу и находил присваивание из ЧУЖОГО
+ * Macro: на `x.` во втором Macro предлагались члены класса, присвоенного `x` в
+ * первом. Компилятор такую переменную здесь не видит, и подсказка была просто
+ * неверной — хуже, чем её отсутствие.
+ *
+ * Идём назад, считая вложенность: встреченный END означает закрытый ниже блок,
+ * а слово-открыватель на нулевой вложенности — наш собственный.
+ */
+function findEnclosingBlockStart(
+    tokens: readonly IRslToken[],
+    fromIndex: number
+): number {
+    let depth = 0;
+
+    for (let index = fromIndex; index >= 0; index--) {
+        const token = tokens[index];
+
+        if (token.kind !== "identifier") {
+            continue;
+        }
+
+        const word = normalizeIdentifier(token.value);
+
+        if (word === "end") {
+            depth++;
+            continue;
+        }
+
+        if (!BLOCK_OPENERS.has(word)) {
+            continue;
+        }
+
+        if (depth === 0) {
+            /*
+             * Найден наш блок. Для macro и class это и есть граница; для if,
+             * while, for и with — нет: объявление могло стоять выше внутри того
+             * же Macro, поэтому продолжаем искать его заголовок.
+             */
+            if (word === "macro" || word === "class") {
+                return index;
+            }
+
+            continue;
+        }
+
+        depth--;
+    }
+
+    /* Верхний уровень модуля: границей служит начало файла. */
+    return 0;
+}
+
 /**
  * Тип получателя по ближайшему предшествующему объявлению или присваиванию.
  *
- * Поиск идёт назад от места обращения: ближе к нему — вернее. Ограничен
- * началом файла, но на практике останавливается на первом же совпадении.
+ * Поиск идёт назад от места обращения — ближе к нему вернее — и не выходит за
+ * начало объемлющего блока: переменная другого Macro в этой позиции невидима.
  */
 function findReceiverType(
     tokens: readonly IRslToken[],
     name: string,
-    fromIndex: number
+    fromIndex: number,
+    boundaryIndex: number
 ): string | undefined {
-    for (let index = fromIndex - 1; index >= 0; index--) {
+    for (let index = fromIndex - 1; index >= boundaryIndex; index--) {
         const token = tokens[index];
 
         if (

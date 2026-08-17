@@ -31,108 +31,147 @@ export interface IRslOutputForm {
  * формы остаётся непрозрачным: parser интересуют только форма, фактические
  * параметры и postfix-спецификаторы форматирования.
  */
-export function parseOutputForms(
-    tokens: readonly IRslToken[]
-): IRslOutputForm[] {
-    const result: IRslOutputForm[] = [];
-
-    for (let index = 0; index < tokens.length; index++) {
-        const form = tokens[index];
-        if (form.kind !== "square" || form.squareKind !== "output") {
-            continue;
-        }
-
-        const openIndex = nextSignificantIndex(tokens, index + 1);
-        const open = openIndex >= 0 ? tokens[openIndex] : undefined;
-
-        if (!open || open.kind !== "symbol" || open.raw !== "(") {
-            result.push({ form, arguments: [] });
-            continue;
-        }
-
-        const closeIndex = findMatchingParen(tokens, openIndex);
-        const close = closeIndex >= 0 ? tokens[closeIndex] : undefined;
-        const bodyEnd = closeIndex >= 0 ? closeIndex : tokens.length;
-        const argumentTokenGroups = splitArguments(tokens, openIndex + 1, bodyEnd);
-
-        result.push({
-            form,
-            openParen: open,
-            closeParen: close,
-            arguments: argumentTokenGroups
-                .filter(group => group.length > 0)
-                .map(group => ({
-                    start: group[0].start,
-                    end: group[group.length - 1].end,
-                    tokens: group,
-                    specifiers: collectSpecifiers(group)
-                }))
-        });
-    }
-
-    return result;
+/** Всё, что даёт разбор инструкций вывода за один проход. */
+interface IOutputFormAnalysis {
+    forms: IRslOutputForm[];
+    /** Значения спецификаторов по возрастанию смещения. */
+    specifiers: IRslToken[];
+    /** start identifier-спецификаторов: их нельзя считать ссылками. */
+    identifierStarts: Set<number>;
 }
 
 /*
- * Спецификаторы запоминаются на версию token stream.
+ * Разбор живёт вместе со своим потоком токенов.
  *
- * Их спрашивают и подсветка, и диагностика, и Hover, а каждый вызов проходит
- * файл целиком. Ключ — сам массив токенов: каждый lex возвращает новый, поэтому
- * устаревший ответ отдать невозможно, а память освобождает GC вместе с ним.
+ * Ключ — сам массив токенов: каждый lex возвращает новый, поэтому устаревший
+ * ответ отдать невозможно, а память освобождает GC вместе с ним. Спрашивают
+ * разбор подсветка, диагностика, Hover и навигация по блокам — все они получают
+ * один и тот же результат, посчитанный однажды на версию текста.
  */
-const specifierCache = new WeakMap<readonly IRslToken[], IRslToken[]>();
+const analysisCache = new WeakMap<
+    readonly IRslToken[],
+    IOutputFormAnalysis
+>();
 
-/** Возвращает все значения спецификаторов внутри списков параметров. */
-export function collectFormatSpecifierTokens(
+function analyzeOutputForms(
     tokens: readonly IRslToken[]
-): IRslToken[] {
-    const known = specifierCache.get(tokens);
+): IOutputFormAnalysis {
+    const known = analysisCache.get(tokens);
 
     if (known) {
         return known;
     }
 
-    const computed = computeFormatSpecifierTokens(tokens);
-    specifierCache.set(tokens, computed);
+    const computed = computeOutputFormAnalysis(tokens);
+    analysisCache.set(tokens, computed);
     return computed;
 }
 
-function computeFormatSpecifierTokens(
+export function parseOutputForms(
+    tokens: readonly IRslToken[]
+): IRslOutputForm[] {
+    return analyzeOutputForms(tokens).forms;
+}
+
+/** Возвращает все значения спецификаторов внутри списков параметров. */
+export function collectFormatSpecifierTokens(
     tokens: readonly IRslToken[]
 ): IRslToken[] {
-    const result = new Map<number, IRslToken>();
+    return analyzeOutputForms(tokens).specifiers;
+}
 
-    /* Инструкции вывода имеют однозначный контекст. */
-    for (const form of parseOutputForms(tokens)) {
-        for (const argument of form.arguments) {
-            for (const specifier of argument.specifiers) {
-                result.set(specifier.value.start, specifier.value);
-            }
-        }
-    }
+/** Возвращает start identifier-спецификаторов, чтобы не считать их ссылками. */
+export function collectFormatSpecifierTokenStarts(
+    tokens: readonly IRslToken[]
+): Set<number> {
+    return analyzeOutputForms(tokens).identifierStarts;
+}
 
-    const declarationRanges = collectDeclarationParameterRanges(tokens);
+/**
+ * Один проход по потоку токенов вместо трёх.
+ *
+ * Прежде файл обходился трижды: отдельно искались инструкции вывода, отдельно
+ * списки параметров Macro и Class, отдельно двоеточия спецификаторов в скобках.
+ * На модуле 700 КБ это была самая долгая непрерывная работа при подготовке
+ * подсветки — около 25 мс, — притом что находилось в среднем ноль-два
+ * спецификатора.
+ *
+ * Слить проходы можно потому, что порядок сведений совпадает с порядком текста:
+ * список параметров начинается с открывающей скобки, а она стоит раньше любого
+ * двоеточия внутри себя. Значит к моменту, когда обход дошёл до двоеточия, все
+ * списки, способные его содержать, уже собраны — и проверка «двоеточие внутри
+ * объявления» видит ровно то же, что видела при отдельном проходе.
+ */
+function computeOutputFormAnalysis(
+    tokens: readonly IRslToken[]
+): IOutputFormAnalysis {
+    const forms: IRslOutputForm[] = [];
+    const specifiers = new Map<number, IRslToken>();
+    const declarationRanges: IOffsetRange[] = [];
     let parenthesisDepth = 0;
 
     for (let index = 0; index < tokens.length; index++) {
         const token = tokens[index];
-        if (isTrivia(token) || token.kind === "comment" || token.kind === "square") {
+
+        /*
+         * Инструкция вывода — один токен: скобки и двоеточия внутри неё в общий
+         * счёт вложенности не идут, поэтому она обрабатывается целиком и обход
+         * переходит к следующему токену.
+         */
+        if (token.kind === "square") {
+            if (token.squareKind === "output") {
+                const form = readOutputForm(tokens, index);
+                forms.push(form);
+
+                /* Внутри инструкции вывода контекст однозначен. */
+                for (const argument of form.arguments) {
+                    for (const specifier of argument.specifiers) {
+                        specifiers.set(specifier.value.start, specifier.value);
+                    }
+                }
+            }
+
             continue;
         }
 
-        if (token.kind === "symbol" && token.raw === "(") {
+        if (isTrivia(token) || token.kind === "comment") {
+            continue;
+        }
+
+        if (token.kind === "identifier") {
+            const word = token.value.toLowerCase();
+
+            if (word === "macro" || word === "class") {
+                const range = readDeclarationParameterRange(
+                    tokens,
+                    index,
+                    word
+                );
+
+                if (range) {
+                    declarationRanges.push(range);
+                }
+            }
+
+            continue;
+        }
+
+        if (token.kind !== "symbol") {
+            continue;
+        }
+
+        if (token.raw === "(") {
             parenthesisDepth++;
             continue;
         }
 
-        if (token.kind === "symbol" && token.raw === ")") {
+        if (token.raw === ")") {
             parenthesisDepth = Math.max(0, parenthesisDepth - 1);
             continue;
         }
 
         if (
             parenthesisDepth <= 0 ||
-            token.kind !== "symbol" ||
             token.raw !== ":" ||
             declarationRanges.some(range =>
                 range.start <= token.start && token.end <= range.end
@@ -149,24 +188,60 @@ function computeFormatSpecifierTokens(
 
         const value = tokens[valueIndex];
         if (isFormatSpecifierValue(value)) {
-            result.set(value.start, value);
+            specifiers.set(value.start, value);
         }
     }
 
-    return Array.from(result.values()).sort((left, right) =>
+    /*
+     * Порядок в Map зависит от того, что встретилось раньше, а потребители
+     * ожидают возрастание смещения — как и при прежних двух проходах.
+     */
+    const ordered = Array.from(specifiers.values()).sort((left, right) =>
         left.start - right.start
     );
+
+    return {
+        forms,
+        specifiers: ordered,
+        identifierStarts: new Set(
+            ordered
+                .filter(token => token.kind === "identifier")
+                .map(token => token.start)
+        )
+    };
 }
 
-/** Возвращает start identifier-спецификаторов, чтобы не считать их ссылками. */
-export function collectFormatSpecifierTokenStarts(
-    tokens: readonly IRslToken[]
-): Set<number> {
-    return new Set(
-        collectFormatSpecifierTokens(tokens)
-            .filter(token => token.kind === "identifier")
-            .map(token => token.start)
-    );
+/** Инструкция вывода со своими фактическими параметрами. */
+function readOutputForm(
+    tokens: readonly IRslToken[],
+    index: number
+): IRslOutputForm {
+    const form = tokens[index];
+    const openIndex = nextSignificantIndex(tokens, index + 1);
+    const open = openIndex >= 0 ? tokens[openIndex] : undefined;
+
+    if (!open || open.kind !== "symbol" || open.raw !== "(") {
+        return { form, arguments: [] };
+    }
+
+    const closeIndex = findMatchingParen(tokens, openIndex);
+    const close = closeIndex >= 0 ? tokens[closeIndex] : undefined;
+    const bodyEnd = closeIndex >= 0 ? closeIndex : tokens.length;
+    const argumentTokenGroups = splitArguments(tokens, openIndex + 1, bodyEnd);
+
+    return {
+        form,
+        openParen: open,
+        closeParen: close,
+        arguments: argumentTokenGroups
+            .filter(group => group.length > 0)
+            .map(group => ({
+                start: group[0].start,
+                end: group[group.length - 1].end,
+                tokens: group,
+                specifiers: collectSpecifiers(group)
+            }))
+    };
 }
 
 export function isFormatSpecifierValue(token: IRslToken): boolean {
@@ -206,56 +281,75 @@ interface IOffsetRange {
     end: number;
 }
 
-function collectDeclarationParameterRanges(
-    tokens: readonly IRslToken[]
-): IOffsetRange[] {
-    const significant = tokens.filter(token =>
-        !isTrivia(token) && token.kind !== "comment" && token.kind !== "square"
-    );
-    const result: IOffsetRange[] = [];
-
-    for (let index = 0; index < significant.length; index++) {
-        const keyword = significant[index];
-        if (keyword.kind !== "identifier") {
-            continue;
-        }
-
-        const word = keyword.value.toLowerCase();
-        if (word !== "macro" && word !== "class") {
-            continue;
-        }
-
-        let cursor = index + 1;
-        if (
-            word === "class" &&
-            significant[cursor]?.kind === "symbol" &&
-            significant[cursor].raw === "("
-        ) {
-            cursor = matchingSignificantParen(significant, cursor) + 1;
-        }
-
-        if (significant[cursor]?.kind !== "identifier") {
-            continue;
-        }
-        cursor++;
+/** Следующий значимый токен, начиная с указанного места; -1, если их больше нет. */
+function nextDeclarationIndex(
+    tokens: readonly IRslToken[],
+    from: number
+): number {
+    for (let index = from; index < tokens.length; index++) {
+        const token = tokens[index];
 
         if (
-            significant[cursor]?.kind !== "symbol" ||
-            significant[cursor].raw !== "("
+            !isTrivia(token) &&
+            token.kind !== "comment" &&
+            token.kind !== "square"
         ) {
-            continue;
-        }
-
-        const close = matchingSignificantParen(significant, cursor);
-        if (close > cursor) {
-            result.push({
-                start: significant[cursor].start,
-                end: significant[close].end
-            });
+            return index;
         }
     }
 
-    return result;
+    return -1;
+}
+
+/**
+ * Список параметров объявления, начинающегося с этого слова, или undefined.
+ *
+ * Двоеточие внутри такого списка — это написанный тип параметра, а не
+ * спецификатор форматирования.
+ *
+ * Обход идёт по исходному потоку токенов, а не по его отфильтрованной копии.
+ * Копия — это массив на сотню тысяч элементов для одного файла, и на большом
+ * модуле сборка мусора после неё стоила дороже самого обхода: подготовка
+ * подсветки занимала около 40 мс непрерывной работы, из них четверть — GC.
+ */
+function readDeclarationParameterRange(
+    tokens: readonly IRslToken[],
+    keywordIndex: number,
+    word: string
+): IOffsetRange | undefined {
+    let cursor = nextDeclarationIndex(tokens, keywordIndex + 1);
+
+    if (
+        word === "class" &&
+        cursor >= 0 &&
+        tokens[cursor].kind === "symbol" &&
+        tokens[cursor].raw === "("
+    ) {
+        cursor = nextDeclarationIndex(
+            tokens,
+            matchingSignificantParen(tokens, cursor) + 1
+        );
+    }
+
+    if (cursor < 0 || tokens[cursor].kind !== "identifier") {
+        return undefined;
+    }
+
+    const open = nextDeclarationIndex(tokens, cursor + 1);
+
+    if (
+        open < 0 ||
+        tokens[open].kind !== "symbol" ||
+        tokens[open].raw !== "("
+    ) {
+        return undefined;
+    }
+
+    const close = matchingSignificantParen(tokens, open);
+
+    return close > open
+        ? { start: tokens[open].start, end: tokens[close].end }
+        : undefined;
 }
 
 function matchingSignificantParen(

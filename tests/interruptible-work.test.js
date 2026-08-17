@@ -222,6 +222,53 @@ async function main() {
         );
     });
 
+    await test(
+        "порция не теряет проверки внутри одного объявления",
+        async () => {
+            /*
+             * Проверки, которые обходят все вхождения имени, режутся на порции
+             * по числу вхождений: на большом модуле весь этап уходил на ОДНО
+             * объявление, имя которого встречается тысячи раз. Здесь вхождений
+             * заведомо больше бюджета одной порции, поэтому продолжение с
+             * середины объявления обязано дать тот же ответ, что и обход целиком.
+             */
+            const uses = Array.from(
+                { length: 900 },
+                () => "  counter = counter + 1;"
+            ).join("\n");
+            const source = [
+                "Macro Long()",
+                uses,
+                "  Var counter = 0;",
+                "  Var later = missing;",
+                "  Var missing = 1;",
+                "End;"
+            ].join("\n");
+            const uri = "file:///d:/resumable.mac";
+            const index = new WorkspaceIndex();
+            index.registerWorkspaceFiles([uri]);
+            const module = index.updateOpenModule(uri, source, 1);
+
+            const synchronous = buildLocalRslDiagnostics(module, index);
+            const chunked = await buildLocalRslDiagnosticsChunked(
+                module,
+                index
+            );
+            const key = list => list
+                .map(item => `${item.code}:${item.range.start.line}`)
+                .sort();
+
+            assert.deepStrictEqual(key(chunked), key(synchronous));
+            assert.ok(
+                synchronous.some(
+                    item => item.code === "use-before-declaration"
+                ),
+                "Образец обязан содержать использование до объявления, иначе " +
+                    "проверка сравнивала бы два пустых списка"
+            );
+        }
+    );
+
     if (failed > 0) {
         console.error(`\nПройдено: ${passed}\nОшибок: ${failed}`);
         process.exitCode = 1;

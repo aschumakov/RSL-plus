@@ -37,6 +37,9 @@ import {
     resolveBlockNavigationPosition
 } from "./blockNavigation";
 import { normalizeIdentifier } from "../lexer";
+import type {
+    IRslDeclarationDescriptor
+} from "../analysis/declarationExtractor";
 import type { IRslSettings } from "../interfaces";
 import { tokenAtOffset, type IRslToken } from "../lexer";
 import {
@@ -248,7 +251,16 @@ export class RslLanguageFeatureRegistry {
             const module = this.getRequestModule(document);
 
             if (!module) {
-                void ensureDocumentParsed(document, waitMode);
+                /*
+                 * Разбор идёт своим ходом, но его отказ обязан быть перехвачен:
+                 * отделённый Promise без catch превращает ошибку разбора в
+                 * необработанное отклонение и валит процесс сервера.
+                 */
+                ensureDocumentParsed(document, waitMode).catch(error =>
+                    this.environment.log(
+                        `Completion: разбор не удался; ${errorText(error)}`
+                    )
+                );
 
                 if (requestIsStale(document, version, cancellationToken)) {
                     return finish(
@@ -267,13 +279,20 @@ export class RslLanguageFeatureRegistry {
                     document
                 );
                 const offset = document.offsetAt(params.position);
+                /* Объявления файла извлекаются один раз на запрос. */
+                const declarations =
+                    getFastDocumentDeclarations(snapshot).declarations;
                 const members = buildRslFastMemberCompletions(
                     snapshot,
                     offset,
-                    name => this.findFastClassMembers(document, snapshot, name)
+                    name => this.findFastClassMembers(
+                        document,
+                        name,
+                        declarations
+                    )
                 );
                 const fast = members || deduplicateCompletionItems(
-                    buildRslFastCompletions(snapshot, offset),
+                    buildRslFastCompletions(snapshot, offset, declarations),
                     this.defaultCompletionItems,
                     this.knownImportCompletions(document)
                 );
@@ -1122,17 +1141,18 @@ export class RslLanguageFeatureRegistry {
      */
     private findFastClassMembers(
         document: TextDocument,
-        snapshot: IFastDocumentSnapshot,
-        className: string
+        className: string,
+        /* Объявления передаются готовыми: за запрос они извлекаются один раз. */
+        declarations: readonly IRslDeclarationDescriptor[]
     ): CompletionItem[] | undefined {
         const wanted = normalizeIdentifier(className);
-        const own = getFastDocumentDeclarations(snapshot).declarations
-            .find(item =>
-                item.kind === "class" &&
-                normalizeIdentifier(item.name) === wanted
-            );
+        const own = declarations.find(item =>
+            item.kind === "class" &&
+            normalizeIdentifier(item.name) === wanted
+        );
 
         if (own) {
+            /* Свой класс: приватные члены видны, файл один. */
             return own.children.map(member => ({
                 label: member.name,
                 kind: member.kind === "macro"
@@ -1142,14 +1162,26 @@ export class RslLanguageFeatureRegistry {
             }));
         }
 
-        for (const imported of this.environment.index
-            .getImportedModules(document.uri)) {
+        for (const imported of this.importClosure(document)) {
             const symbol = imported.symbolTree.children.find(item =>
                 normalizeIdentifier(item.name) === wanted
             );
 
-            if (symbol && symbol.children.length > 0) {
-                return symbol.children.map(member => ({
+            /*
+             * Проверяется именно класс: одноимённая процедура или переменная
+             * членов не имеет, и выдать её «члены» значило бы выдумать их.
+             * Приватные члены чужого модуля недоступны — их не предлагаем.
+             */
+            if (!symbol || symbol.kind !== CompletionItemKind.Class) {
+                continue;
+            }
+
+            const members = symbol.children.filter(
+                member => member.visibility !== "private"
+            );
+
+            if (members.length > 0) {
+                return members.map(member => ({
                     label: member.name,
                     kind: member.kind,
                     detail: member.typeName || undefined
@@ -1160,6 +1192,68 @@ export class RslLanguageFeatureRegistry {
         return undefined;
     }
 
+    /**
+     * Модули, видимые из документа по Import текущей версии текста, включая
+     * транзитивные.
+     *
+     * Список Import берётся из быстрого снимка этой версии, а замыкание
+     * достраивается по Import уже прочитанных модулей: в RSL подключение даёт
+     * доступ ко всей рекурсивной цепочке. Прежний вариант брал готовый список
+     * модели предыдущей версии и лишь фильтровал его по basename — из-за этого
+     * только что добавленный Import не появлялся, транзитивные отбрасывались, а
+     * Import с путём не совпадал с именем файла.
+     */
+    private importClosure(document: TextDocument): IIndexedModule[] {
+        const { index } = this.environment;
+
+        if (!index.areImportsEnabled) {
+            return [];
+        }
+
+        const wanted = getFastDocumentImports(
+            this.environment.getFastDocumentSnapshot(document)
+        );
+        const result: IIndexedModule[] = [];
+        const seen = new Set<string>([document.uri]);
+        const queue: string[] = [];
+
+        for (const name of wanted) {
+            const uri = resolvedUri(index.resolveWorkspaceFile(name));
+
+            if (uri) {
+                queue.push(uri);
+            }
+        }
+
+        while (queue.length > 0) {
+            const uri = queue.shift()!;
+
+            if (seen.has(uri)) {
+                continue;
+            }
+            seen.add(uri);
+
+            const module = index.getModule(uri);
+
+            if (!module) {
+                continue;
+            }
+
+            result.push(module);
+
+            /* Транзитивная цепочка: Import подключённого модуля тоже видны. */
+            for (const name of module.imports) {
+                const next = resolvedUri(index.resolveWorkspaceFile(name));
+
+                if (next && !seen.has(next)) {
+                    queue.push(next);
+                }
+            }
+        }
+
+        return result;
+    }
+
     private knownImportCompletions(document: TextDocument): CompletionItem[] {
         const { index } = this.environment;
 
@@ -1167,30 +1261,13 @@ export class RslLanguageFeatureRegistry {
             return [];
         }
 
-        /*
-         * Список Import берётся из быстрого снимка ЭТОЙ версии, а не из модели.
-         *
-         * Модель здесь по определению от предыдущей версии — иначе мы бы не
-         * отвечали приблизительно. Её Import отражают текст до правки, поэтому
-         * только что добавленный Import не давал бы подсказок, а только что
-         * удалённый продолжал бы давать.
-         */
-        const current = new Set(
-            getFastDocumentImports(
-                this.environment.getFastDocumentSnapshot(document)
-            ).map(name => normalizeIdentifier(name))
-        );
         const items: CompletionItem[] = [];
 
-        for (const imported of index.getImportedModules(document.uri)) {
+        for (const imported of this.importClosure(document)) {
             const from = imported.uri.replace(/^.*[/\\]/, "");
 
-            if (!current.has(normalizeIdentifier(from.replace(/\.mac$/i, "")))) {
-                continue;
-            }
-
             for (const symbol of imported.symbolTree.children) {
-                if (symbol.isPrivate) {
+                if (symbol.visibility === "private") {
                     continue;
                 }
 
@@ -1310,6 +1387,13 @@ const INLAY_REFRESH_COALESCE_MS = 300;
  * context — старый клиент; там безопаснее считать запрос явным, иначе подсказка
  * молчала бы до конца склейки правок.
  */
+/** URI из разрешения имени модуля; неоднозначное и отсутствующее пропускаем. */
+function resolvedUri(
+    resolution: ReturnType<WorkspaceIndex["resolveWorkspaceFile"]>
+): string | undefined {
+    return resolution.kind === "resolved" ? resolution.value : undefined;
+}
+
 function isExplicitCompletion(params: CompletionParams): boolean {
     const kind = params.context?.triggerKind;
 

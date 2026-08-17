@@ -33,6 +33,9 @@ const tests = [
     "model-equivalence.test.js",
     "document-units.test.js",
     "text-decoding.test.js",
+    "resolver-cache.test.js",
+    "index-memory.test.js",
+    "fast-completion.test.js",
 ];
 
 let failed = false;

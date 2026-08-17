@@ -380,6 +380,8 @@ export class WorkspaceIndex {
     get size(): number { return this.modules.size; }
     get revision(): number { return this.revisionValue; }
     get importCacheSize(): number { return this.importContexts.size; }
+    /** Учтённый объём внешних модулей: по нему работает вытеснение. */
+    get externalModuleBytes(): number { return this.externalBytes; }
 
     private replace(
         uri: string,

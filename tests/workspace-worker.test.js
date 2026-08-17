@@ -1195,6 +1195,48 @@ function writeModule(directory, name, source) {
     );
 
     await test(
+        "сводки прежней версии кэша не переиспользуются",
+        () => withCache(async ({ directory, cacheFile }) => {
+            /*
+             * Отпечаток считается по байтам файла, а он от смены способа чтения
+             * не меняется. Поэтому сводки, снятые до распознавания CP866,
+             * выглядели актуальными и отдавались как есть — с именами из
+             * вопросительных знаков. Отсечь их может только номер версии.
+             */
+            const { uri } = writeModule(
+                directory,
+                "cache-old-version.mac",
+                externalSource(4)
+            );
+            await readCompactModule({ uri, generation: 0, id: 1 });
+            await compactModuleCache().flush();
+
+            const parsed = JSON.parse(fs.readFileSync(cacheFile, "utf8"));
+            assert.ok(parsed.entries.length > 0, "Кэш обязан быть записан");
+            /* Записи те же и отпечаток тот же — отличается только версия. */
+            fs.writeFileSync(
+                cacheFile,
+                JSON.stringify({ version: 1, entries: parsed.entries })
+            );
+            configureCompactModuleCache(undefined);
+            configureCompactModuleCache(cacheFile);
+
+            const again = await readCompactModule({
+                uri,
+                generation: 0,
+                id: 2
+            });
+
+            assert.strictEqual(again.status, "indexed");
+            assert.strictEqual(
+                again.reused,
+                false,
+                "Сводка прежней версии обязана быть перечитана заново"
+            );
+        })
+    );
+
+    await test(
         "в кэш не попадают исходный текст и AST",
         () => withCache(async ({ directory, cacheFile }) => {
             /* Состав уникален: тест не должен зависеть от памяти сессии. */
