@@ -1208,7 +1208,13 @@ function writeModule(directory, name, source) {
 
             const raw = fs.readFileSync(cacheFile, "utf8");
             const parsed = JSON.parse(raw);
-            assert.strictEqual(parsed.version, 1);
+            /*
+             * Версия 2 — распознавание CP866. Поднимать её нужно и тогда, когда
+             * изменился не формат записи, а способ получения содержимого:
+             * отпечаток считается по байтам файла и потому совпадал, и старые
+             * сводки без русских имён отдавались как актуальные.
+             */
+            assert.strictEqual(parsed.version, 2);
             assert.deepStrictEqual(
                 Object.keys(parsed.entries[0]).sort(),
                 [

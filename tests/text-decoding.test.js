@@ -77,6 +77,58 @@ test("CP866 распознаётся и декодируется", () => {
     assert.strictEqual(decoded.text, source, "текст обязан совпасть посимвольно");
 });
 
+test("таблица CP866 верна на всех 256 байтах", () => {
+    /*
+     * Кириллица в CP866 идёт подряд тремя кусками, и на них соблазнительно
+     * обойтись формулой. Между ними лежат 48 символов псевдографики с
+     * произвольным порядком: первая версия считала их арифметикой и давала
+     * другие символы, а проверка смотрела только на кириллицу и молчала.
+     *
+     * Эталон — таблица Unicode.org, выписанная здесь независимо от кода.
+     */
+    const reference = [];
+
+    for (let index = 0; index < 32; index++) {
+        reference.push(0x0410 + index);
+    }
+    for (let index = 0; index < 16; index++) {
+        reference.push(0x0430 + index);
+    }
+    reference.push(
+        0x2591, 0x2592, 0x2593, 0x2502, 0x2524, 0x2561, 0x2562, 0x2556,
+        0x2555, 0x2563, 0x2551, 0x2557, 0x255D, 0x255C, 0x255B, 0x2510,
+        0x2514, 0x2534, 0x252C, 0x251C, 0x2500, 0x253C, 0x255E, 0x255F,
+        0x255A, 0x2554, 0x2569, 0x2566, 0x2560, 0x2550, 0x256C, 0x2567,
+        0x2568, 0x2564, 0x2565, 0x2559, 0x2558, 0x2552, 0x2553, 0x256B,
+        0x256A, 0x2518, 0x250C, 0x2588, 0x2584, 0x258C, 0x2590, 0x2580
+    );
+    for (let index = 0; index < 16; index++) {
+        reference.push(0x0440 + index);
+    }
+    reference.push(
+        0x0401, 0x0451, 0x0404, 0x0454, 0x0407, 0x0457, 0x040E, 0x045E,
+        0x00B0, 0x2219, 0x00B7, 0x221A, 0x2116, 0x00A4, 0x25A0, 0x00A0
+    );
+
+    assert.strictEqual(reference.length, 128, "эталон обязан покрыть 0x80..0xFF");
+
+    const wrong = [];
+
+    for (let byte = 0; byte <= 0xFF; byte++) {
+        const decoded = decodeRslSourceText(Buffer.from([byte]));
+        const expected = byte < 0x80 ? byte : reference[byte - 0x80];
+
+        if (decoded.charCodeAt(0) !== expected) {
+            wrong.push(
+                `0x${byte.toString(16)}: U+${decoded.charCodeAt(0).toString(16)}` +
+                ` вместо U+${expected.toString(16)}`
+            );
+        }
+    }
+
+    assert.deepStrictEqual(wrong, [], "таблица CP866 обязана совпасть целиком");
+});
+
 test("UTF-8 остаётся UTF-8, в том числе с BOM", () => {
     const source = "Macro НоваяОперация()\nEnd;";
     const plain = decodeRslSource(Buffer.from(source, "utf8"));

@@ -145,23 +145,43 @@ test("правка внутри Macro делает грязным только �
     );
 });
 
-test("правка в теле метода не делает грязными соседние методы", () => {
+test("правка в теле метода не пачкает ни класс, ни соседние методы", () => {
     const { diff } = afterEdit(SOURCE, "    x = 1;", "    y = 2;\n");
-    const changed = diff.changed.map(unit => unit.id).sort();
 
     /*
-     * Класс тоже грязен: его текст включает тело метода. Но соседний метод —
-     * нет, и именно это позволяет не разбирать его заново.
+     * Тело метода классу не принадлежит: классу остаются заголовок, поля и
+     * промежутки между методами. Иначе правка в любом методе делала бы грязным
+     * весь класс, и разделение на методы не давало бы ничего.
      */
     assert.deepStrictEqual(
-        changed,
-        ["class:doc", "method:doc.save"],
-        "грязными обязаны стать метод и его класс, но не соседний метод"
+        diff.changed.map(unit => unit.id).sort(),
+        ["method:doc.save"],
+        "грязным обязан стать только сам метод"
+    );
+    assert.ok(
+        diff.shifted.some(unit => unit.id === "class:doc"),
+        "класс обязан оказаться лишь сдвинутым"
     );
     assert.ok(
         diff.shifted.some(unit => unit.id === "method:doc.load"),
-        "соседний метод обязан оказаться лишь сдвинутым"
+        "и соседний метод тоже"
     );
+});
+
+test("правка поля класса пачкает класс, но не его методы", () => {
+    const { diff } = afterEdit(SOURCE, "  Var field: String;", "  Var extra;\n");
+
+    assert.deepStrictEqual(
+        diff.changed.map(unit => unit.id).sort(),
+        ["class:doc"],
+        "поле принадлежит классу"
+    );
+    for (const method of ["method:doc.save", "method:doc.load"]) {
+        assert.ok(
+            diff.shifted.some(unit => unit.id === method),
+            `${method} обязан лишь сдвинуться`
+        );
+    }
 });
 
 test("правка Import делает грязным верхний уровень", () => {
@@ -239,6 +259,46 @@ test("единицы не пересекаются и покрывают объ�
         assert.ok(unit.end > unit.start, `${unit.id}: пустой диапазон`);
         assert.ok(unit.hash.length > 0, `${unit.id}: нет хеша`);
     }
+});
+
+test("переиспользование опирается на текст, а не только на отпечаток", () => {
+    /*
+     * Цена коллизии отпечатка здесь обратна привычной: не лишний пересчёт, а
+     * переиспользование устаревшего результата, то есть молчаливо неверные
+     * подсказки и Problems. Поэтому там, где по ответу переиспользуют готовое,
+     * diff сверяет сам текст.
+     */
+    const {
+        sameUnitText
+    } = require("../server/out/analysis/documentUnits");
+    const first = split(SOURCE);
+    const second = split(SOURCE);
+    const macro = first.find(unit => unit.id === "macro:first");
+    const same = second.find(unit => unit.id === "macro:first");
+
+    assert.ok(sameUnitText(SOURCE, macro, SOURCE, same));
+
+    /* Подделка: тот же отпечаток при другом тексте не должен обмануть. */
+    const forged = { ...same, hash: macro.hash };
+    const otherSource = SOURCE.replace("Var x = 1;", "Var y = 2;");
+    const changed = split(otherSource).find(unit => unit.id === "macro:first");
+
+    assert.strictEqual(
+        sameUnitText(SOURCE, macro, otherSource, { ...changed, hash: macro.hash }),
+        false,
+        "сверка текста обязана поймать несовпадение даже при равном отпечатке"
+    );
+    void forged;
+
+    /* А diff с текстами обязан признать такую единицу изменённой. */
+    const diff = diffRslDocumentUnits(first, split(otherSource), {
+        previous: SOURCE,
+        next: otherSource
+    });
+    assert.deepStrictEqual(
+        diff.changed.map(unit => unit.id),
+        ["macro:first"]
+    );
 });
 
 test("файл без Macro и Class — это один верхний уровень", () => {

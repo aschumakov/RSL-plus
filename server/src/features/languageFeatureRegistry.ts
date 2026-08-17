@@ -4,6 +4,7 @@ import {
     CodeActionParams,
     CodeActionTriggerKind,
     CompletionItem,
+    CompletionItemKind,
     type CompletionParams,
     CompletionTriggerKind,
     Definition,
@@ -35,6 +36,7 @@ import {
     resolveCurrentBlockRange,
     resolveBlockNavigationPosition
 } from "./blockNavigation";
+import { normalizeIdentifier } from "../lexer";
 import type { IRslSettings } from "../interfaces";
 import { tokenAtOffset, type IRslToken } from "../lexer";
 import {
@@ -43,9 +45,14 @@ import {
 } from "../parsing/outputFormParser";
 import { findRslReferencesInWorkspace } from "../analysis/references";
 import { ReferenceIndex } from "../analysis/referenceIndex";
-import type { IFastDocumentSnapshot } from "../services/fastDocumentSnapshot";
 import {
-    buildRslFastCompletions
+    getFastDocumentDeclarations,
+    getFastDocumentImports,
+    type IFastDocumentSnapshot
+} from "../services/fastDocumentSnapshot";
+import {
+    buildRslFastCompletions,
+    buildRslFastMemberCompletions
 } from "./fastCompletionProvider";
 import type {
     ParseWaitMode
@@ -229,31 +236,44 @@ export class RslLanguageFeatureRegistry {
              * тогда, когда пользователь его открыл. Разбор при этом не
              * отменяется — по его готовности клиент перезапросит список.
              */
-            await waitForParseBudget(
-                ensureDocumentParsed(document, waitMode),
-                FAST_COMPLETION_BUDGET_MS
-            );
-            if (requestIsStale(document, version, cancellationToken)) {
-                return finish(
-                    { isIncomplete: false, items: [] },
-                    { cancelled: true, items: 0 }
-                );
-            }
+            /*
+             * Модель либо уже готова, либо ответ будет приблизительным.
+             *
+             * Ждать здесь нечего: бюджет ожидания был не жёстким. Пока идёт
+             * синхронная фаза разбора, таймер сработать не может — управление
+             * к нему не возвращается, — и на загруженной машине «25 мс»
+             * превращались в сколько угодно. Разбор всё равно назначается, а
+             * isIncomplete заставит клиента перезапросить список по готовности.
+             */
             const module = this.getRequestModule(document);
+
             if (!module) {
+                void ensureDocumentParsed(document, waitMode);
+
+                if (requestIsStale(document, version, cancellationToken)) {
+                    return finish(
+                        { isIncomplete: false, items: [] },
+                        { cancelled: true, items: 0 }
+                    );
+                }
+
                 /*
-                 * Модели этой версии ещё нет, но отвечать пустым списком
-                 * нельзя: пользователь видит его как «в файле ничего нет».
-                 * Состав — из быстрого снимка плюс то, что уже готово и не
-                 * зависит от модели: встроенные имена и символы прочитанных
-                 * Import. isIncomplete заставляет клиента перезапросить
-                 * список, когда модель будет готова.
+                 * Пустым списком отвечать нельзя: пользователь читает его как
+                 * «в файле ничего нет». Состав — из быстрого снимка плюс то,
+                 * что от модели не зависит: встроенные имена и символы
+                 * прочитанных Import.
                  */
-                const fast = deduplicateCompletionItems(
-                    buildRslFastCompletions(
-                        this.environment.getFastDocumentSnapshot(document),
-                        document.offsetAt(params.position)
-                    ),
+                const snapshot = this.environment.getFastDocumentSnapshot(
+                    document
+                );
+                const offset = document.offsetAt(params.position);
+                const members = buildRslFastMemberCompletions(
+                    snapshot,
+                    offset,
+                    name => this.findFastClassMembers(document, snapshot, name)
+                );
+                const fast = members || deduplicateCompletionItems(
+                    buildRslFastCompletions(snapshot, offset),
                     this.defaultCompletionItems,
                     this.knownImportCompletions(document)
                 );
@@ -263,7 +283,18 @@ export class RslLanguageFeatureRegistry {
                         isIncomplete: true,
                         items: this.completionTransport.prepare(fast).items
                     },
-                    { pendingModel: true, items: fast.length }
+                    {
+                        pendingModel: true,
+                        source: members ? "fastMembers" : "fastNames",
+                        items: fast.length
+                    }
+                );
+            }
+
+            if (requestIsStale(document, version, cancellationToken)) {
+                return finish(
+                    { isIncomplete: false, items: [] },
+                    { cancelled: true, items: 0 }
                 );
             }
             const contextual = buildRslContextCompletions(
@@ -1081,6 +1112,54 @@ export class RslLanguageFeatureRegistry {
      * и лежат в индексе. Поэтому в приблизительном ответе они законны — в
      * отличие от локальных областей видимости, которых без модели нет.
      */
+    /**
+     * Члены класса по имени, без полной модели.
+     *
+     * Класс ищется там, где он может быть виден без анализа: объявления самого
+     * файла из быстрого снимка, затем прочитанные модули Import. Встроенные и
+     * прикладные классы остаются полной модели — их разрешение зависит от
+     * Import-контекста, а он здесь ещё не построен.
+     */
+    private findFastClassMembers(
+        document: TextDocument,
+        snapshot: IFastDocumentSnapshot,
+        className: string
+    ): CompletionItem[] | undefined {
+        const wanted = normalizeIdentifier(className);
+        const own = getFastDocumentDeclarations(snapshot).declarations
+            .find(item =>
+                item.kind === "class" &&
+                normalizeIdentifier(item.name) === wanted
+            );
+
+        if (own) {
+            return own.children.map(member => ({
+                label: member.name,
+                kind: member.kind === "macro"
+                    ? CompletionItemKind.Method
+                    : CompletionItemKind.Field,
+                detail: member.typeName || undefined
+            }));
+        }
+
+        for (const imported of this.environment.index
+            .getImportedModules(document.uri)) {
+            const symbol = imported.symbolTree.children.find(item =>
+                normalizeIdentifier(item.name) === wanted
+            );
+
+            if (symbol && symbol.children.length > 0) {
+                return symbol.children.map(member => ({
+                    label: member.name,
+                    kind: member.kind,
+                    detail: member.typeName || undefined
+                }));
+            }
+        }
+
+        return undefined;
+    }
+
     private knownImportCompletions(document: TextDocument): CompletionItem[] {
         const { index } = this.environment;
 
@@ -1088,10 +1167,27 @@ export class RslLanguageFeatureRegistry {
             return [];
         }
 
+        /*
+         * Список Import берётся из быстрого снимка ЭТОЙ версии, а не из модели.
+         *
+         * Модель здесь по определению от предыдущей версии — иначе мы бы не
+         * отвечали приблизительно. Её Import отражают текст до правки, поэтому
+         * только что добавленный Import не давал бы подсказок, а только что
+         * удалённый продолжал бы давать.
+         */
+        const current = new Set(
+            getFastDocumentImports(
+                this.environment.getFastDocumentSnapshot(document)
+            ).map(name => normalizeIdentifier(name))
+        );
         const items: CompletionItem[] = [];
 
         for (const imported of index.getImportedModules(document.uri)) {
             const from = imported.uri.replace(/^.*[/\\]/, "");
+
+            if (!current.has(normalizeIdentifier(from.replace(/\.mac$/i, "")))) {
+                continue;
+            }
 
             for (const symbol of imported.symbolTree.children) {
                 if (symbol.isPrivate) {
@@ -1199,13 +1295,13 @@ const INTERACTIVE_PARSE_BUDGET_MS = 200;
 const INLAY_REFRESH_COALESCE_MS = 300;
 
 /*
- * Сколько Completion согласен ждать модель, прежде чем ответить приблизительно.
+ * Бюджета ожидания у Completion больше нет.
  *
- * Раньше он ждал весь интерактивный бюджет — 200 мс, — потому что иначе
- * альтернативой был пустой список. Теперь альтернатива осмысленная, и держать
- * список закрытым столько времени незачем: пользователь его уже открыл.
+ * Он был не жёстким: пока идёт синхронная фаза разбора, управление к таймеру не
+ * возвращается, и «25 мс» на загруженной машине превращались в сколько угодно.
+ * Теперь готовая модель используется, а неготовая не ожидается вовсе — ответ
+ * приблизительный и помечен isIncomplete.
  */
-const FAST_COMPLETION_BUDGET_MS = 25;
 
 /**
  * Список открыт действием пользователя, а не набором текста.

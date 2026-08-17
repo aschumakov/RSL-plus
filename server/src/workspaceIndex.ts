@@ -69,7 +69,16 @@ export class WorkspaceIndex {
         Number.MAX_SAFE_INTEGER
     );
     private readonly maxExternalModules: number;
-    /** Суммарный объём сводок закрытых файлов и его предел. */
+    /**
+     * Объём сводки каждого внешнего модуля и их сумма.
+     *
+     * Размеры хранятся поимённо, а не одним счётчиком. Счётчик приходилось бы
+     * править в шести местах — добавление, замена, открытие, закрытие,
+     * удаление, очистка, — и первая же версия этого не делала: вычитания не
+     * было нигде, а повторная запись того же модуля прибавляла второй раз.
+     * Индекс из-за этого считал себя переполненным и вытеснял нужные модули.
+     */
+    private readonly externalSizeByUri = new Map<string, number>();
     private readonly maxExternalBytes: number;
     private externalBytes = 0;
     private importsEnabled = true;
@@ -186,6 +195,7 @@ export class WorkspaceIndex {
         if (module) module.isOpen = true;
         /* Открытый документ никогда не вытесняется LRU external-модулей. */
         this.externalModuleOrder.delete(uri);
+        this.dropExternalSize(uri);
     }
 
     removeModule(uri: string): void {
@@ -196,6 +206,7 @@ export class WorkspaceIndex {
             this.imports.remove(previous);
         }
         this.externalModuleOrder.delete(uri);
+        this.dropExternalSize(uri);
         affected.add(uri);
         this.invalidateImportContexts(affected);
         this.revisionValue++;
@@ -208,6 +219,8 @@ export class WorkspaceIndex {
         this.files.clear();
         this.importContexts.clear();
         this.externalModuleOrder.clear();
+        this.externalSizeByUri.clear();
+        this.externalBytes = 0;
         this.revisionValue++;
     }
 
@@ -397,7 +410,12 @@ export class WorkspaceIndex {
         this.invalidateImportContexts(affected);
 
         if (isOpen) {
+            /*
+             * Открытие снимает модуль с учёта: он больше не внешний и не
+             * вытесняется. Без этого его объём оставался бы в сумме навсегда.
+             */
             this.externalModuleOrder.delete(uri);
+            this.dropExternalSize(uri);
         } else {
             this.touchExternalModule(uri);
         }
@@ -419,7 +437,7 @@ export class WorkspaceIndex {
      */
     private touchExternalModule(uri: string): void {
         this.externalModuleOrder.set(uri, true);
-        this.externalBytes += this.modules.get(uri)?.sourceLength ?? 0;
+        this.setExternalSize(uri, this.modules.get(uri)?.sourceLength ?? 0);
 
         while (
             this.externalModuleOrder.size > this.maxExternalModules ||
@@ -432,12 +450,26 @@ export class WorkspaceIndex {
             }
 
             this.externalModuleOrder.delete(oldest);
-            this.externalBytes = Math.max(
-                0,
-                this.externalBytes - (this.modules.get(oldest)?.sourceLength ?? 0)
-            );
             this.removeModule(oldest);
         }
+    }
+
+    /** Единственное место, где учтённый объём модуля меняется. */
+    private setExternalSize(uri: string, size: number): void {
+        this.externalBytes += size - (this.externalSizeByUri.get(uri) ?? 0);
+        this.externalSizeByUri.set(uri, size);
+    }
+
+    /** Модуль перестал быть внешним: закрыт открытием, удалён или вытеснен. */
+    private dropExternalSize(uri: string): void {
+        const known = this.externalSizeByUri.get(uri);
+
+        if (known === undefined) {
+            return;
+        }
+
+        this.externalBytes = Math.max(0, this.externalBytes - known);
+        this.externalSizeByUri.delete(uri);
     }
 
     private getImportContext(uri: string): IImportContext {

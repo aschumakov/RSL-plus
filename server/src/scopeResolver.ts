@@ -697,7 +697,17 @@ export class RslScopeResolver {
             }
 
             for (const candidate of candidates) {
-                const boundary = candidate.selectionRange.end;
+                /*
+                 * Границей служит НАЧАЛО имени объявления, а не конец.
+                 *
+                 * На самом имени запрос обязан разрешиться в это объявление, а
+                 * до него — во внешнее. То есть ответ меняется ровно в
+                 * selectionRange.start. С границей по концу имени оба смещения
+                 * попадали в один интервал, и ответ зависел от того, какой из
+                 * них спросили первым: `Var x` внутри Macro разрешался во
+                 * внешний x, если до этого спрашивали строку выше.
+                 */
+                const boundary = candidate.selectionRange.start;
 
                 if (boundary <= offset) {
                     from = Math.max(from, boundary);

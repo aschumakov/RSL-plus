@@ -511,11 +511,15 @@ const SAME_LENGTH = SOURCE.replace("Var local = value;", "Var lokal = value;");
              * Пользователь, открывший список, ждёт его сейчас. Поток букв,
              * наоборот, идёт на каждый символ, и разбор по нему снимал бы
              * склейку правок.
+             *
+             * Проверяется путь БЕЗ готовой модели: когда она есть, разбор не
+             * нужен вовсе и не назначается — ни тем, ни другим запросом.
              */
-            const { handlers, calls } = createRegistry({
+            const { handlers, calls, state } = createRegistry({
                 uri: URI,
                 source: SOURCE
             });
+            bumpVersion(state, CHANGED);
             const request = context => {
                 calls.forced = 0;
                 calls.scheduled = 0;
