@@ -16,6 +16,7 @@ import {
     referenceSourceFactsTesting,
     scanReferenceSource
 } from "./referenceSourceFacts";
+import { decodeRslSourceText } from "../core/textDecoding";
 
 export type { IReferenceImportModule } from "./referenceImportGraph";
 
@@ -335,7 +336,9 @@ export class ReferenceIndex {
 
         let source: string;
         try {
-            source = await fs.promises.readFile(filePath, "utf8");
+            source = decodeRslSourceText(
+                await fs.promises.readFile(filePath)
+            );
         } catch (_error) {
             this.invalidate(uri);
             return undefined;

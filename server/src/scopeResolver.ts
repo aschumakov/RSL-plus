@@ -50,7 +50,9 @@ export interface IResolvedSymbol {
 }
 
 interface IResolutionCache {
-    closureKey: string;
+    /* Ревизии индекса и каталога вместо строкового ключа: см. resolveAt. */
+    revision: number;
+    platformRevision: number;
     byTokenStart: Map<number, IResolvedSymbol | null>;
 }
 
@@ -63,6 +65,41 @@ interface IResolutionCache {
  * поиском по всему workspace, без области видимости и без позиции, — и
  * `x = Get()` получал тип чужого класса Get из произвольного файла проекта.
  */
+/**
+ * Запись кэша разрешения имён: результат и интервал его действительности.
+ *
+ * Интервал обязателен. До объявления имя видит внешнюю область, после —
+ * местную, и кэш без границ отвечал бы на «использование выше объявления» так
+ * же, как на «использование ниже».
+ */
+interface IResolutionCacheEntry {
+    from: number;
+    to: number;
+    resolved: IIndexedSymbol | undefined;
+}
+
+/** Фильтр «годится любой символ»: узнаётся по ссылке, поэтому он один. */
+const ACCEPT_ANY = (): boolean => true;
+
+/*
+ * Прочие фильтры различаются по тексту функции. Их всего несколько и они
+ * заданы в коде литералами, поэтому текст — устойчивый ключ; переменные в
+ * замыкании фильтров не участвуют.
+ */
+const acceptTags = new WeakMap<(symbol: RslSymbol) => boolean, string>();
+let acceptTagCounter = 0;
+
+function acceptTag(accept: (symbol: RslSymbol) => boolean): string {
+    let tag = acceptTags.get(accept);
+
+    if (tag === undefined) {
+        tag = `f${++acceptTagCounter}`;
+        acceptTags.set(accept, tag);
+    }
+
+    return tag;
+}
+
 interface IConstructorAssignment {
     /** Позиция имени цели присваивания. */
     offset: number;
@@ -146,6 +183,19 @@ export class RslScopeResolver {
     >();
     private resolutionCacheHits = 0;
     private resolutionCacheMisses = 0;
+    /**
+     * Разрешение имени по паре «область + имя», а не по позиции токена.
+     *
+     * Кэш по позиции помогает только повторному запросу той же версии: внутри
+     * одного построения подсветки каждый токен — свой ключ, и все промахиваются.
+     * Между тем на файле 379 КБ 37 627 идентификаторов дают 34 различные пары
+     * «область + имя».
+     */
+    private namesByModule = new WeakMap<IIndexedModule, {
+        revision: number;
+        platformRevision: number;
+        byKey: Map<string, IResolutionCacheEntry>;
+    }>();
     /** Присваивания, тип которых сейчас вычисляется: защита от цикла. */
     private memberTypeGuard = new Set<IConstructorAssignment>();
     /** Модули, индекс присваиваний которых строится сейчас. */
@@ -212,12 +262,23 @@ export class RslScopeResolver {
             return undefined;
         }
 
-        const closureKey = this.getImportContextKey(uri);
+        /*
+         * Актуальность — по ревизиям, а не по ключу Import-контекста: ключ
+         * собирает Import-замыкание в строку, а вызывался он здесь на каждый
+         * идентификатор файла. На файле 379 КБ это 37 627 сборок ключа.
+         */
+        const revision = this.index.revision;
+        const platformRevision = this.platformModules?.revision ?? 0;
         let cache = this.resolutionByModule.get(module);
 
-        if (!cache || cache.closureKey !== closureKey) {
+        if (
+            !cache ||
+            cache.revision !== revision ||
+            cache.platformRevision !== platformRevision
+        ) {
             cache = {
-                closureKey,
+                revision,
+                platformRevision,
                 byTokenStart: new Map<number, IResolvedSymbol | null>()
             };
             this.resolutionByModule.set(module, cache);
@@ -445,10 +506,63 @@ export class RslScopeResolver {
          * Service()` внутри `Var service;` разрешал бы Service в саму
          * переменную — и тип переменной остался бы неизвестным.
          */
-        accept: (symbol: RslSymbol) => boolean = () => true
+        accept: (symbol: RslSymbol) => boolean = ACCEPT_ANY
     ): IIndexedSymbol | undefined {
         const referenceName = normalizeReferenceIdentifier(name);
         const chain = getScopeChain(tree, offset);
+        /*
+         * Кэш по паре «область + имя» с интервалом действительности.
+         *
+         * Одно и то же имя в одной области разрешается в одно и то же — но
+         * только пока смещение не пересекло объявление-кандидата: до объявления
+         * имя видит внешнюю область, после — местную. Поэтому ключа мало,
+         * нужен ещё интервал, внутри которого набор видимых кандидатов тот же.
+         *
+         * Ради этого всё и делается: на файле 379 КБ 37 627 идентификаторов
+         * дают 34 различные пары «область + имя», то есть повторность 1107 раз,
+         * и без кэша каждый из них заново обходит цепочку областей, наследование
+         * и Import-замыкание. Разрешение имён — 98% времени семантической
+         * подсветки.
+         */
+        const cache = this.nameResolutionCache(uri);
+        const key = cache
+            ? this.resolutionKey(chain, referenceName, accept)
+            : "";
+        const entry = cache?.get(key);
+
+        if (entry && offset >= entry.from && offset <= entry.to) {
+            this.resolutionCacheHits++;
+            return entry.resolved;
+        }
+
+        this.resolutionCacheMisses++;
+        const resolved = this.resolveNameUncached(
+            uri,
+            tree,
+            referenceName,
+            offset,
+            accept,
+            chain
+        );
+
+        if (cache) {
+            cache.set(key, {
+                ...this.resolutionValidity(chain, referenceName, offset),
+                resolved
+            });
+        }
+
+        return resolved;
+    }
+
+    private resolveNameUncached(
+        uri: string,
+        tree: RslSymbol,
+        referenceName: string,
+        offset: number,
+        accept: (symbol: RslSymbol) => boolean,
+        chain: RslSymbol[]
+    ): IIndexedSymbol | undefined {
         const pick = (scope: RslSymbol): RslSymbol | undefined => {
             const candidates = getChildrenByName(scope).get(referenceName);
             return candidates
@@ -555,6 +669,97 @@ export class RslScopeResolver {
                 platformModule: platform.moduleKey
             }
             : undefined;
+    }
+
+    /**
+     * Интервал смещений, внутри которого разрешение имени не меняется.
+     *
+     * Ответ зависит от смещения только через видимость объявлений: пока оно не
+     * пересекло ни одного кандидата с этим именем, набор видимого тот же, а
+     * значит и результат. Границами служат ближайшие объявления-кандидаты слева
+     * и справа, а также границы самой внутренней области — за ней меняется уже
+     * цепочка областей.
+     */
+    private resolutionValidity(
+        chain: readonly RslSymbol[],
+        referenceName: string,
+        offset: number
+    ): { from: number; to: number } {
+        const innermost = chain[chain.length - 1];
+        let from = innermost ? innermost.range.start : 0;
+        let to = innermost ? innermost.range.end : Number.MAX_SAFE_INTEGER;
+
+        for (const scope of chain) {
+            const candidates = getChildrenByName(scope).get(referenceName);
+
+            if (!candidates) {
+                continue;
+            }
+
+            for (const candidate of candidates) {
+                const boundary = candidate.selectionRange.end;
+
+                if (boundary <= offset) {
+                    from = Math.max(from, boundary);
+                } else {
+                    to = Math.min(to, boundary - 1);
+                }
+            }
+        }
+
+        return { from, to };
+    }
+
+    /** Ключ кэша: область, имя и род принимаемых символов. */
+    private resolutionKey(
+        chain: readonly RslSymbol[],
+        referenceName: string,
+        accept: (symbol: RslSymbol) => boolean
+    ): string {
+        const innermost = chain[chain.length - 1];
+        return `${innermost ? innermost.id : "root"}|${referenceName}|` +
+            `${accept === ACCEPT_ANY ? "any" : acceptTag(accept)}`;
+    }
+
+    /**
+     * Кэш разрешения имён этого модуля.
+     *
+     * Живёт ровно столько же, сколько кэш по позициям токенов: пока не сменился
+     * Import-контекст и пока это та же модель документа. Модель неизменяема, и
+     * новая версия файла даёт новый объект — старый кэш уходит с ним.
+     */
+    private nameResolutionCache(
+        uri: string
+    ): Map<string, IResolutionCacheEntry> | undefined {
+        const module = this.index.getModule(uri);
+
+        if (!module) {
+            return undefined;
+        }
+
+        /*
+         * Актуальность проверяется парой чисел, а не ключом Import-контекста.
+         *
+         * Ключ — строка, и он собирает Import-замыкание. Первая версия этого
+         * кэша звала его на каждое разрешение имени и на каждую запись: 75 288
+         * вызовов на файл вместо 37 627 разрешений, и кэш вышел дороже того,
+         * что он экономил. Ревизии индекса и каталога меняются ровно тогда же,
+         * когда изменился бы ключ, а стоят одно сравнение.
+         */
+        const revision = this.index.revision;
+        const platformRevision = this.platformModules?.revision ?? 0;
+        let cache = this.namesByModule.get(module);
+
+        if (
+            !cache ||
+            cache.revision !== revision ||
+            cache.platformRevision !== platformRevision
+        ) {
+            cache = { revision, platformRevision, byKey: new Map() };
+            this.namesByModule.set(module, cache);
+        }
+
+        return cache.byKey;
     }
 
     /**
@@ -2149,22 +2354,35 @@ function innermostRange(
     ranges: readonly { start: number; end: number }[],
     offset: number
 ): { start: number; end: number } | undefined {
-    let result: { start: number; end: number } | undefined;
-
     /*
-     * Диапазоны отсортированы по началу, поэтому подходящие идут подряд до
-     * первого, начинающегося после offset. Самый внутренний — последний из них.
+     * Диапазоны отсортированы по началу, поэтому кандидаты — префикс до первого
+     * начинающегося после offset, а самый внутренний из них — последний
+     * содержащий. Граница префикса ищется двоичным поиском, дальше идём назад.
+     *
+     * Прежде префикс просматривался с начала, и для правки в конце файла это
+     * означало обход почти всех диапазонов — на каждое присваивание. В профиле
+     * диагностики эта строка была одной из самых дорогих.
      */
-    for (const range of ranges) {
-        if (range.start > offset) {
-            break;
-        }
-        if (offset <= range.end) {
-            result = range;
+    let low = 0;
+    let high = ranges.length;
+
+    while (low < high) {
+        const middle = (low + high) >>> 1;
+
+        if (ranges[middle].start <= offset) {
+            low = middle + 1;
+        } else {
+            high = middle;
         }
     }
 
-    return result;
+    for (let index = low - 1; index >= 0; index--) {
+        if (offset <= ranges[index].end) {
+            return ranges[index];
+        }
+    }
+
+    return undefined;
 }
 
 function isAfterDot(tokens: readonly IRslToken[], index: number): boolean {

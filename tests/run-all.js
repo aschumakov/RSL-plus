@@ -30,6 +30,9 @@ const tests = [
     "request-races.test.js",
     "interruptible-work.test.js",
     "parse-scheduling.test.js",
+    "model-equivalence.test.js",
+    "document-units.test.js",
+    "text-decoding.test.js",
 ];
 
 let failed = false;

@@ -73,8 +73,31 @@ export function parseOutputForms(
     return result;
 }
 
+/*
+ * Спецификаторы запоминаются на версию token stream.
+ *
+ * Их спрашивают и подсветка, и диагностика, и Hover, а каждый вызов проходит
+ * файл целиком. Ключ — сам массив токенов: каждый lex возвращает новый, поэтому
+ * устаревший ответ отдать невозможно, а память освобождает GC вместе с ним.
+ */
+const specifierCache = new WeakMap<readonly IRslToken[], IRslToken[]>();
+
 /** Возвращает все значения спецификаторов внутри списков параметров. */
 export function collectFormatSpecifierTokens(
+    tokens: readonly IRslToken[]
+): IRslToken[] {
+    const known = specifierCache.get(tokens);
+
+    if (known) {
+        return known;
+    }
+
+    const computed = computeFormatSpecifierTokens(tokens);
+    specifierCache.set(tokens, computed);
+    return computed;
+}
+
+function computeFormatSpecifierTokens(
     tokens: readonly IRslToken[]
 ): IRslToken[] {
     const result = new Map<number, IRslToken>();

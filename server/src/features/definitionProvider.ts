@@ -20,6 +20,7 @@ import {
     GetProcedureReferenceTargetFromTokens
 } from "../execMacroDefinition";
 import { getScopeChain } from "../scopeResolver";
+import { decodeRslSourceText } from "../core/textDecoding";
 
 export interface IRslDefinitionContext {
     document: TextDocument;
@@ -313,9 +314,8 @@ export class RslDefinitionProvider {
         }
 
         try {
-            const text = await fs.promises.readFile(
-                filePath,
-                "utf8"
+            const text = decodeRslSourceText(
+                await fs.promises.readFile(filePath)
             );
             const document = TextDocument.create(
                 uri,
@@ -392,7 +392,9 @@ export class RslDefinitionProvider {
 
         try {
             const uri = pathToFileURL(filePath).toString();
-            const text = await fs.promises.readFile(filePath, "utf8");
+            const text = decodeRslSourceText(
+                await fs.promises.readFile(filePath)
+            );
             return {
                 uri,
                 symbol: createExternalModuleSummary(text).symbolTree

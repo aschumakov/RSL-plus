@@ -20,6 +20,7 @@ import type { ReferenceIndex } from "../analysis/referenceIndex";
 import { normalizeIdentifier } from "../lexer";
 import type { RslScopeResolver } from "../scopeResolver";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
+import { decodeRslSourceText } from "../core/textDecoding";
 
 interface ICallHierarchyData {
     uri: string;
@@ -238,7 +239,9 @@ export class RslCallHierarchyProvider {
         }
 
         try {
-            const source = await fs.promises.readFile(filePath, "utf8");
+            const source = decodeRslSourceText(
+                await fs.promises.readFile(filePath)
+            );
             let value: T | undefined;
 
             this.environment.index.withTransientOpenModule(

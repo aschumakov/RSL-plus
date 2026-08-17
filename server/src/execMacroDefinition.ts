@@ -1,7 +1,7 @@
 import {
+    cachedSignificantTokens,
     IRslToken,
-    lexRsl,
-    significantTokens
+    lexRsl
 } from "./lexer";
 import {
     callbackNameFromArgument,
@@ -74,7 +74,7 @@ export function GetDynamicDefinitionTargetFromTokens(
     sourceTokens: IRslToken[],
     offset: number
 ): IDynamicDefinitionTarget | undefined {
-    const tokens = significantTokens(sourceTokens);
+    const tokens = cachedSignificantTokens(sourceTokens);
     const calls = findDynamicCalls(tokens);
 
     /*
@@ -151,7 +151,7 @@ export function GetProcedureReferenceTargetFromTokens(
     sourceTokens: IRslToken[],
     offset: number
 ): IProcedureReferenceTarget | undefined {
-    const tokens = significantTokens(sourceTokens);
+    const tokens = cachedSignificantTokens(sourceTokens);
     const calls = findCalls(tokens, name =>
         name === "r2m" || !!getProcedureCallbackSpec(name)
     ).sort((left, right) =>
@@ -198,7 +198,7 @@ export function GetProcedureReferenceTargetFromTokens(
 export function GetPositionalHandlerNamesFromTokens(
     sourceTokens: IRslToken[]
 ): Set<string> {
-    const tokens = significantTokens(sourceTokens);
+    const tokens = cachedSignificantTokens(sourceTokens);
     const result = new Set<string>();
 
     for (const call of findCalls(tokens, name =>
@@ -265,7 +265,7 @@ export function GetDynamicMacroReferences(source: string): string[] {
 export function GetDynamicMacroReferencesFromTokens(
     sourceTokens: IRslToken[]
 ): string[] {
-    const tokens = significantTokens(sourceTokens);
+    const tokens = cachedSignificantTokens(sourceTokens);
     const result: string[] = [];
 
     for (const call of findDynamicCalls(tokens)) {
@@ -328,17 +328,38 @@ export function GetImportedMacroFilesFromTokens(
     return result;
 }
 
+/*
+ * Ссылки Import запоминаются на версию token stream.
+ *
+ * Их спрашивают несколько проверок диагностики, и каждая заново фильтровала
+ * весь поток токенов и заново обходила его. В профиле диагностики это была
+ * самая дорогая опознаваемая строка. Ключ — сам массив токенов: каждый lex
+ * возвращает новый, поэтому устаревший ответ отдать невозможно.
+ */
+const importReferencesCache = new WeakMap<
+    readonly IRslToken[],
+    IImportDefinitionTarget[]
+>();
+
 function getImportReferencesFromTokens(
     sourceTokens: IRslToken[]
 ): IImportDefinitionTarget[] {
-    const tokens = sourceTokens.filter(token =>
-        token.kind !== "whitespace" &&
-        token.kind !== "newline" &&
-        token.kind !== "comment" &&
-        token.kind !== "square" &&
-        token.kind !== "bom"
-    );
+    const known = importReferencesCache.get(sourceTokens);
 
+    if (known) {
+        return known;
+    }
+
+    const references = computeImportReferences(sourceTokens);
+    importReferencesCache.set(sourceTokens, references);
+    return references;
+}
+
+function computeImportReferences(
+    sourceTokens: IRslToken[]
+): IImportDefinitionTarget[] {
+    /* Тот же отфильтрованный поток, что и у остальных: он уже посчитан. */
+    const tokens = cachedSignificantTokens(sourceTokens);
     const result: IImportDefinitionTarget[] = [];
 
     for (let index = 0; index < tokens.length; index++) {

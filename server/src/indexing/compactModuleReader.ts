@@ -12,6 +12,7 @@ import type {
     ICompactModuleRequest,
     ICompactModuleResponse
 } from "./compactModuleProtocol";
+import { decodeRslSourceText } from "../core/textDecoding";
 
 /*
  * Чтение и компактное сканирование внешнего модуля.
@@ -184,7 +185,8 @@ export async function readCompactModule(
             );
         }
 
-        const source = content.toString("utf8");
+        /* Макросы бывают в UTF-8 и в CP866; см. decodeRslSource. */
+        const source = decodeRslSourceText(content);
         const expected = request.expectedExport
             ? normalizeIdentifier(request.expectedExport)
             : undefined;
