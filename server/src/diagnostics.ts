@@ -38,7 +38,7 @@ import {
     buildScalarMemberDiagnostics
 } from "./diagnostics/scalarMemberDiagnostics";
 import {
-    buildUnreachableCodeDiagnostics
+    createUnreachableCodeScanner
 } from "./diagnostics/unreachableCodeDiagnostics";
 import {
     createWorkSlice,
@@ -194,19 +194,105 @@ export type RslDiagnosticStageObserver = (
 /**
  * Этап расчёта; true в ответе означает «работа не окончена».
  *
- * Обходы, которые спрашивают resolver про каждое место файла, на большом модуле
- * занимают поток на десятки миллисекунд подряд, а управление возвращается
- * event loop только МЕЖДУ этапами — значит такой обход целиком стоит в очереди
- * перед запросом пользователя. Возвращая true, этап отдаёт управление и
- * продолжает с того же места при следующем вызове.
+ * Обходы, которые идут по всему файлу, на большом модуле занимают поток на
+ * десятки миллисекунд подряд, а управление возвращается event loop только МЕЖДУ
+ * этапами — значит такой обход целиком стоит в очереди перед запросом
+ * пользователя. Возвращая true, этап отдаёт управление и продолжает с того же
+ * места при следующем вызове.
  *
- * Способ один для обоих режимов: синхронный драйвер вызывает этап в цикле до
- * конца, порционный — с паузой между вызовами. Иначе прерываемый расчёт
- * проверял бы не то же самое, что непрерываемый.
+ * Когда прерваться, решает shouldYield — то есть время, а не число элементов.
+ * Порция фиксированного размера ничего не гарантирует: «6000 токенов» на
+ * загруженной машине выполняются сколько угодно долго, и именно это и
+ * наблюдалось — отдельные порции по 19–36 мс.
+ *
+ * Способ один для обоих режимов: синхронный драйвер не даёт shouldYield вовсе,
+ * и этап идёт до конца одним вызовом; порционный передаёт бюджет и делает паузу
+ * между вызовами. Иначе прерываемый расчёт проверял бы не то же самое, что
+ * непрерываемый.
  */
 export type IRslDiagnosticStage = (
-    isCancelled?: () => boolean
+    isCancelled?: () => boolean,
+    shouldYield?: () => boolean
 ) => void | boolean;
+
+/*
+ * Через сколько элементов сверяться с бюджетом.
+ *
+ * Date.now() на каждом токене заметен на горячем пути, а раз в 64 — нет: при
+ * бюджете 8 мс это доли процента от порции, зато перерасход ограничен временем
+ * обработки 64 элементов.
+ */
+const BUDGET_CHECK_INTERVAL = 64;
+
+/*
+ * Там, где на каждый элемент приходится обращение к resolver, шаг сверки меньше:
+ * одно разрешение имени стоит порядка десятка микросекунд, а первое в файле —
+ * заметно больше, и 64 таких элемента уже выносят порцию за бюджет.
+ */
+const RESOLVER_CHECK_INTERVAL = 8;
+
+/** Пора ли прерваться: бюджет проверяется не на каждом элементе. */
+function budgetExpired(
+    processed: number,
+    shouldYield: (() => boolean) | undefined,
+    interval: number = BUDGET_CHECK_INTERVAL
+): boolean {
+    return shouldYield !== undefined &&
+        processed % interval === 0 &&
+        processed > 0 &&
+        shouldYield();
+}
+
+/**
+ * Возобновляемый обход последовательности.
+ *
+ * Состояние проверки живёт в замыкании вызывающего и переживает паузы, поэтому
+ * обход, разорванный на порции, видит ровно то же, что видел бы целиком: стек
+ * скобок, предыдущий токен, текущая строка — всё продолжается с того же места.
+ *
+ * finish вызывается один раз после последнего элемента: там, где проверка
+ * сообщает о незакрытом до конца файла — например о непарной скобке.
+ */
+function createScanStage<T>(
+    items: () => readonly T[],
+    step: (item: T, index: number) => void,
+    finish?: () => void
+): IRslDiagnosticStage {
+    let cursor = 0;
+    let finished = false;
+
+    return (_isCancelled, shouldYield) => {
+        /*
+         * Бюджет мог быть израсходован предыдущим этапом этой же порции. Начать
+         * работу сейчас значит превысить бюджет на всю свою длительность,
+         * поэтому этап отдаёт управление, ничего не сделав: драйвер сделает
+         * паузу, и этап продолжит с того же места в следующей порции.
+         */
+        if (shouldYield?.() === true) {
+            return true;
+        }
+
+        const list = items();
+        let processed = 0;
+
+        while (cursor < list.length) {
+            if (budgetExpired(processed, shouldYield)) {
+                return true;
+            }
+
+            step(list[cursor], cursor);
+            cursor++;
+            processed++;
+        }
+
+        if (!finished) {
+            finished = true;
+            finish?.();
+        }
+
+        return false;
+    };
+}
 
 /**
  * Единая точка построения диагностик RSL.
@@ -293,7 +379,10 @@ async function runDiagnosticPlanChunked(
             }
 
             const started = onStage ? Date.now() : 0;
-            unfinished = stage.run(isCancelled) === true;
+            unfinished = stage.run(
+                isCancelled,
+                () => slice.shouldYield()
+            ) === true;
             onStage?.(stage.name, Date.now() - started);
         }
     }
@@ -323,7 +412,17 @@ function planLocalRslDiagnostics(
 
         return resolver;
     };
+    /*
+     * Справочник объявлений собирается двумя этапами, а не одним ленивым
+     * вызовом.
+     *
+     * Обход дерева и обход всех идентификаторов файла — это две разные работы по
+     * несколько миллисекунд каждая, и вместе они складывались в самую долгую
+     * порцию расчёта. Индекс идентификаторов вдобавок наполняется порциями:
+     * Map живёт здесь и переживает паузы.
+     */
     let localFacts: ILocalDiagnosticFacts | undefined;
+    const identifierIndex = new Map<string, IRslToken[]>();
     const getLocalFacts = (): ILocalDiagnosticFacts => {
         if (!localFacts) {
             const declarations = collectDeclarations(
@@ -332,7 +431,7 @@ function planLocalRslDiagnostics(
             );
             localFacts = {
                 declarations,
-                identifierIndex: buildIdentifierIndex(module.syntax.tokens),
+                identifierIndex,
                 declarationRangeKeys: new Set(
                     declarations.map(item => offsetRangeKey(
                         item.symbol.range.start,
@@ -356,16 +455,35 @@ function planLocalRslDiagnostics(
      */
     const stages: readonly IRslDiagnosticStageEntry[] = [
         ["parser", true, () => addSyntaxParserDiagnostics(module, result)],
-        ["limits", true, () => addDocumentedLimitDiagnostics(module, result)],
+        /*
+         * Проверки, идущие по всему потоку токенов, объявлены возобновляемыми:
+         * их порция ограничена временем, а не числом токенов. Состояние живёт в
+         * замыкании createScanStage, поэтому пауза ничего не теряет.
+         */
+        [
+            "limits",
+            true,
+            createScanStage(
+                () => module.lex.tokens,
+                token => addDocumentedLimitDiagnostic(module, token, result),
+                () => addFileNameLimitDiagnostic(module, result)
+            )
+        ],
         [
             "unterminated",
             options.structure,
-            () => addUnterminatedTokenDiagnostics(module, result)
+            createScanStage(
+                () => module.lex.tokens,
+                token => addUnterminatedTokenDiagnostic(module, token, result)
+            )
         ],
         [
             "escapes",
             options.structure,
-            () => addUnrecognizedEscapeDiagnostics(module, result)
+            createScanStage(
+                () => module.lex.tokens,
+                token => addUnrecognizedEscapeDiagnostic(module, token, result)
+            )
         ],
         [
             "brackets",
@@ -376,7 +494,16 @@ function planLocalRslDiagnostics(
         [
             "unreachable",
             options.structure,
-            () => result.push(...buildUnreachableCodeDiagnostics(module))
+            (() => {
+                /* Состояние обхода живёт между порциями: см. createScanStage. */
+                const scanner = createUnreachableCodeScanner(module, result);
+
+                return createScanStage(
+                    () => module.syntax.tokens,
+                    token => scanner.step(token),
+                    () => scanner.finish()
+                );
+            })()
         ],
         [
             "duplicates",
@@ -420,12 +547,20 @@ function planLocalRslDiagnostics(
             }
         ],
         /*
-         * Справочник объявлений строится отдельным этапом.
+         * Справочник объявлений строится отдельными этапами.
          *
          * Он нужен двум последним проверкам, а строился ленивым вызовом внутри
          * первой из них — и его время складывалось с её собственным в один
-         * неделимый кусок. Отдельным этапом это две порции вместо одной.
+         * неделимый кусок.
          */
+        [
+            "identifierIndex",
+            options.useBeforeDeclaration || options.unusedVariables,
+            createScanStage(
+                () => module.syntax.tokens,
+                token => addToIdentifierIndex(identifierIndex, token)
+            )
+        ],
         [
             "declarationFacts",
             options.useBeforeDeclaration || options.unusedVariables,
@@ -667,60 +802,65 @@ function countCharacters(value: string): number {
     return count;
 }
 
-function addDocumentedLimitDiagnostics(
+function addDocumentedLimitDiagnostic(
+    _module: IIndexedModule,
+    token: IRslToken,
+    result: Diagnostic[]
+): void {
+    if (
+        token.kind === "identifier" &&
+        /*
+         * Дешёвая проверка идёт первой. Число символов может быть только
+         * меньше числа единиц UTF-16, поэтому короткое по единицам имя
+         * заведомо короткое и по символам — а перебор символов через
+         * Array.from создавал массив на каждый идентификатор файла.
+         */
+        token.value.length > IDENTIFIER_LIMIT &&
+        !isSpecialName(token.value) &&
+        countCharacters(token.value) > IDENTIFIER_LIMIT
+    ) {
+        result.push(createTokenDiagnostic(
+            token,
+            DiagnosticSeverity.Error,
+            "Имя идентификатора длиннее допустимых 80 символов",
+            "identifier-too-long"
+        ));
+    } else if (
+        token.kind === "string" &&
+        token.value.length > STRING_LIMIT &&
+        countCharacters(token.value) > STRING_LIMIT
+    ) {
+        result.push(createTokenDiagnostic(
+            token,
+            DiagnosticSeverity.Error,
+            "Строковый литерал длиннее допустимых 2047 символов",
+            "string-literal-too-long",
+            false,
+            {
+                start: token.start,
+                end: token.end,
+                replacement: splitLongStringLiteral(token.raw)
+            }
+        ));
+    } else if (
+        token.kind === "number" &&
+        token.raw.startsWith("$") &&
+        !/[0-9]/.test(token.raw)
+    ) {
+        result.push(createTokenDiagnostic(
+            token,
+            DiagnosticSeverity.Error,
+            "Неверная денежная константа",
+            "invalid-money-constant"
+        ));
+    }
+}
+
+/** Ограничение на длину имени самого файла: проверяется один раз. */
+function addFileNameLimitDiagnostic(
     module: IIndexedModule,
     result: Diagnostic[]
 ): void {
-    for (const token of module.lex.tokens) {
-        if (
-            token.kind === "identifier" &&
-            /*
-             * Дешёвая проверка идёт первой. Число символов может быть только
-             * меньше числа единиц UTF-16, поэтому короткое по единицам имя
-             * заведомо короткое и по символам — а перебор символов через
-             * Array.from создавал массив на каждый идентификатор файла.
-             */
-            token.value.length > IDENTIFIER_LIMIT &&
-            !isSpecialName(token.value) &&
-            countCharacters(token.value) > IDENTIFIER_LIMIT
-        ) {
-            result.push(createTokenDiagnostic(
-                token,
-                DiagnosticSeverity.Error,
-                "Имя идентификатора длиннее допустимых 80 символов",
-                "identifier-too-long"
-            ));
-        } else if (
-            token.kind === "string" &&
-            token.value.length > STRING_LIMIT &&
-            countCharacters(token.value) > STRING_LIMIT
-        ) {
-            result.push(createTokenDiagnostic(
-                token,
-                DiagnosticSeverity.Error,
-                "Строковый литерал длиннее допустимых 2047 символов",
-                "string-literal-too-long",
-                false,
-                {
-                    start: token.start,
-                    end: token.end,
-                    replacement: splitLongStringLiteral(token.raw)
-                }
-            ));
-        } else if (
-            token.kind === "number" &&
-            token.raw.startsWith("$") &&
-            !/[0-9]/.test(token.raw)
-        ) {
-            result.push(createTokenDiagnostic(
-                token,
-                DiagnosticSeverity.Error,
-                "Неверная денежная константа",
-                "invalid-money-constant"
-            ));
-        }
-    }
-
     const fileName = moduleFileName(module.uri);
     const extension = path.extname(fileName);
     const stem = path.basename(fileName, extension);
@@ -769,9 +909,6 @@ function addImportPlacementDiagnostics(
     }
 }
 
-/* Токенов за одну порцию: подобрано по замеру, примерно 5 мс работы. */
-const CONSTANT_SCAN_CHUNK = 6000;
-
 /**
  * Проверка присваивания константам — возобновляемым этапом.
  *
@@ -788,7 +925,12 @@ function createConstantAssignmentStage(
     let declarationStarts: Set<number> | undefined;
     let cursor = 0;
 
-    return () => {
+    return (_isCancelled, shouldYield) => {
+        /* Бюджет уже израсходован соседним этапом: см. createScanStage. */
+        if (shouldYield?.() === true) {
+            return true;
+        }
+
         if (!declarationStarts) {
             const starts = new Set<number>();
             walkScopes(module.symbolTree, scope => {
@@ -802,24 +944,27 @@ function createConstantAssignmentStage(
         }
 
         const tokens = cachedSignificantTokens(module.lex.tokens);
-        const last = Math.min(
-            cursor + CONSTANT_SCAN_CHUNK,
-            tokens.length - 1
-        );
+        const last = tokens.length - 1;
+        let processed = 0;
 
-        for (let index = cursor; index < last; index++) {
+        while (cursor < last) {
+            if (budgetExpired(processed, shouldYield, RESOLVER_CHECK_INTERVAL)) {
+                return true;
+            }
+
             addConstantAssignmentDiagnostic(
                 module,
                 getResolver(),
                 declarationStarts,
-                tokens[index],
-                tokens[index + 1],
+                tokens[cursor],
+                tokens[cursor + 1],
                 result
             );
+            cursor++;
+            processed++;
         }
 
-        cursor = Math.max(cursor + CONSTANT_SCAN_CHUNK, last);
-        return cursor < tokens.length - 1;
+        return false;
     };
 }
 
@@ -1208,66 +1353,65 @@ function addDebugBreakDiagnostics(
     }
 }
 
-function addUnrecognizedEscapeDiagnostics(
+function addUnrecognizedEscapeDiagnostic(
     module: IIndexedModule,
+    token: IRslToken,
     result: Diagnostic[]
 ): void {
-    for (const token of module.lex.tokens) {
-        if (token.kind !== "string") {
-            continue;
-        }
+    if (token.kind !== "string") {
+        return;
+    }
 
-        for (const offset of findUnrecognizedEscapes(token.raw)) {
-            const start = token.start + offset;
-            result.push(createOffsetDiagnostic(
-                module,
-                start,
-                start + 2,
-                DiagnosticSeverity.Warning,
-                "Неизвестная escape-последовательность; " +
-                    "допустимы \\n \\r \\t \\f \\xHH \\XHH \\\\",
-                "unknown-escape-sequence"
-            ));
-        }
+    for (const offset of findUnrecognizedEscapes(token.raw)) {
+        const start = token.start + offset;
+        result.push(createOffsetDiagnostic(
+            module,
+            start,
+            start + 2,
+            DiagnosticSeverity.Warning,
+            "Неизвестная escape-последовательность; " +
+                "допустимы \\n \\r \\t \\f \\xHH \\XHH \\\\",
+            "unknown-escape-sequence"
+        ));
     }
 }
 
-function addUnterminatedTokenDiagnostics(
-    module: IIndexedModule,
+function addUnterminatedTokenDiagnostic(
+    _module: IIndexedModule,
+    token: IRslToken,
     result: Diagnostic[]
 ): void {
-    for (const token of module.lex.tokens) {
-        if (token.kind === "string" && !isClosedString(token.raw)) {
-            result.push(createTokenDiagnostic(
-                token,
-                DiagnosticSeverity.Error,
-                "Строковый литерал не закрыт",
-                "unclosed-string"
-            ));
-        } else if (
-            token.kind === "comment" &&
-            token.raw.startsWith("/*") &&
-            !token.raw.endsWith("*/")
-        ) {
-            result.push(createTokenDiagnostic(
-                token,
-                DiagnosticSeverity.Error,
-                "Многострочный комментарий не закрыт",
-                "unclosed-comment"
-            ));
-        } else if (
-            token.kind === "square" &&
-            !isClosedSquareBlock(token.raw, token.squareKind)
-        ) {
-            result.push(createTokenDiagnostic(
-                token,
-                DiagnosticSeverity.Error,
-                "Блок [ ... ] не закрыт символом ]",
-                "unclosed-square-block"
-            ));
-        }
+    if (token.kind === "string" && !isClosedString(token.raw)) {
+        result.push(createTokenDiagnostic(
+            token,
+            DiagnosticSeverity.Error,
+            "Строковый литерал не закрыт",
+            "unclosed-string"
+        ));
+    } else if (
+        token.kind === "comment" &&
+        token.raw.startsWith("/*") &&
+        !token.raw.endsWith("*/")
+    ) {
+        result.push(createTokenDiagnostic(
+            token,
+            DiagnosticSeverity.Error,
+            "Многострочный комментарий не закрыт",
+            "unclosed-comment"
+        ));
+    } else if (
+        token.kind === "square" &&
+        !isClosedSquareBlock(token.raw, token.squareKind)
+    ) {
+        result.push(createTokenDiagnostic(
+            token,
+            DiagnosticSeverity.Error,
+            "Блок [ ... ] не закрыт символом ]",
+            "unclosed-square-block"
+        ));
     }
 }
+
 
 function addBracketDiagnostics(
     module: IIndexedModule,
@@ -1585,13 +1729,13 @@ function addUnusedDeclarationDiagnostics(
 }
 
 /*
- * Вхождений имени за одну порцию: подобрано по замеру, примерно 5 мс работы.
+ * Сколько вхождений имени просматривать между сверками с бюджетом.
  *
  * Резать пришлось именно по вхождениям, а не по объявлениям: на файле 700 КБ
  * все 25 мс этапа уходили на ОДНО объявление, имя которого встречается в модуле
  * тысячи раз, — по числу объявлений такой этап не делится вовсе.
  */
-const USE_BEFORE_DECLARATION_CHUNK = 400;
+const USE_BEFORE_DECLARATION_CHUNK = 16;
 
 /**
  * Использование до объявления — возобновляемым этапом.
@@ -1614,7 +1758,11 @@ function createUseBeforeDeclarationStage(
     /* Сколько вхождений текущего объявления уже просмотрено. */
     let occurrenceIndex = 0;
 
-    return () => {
+    return (_isCancelled, shouldYield) => {
+        if (shouldYield?.() === true) {
+            return true;
+        }
+
         const facts = getLocalFacts();
         const resolver = getResolver();
 
@@ -1622,11 +1770,17 @@ function createUseBeforeDeclarationStage(
             memberNameStarts = collectMemberNameStarts(module.syntax.tokens);
         }
 
-        let budget = USE_BEFORE_DECLARATION_CHUNK;
-
-        while (budget > 0 && declarationIndex < facts.declarations.length) {
+        while (declarationIndex < facts.declarations.length) {
             if (result.length >= maxProblems) {
                 return false;
+            }
+
+            /*
+             * Бюджет сверяется между порциями вхождений: одно объявление с
+             * тысячами вхождений иначе прошло бы целиком за один вызов.
+             */
+            if (shouldYield?.()) {
+                return true;
             }
 
             const step = addUseBeforeDeclarationDiagnostic(
@@ -1637,7 +1791,7 @@ function createUseBeforeDeclarationStage(
                 nestedScopesByScope,
                 facts.declarations[declarationIndex],
                 occurrenceIndex,
-                budget,
+                USE_BEFORE_DECLARATION_CHUNK,
                 result
             );
 
@@ -1647,11 +1801,9 @@ function createUseBeforeDeclarationStage(
             } else {
                 occurrenceIndex = step.nextOccurrence;
             }
-
-            budget -= step.examined;
         }
 
-        return declarationIndex < facts.declarations.length;
+        return false;
     };
 }
 
@@ -2178,28 +2330,34 @@ function collectDeclarations(
     return result;
 }
 
-function buildIdentifierIndex(
-    tokens: IRslToken[]
-): Map<string, IRslToken[]> {
-    const result = new Map<string, IRslToken[]>();
-
-    for (const token of tokens) {
-        if (token.kind !== "identifier") {
-            continue;
-        }
-
-        const name = normalizeReferenceIdentifier(token.value);
-
-        if (isReservedIdentifier(name)) {
-            continue;
-        }
-
-        const list = result.get(name) || [];
-        list.push(token);
-        result.set(name, list);
+/**
+ * Добавляет один токен в индекс вхождений имён.
+ *
+ * Индекс наполняется порциями, поэтому он передаётся снаружи, а не создаётся
+ * здесь: между порциями расчёт возвращает управление редактору, и накопленное
+ * обязано сохраниться.
+ */
+function addToIdentifierIndex(
+    index: Map<string, IRslToken[]>,
+    token: IRslToken
+): void {
+    if (token.kind !== "identifier") {
+        return;
     }
 
-    return result;
+    const name = normalizeReferenceIdentifier(token.value);
+
+    if (isReservedIdentifier(name)) {
+        return;
+    }
+
+    const list = index.get(name);
+
+    if (list) {
+        list.push(token);
+    } else {
+        index.set(name, [token]);
+    }
 }
 
 function isRslSystemSpecialVariableReference(

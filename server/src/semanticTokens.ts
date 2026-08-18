@@ -106,7 +106,8 @@ export async function buildRslSemanticTokensChunked(
         index,
         sharedResolver,
         range,
-        isCancelled
+        isCancelled,
+        () => slice.shouldYield()
     );
     let step = steps.next();
 
@@ -162,7 +163,14 @@ function* semanticTokenSteps(
     index: WorkspaceIndex,
     sharedResolver: RslScopeResolver | undefined,
     range: IRslSemanticTokenRange | undefined,
-    isCancelled: () => boolean
+    isCancelled: () => boolean,
+    /*
+     * Пора ли вернуть управление. Синхронный расчёт этого не передаёт и потому
+     * идёт до конца одним куском; порционный отдаёт бюджет времени, а не число
+     * токенов: "каждые 300 токенов" на загруженной машине не ограничивает
+     * ничего, и именно так порция подсветки доходила до десятков миллисекунд.
+     */
+    shouldYield?: () => boolean
 ): Generator<void, SemanticTokens, void> {
     const resolver = sharedResolver || new RslScopeResolver(index);
     const tokens = module.syntax.tokens;
@@ -179,9 +187,37 @@ function* semanticTokenSteps(
     }
     const objectInfoByObject = new Map<RslSymbol, IObjectInfo>();
     const declarationByRange = new Map<string, IObjectInfo>();
-    const identifiersByName = buildIdentifiersByName(tokens);
+    /*
+     * Оба подготовительных обхода тоже отдают управление по бюджету, а не
+     * целиком: каждый идёт по всему файлу, и вместе они занимали поток дольше
+     * любой порции основного цикла.
+     */
+    const identifiersByName = new Map<string, IRslToken[]>();
 
-    objects.forEach(info => {
+    for (let index = 0; index < tokens.length; index++) {
+        if (index % CANCEL_CHECK_INTERVAL === 0 && index > 0 &&
+            (shouldYield === undefined || shouldYield())) {
+            yield;
+
+            if (isCancelled()) {
+                return { data: [] };
+            }
+        }
+
+        addToIdentifiersByName(identifiersByName, tokens[index]);
+    }
+
+    for (let index = 0; index < objects.length; index++) {
+        if (index % CANCEL_CHECK_INTERVAL === 0 && index > 0 &&
+            (shouldYield === undefined || shouldYield())) {
+            yield;
+
+            if (isCancelled()) {
+                return { data: [] };
+            }
+        }
+
+        const info = objects[index];
         objectInfoByObject.set(info.symbol, info);
         const token = findDeclarationToken(identifiersByName, info.symbol);
 
@@ -191,7 +227,7 @@ function* semanticTokenSteps(
                 info
             );
         }
-    });
+    }
 
     /*
      * Граница порции перед разбором инструкций вывода: он идёт по всему потоку
@@ -230,7 +266,14 @@ function* semanticTokenSteps(
     for (let tokenIndex = firstTokenIndex; tokenIndex < tokens.length; tokenIndex++) {
         if (
             tokenIndex % CANCEL_CHECK_INTERVAL === 0 &&
-            tokenIndex > firstTokenIndex
+            tokenIndex > firstTokenIndex &&
+            /*
+             * Спрашивается время, а не число пройденных токенов: за 300 токенов
+             * работы может пройти и десять миллисекунд, и сто. Сам счётчик
+             * остаётся, но только как разрежение — Date.now() на каждом токене
+             * заметен на горячем пути.
+             */
+            (shouldYield === undefined || shouldYield())
         ) {
             /*
              * Пауза ПЕРЕД проверкой отмены. Обратный порядок — проверять, ничего
@@ -698,27 +741,22 @@ function findSignatureRange(
  * 700 КБ обход всех объектов складывался в 50 мс непрерывной работы, и это была
  * самая долгая порция подсветки. С индексом на объект приходится двоичный поиск.
  */
-function buildIdentifiersByName(
-    tokens: IRslToken[]
-): Map<string, IRslToken[]> {
-    const result = new Map<string, IRslToken[]>();
-
-    for (const token of tokens) {
-        if (token.kind !== "identifier") {
-            continue;
-        }
-
-        const name = normalizeIdentifier(token.value);
-        const list = result.get(name);
-
-        if (list) {
-            list.push(token);
-        } else {
-            result.set(name, [token]);
-        }
+function addToIdentifiersByName(
+    result: Map<string, IRslToken[]>,
+    token: IRslToken
+): void {
+    if (token.kind !== "identifier") {
+        return;
     }
 
-    return result;
+    const name = normalizeIdentifier(token.value);
+    const list = result.get(name);
+
+    if (list) {
+        list.push(token);
+    } else {
+        result.set(name, [token]);
+    }
 }
 
 function findDeclarationToken(

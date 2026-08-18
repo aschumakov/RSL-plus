@@ -97,7 +97,9 @@ export function buildRslFastCompletions(
 export function buildRslFastMemberCompletions(
     snapshot: IFastDocumentSnapshot,
     offset: number,
-    findClassMembers: (className: string) => CompletionItem[] | undefined
+    findClassMembers: (className: string) => CompletionItem[] | undefined,
+    /* Готовые объявления, если вызывающий уже их извлёк: за запрос — один раз. */
+    known?: readonly IRslDeclarationDescriptor[]
 ): CompletionItem[] | undefined {
     const receiver = findReceiverBeforeDot(snapshot.lex.tokens, offset);
 
@@ -105,15 +107,53 @@ export function buildRslFastMemberCompletions(
         return undefined;
     }
 
+    const declarations = known ||
+        getFastDocumentDeclarations(snapshot).declarations;
     const tokens = snapshot.lex.tokens;
     const className = findReceiverType(
         tokens,
         receiver.name,
         receiver.index,
-        findEnclosingBlockStart(tokens, receiver.index)
+        collectHiddenRanges(declarations, offset, [])
     );
 
     return className ? findClassMembers(className) : undefined;
+}
+
+/**
+ * Тела Macro и Class, невидимые из этой точки.
+ *
+ * Ровно они и отделяют своё от чужого. Прежде поиск типа обрывался на заголовке
+ * объемлющего Macro: утечку между макросами это убирало, но заодно отрезало
+ * поля своего класса и переменные модуля — то есть `Var MessageText: TStringList`
+ * на верхнем уровне перестал давать подсказку внутри `Macro`. Здесь наоборот:
+ * поиск идёт по всему файлу, но не заходит в блоки, которые эту точку не
+ * содержат.
+ *
+ * Список получается упорядоченным по возрастанию: объявления идут в порядке
+ * текста, а вложенные в пропущенный блок отдельно не нужны — он пропускается
+ * целиком.
+ */
+function collectHiddenRanges(
+    declarations: readonly IRslDeclarationDescriptor[],
+    offset: number,
+    result: Array<{ start: number; end: number }>
+): Array<{ start: number; end: number }> {
+    for (const declaration of declarations) {
+        if (declaration.kind === "variable") {
+            continue;
+        }
+
+        if (offset >= declaration.start && offset <= declaration.end) {
+            /* Свой блок: невидимы только его части, не содержащие точку. */
+            collectHiddenRanges(declaration.children, offset, result);
+            continue;
+        }
+
+        result.push({ start: declaration.start, end: declaration.end });
+    }
+
+    return result;
 }
 
 /** Последний токен, начинающийся не позже смещения; поток упорядочен. */
@@ -182,78 +222,37 @@ function findReceiverBeforeDot(
     return undefined;
 }
 
-/* Слова, открывающие блок: их закрывает END. */
-const BLOCK_OPENERS = new Set(["macro", "class", "if", "while", "for", "with"]);
-
-/**
- * Начало объемлющего Macro, метода или класса — граница поиска типа.
- *
- * Без неё поиск шёл назад по всему файлу и находил присваивание из ЧУЖОГО
- * Macro: на `x.` во втором Macro предлагались члены класса, присвоенного `x` в
- * первом. Компилятор такую переменную здесь не видит, и подсказка была просто
- * неверной — хуже, чем её отсутствие.
- *
- * Идём назад, считая вложенность: встреченный END означает закрытый ниже блок,
- * а слово-открыватель на нулевой вложенности — наш собственный.
- */
-function findEnclosingBlockStart(
-    tokens: readonly IRslToken[],
-    fromIndex: number
-): number {
-    let depth = 0;
-
-    for (let index = fromIndex; index >= 0; index--) {
-        const token = tokens[index];
-
-        if (token.kind !== "identifier") {
-            continue;
-        }
-
-        const word = normalizeIdentifier(token.value);
-
-        if (word === "end") {
-            depth++;
-            continue;
-        }
-
-        if (!BLOCK_OPENERS.has(word)) {
-            continue;
-        }
-
-        if (depth === 0) {
-            /*
-             * Найден наш блок. Для macro и class это и есть граница; для if,
-             * while, for и with — нет: объявление могло стоять выше внутри того
-             * же Macro, поэтому продолжаем искать его заголовок.
-             */
-            if (word === "macro" || word === "class") {
-                return index;
-            }
-
-            continue;
-        }
-
-        depth--;
-    }
-
-    /* Верхний уровень модуля: границей служит начало файла. */
-    return 0;
-}
-
 /**
  * Тип получателя по ближайшему предшествующему объявлению или присваиванию.
  *
- * Поиск идёт назад от места обращения — ближе к нему вернее — и не выходит за
- * начало объемлющего блока: переменная другого Macro в этой позиции невидима.
+ * Поиск идёт назад от места обращения — ближе к нему вернее — по всей видимой
+ * области: свой Macro, затем поля своего класса, затем верхний уровень модуля.
+ * Тела чужих Macro и Class пропускаются целиком: их переменные в этой точке
+ * компилятору не видны, и предложить их значило бы дать неверную подсказку.
  */
 function findReceiverType(
     tokens: readonly IRslToken[],
     name: string,
     fromIndex: number,
-    boundaryIndex: number
+    hidden: ReadonlyArray<{ start: number; end: number }>
 ): string | undefined {
-    for (let index = fromIndex - 1; index >= boundaryIndex; index--) {
+    /* Идём назад, поэтому и по списку пропусков движемся с конца. */
+    let hiddenIndex = hidden.length - 1;
+
+    for (let index = fromIndex - 1; index >= 0; index--) {
         const token = tokens[index];
+
+        /*
+         * Смещения убывают, поэтому пропуск, начинающийся позже текущего
+         * токена, не понадобится больше никогда — указатель только убывает.
+         */
+        while (hiddenIndex >= 0 && hidden[hiddenIndex].start > token.start) {
+            hiddenIndex--;
+        }
+
+        if (hiddenIndex >= 0 && token.start < hidden[hiddenIndex].end) {
+            continue;
+        }
 
         if (
             token.kind !== "identifier" ||

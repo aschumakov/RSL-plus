@@ -288,8 +288,10 @@ export class RslLanguageFeatureRegistry {
                     name => this.findFastClassMembers(
                         document,
                         name,
-                        declarations
-                    )
+                        declarations,
+                        offset
+                    ),
+                    declarations
                 );
                 const fast = members || deduplicateCompletionItems(
                     buildRslFastCompletions(snapshot, offset, declarations),
@@ -1143,7 +1145,9 @@ export class RslLanguageFeatureRegistry {
         document: TextDocument,
         className: string,
         /* Объявления передаются готовыми: за запрос они извлекаются один раз. */
-        declarations: readonly IRslDeclarationDescriptor[]
+        declarations: readonly IRslDeclarationDescriptor[],
+        /* Где стоит курсор: от этого зависит видимость приватных членов. */
+        offset: number
     ): CompletionItem[] | undefined {
         const wanted = normalizeIdentifier(className);
         const own = declarations.find(item =>
@@ -1152,8 +1156,19 @@ export class RslLanguageFeatureRegistry {
         );
 
         if (own) {
-            /* Свой класс: приватные члены видны, файл один. */
-            return own.children.map(member => ({
+            /*
+             * Приватный член виден только внутри своего класса — в том числе
+             * когда класс объявлен в этом же файле. Прежде файл считался одной
+             * областью, и приватные поля предлагались из любого его места.
+             */
+            const insideOwnClass = offset >= own.start && offset <= own.end;
+            const members = insideOwnClass
+                ? own.children
+                : own.children.filter(
+                    member => member.visibility !== "private"
+                );
+
+            return members.map(member => ({
                 label: member.name,
                 kind: member.kind === "macro"
                     ? CompletionItemKind.Method
@@ -1187,6 +1202,32 @@ export class RslLanguageFeatureRegistry {
                     detail: member.typeName || undefined
                 }));
             }
+        }
+
+        /*
+         * Встроенный класс и класс прикладного модуля — последними.
+         *
+         * От модели документа они не зависят: встроенные видны всегда, а
+         * прикладные — через Import, состав которого берётся из текущего текста.
+         * Прежде оба источника оставались полной модели, и `Var f: TBFile; f.`
+         * до конца разбора не давал ни одного члена.
+         */
+        const external = this.environment.resolver.findClassWithoutModel(
+            document.uri,
+            wanted,
+            getFastDocumentImports(
+                this.environment.getFastDocumentSnapshot(document)
+            )
+        );
+
+        if (external) {
+            return external.children
+                .filter(member => member.visibility !== "private")
+                .map(member => ({
+                    label: member.name,
+                    kind: member.kind,
+                    detail: member.typeName || undefined
+                }));
         }
 
         return undefined;

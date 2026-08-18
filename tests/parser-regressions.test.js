@@ -156,9 +156,18 @@ function testOptimizedTokenLookup() {
     );
 }
 
+/**
+ * Извлечение объявлений линейно по размеру файла.
+ *
+ * Проверяется характер роста, а не абсолютное время. Прежний вариант требовал
+ * «меньше 500 мс на 2000 объявлений»: на занятой машине этот предел иногда
+ * превышался и тест падал без всякой регрессии, то есть сообщал не о том, о чём
+ * заведён. Квадратичный поиск токенов виден иначе — по тому, что удвоение файла
+ * даёт вчетверо больше работы.
+ */
 function testLinearDeclarationExtraction() {
-    const source = Array.from(
-        { length: 2000 },
+    const build = count => Array.from(
+        { length: count },
         (_value, index) => [
             `Macro Procedure${index}(value: Integer)`,
             "  Var result;",
@@ -166,15 +175,34 @@ function testLinearDeclarationExtraction() {
             "End;"
         ].join("\n")
     ).join("\n");
-    const startedAt = Date.now();
-    const tree = createSymbolTree(source);
-    const elapsed = Date.now() - startedAt;
 
-    assert.strictEqual(tree.children.length, 2000);
+    const measure = count => {
+        const source = build(count);
+        /* Медиана трёх прогонов: одиночный замер шумит сильнее самой разницы. */
+        const times = [];
+
+        for (let attempt = 0; attempt < 3; attempt++) {
+            const startedAt = process.hrtime.bigint();
+            const tree = createSymbolTree(source);
+            times.push(Number(process.hrtime.bigint() - startedAt) / 1e6);
+            assert.strictEqual(tree.children.length, count);
+        }
+
+        times.sort((left, right) => left - right);
+        return times[1];
+    };
+
+    /* Разогрев: первый прогон платит за JIT, и на него приходится основной шум. */
+    measure(200);
+    const single = measure(1000);
+    const double = measure(2000);
+    const ratio = double / Math.max(single, 0.001);
+
     assert.ok(
-        elapsed < 500,
-        `Построение 2000 деклараций заняло ${elapsed} мс; ` +
-        "возможен возврат квадратичного поиска токенов"
+        ratio < 3,
+        `Удвоение файла увеличило время в ${ratio.toFixed(1)} раза ` +
+        `(${single.toFixed(1)} мс -> ${double.toFixed(1)} мс); ` +
+        "линейный обход дал бы примерно вдвое, квадратичный — вчетверо"
     );
 }
 

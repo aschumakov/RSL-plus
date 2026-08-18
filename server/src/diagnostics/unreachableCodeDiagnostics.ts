@@ -30,12 +30,11 @@ import type { IIndexedModule } from "../workspaceIndex";
  * ONERROR важен особо: в него попадают по ошибке, а не по порядку, поэтому
  * RETURN перед ним о его достижимости ничего не говорит.
  */
-export function buildUnreachableCodeDiagnostics(
-    module: IIndexedModule
-): Diagnostic[] {
-    const result: Diagnostic[] = [];
+export function createUnreachableCodeScanner(
+    module: IIndexedModule,
+    result: Diagnostic[]
+): IRslUnreachableScanner {
     const frames: IBlockFrame[] = [createFrame(false)];
-    const tokens = module.syntax.tokens;
     let previous: IRslToken | undefined;
     let currentLine = -1;
     let canStartStatement = true;
@@ -53,110 +52,134 @@ export function buildUnreachableCodeDiagnostics(
         frame.unreachableStart = undefined;
     };
 
-    for (const token of tokens) {
-        if (token.kind === "comment" || token.kind === "whitespace" ||
-            token.kind === "newline" || token.kind === "bom") {
-            continue;
-        }
+    return {
+        step(token: IRslToken): void {
 
-        if (token.line !== currentLine) {
-            currentLine = token.line;
-            canStartStatement = true;
-        }
-
-        const frame = frames[frames.length - 1];
-
-        if (token.kind !== "identifier") {
-            if (token.kind === "symbol" && token.raw === ";") {
-                /*
-                 * Оператор с терминатором закончился: только теперь всё
-                 * следующее в этом блоке недостижимо. Без этого шага
-                 * `Return\n  1;` считало бы `1` за отдельный оператор.
-                 */
-                if (frame.state === "afterTerminator") {
-                    frame.state = "terminated";
-                }
-                canStartStatement = true;
-            } else {
-                canStartStatement = false;
+            if (token.kind === "comment" || token.kind === "whitespace" ||
+                token.kind === "newline" || token.kind === "bom") {
+                return;
             }
-            previous = token;
-            continue;
-        }
 
-        const word = normalizeIdentifier(token.value);
+            if (token.line !== currentLine) {
+                currentLine = token.line;
+                canStartStatement = true;
+            }
 
-        if (word === END_KEYWORD) {
-            finish(frame);
-            frame.allBranchesTerminated = frame.allBranchesTerminated &&
-                branchTerminated(frame);
+            const frame = frames[frames.length - 1];
 
-            if (frames.length > 1) {
-                frames.pop();
+            if (token.kind !== "identifier") {
+                if (token.kind === "symbol" && token.raw === ";") {
+                    /*
+                     * Оператор с терминатором закончился: только теперь всё
+                     * следующее в этом блоке недостижимо. Без этого шага
+                     * `Return\n  1;` считало бы `1` за отдельный оператор.
+                     */
+                    if (frame.state === "afterTerminator") {
+                        frame.state = "terminated";
+                    }
+                    canStartStatement = true;
+                } else {
+                    canStartStatement = false;
+                }
+                previous = token;
+                return;
+            }
 
-                /* IF со всеми вышедшими ветками и ELSE — сам выход. */
-                if (
-                    frame.keyword === "if" &&
-                    frame.hasElse &&
-                    frame.allBranchesTerminated
-                ) {
-                    const parent = frames[frames.length - 1];
+            const word = normalizeIdentifier(token.value);
 
-                    if (parent.state === "normal") {
-                        parent.state = "terminated";
-                        parent.terminator = "RETURN во всех ветках IF";
+            if (word === END_KEYWORD) {
+                finish(frame);
+                frame.allBranchesTerminated = frame.allBranchesTerminated &&
+                    branchTerminated(frame);
+
+                if (frames.length > 1) {
+                    frames.pop();
+
+                    /* IF со всеми вышедшими ветками и ELSE — сам выход. */
+                    if (
+                        frame.keyword === "if" &&
+                        frame.hasElse &&
+                        frame.allBranchesTerminated
+                    ) {
+                        const parent = frames[frames.length - 1];
+
+                        if (parent.state === "normal") {
+                            parent.state = "terminated";
+                            parent.terminator = "RETURN во всех ветках IF";
+                        }
                     }
                 }
+                canStartStatement = false;
+                previous = token;
+                return;
             }
+
+            if (BRANCH_KEYWORDS.includes(word)) {
+                /* Новая ветка: то, что было до неё, о её достижимости не говорит. */
+                finish(frame);
+                frame.allBranchesTerminated = frame.allBranchesTerminated &&
+                    branchTerminated(frame);
+                frame.hasElse = frame.hasElse || word === "else";
+                frame.state = "normal";
+                frame.terminator = "";
+                canStartStatement = false;
+                previous = token;
+                return;
+            }
+
+            if (canStartStatement) {
+                if (frame.state === "terminated") {
+                    frame.state = "unreachable";
+                    frame.unreachableStart = token.start;
+                }
+
+                if (
+                    frame.state === "normal" &&
+                    TERMINATORS.includes(word)
+                ) {
+                    frame.state = "afterTerminator";
+                    frame.terminator = word.toUpperCase();
+                }
+            }
+
+            if (BLOCK_START_KEYWORDS.includes(word)) {
+                /*
+                 * Вложенный блок наследует недостижимость: сообщать о нём отдельно
+                 * незачем, внешний диапазон его уже накрыл.
+                 */
+                frames.push(createFrame(
+                    frame.suppressed || frame.unreachableStart !== undefined,
+                    word
+                ));
+            }
+
             canStartStatement = false;
             previous = token;
-            continue;
+        },
+        finish(): void {
+            frames.forEach(finish);
         }
+    };
+}
 
-        if (BRANCH_KEYWORDS.includes(word)) {
-            /* Новая ветка: то, что было до неё, о её достижимости не говорит. */
-            finish(frame);
-            frame.allBranchesTerminated = frame.allBranchesTerminated &&
-                branchTerminated(frame);
-            frame.hasElse = frame.hasElse || word === "else";
-            frame.state = "normal";
-            frame.terminator = "";
-            canStartStatement = false;
-            previous = token;
-            continue;
-        }
+/** Проверка недостижимости, наполняющая result по одному токену. */
+export interface IRslUnreachableScanner {
+    step(token: IRslToken): void;
+    /** Вызывается после последнего токена: незакрытые блоки тоже сообщаются. */
+    finish(): void;
+}
 
-        if (canStartStatement) {
-            if (frame.state === "terminated") {
-                frame.state = "unreachable";
-                frame.unreachableStart = token.start;
-            }
+/** Полный результат одним вызовом: тесты и синхронный расчёт. */
+export function buildUnreachableCodeDiagnostics(
+    module: IIndexedModule
+): Diagnostic[] {
+    const result: Diagnostic[] = [];
+    const scanner = createUnreachableCodeScanner(module, result);
 
-            if (
-                frame.state === "normal" &&
-                TERMINATORS.includes(word)
-            ) {
-                frame.state = "afterTerminator";
-                frame.terminator = word.toUpperCase();
-            }
-        }
-
-        if (BLOCK_START_KEYWORDS.includes(word)) {
-            /*
-             * Вложенный блок наследует недостижимость: сообщать о нём отдельно
-             * незачем, внешний диапазон его уже накрыл.
-             */
-            frames.push(createFrame(
-                frame.suppressed || frame.unreachableStart !== undefined,
-                word
-            ));
-        }
-
-        canStartStatement = false;
-        previous = token;
+    for (const token of module.syntax.tokens) {
+        scanner.step(token);
     }
-
-    frames.forEach(finish);
+    scanner.finish();
     return result;
 }
 

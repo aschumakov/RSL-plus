@@ -1099,11 +1099,25 @@ export class RslScopeResolver {
      * ответа. Ещё не разобранный Import просто не даёт своих модулей, а
      * появятся они при следующем запросе, когда индекс их уже построит.
      */
-    visiblePlatformModules(uri: string): readonly string[] {
+    visiblePlatformModules(
+        uri: string,
+        /*
+         * Import текущего текста, если он свежее разобранной модели.
+         *
+         * Нужен быстрому пути Completion: там модель отстаёт на одну правку, а
+         * только что набранный Import должен действовать сразу. Кэш в этом
+         * случае не используется — его ключ состав Import не описывает.
+         */
+        seedImports?: readonly string[]
+    ): readonly string[] {
         const catalog = this.platformModules;
 
         if (!catalog?.ready) {
             return [];
+        }
+
+        if (seedImports) {
+            return this.expandPlatformModules(uri, seedImports);
         }
 
         const cached = this.visibleModulesByUri.get(uri);
@@ -1119,11 +1133,28 @@ export class RslScopeResolver {
             return cached.modules;
         }
 
+        const modules = this.expandPlatformModules(
+            uri,
+            this.index.getModule(uri)?.imports || []
+        );
+        this.visibleModulesByUri.set(uri, { revision, modules });
+        return modules;
+    }
+
+    /** Прикладные модули, видимые из заданного списка Import, транзитивно. */
+    private expandPlatformModules(
+        uri: string,
+        seedImports: readonly string[]
+    ): readonly string[] {
+        const catalog = this.platformModules;
+
+        if (!catalog) {
+            return Object.freeze([]);
+        }
+
         const found = new Set<string>();
         const visitedUris = new Set<string>([uri]);
-        const queue: readonly string[][] = [
-            this.index.getModule(uri)?.imports || []
-        ];
+        const queue: readonly string[][] = [seedImports.slice()];
 
         for (const imports of queue) {
             for (const importName of imports) {
@@ -1149,9 +1180,32 @@ export class RslScopeResolver {
             }
         }
 
-        const modules = Object.freeze(Array.from(found));
-        this.visibleModulesByUri.set(uri, { revision, modules });
-        return modules;
+        return Object.freeze(Array.from(found));
+    }
+
+    /**
+     * Класс встроенной библиотеки или прикладного модуля — без модели документа.
+     *
+     * Нужен быстрому пути Completion: до готовности модели дерева символов нет, а
+     * эти два источника от него и не зависят. Встроенные классы видны всегда,
+     * прикладные — через Import, поэтому его состав передаётся вызывающим: он
+     * читает Import из текста текущей версии, а не из отставшей модели.
+     */
+    findClassWithoutModel(
+        uri: string,
+        className: string,
+        seedImports: readonly string[]
+    ): RslSymbol | undefined {
+        const builtin = this.builtins.findClass(className);
+
+        if (builtin) {
+            return builtin;
+        }
+
+        return this.platformModules?.findClass(
+            this.visiblePlatformModules(uri, seedImports),
+            className
+        )?.symbol;
     }
 
     /**

@@ -340,6 +340,7 @@
       "vscode:prepublish": "npm test && npm run bundle",
       "bundle": "node build/bundle.js",
       "bench": "npm run compile && node build/benchmark-parse.js",
+      "bench:responsiveness": "npm run compile && node --expose-gc build/bench.js",
       "grammar": "npm run compile && node build/generate-grammar.js --write",
       "platform-modules": "npm run compile && node build/platform-modules.js",
       "platform-modules:fix": "npm run compile && node build/platform-modules.js --fix",

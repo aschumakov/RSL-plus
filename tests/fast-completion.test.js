@@ -280,6 +280,129 @@ test("тип не переносится между Macro", async () => {
     );
 });
 
+test("переменная модуля видна внутри Macro", async () => {
+    /*
+     * Область видимости — не только текущий Macro. Ограничение поиска его
+     * заголовком убирало утечку между макросами, но заодно отрезало верхний
+     * уровень модуля: объявление выше первого Macro перестало давать подсказку.
+     */
+    const registry = createRegistry({
+        source: [
+            LOCAL_CLASS,
+            "Var MessageText: Ledger;",
+            "Macro Work()",
+            "  MessageText.",
+            "End;"
+        ].join("\n")
+    });
+    const labels = await completeAfterDot(registry, "  MessageText.");
+
+    assert.deepStrictEqual(
+        labels.slice().sort(),
+        ["Balance", "PostEntry"],
+        "Переменная верхнего уровня обязана быть видна из Macro"
+    );
+});
+
+test("поле класса видно внутри его метода", async () => {
+    const registry = createRegistry({
+        source: [
+            "Class Ledger",
+            "  Var Balance: Double;",
+            "  Macro PostEntry()",
+            "  End;",
+            "End;",
+            "Class Journal",
+            "  Var Entry: Ledger;",
+            "  Macro Add()",
+            "    Entry.",
+            "  End;",
+            "End;"
+        ].join("\n")
+    });
+    const labels = await completeAfterDot(registry, "    Entry.");
+
+    assert.deepStrictEqual(
+        labels.slice().sort(),
+        ["Balance", "PostEntry"],
+        "Поле класса обязано быть видно в методе того же класса"
+    );
+});
+
+test("одинаковые имена в разных Macro не смешиваются", async () => {
+    /* В каждом Macro своя переменная с одним именем, но разного типа. */
+    const registry = createRegistry({
+        source: [
+            "Class Ledger",
+            "  Var Balance: Double;",
+            "End;",
+            "Class Journal",
+            "  Var Total: Double;",
+            "End;",
+            "Macro First()",
+            "  Var item: Ledger;",
+            "  item.",
+            "End;",
+            "Macro Second()",
+            "  Var item: Journal;",
+            "  item.",
+            "End;"
+        ].join("\n")
+    });
+
+    assert.deepStrictEqual(
+        (await completeAfterDot(registry, "  item.")).slice().sort(),
+        ["Balance"],
+        "В First обязан быть тип из First"
+    );
+    assert.deepStrictEqual(
+        (await completeAfterDot(registry, "Var item: Journal;\n  item."))
+            .slice().sort(),
+        ["Total"],
+        "Во Second обязан быть тип из Second"
+    );
+});
+
+test("приватное поле своего класса видно только внутри класса", async () => {
+    const source = [
+        "Class Ledger",
+        "  Var Balance: Double;",
+        "  Private Var SecretKey: String;",
+        "  Macro PostEntry()",
+        "    Var self: Ledger;",
+        "    self.",
+        "  End;",
+        "End;",
+        "Macro Work()",
+        "  Var acc: Ledger;",
+        "  acc.",
+        "End;"
+    ].join("\n");
+
+    const inside = await completeAfterDot(
+        createRegistry({ source }),
+        "    self."
+    );
+    assert.ok(
+        inside.includes("SecretKey"),
+        `Внутри своего класса приватное поле обязано быть: ${
+            inside.join(", ")}`
+    );
+
+    const outside = await completeAfterDot(
+        createRegistry({ source }),
+        "  acc."
+    );
+    assert.ok(
+        outside.includes("Balance"),
+        `Открытое поле обязано быть и снаружи: ${outside.join(", ")}`
+    );
+    assert.ok(
+        !outside.includes("SecretKey"),
+        "Приватное поле вне своего класса недоступно и предлагаться не должно"
+    );
+});
+
 test("вложенный блок не мешает найти тип в своём Macro", async () => {
     const registry = createRegistry({
         source: [
@@ -411,6 +534,32 @@ test("класс виден через цепочку Import", async () => {
     assert.ok(
         labels.includes("AccountNumber"),
         `Транзитивный Import обязан учитываться: ${labels.join(", ")}`
+    );
+});
+
+test("встроенный класс даёт члены без готовой модели", async () => {
+    /*
+     * Форма из ревью: тип написан на верхнем уровне, обращение — внутри Macro.
+     * Встроенные классы видны всегда и от Import не зависят, поэтому оставлять
+     * их полной модели незачем.
+     */
+    const registry = createRegistry({
+        source: [
+            "Var Handle: TBFile;",
+            "Macro Work()",
+            "  Handle.",
+            "End;"
+        ].join("\n")
+    });
+    const labels = await completeAfterDot(registry, "  Handle.");
+
+    assert.ok(
+        labels.includes("AddFilter") && labels.includes("GetFldInfo"),
+        `Обязаны прийти члены TBFile: ${labels.slice(0, 12).join(", ")}`
+    );
+    assert.ok(
+        !labels.includes("MsgBox"),
+        "Это должен быть список членов, а не общий приблизительный список"
     );
 });
 
