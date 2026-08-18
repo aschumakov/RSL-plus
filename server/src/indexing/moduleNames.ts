@@ -196,3 +196,19 @@ export function normalizeUriPath(uri: string): string {
         .replace(/\\/g, "/")
         .toLowerCase();
 }
+
+/**
+ * Ключ имени модуля: по нему два написания считаются одним файлом.
+ *
+ * Разделитель пути и регистр в RSL не значимы, а расширение .mac
+ * подразумевается: Import oralib и Import "oralib.mac" — один и тот же
+ * модуль. Прочие расширения оставлены как есть: файлы с одинаковым именем и
+ * разными расширениями — это ошибка, и диагностика сообщает о ней отдельно.
+ */
+export function moduleReferenceKey(value: string): string {
+    return (value || "")
+        .trim()
+        .replace(/\\/gu, "/")
+        .toLowerCase()
+        .replace(/\.mac$/u, "");
+}

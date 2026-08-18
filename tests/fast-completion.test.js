@@ -17,6 +17,9 @@
  */
 
 const assert = require("assert");
+const {
+    CompletionItemKind
+} = require("../server/node_modules/vscode-languageserver");
 
 const {
     RslLanguageFeatureRegistry
@@ -26,6 +29,10 @@ const {
 } = require("../server/out/services/fastDocumentSnapshot");
 const { RslScopeResolver } = require("../server/out/scopeResolver");
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
+const { getDefaults } = require("../server/out/defaults");
+const {
+    PlatformModuleCatalog
+} = require("../server/out/builtins/platformModuleCatalog");
 
 let passed = 0;
 let failed = 0;
@@ -159,7 +166,7 @@ function createConnection(handlers) {
  * Документ отдаётся версией 2, а в индексе лежит версия 1: именно это состояние
  * возникает сразу после правки, и именно в нём работает быстрый путь.
  */
-function createRegistry({ source, others = {} }) {
+function createRegistry({ source, others = {}, platform }) {
     const index = new WorkspaceIndex();
     const uris = [MAIN, ...Object.keys(others)];
     index.registerWorkspaceFiles(uris);
@@ -179,7 +186,7 @@ function createRegistry({ source, others = {} }) {
             all: () => [document]
         },
         index,
-        resolver: new RslScopeResolver(index),
+        resolver: new RslScopeResolver(index, getDefaults(), platform),
         definitionProvider: {
             findImportDefinition: async () => undefined,
             findDynamicDefinition: async () => undefined,
@@ -217,6 +224,27 @@ async function completeAfterDot(registry, marker) {
     );
 
     return (response.items || []).map(item => item.label);
+}
+
+/** Те же элементы целиком: видами отличаются поле и метод. */
+async function completeItems(registry, marker) {
+    const source = registry.document.getText();
+    const at = source.indexOf(marker);
+    assert.ok(at >= 0, "В образце нет: " + marker);
+
+    const response = await registry.handlers.completion(
+        {
+            textDocument: { uri: MAIN },
+            position: registry.document.positionAt(at + marker.length),
+            context: { triggerKind: 2, triggerCharacter: "." }
+        },
+        {
+            isCancellationRequested: false,
+            onCancellationRequested: () => ({ dispose: () => undefined })
+        }
+    );
+
+    return response.items || [];
 }
 
 const LOCAL_CLASS = [
@@ -639,6 +667,108 @@ test("встроенный класс даёт члены без готовой 
         !labels.includes("MsgBox"),
         "Это должен быть список членов, а не общий приблизительный список"
     );
+});
+
+test("наследование локальных классов", async () => {
+    const registry = createRegistry({
+        source: [
+            "Class Base",
+            "  Var BaseField: String;",
+            "  Macro BaseMethod()",
+            "  End;",
+            "End;",
+            "Class (Base) Derived",
+            "  Var OwnField: String;",
+            "End;",
+            "Macro Work()",
+            "  Var item: Derived;",
+            "  item.",
+            "End;"
+        ].join("\n")
+    });
+    const labels = await completeAfterDot(registry, "  item.");
+
+    assert.deepStrictEqual(
+        labels.slice().sort(),
+        ["BaseField", "BaseMethod", "OwnField"],
+        "унаследованные члены обязаны быть в списке"
+    );
+});
+
+test("член производного класса перекрывает одноимённый член базы", async () => {
+    const registry = createRegistry({
+        source: [
+            "Class Base",
+            "  Var Shared: String;",
+            "End;",
+            "Class (Base) Derived",
+            "  Var Shared: Double;",
+            "End;",
+            "Macro Work()",
+            "  Var item: Derived;",
+            "  item.",
+            "End;"
+        ].join("\n")
+    });
+    const items = await completeAfterDot(registry, "  item.");
+
+    assert.deepStrictEqual(items, ["Shared"], "член обязан быть один");
+});
+
+test("класс, наследующий сам себя, не зацикливает подсказку", async () => {
+    const registry = createRegistry({
+        source: [
+            "Class (Loop) Loop",
+            "  Var Field: String;",
+            "End;",
+            "Macro Work()",
+            "  Var item: Loop;",
+            "  item.",
+            "End;"
+        ].join("\n")
+    });
+
+    assert.deepStrictEqual(
+        await completeAfterDot(registry, "  item."),
+        ["Field"]
+    );
+});
+
+test("класс прикладного модуля: своё поле и унаследованный метод", async () => {
+    /*
+     * Контрольный пример: TRsbLabel из RsbFormsInter объявляет поле text, а
+     * метод getPosition достаётся ему от TRsbVisualComponent. Быстрый путь
+     * обязан показать оба и с теми же видами элементов, что и полный.
+     */
+    const platform = new PlatformModuleCatalog({ log: () => undefined });
+    await platform.ensureModules(["RsbFormsInter"]);
+    assert.ok(platform.ready, "каталог прикладных модулей не прочитан");
+
+    const registry = createRegistry({
+        source: [
+            "Import RsbFormsInter;",
+            "Macro Test()",
+            "  Var label: TRsbLabel;",
+            "  label.",
+            "End;"
+        ].join("\n"),
+        platform
+    });
+    const response = await completeItems(registry, "  label.");
+    const byName = new Map(response.map(item => [item.label, item.kind]));
+
+    assert.ok(byName.has("text"), "своё поле обязано быть: " +
+        Array.from(byName.keys()).join(", "));
+    assert.ok(byName.has("getPosition"),
+        "унаследованный метод обязан быть: " +
+        Array.from(byName.keys()).join(", "));
+    /*
+     * Виды берутся из того же каталога, что и у полного пути: text описан
+     * там свойством, getPosition — методом. Здесь и проверяется, что
+     * быстрый путь их не подменяет своими.
+     */
+    assert.strictEqual(byName.get("text"), CompletionItemKind.Property);
+    assert.strictEqual(byName.get("getPosition"), CompletionItemKind.Method);
 });
 
 test("одноимённая процедура членов не имеет", async () => {

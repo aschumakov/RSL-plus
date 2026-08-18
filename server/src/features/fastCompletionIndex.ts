@@ -11,6 +11,7 @@ import {
     normalizeIdentifier,
     type IRslToken
 } from "../lexer";
+import { moduleReferenceKey } from "../indexing/moduleNames";
 import type { IFastDocumentSnapshot } from "../services/fastDocumentSnapshot";
 
 /**
@@ -48,6 +49,8 @@ export interface IFastClassMember {
 export interface IFastClassInfo {
     start: number;
     end: number;
+    /** Имя базового класса; пусто, если базы нет. */
+    baseName: string;
     members: IFastClassMember[];
 }
 
@@ -123,7 +126,7 @@ const DECLARES_NAMES = new Set(
     DECLARATION_KEYWORDS.filter(word => word !== "macro" && word !== "class")
 );
 
-const INDEX_BUDGET_ENTRIES = 60000;
+const INDEX_BUDGET_ENTRIES = 400000;
 const indexByUri = new Map<string, IFastCompletionIndex>();
 
 /** Приблизительный вес индекса: объявления, области, имена и члены классов. */
@@ -142,7 +145,16 @@ function indexWeight(index: IFastCompletionIndex): number {
         scoped += list.length;
     }
 
-    return index.scopes.length + index.globalItems.length + members + scoped;
+    /*
+     * Поток токенов учитывается наравне с объявлениями: файл на 400 КБ с
+     * десятком процедур почти ничего не весил по одним объявлениям, а держит
+     * сотню тысяч токенов.
+     */
+    return index.tokens.length +
+        index.scopes.length +
+        index.globalItems.length +
+        members +
+        scoped;
 }
 
 /** Индекс этой версии; строится при первом обращении. */
@@ -708,14 +720,25 @@ function openScope(
 
     let index = keywordIndex + 1;
 
-    /* Базовый класс в скобках перед именем. */
+    /* Базовый класс в скобках перед именем: class (TRsbPanel) tPanel. */
+    let baseName = "";
+
     if (
         word === "class" &&
         tokens[index] &&
         tokens[index].kind === "symbol" &&
         tokens[index].raw === "("
     ) {
-        index = skipParens(tokens, index) + 1;
+        const closing = skipParens(tokens, index);
+
+        for (let inside = index + 1; inside < closing; inside++) {
+            if (tokens[inside].kind === "identifier") {
+                baseName = tokens[inside].value;
+                break;
+            }
+        }
+
+        index = closing + 1;
     }
 
     const nameToken = tokens[index];
@@ -728,7 +751,12 @@ function openScope(
     }
 
     if (word === "class") {
-        const info: IFastClassInfo = { start, end: start, members: [] };
+        const info: IFastClassInfo = {
+            start,
+            end: start,
+            baseName,
+            members: []
+        };
         const key = normalizeIdentifier(name);
         const list = classes.get(key);
 
@@ -829,9 +857,27 @@ function skipParens(
     return openIndex;
 }
 
-/** Слово, на котором объявление заведомо кончилось. */
-function endsDeclaration(token: IRslToken): boolean {
-    if (token.kind !== "identifier") {
+/**
+ * Слово, на котором объявление заведомо кончилось.
+ *
+ * Имя после точки ключевым словом не считается — то же правило, что и в главном
+ * цикле. Без него Var x = obj.End; заканчивал объявление на слове End, и это
+ * слово доставалось главному циклу как закрытие блока: Macro закрывалась
+ * посреди себя, а obj.Class открывал ложный класс.
+ */
+function endsDeclaration(
+    tokens: readonly IRslToken[],
+    index: number
+): boolean {
+    const token = tokens[index];
+
+    if (!token || token.kind !== "identifier") {
+        return false;
+    }
+
+    const previous = tokens[index - 1];
+
+    if (previous && previous.kind === "symbol" && previous.raw === ".") {
         return false;
     }
 
@@ -879,7 +925,7 @@ function readDeclarationList(
     while (index < tokens.length) {
         const name = tokens[index];
 
-        if (name.kind !== "identifier" || endsDeclaration(name)) {
+        if (name.kind !== "identifier" || endsDeclaration(tokens, index)) {
             /*
              * Служебное слово принадлежит уже следующей инструкции: вернуть
              * нужно позицию ПЕРЕД ним, иначе главный цикл его перескочит и
@@ -927,7 +973,7 @@ function readDeclarationList(
                 ) {
                     break;
                 }
-            } else if (depth === 0 && endsDeclaration(token)) {
+            } else if (depth === 0 && endsDeclaration(tokens, index)) {
                 /*
                  * Точку с запятой в конце объявления ставят не всегда:
                  * Var A = 1, B = 2 end; встречается в реальном коде. Без этой
@@ -1023,20 +1069,6 @@ function readParameterList(
 }
 
 /**
- * Одно и то же имя модуля.
- *
- * Регистр в RSL не различается, а расширение .mac подразумевается: Import
- * "oralib.mac" и Import oralib — это один и тот же файл, и полный извлекатель
- * считает их одним модулем.
- */
-function sameModule(left: string, right: string): boolean {
-    const key = (value: string): string =>
-        value.toLowerCase().replace(/.mac$/u, "");
-
-    return key(left) === key(right);
-}
-
-/**
  * Имена модулей после слова Import и до точки с запятой.
  *
  * Их может быть несколько через запятую, и путь может быть строкой:
@@ -1061,7 +1093,7 @@ function readImport(
          * извлекатель. Список уходит в разрешение модулей, и он обязан
          * совпадать с тем, что построит полный путь.
          */
-        if (name && !imports.some(known => sameModule(known, name))) {
+        if (name && !imports.some(known => moduleReferenceKey(known) === moduleReferenceKey(name))) {
             imports.push(name);
         }
     };
@@ -1077,6 +1109,17 @@ function readImport(
             flush();
             index++;
             continue;
+        }
+
+        /*
+         * Точку с запятой пользователь ещё не набрал — и именно в этот момент
+         * подсказка и нужна. Без остановки на следующем служебном слове весь
+         * остаток файла становился одним именем модуля: Import lib с новой
+         * строки давал импорт libMacroWork()End, и ни одной области.
+         */
+        if (endsDeclaration(tokens, index)) {
+            flush();
+            return index - 1;
         }
 
         parts.push(token.kind === "string" ? token.value : token.raw);

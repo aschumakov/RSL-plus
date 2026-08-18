@@ -56,6 +56,7 @@ import {
 } from "./fastCompletionProvider";
 import {
     dropFastCompletionIndex,
+    findFastClass,
     getFastCompletionIndex,
     type IFastCompletionIndex
 } from "./fastCompletionIndex";
@@ -1157,6 +1158,14 @@ export class RslLanguageFeatureRegistry {
      * прикладные классы остаются полной модели — их разрешение зависит от
      * Import-контекста, а он здесь ещё не построен.
      */
+    /**
+     * Члены класса вместе с унаследованными, без полной модели.
+     *
+     * Цепочка баз обходится от производного класса к базовому, и член
+     * производного перекрывает одноимённый член базы — так же, как это делает
+     * полный resolver. Прежде быстрый путь отдавал только собственные члены: у
+     * TRsbLabel было поле text, но не унаследованный getPosition.
+     */
     private findFastClassMembers(
         document: TextDocument,
         className: string,
@@ -1165,10 +1174,62 @@ export class RslLanguageFeatureRegistry {
         /* Где стоит курсор: от этого зависит видимость приватных членов. */
         offset: number
     ): CompletionItem[] | undefined {
-        const own = buildRslFastOwnClassMembers(fastIndex, className, offset);
+        const items: CompletionItem[] = [];
+        const taken = new Set<string>();
+        /* Защита от цикла: класс, наследующий сам себя, встречается в правках. */
+        const visited = new Set<string>();
+        let wanted = className;
+        let found = false;
+
+        while (wanted && !visited.has(normalizeIdentifier(wanted))) {
+            visited.add(normalizeIdentifier(wanted));
+            const level = this.findFastClassLevel(
+                document,
+                wanted,
+                fastIndex,
+                offset
+            );
+
+            if (!level) {
+                break;
+            }
+
+            found = true;
+
+            for (const member of level.members) {
+                const key = normalizeIdentifier(member.label);
+
+                /* Первым идёт производный класс: его член и остаётся. */
+                if (!taken.has(key)) {
+                    taken.add(key);
+                    items.push(member);
+                }
+            }
+
+            wanted = level.baseName;
+        }
+
+        return found ? items : undefined;
+    }
+
+    /** Один уровень цепочки: собственные члены класса и имя его базы. */
+    private findFastClassLevel(
+        document: TextDocument,
+        className: string,
+        fastIndex: IFastCompletionIndex,
+        offset: number
+    ): { members: CompletionItem[]; baseName: string } | undefined {
+        const own = findFastClass(fastIndex, className, offset);
 
         if (own) {
-            return own;
+            return {
+                members: buildRslFastOwnClassMembers(
+                    fastIndex,
+                    className,
+                    offset
+                ) || [],
+                baseName: own.baseName
+            };
         }
 
         const wanted = normalizeIdentifier(className);
@@ -1201,8 +1262,7 @@ export class RslLanguageFeatureRegistry {
          *
          * От модели документа они не зависят: встроенные видны всегда, а
          * прикладные — через Import, состав которого берётся из текущего
-         * текста. Прежде оба источника оставались полной модели, и объявление
-         * с типом TBFile до конца разбора не давало ни одного члена.
+         * текста.
          */
         const symbol = matches[0] ||
             this.environment.resolver.findClassWithoutModel(
@@ -1215,14 +1275,17 @@ export class RslLanguageFeatureRegistry {
             return undefined;
         }
 
-        /* Приватные члены чужого модуля недоступны — их не предлагаем. */
-        return symbol.children
-            .filter(member => member.visibility !== "private")
-            .map(member => ({
-                label: member.name,
-                kind: member.kind,
-                detail: member.typeName || undefined
-            }));
+        return {
+            /* Приватные члены чужого модуля недоступны — их не предлагаем. */
+            members: symbol.children
+                .filter(member => member.visibility !== "private")
+                .map(member => ({
+                    label: member.name,
+                    kind: member.kind,
+                    detail: member.typeName || undefined
+                })),
+            baseName: symbol.baseClassName || ""
+        };
     }
 
     /**

@@ -227,6 +227,79 @@ test("состав Import совпадает с общим извлекател�
     }
 });
 
+test("foo.mac и fooxmac — разные модули", () => {
+    /*
+     * Точка в шаблоне расширения обязана быть литеральной. С точкой-заменителем
+     * fooxmac попадал под .mac и считался повтором foo.mac.
+     */
+    assert.deepStrictEqual(indexOf("Import foo.mac, fooxmac;").imports, [
+        "foo.mac",
+        "fooxmac"
+    ]);
+});
+
+test("Import без точки с запятой не поглощает следующую инструкцию", () => {
+    /*
+     * Точку с запятой ещё не набрали — а подсказка нужна именно сейчас. Прежде
+     * весь остаток файла становился одним именем модуля, и ни одной области не
+     * находилось.
+     */
+    const index = indexOf("Import lib" + "\n" + "Macro Work()" + "\n" + "End;" + "\n");
+
+    assert.deepStrictEqual(index.imports, ["lib"]);
+    assert.deepStrictEqual(
+        index.globalItems.map(item => item.label),
+        ["Work"]
+    );
+});
+
+test("ключевое слово после точки внутри Var не заканчивает объявление", () => {
+    /*
+     * Var x = obj.End; — здесь End это имя поля. Проверка после точки была
+     * только в главном цикле, и разбор объявления заканчивался на нём: слово
+     * доставалось главному циклу и закрывало Macro посреди себя.
+     */
+    const source = [
+        "Class Ledger",
+        "  Var Balance: Double;",
+        "End;",
+        "Macro Work()",
+        "  Var x = obj.End;",
+        "  Var y: Ledger;",
+        "  y.",
+        "End;"
+    ].join("\n");
+    const index = indexOf(source);
+
+    assert.strictEqual(
+        index.scopes.filter(scope => scope.parent === -1).length,
+        2
+    );
+    assert.deepStrictEqual(
+        lookupFastName(index, "y", source.indexOf("  y.") + 4),
+        { declared: true, typeName: "Ledger" }
+    );
+});
+
+test("obj.Class в объявлении не открывает класс", () => {
+    const index = indexOf(
+        "Macro Work()" + "\n" + "  Var x = obj.Class;" + "\n" + "End;" + "\n"
+    );
+
+    assert.strictEqual(index.classes.size, 0);
+    assert.strictEqual(index.scopes.length, 1);
+});
+
+test("базовый класс запоминается", () => {
+    const index = indexOf(
+        "Class Base" + "\n" + "End;" + "\n" +
+        "Class (Base) Derived" + "\n" + "End;" + "\n"
+    );
+
+    assert.strictEqual(index.classes.get("derived")[0].baseName, "Base");
+    assert.strictEqual(index.classes.get("base")[0].baseName, "");
+});
+
 /* --- объявления ----------------------------------------------------------- */
 
 test("запятая внутри вызова не создаёт объявление", () => {
