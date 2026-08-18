@@ -37,9 +37,6 @@ import {
     resolveBlockNavigationPosition
 } from "./blockNavigation";
 import { normalizeIdentifier } from "../lexer";
-import type {
-    IRslDeclarationDescriptor
-} from "../analysis/declarationExtractor";
 import type { IRslSettings } from "../interfaces";
 import { tokenAtOffset, type IRslToken } from "../lexer";
 import {
@@ -49,14 +46,19 @@ import {
 import { findRslReferencesInWorkspace } from "../analysis/references";
 import { ReferenceIndex } from "../analysis/referenceIndex";
 import {
-    getFastDocumentDeclarations,
     getFastDocumentImports,
     type IFastDocumentSnapshot
 } from "../services/fastDocumentSnapshot";
 import {
     buildRslFastCompletions,
-    buildRslFastMemberCompletions
+    buildRslFastMemberCompletions,
+    buildRslFastOwnClassMembers
 } from "./fastCompletionProvider";
+import {
+    dropFastCompletionIndex,
+    getFastCompletionIndex,
+    type IFastCompletionIndex
+} from "./fastCompletionIndex";
 import type {
     ParseWaitMode
 } from "../services/documentAnalysisService";
@@ -250,6 +252,14 @@ export class RslLanguageFeatureRegistry {
              */
             const module = this.getRequestModule(document);
 
+            if (module) {
+                /*
+                 * Модель готова: приблизительный индекс больше не нужен, и
+                 * держать его до следующей правки значит держать память зря.
+                 */
+                dropFastCompletionIndex(document.uri);
+            }
+
             if (!module) {
                 /*
                  * Разбор идёт своим ходом, но его отказ обязан быть перехвачен:
@@ -279,22 +289,27 @@ export class RslLanguageFeatureRegistry {
                     document
                 );
                 const offset = document.offsetAt(params.position);
-                /* Объявления файла извлекаются один раз на запрос. */
-                const declarations =
-                    getFastDocumentDeclarations(snapshot).declarations;
+                /*
+                 * Компактный индекс версии вместо повторного извлечения.
+                 *
+                 * Прежде каждый запрос заново обходил весь файл: на модуле
+                 * 237 КБ это 6 мс в медиане и до 29 мс в худшем случае, и так
+                 * на каждое нажатие клавиши.
+                 */
+                const fastIndex = getFastCompletionIndex(snapshot);
                 const members = buildRslFastMemberCompletions(
                     snapshot,
                     offset,
                     name => this.findFastClassMembers(
                         document,
                         name,
-                        declarations,
+                        fastIndex,
                         offset
                     ),
-                    declarations
+                    fastIndex
                 );
                 const fast = members || deduplicateCompletionItems(
-                    buildRslFastCompletions(snapshot, offset, declarations),
+                    buildRslFastCompletions(snapshot, offset, fastIndex),
                     this.defaultCompletionItems,
                     this.knownImportCompletions(document)
                 );
@@ -1144,93 +1159,69 @@ export class RslLanguageFeatureRegistry {
     private findFastClassMembers(
         document: TextDocument,
         className: string,
-        /* Объявления передаются готовыми: за запрос они извлекаются один раз. */
-        declarations: readonly IRslDeclarationDescriptor[],
+        /* Индекс версии: за запрос он берётся один раз. */
+        fastIndex: IFastCompletionIndex,
         /* Где стоит курсор: от этого зависит видимость приватных членов. */
         offset: number
     ): CompletionItem[] | undefined {
-        const wanted = normalizeIdentifier(className);
-        const own = declarations.find(item =>
-            item.kind === "class" &&
-            normalizeIdentifier(item.name) === wanted
-        );
+        const own = buildRslFastOwnClassMembers(fastIndex, className, offset);
 
         if (own) {
-            /*
-             * Приватный член виден только внутри своего класса — в том числе
-             * когда класс объявлен в этом же файле. Прежде файл считался одной
-             * областью, и приватные поля предлагались из любого его места.
-             */
-            const insideOwnClass = offset >= own.start && offset <= own.end;
-            const members = insideOwnClass
-                ? own.children
-                : own.children.filter(
-                    member => member.visibility !== "private"
-                );
-
-            return members.map(member => ({
-                label: member.name,
-                kind: member.kind === "macro"
-                    ? CompletionItemKind.Method
-                    : CompletionItemKind.Field,
-                detail: member.typeName || undefined
-            }));
+            return own;
         }
+
+        const wanted = normalizeIdentifier(className);
+        /*
+         * Классы подключённых модулей собираются все, а не берётся первый.
+         *
+         * Одноимённые классы в разных Import — это неоднозначность, и какой из
+         * них выберет компилятор, без полной модели неизвестно. Показать члены
+         * наугад хуже, чем не показать ничего.
+         */
+        const matches: RslSymbol[] = [];
 
         for (const imported of this.importClosure(document)) {
             const symbol = imported.symbolTree.children.find(item =>
-                normalizeIdentifier(item.name) === wanted
+                normalizeIdentifier(item.name) === wanted &&
+                item.kind === CompletionItemKind.Class
             );
 
-            /*
-             * Проверяется именно класс: одноимённая процедура или переменная
-             * членов не имеет, и выдать её «члены» значило бы выдумать их.
-             * Приватные члены чужого модуля недоступны — их не предлагаем.
-             */
-            if (!symbol || symbol.kind !== CompletionItemKind.Class) {
-                continue;
+            if (symbol) {
+                matches.push(symbol);
             }
+        }
 
-            const members = symbol.children.filter(
-                member => member.visibility !== "private"
-            );
-
-            if (members.length > 0) {
-                return members.map(member => ({
-                    label: member.name,
-                    kind: member.kind,
-                    detail: member.typeName || undefined
-                }));
-            }
+        if (matches.length > 1) {
+            return undefined;
         }
 
         /*
          * Встроенный класс и класс прикладного модуля — последними.
          *
          * От модели документа они не зависят: встроенные видны всегда, а
-         * прикладные — через Import, состав которого берётся из текущего текста.
-         * Прежде оба источника оставались полной модели, и `Var f: TBFile; f.`
-         * до конца разбора не давал ни одного члена.
+         * прикладные — через Import, состав которого берётся из текущего
+         * текста. Прежде оба источника оставались полной модели, и объявление
+         * с типом TBFile до конца разбора не давало ни одного члена.
          */
-        const external = this.environment.resolver.findClassWithoutModel(
-            document.uri,
-            wanted,
-            getFastDocumentImports(
-                this.environment.getFastDocumentSnapshot(document)
-            )
-        );
+        const symbol = matches[0] ||
+            this.environment.resolver.findClassWithoutModel(
+                document.uri,
+                wanted,
+                fastIndex.imports
+            );
 
-        if (external) {
-            return external.children
-                .filter(member => member.visibility !== "private")
-                .map(member => ({
-                    label: member.name,
-                    kind: member.kind,
-                    detail: member.typeName || undefined
-                }));
+        if (!symbol) {
+            return undefined;
         }
 
-        return undefined;
+        /* Приватные члены чужого модуля недоступны — их не предлагаем. */
+        return symbol.children
+            .filter(member => member.visibility !== "private")
+            .map(member => ({
+                label: member.name,
+                kind: member.kind,
+                detail: member.typeName || undefined
+            }));
     }
 
     /**

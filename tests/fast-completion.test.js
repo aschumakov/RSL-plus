@@ -409,7 +409,7 @@ test("вложенный блок не мешает найти тип в сво�
             LOCAL_CLASS,
             "Macro Work()",
             "  Var acc = Ledger();",
-            "  If (1 = 1) Then",
+            "  If (1 = 1)",
             "    acc.",
             "  End;",
             "End;"
@@ -534,6 +534,84 @@ test("класс виден через цепочку Import", async () => {
     assert.ok(
         labels.includes("AccountNumber"),
         `Транзитивный Import обязан учитываться: ${labels.join(", ")}`
+    );
+});
+
+test("нетипизированный параметр затеняет внешнее имя", async () => {
+    /*
+     * Параметр объявлен без типа, и тип внешней переменной к этой точке
+     * отношения не имеет. Поиск, идущий по тексту назад до первого объявления
+     * с типом, проходил сквозь затенение и предлагал члены чужого объекта.
+     */
+    const registry = createRegistry({
+        source: [
+            LOCAL_CLASS,
+            "Var x: Ledger;",
+            "Macro Work(x)",
+            "  x.",
+            "End;"
+        ].join("\n")
+    });
+    const labels = await completeAfterDot(registry, "  x.");
+
+    assert.ok(
+        !labels.includes("Balance") && !labels.includes("PostEntry"),
+        `Параметр затеняет внешнее имя: ${labels.join(", ")}`
+    );
+    assert.ok(
+        labels.includes("MsgBox"),
+        "Вместо членов обязан прийти обычный приблизительный список"
+    );
+});
+
+test("нетипизированная локальная переменная затеняет внешнее имя", async () => {
+    const registry = createRegistry({
+        source: [
+            LOCAL_CLASS,
+            "Var x: Ledger;",
+            "Macro Work()",
+            "  Var x;",
+            "  x.",
+            "End;"
+        ].join("\n")
+    });
+    const labels = await completeAfterDot(registry, "  x.");
+
+    assert.ok(
+        !labels.includes("Balance") && !labels.includes("PostEntry"),
+        `Локальная переменная затеняет внешнее имя: ${labels.join(", ")}`
+    );
+});
+
+test("одноимённые классы разных Import членов не дают", async () => {
+    /*
+     * Какой из двух классов выберет компилятор, без полной модели неизвестно.
+     * Показать члены первого попавшегося значит подсказать наугад.
+     */
+    const second = "file:///d:/fast/lib2.mac";
+    const registry = createRegistry({
+        source: [
+            "Import lib;",
+            "Import lib2;",
+            "Macro Work()",
+            "  Var a: Account;",
+            "  a.",
+            "End;"
+        ].join("\n"),
+        others: {
+            [REMOTE]: REMOTE_SOURCE,
+            [second]: [
+                "Class Account",
+                "  Var OtherField: String;",
+                "End;"
+            ].join("\n")
+        }
+    });
+    const labels = await completeAfterDot(registry, "  a.");
+
+    assert.ok(
+        !labels.includes("AccountNumber") && !labels.includes("OtherField"),
+        `При неоднозначности члены не показываются: ${labels.join(", ")}`
     );
 });
 

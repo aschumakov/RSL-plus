@@ -276,14 +276,24 @@ test("подсказка не зависит от размера файла", ()
     tail.push("End;");
 
     const visible = { start: { line: 3, character: 0 }, end: { line: 3, character: 99 } };
+    /*
+     * Медиана нескольких прогонов, а не один замер: единственная пауза
+     * сборщика мусора на загруженной машине давала 25 мс и роняла проверку,
+     * ничего при этом не найдя.
+     */
     const measure = lines => {
         const context = open(lines);
-        const started = process.hrtime.bigint();
-        const hints = buildRslInlayHints(context.module, context.resolver, visible);
-        return {
-            ms: Number(process.hrtime.bigint() - started) / 1e6,
-            hints
-        };
+        const times = [];
+        let hints = [];
+
+        for (let attempt = 0; attempt < 5; attempt++) {
+            const started = process.hrtime.bigint();
+            hints = buildRslInlayHints(context.module, context.resolver, visible);
+            times.push(Number(process.hrtime.bigint() - started) / 1e6);
+        }
+
+        times.sort((left, right) => left - right);
+        return { ms: times[2], hints };
     };
 
     const small = measure([...declarations, "End;"]);
@@ -294,10 +304,14 @@ test("подсказка не зависит от размера файла", ()
         small.hints.map(hint => hint.label),
         "подсказка для видимой строки не зависит от того, что ниже"
     );
+    /*
+     * Сравнивается характер, а не абсолютная разница: обход всего файла даёт
+     * рост в сотни раз, а шум измерения — единицы.
+     */
     assert.ok(
-        large.ms < small.ms + 25,
+        large.ms < Math.max(5, small.ms * 20),
         "запрос для одной видимой строки не имеет права сканировать весь файл; " +
-            `${small.ms.toFixed(1)} мс против ${large.ms.toFixed(1)} мс на ` +
+            `${small.ms.toFixed(2)} мс против ${large.ms.toFixed(2)} мс на ` +
             `${tail.length} строк ниже`
     );
 });

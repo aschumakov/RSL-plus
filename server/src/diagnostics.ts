@@ -582,12 +582,18 @@ function planLocalRslDiagnostics(
         [
             "deprecated",
             options.deprecatedDeclarations,
-            () => addDeprecatedDeclarationDiagnostics(module, result)
+            createScanStage(
+                () => module.lex.tokens,
+                token => addDeprecatedDeclarationDiagnostic(module, token, result)
+            )
         ],
         [
             "debugBreak",
             options.debugBreak,
-            () => addDebugBreakDiagnostics(module, result)
+            createScanStage(
+                () => module.lex.tokens,
+                token => addDebugBreakDiagnostic(module, token, result)
+            )
         ],
         [
             "unused",
@@ -1303,54 +1309,54 @@ function splitLongStringLiteral(raw: string): string | undefined {
     return parts.map(part => `${quote}${part}${quote}`).join(" +\n");
 }
 
-function addDeprecatedDeclarationDiagnostics(
-    module: IIndexedModule,
+function addDeprecatedDeclarationDiagnostic(
+    _module: IIndexedModule,
+    token: IRslToken,
     result: Diagnostic[]
 ): void {
-    for (const token of module.lex.tokens) {
-        if (token.kind !== "identifier") {
-            continue;
-        }
 
-        const message = deprecatedConstructMessage(token.value);
-
-        if (!message) {
-            continue;
-        }
-
-        result.push(createTokenDiagnostic(
-            token,
-            DiagnosticSeverity.Information,
-            message,
-            "deprecated-declaration"
-        ));
+    if (token.kind !== "identifier") {
+        return;
     }
+
+    const message = deprecatedConstructMessage(token.value);
+
+    if (!message) {
+        return;
+    }
+
+    result.push(createTokenDiagnostic(
+        token,
+        DiagnosticSeverity.Information,
+        message,
+        "deprecated-declaration"
+    ));
 }
 
-function addDebugBreakDiagnostics(
-    module: IIndexedModule,
+function addDebugBreakDiagnostic(
+    _module: IIndexedModule,
+    token: IRslToken,
     result: Diagnostic[]
 ): void {
-    for (const token of module.lex.tokens) {
-        if (
-            token.kind !== "identifier" ||
-            normalizeIdentifier(token.value) !== "debugbreak"
-        ) {
-            continue;
-        }
 
-        result.push(createTokenDiagnostic(
-            token,
-            DiagnosticSeverity.Warning,
-            "В коде оставлен DEBUGBREAK",
-            "debugbreak",
-            false,
-            {
-                start: token.start,
-                end: token.end
-            }
-        ));
+    if (
+        token.kind !== "identifier" ||
+        normalizeIdentifier(token.value) !== "debugbreak"
+    ) {
+        return;
     }
+
+    result.push(createTokenDiagnostic(
+        token,
+        DiagnosticSeverity.Warning,
+        "В коде оставлен DEBUGBREAK",
+        "debugbreak",
+        false,
+        {
+            start: token.start,
+            end: token.end
+        }
+    ));
 }
 
 function addUnrecognizedEscapeDiagnostic(

@@ -1,11 +1,15 @@
 import { CompletionItem, CompletionItemKind } from "vscode-languageserver";
 
 import {
-    getFastDocumentDeclarations,
-    type IFastDocumentSnapshot
-} from "../services/fastDocumentSnapshot";
+    findFastClass,
+    getFastCompletionIndex,
+    lookupFastName,
+    visibleFastItems,
+    type IFastClassInfo,
+    type IFastCompletionIndex
+} from "./fastCompletionIndex";
+import type { IFastDocumentSnapshot } from "../services/fastDocumentSnapshot";
 import { normalizeIdentifier, type IRslToken } from "../lexer";
-import type { IRslDeclarationDescriptor } from "../analysis/declarationExtractor";
 
 /**
  * Объявления файла без ожидания полной модели.
@@ -14,92 +18,39 @@ import type { IRslDeclarationDescriptor } from "../analysis/declarationExtractor
  * этой версии ещё строится. Прежде в таком случае возвращался пустой список —
  * то есть подсказка выглядела так, будто в файле ничего нет.
  *
- * Это заведомо неполный ответ, и он таким и помечается: состав взят
- * сканированием токенов, без областей видимости и вывода типов. Локальных
- * переменных Macro здесь не будет вовсе — быстрый снимок их не извлекает, он
- * строится для Structure. Остаются классы, макропроцедуры, методы и параметры,
- * то есть ровно то, что чаще всего и вызывают. Как только модель готова, клиент
- * перезапрашивает список и получает точный.
+ * Это заведомо неполный ответ, и он таким и помечается: состав взят из
+ * компактного индекса версии, без вывода типов по выражениям. Зато область
+ * видимости соблюдается — предлагаются имена верхнего уровня, классы,
+ * процедуры и собственные имена объемлющих Macro и Class.
  */
 export function buildRslFastCompletions(
     snapshot: IFastDocumentSnapshot,
     offset: number,
-    /* Готовые объявления, если вызывающий уже их извлёк: за запрос — один раз. */
-    known?: readonly IRslDeclarationDescriptor[]
+    /* Готовый индекс, если вызывающий уже его взял: за запрос — один раз. */
+    known?: IFastCompletionIndex
 ): CompletionItem[] {
-    const declarations = known ||
-        getFastDocumentDeclarations(snapshot).declarations;
-    const items = new Map<string, CompletionItem>();
-
-    const add = (
-        declaration: IRslDeclarationDescriptor,
-        insideCurrentBlock: boolean
-    ): void => {
-        /*
-         * Локальные переменные чужого Macro в подсказку не попадают: областей
-         * видимости здесь нет, и предложить их значило бы предложить то, что
-         * компилятор в этой позиции не увидит. Верхний уровень виден всегда.
-         *
-         * Метод класса — тот же случай: самостоятельным именем он не
-         * вызывается, только через объект. Вне своего класса его в списке
-         * простых имён быть не должно.
-         */
-        const hidden = declaration.kind === "variable" ||
-            (declaration.kind === "macro" && declaration.isMethod);
-
-        if (!insideCurrentBlock && hidden) {
-            return;
-        }
-
-        const key = declaration.name.toLowerCase();
-
-        if (!items.has(key)) {
-            items.set(key, {
-                label: declaration.name,
-                kind: completionKind(declaration),
-                detail: declaration.typeName || undefined,
-                /*
-                 * Сортировка ниже обычной: точный список придёт следом, и
-                 * приблизительные имена не должны опережать его.
-                 */
-                sortText: `${declaration.name}`
-            });
-        }
-    };
-
-    const visit = (
-        list: readonly IRslDeclarationDescriptor[],
-        insideCurrentBlock: boolean
-    ): void => {
-        for (const declaration of list) {
-            add(declaration, insideCurrentBlock);
-            const inside = insideCurrentBlock ||
-                (offset >= declaration.start && offset <= declaration.end);
-            visit(declaration.children, inside);
-        }
-    };
-
-    visit(declarations, false);
-    return Array.from(items.values());
+    return visibleFastItems(
+        known || getFastCompletionIndex(snapshot),
+        offset
+    );
 }
 
 /**
- * Члены объекта до готовности модели: `MessageText.` сразу после правки.
+ * Члены объекта до готовности модели: MessageText. сразу после правки.
  *
- * Тип получателя ищется в тексте рядом — по написанному типу `Var x: TFile`
- * или по присваиванию класса `x = TStringList` и `x = TStringList()`. Это
- * ровно те два случая, в которых тип виден без анализа; всё сложнее (вызов
- * процедуры, член другого объекта, ветвление) остаётся полной модели.
+ * Тип получателя берётся из ближайшего ВИДИМОГО объявления — написанного типа
+ * или присваивания класса. Если объявление найдено, но тип по нему неизвестен,
+ * подсказка не выдаётся вовсе: внешнее одноимённое имя в этой точке затенено, и
+ * его члены здесь не при чём.
  *
- * Возвращает undefined, если это не обращение к члену или тип не опознан:
- * тогда вызывающий отдаёт обычный приблизительный список, а не пустой.
+ * Возвращает undefined, если это не обращение к члену или тип не опознан: тогда
+ * вызывающий отдаёт обычный приблизительный список, а не пустой.
  */
 export function buildRslFastMemberCompletions(
     snapshot: IFastDocumentSnapshot,
     offset: number,
     findClassMembers: (className: string) => CompletionItem[] | undefined,
-    /* Готовые объявления, если вызывающий уже их извлёк: за запрос — один раз. */
-    known?: readonly IRslDeclarationDescriptor[]
+    known?: IFastCompletionIndex
 ): CompletionItem[] | undefined {
     const receiver = findReceiverBeforeDot(snapshot.lex.tokens, offset);
 
@@ -107,53 +58,46 @@ export function buildRslFastMemberCompletions(
         return undefined;
     }
 
-    const declarations = known ||
-        getFastDocumentDeclarations(snapshot).declarations;
-    const tokens = snapshot.lex.tokens;
-    const className = findReceiverType(
-        tokens,
-        receiver.name,
-        receiver.index,
-        collectHiddenRanges(declarations, offset, [])
-    );
+    const index = known || getFastCompletionIndex(snapshot);
+    const found = lookupFastName(index, receiver.name, offset);
 
-    return className ? findClassMembers(className) : undefined;
+    return found.typeName ? findClassMembers(found.typeName) : undefined;
 }
 
-/**
- * Тела Macro и Class, невидимые из этой точки.
- *
- * Ровно они и отделяют своё от чужого. Прежде поиск типа обрывался на заголовке
- * объемлющего Macro: утечку между макросами это убирало, но заодно отрезало
- * поля своего класса и переменные модуля — то есть `Var MessageText: TStringList`
- * на верхнем уровне перестал давать подсказку внутри `Macro`. Здесь наоборот:
- * поиск идёт по всему файлу, но не заходит в блоки, которые эту точку не
- * содержат.
- *
- * Список получается упорядоченным по возрастанию: объявления идут в порядке
- * текста, а вложенные в пропущенный блок отдельно не нужны — он пропускается
- * целиком.
- */
-function collectHiddenRanges(
-    declarations: readonly IRslDeclarationDescriptor[],
-    offset: number,
-    result: Array<{ start: number; end: number }>
-): Array<{ start: number; end: number }> {
-    for (const declaration of declarations) {
-        if (declaration.kind === "variable") {
-            continue;
-        }
+/** Члены класса, объявленного в этом же файле; undefined, если его здесь нет. */
+export function buildRslFastOwnClassMembers(
+    index: IFastCompletionIndex,
+    className: string,
+    offset: number
+): CompletionItem[] | undefined {
+    const own = findFastClass(index, className);
 
-        if (offset >= declaration.start && offset <= declaration.end) {
-            /* Свой блок: невидимы только его части, не содержащие точку. */
-            collectHiddenRanges(declaration.children, offset, result);
-            continue;
-        }
-
-        result.push({ start: declaration.start, end: declaration.end });
+    if (!own) {
+        return undefined;
     }
 
-    return result;
+    return ownClassItems(own, offset);
+}
+
+function ownClassItems(
+    own: IFastClassInfo,
+    offset: number
+): CompletionItem[] {
+    /*
+     * Приватный член виден только внутри своего класса — в том числе когда
+     * класс объявлен в этом же файле.
+     */
+    const insideOwnClass = offset >= own.start && offset <= own.end;
+
+    return own.members
+        .filter(member => insideOwnClass || !member.isPrivate)
+        .map(member => ({
+            label: member.name,
+            kind: member.kind === "macro"
+                ? CompletionItemKind.Method
+                : CompletionItemKind.Field,
+            detail: member.typeName || undefined
+        }));
 }
 
 /** Последний токен, начинающийся не позже смещения; поток упорядочен. */
@@ -220,124 +164,4 @@ function findReceiverBeforeDot(
     }
 
     return undefined;
-}
-
-/**
- * Тип получателя по ближайшему предшествующему объявлению или присваиванию.
- *
- * Поиск идёт назад от места обращения — ближе к нему вернее — по всей видимой
- * области: свой Macro, затем поля своего класса, затем верхний уровень модуля.
- * Тела чужих Macro и Class пропускаются целиком: их переменные в этой точке
- * компилятору не видны, и предложить их значило бы дать неверную подсказку.
- */
-function findReceiverType(
-    tokens: readonly IRslToken[],
-    name: string,
-    fromIndex: number,
-    hidden: ReadonlyArray<{ start: number; end: number }>
-): string | undefined {
-    /* Идём назад, поэтому и по списку пропусков движемся с конца. */
-    let hiddenIndex = hidden.length - 1;
-
-    for (let index = fromIndex - 1; index >= 0; index--) {
-        const token = tokens[index];
-
-        /*
-         * Смещения убывают, поэтому пропуск, начинающийся позже текущего
-         * токена, не понадобится больше никогда — указатель только убывает.
-         */
-        while (hiddenIndex >= 0 && hidden[hiddenIndex].start > token.start) {
-            hiddenIndex--;
-        }
-
-        if (hiddenIndex >= 0 && token.start < hidden[hiddenIndex].end) {
-            continue;
-        }
-
-        if (
-            token.kind !== "identifier" ||
-            normalizeIdentifier(token.value) !== name
-        ) {
-            continue;
-        }
-
-        const next = nextSignificant(tokens, index);
-
-        if (!next) {
-            continue;
-        }
-
-        /* `Var x: TFile` — тип написан прямо. */
-        if (next.token.kind === "symbol" && next.token.raw === ":") {
-            const type = nextSignificant(tokens, next.index);
-
-            if (type?.token.kind === "identifier") {
-                return type.token.value;
-            }
-
-            continue;
-        }
-
-        /* `x = TStringList` и `x = TStringList()` — присвоен класс. */
-        if (next.token.kind === "symbol" && next.token.raw === "=") {
-            const value = nextSignificant(tokens, next.index);
-
-            if (value?.token.kind !== "identifier") {
-                continue;
-            }
-
-            const after = nextSignificant(tokens, value.index);
-            const isCallOrEnd = !after ||
-                (after.token.kind === "symbol" &&
-                    (after.token.raw === "(" || after.token.raw === ";"));
-
-            if (isCallOrEnd) {
-                return value.token.value;
-            }
-        }
-    }
-
-    return undefined;
-}
-
-function nextSignificant(
-    tokens: readonly IRslToken[],
-    index: number
-): { token: IRslToken; index: number } | undefined {
-    for (let position = index + 1; position < tokens.length; position++) {
-        const token = tokens[position];
-
-        if (
-            token.kind === "whitespace" || token.kind === "newline" ||
-            token.kind === "comment"
-        ) {
-            continue;
-        }
-
-        return { token, index: position };
-    }
-
-    return undefined;
-}
-
-function completionKind(
-    declaration: IRslDeclarationDescriptor
-): CompletionItemKind {
-    if (declaration.kind === "class") {
-        return CompletionItemKind.Class;
-    }
-
-    if (declaration.kind === "macro") {
-        return declaration.isMethod
-            ? CompletionItemKind.Method
-            : CompletionItemKind.Function;
-    }
-
-    if (declaration.isConstant) {
-        return CompletionItemKind.Constant;
-    }
-
-    return declaration.isProperty
-        ? CompletionItemKind.Property
-        : CompletionItemKind.Variable;
 }
