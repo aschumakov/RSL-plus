@@ -771,6 +771,130 @@ test("класс прикладного модуля: своё поле и ун�
     assert.strictEqual(byName.get("getPosition"), CompletionItemKind.Method);
 });
 
+test("локальный класс не подменяет базу импортированного", async () => {
+    /*
+     * У Derived из подключённого модуля база Base объявлена в том же модуле.
+     * Одноимённый класс текущего файла к этой иерархии отношения не имеет:
+     * обход базы обязан идти в контексте владельца, а не активного документа.
+     */
+    const lib = "file:///d:/fast/inh.mac";
+    const registry = createRegistry({
+        source: [
+            "Import inh;",
+            "Class Base",
+            "  Var WrongLocalBase: String;",
+            "End;",
+            "Macro Work()",
+            "  Var d: Derived;",
+            "  d.",
+            "End;"
+        ].join("\n"),
+        others: {
+            [lib]: [
+                "Class Base",
+                "  Var RightImportedBase: String;",
+                "End;",
+                "Class (Base) Derived",
+                "  Var OwnDerived: String;",
+                "End;"
+            ].join("\n")
+        }
+    });
+    const labels = await completeAfterDot(registry, "  d.");
+
+    assert.deepStrictEqual(
+        labels.slice().sort(),
+        ["OwnDerived", "RightImportedBase"],
+        "база обязана прийти из модуля Derived: " + labels.join(", ")
+    );
+});
+
+test("локальный класс не подменяет базу прикладного", async () => {
+    const platform = new PlatformModuleCatalog({ log: () => undefined });
+    await platform.ensureModules(["RsbFormsInter"]);
+    const registry = createRegistry({
+        source: [
+            "Import RsbFormsInter;",
+            "Class TRsbVisualComponent",
+            "  Var WrongLocal: String;",
+            "End;",
+            "Macro Test()",
+            "  Var label: TRsbLabel;",
+            "  label.",
+            "End;"
+        ].join("\n"),
+        platform
+    });
+    const labels = await completeAfterDot(registry, "  label.");
+
+    assert.ok(
+        labels.includes("getPosition") && !labels.includes("WrongLocal"),
+        "база обязана прийти из прикладного модуля: " + labels.join(", ")
+    );
+});
+
+test("полный путь даёт те же члены TRsbLabel", async () => {
+    /*
+     * Быстрый и полный ответы обязаны совпадать по составу и видам: иначе
+     * список менялся бы у пользователя на глазах по готовности модели.
+     */
+    const platform = new PlatformModuleCatalog({ log: () => undefined });
+    await platform.ensureModules(["RsbFormsInter"]);
+    const source = [
+        "Import RsbFormsInter;",
+        "Macro Test()",
+        "  Var label: TRsbLabel;",
+        "  label.",
+        "End;"
+    ].join("\n");
+    const index = new WorkspaceIndex();
+    index.registerWorkspaceFiles([MAIN]);
+    const module = index.updateOpenModule(MAIN, source, 1);
+    const resolver = new RslScopeResolver(index, getDefaults(), platform);
+    const members = resolver.getCompletions(
+        MAIN,
+        module.symbolTree,
+        source.indexOf("  label.") + 8
+    );
+
+    assert.ok(Array.isArray(members), "полный путь обязан отдать список");
+    const byName = new Map(members.map(item => [item.label, item.kind]));
+    assert.strictEqual(byName.get("text"), CompletionItemKind.Property);
+    assert.strictEqual(byName.get("getPosition"), CompletionItemKind.Method);
+});
+
+test("холодный каталог: члены появляются без предварительной загрузки", async () => {
+    /*
+     * Каталог прикладных модулей читается асинхронно. Пока он не прочитан,
+     * членов нет — и это правильно; проверяется, что после чтения они
+     * появляются без всякой дополнительной подготовки.
+     */
+    const platform = new PlatformModuleCatalog({ log: () => undefined });
+    const build = () => createRegistry({
+        source: [
+            "Import RsbFormsInter;",
+            "Macro Test()",
+            "  Var label: TRsbLabel;",
+            "  label.",
+            "End;"
+        ].join("\n"),
+        platform
+    });
+
+    const cold = await completeAfterDot(build(), "  label.");
+    assert.ok(
+        !cold.includes("getPosition"),
+        "до чтения каталога членов взяться неоткуда"
+    );
+
+    await platform.ensureModules(["RsbFormsInter"]);
+    const warm = await completeAfterDot(build(), "  label.");
+    assert.ok(
+        warm.includes("text") && warm.includes("getPosition"),
+        "после чтения каталога обязаны прийти оба члена: " + warm.join(", ")
+    );
+});
+
 test("одноимённая процедура членов не имеет", async () => {
     /*
      * Проверяется именно класс. Выдать «члены» процедуры значило бы выдумать

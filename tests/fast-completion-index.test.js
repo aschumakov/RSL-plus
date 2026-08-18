@@ -436,6 +436,47 @@ test("видимые имена не включают чужие области"
     assert.ok(!labels.includes("onlyFirst"), "чужая локальная не видна");
 });
 
+test("крупные индексы вытесняются по объёму", () => {
+    /*
+     * Ограничение считается по объёму, а не по числу файлов: индекс держит и
+     * поток токенов, поэтому один большой файл весит больше десятка малых.
+     */
+    const blocks = [];
+
+    for (let macro = 0; macro < 4000; macro++) {
+        blocks.push("Macro Handler" + macro + "(a, b)" + "\n" +
+            "  Var value" + macro + ": Integer;" + "\n" + "End;");
+    }
+
+    const big = blocks.join("\n");
+    const first = "file:///d:/evict-first.mac";
+    const firstSnapshot = createFastDocumentSnapshot(
+        TextDocument.create(first, "rsl", 1, big)
+    );
+    const firstIndex = getFastCompletionIndex(firstSnapshot);
+
+    /*
+     * Каждый такой файл — около девяноста тысяч токенов, и нескольких хватает,
+     * чтобы бюджет был исчерпан и самый давний индекс ушёл.
+     */
+    for (let extra = 0; extra < 6; extra++) {
+        getFastCompletionIndex(createFastDocumentSnapshot(
+            TextDocument.create(
+                "file:///d:/evict-" + extra + ".mac",
+                "rsl",
+                1,
+                big
+            )
+        ));
+    }
+
+    assert.notStrictEqual(
+        getFastCompletionIndex(firstSnapshot),
+        firstIndex,
+        "давний индекс обязан быть вытеснен, а не жить рядом с новыми"
+    );
+});
+
 console.log("\nПройдено: " + passed + ", провалено: " + failed);
 
 if (failed > 0) {

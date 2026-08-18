@@ -7,6 +7,7 @@ import {
     DECLARATION_MODIFIERS,
     numericLiteralType
 } from "../language/rslLanguageReference";
+import { moduleReferenceKey } from "../indexing/moduleNames";
 import { lexRsl, normalizeIdentifier, type IRslToken } from "../lexer";
 import { readClassDeclarationHeader } from "../parsing/classDeclarationHeader";
 import {
@@ -219,7 +220,7 @@ export function extractCompactDeclarations(
         if (keyword === "import") {
             const parsed = scanImportNames(tokens, index + 1, keywordToken.line);
             parsed.names.forEach(name => {
-                if (name && !imports.some(item => normalizeModuleName(item) === normalizeModuleName(name))) {
+                if (name && !imports.some(item => moduleReferenceKey(item) === moduleReferenceKey(name))) {
                     imports.push(name);
                 }
             });
@@ -759,13 +760,7 @@ function stripQuotes(value: string): string {
     return text;
 }
 
-function normalizeModuleName(value: string): string {
-    let result = (value || "").trim().replace(/\\/g, "/").toLowerCase();
-    if (!result.endsWith(".mac")) {
-        result += ".mac";
-    }
-    return result;
-}
+
 
 export interface ISyntaxDeclarationOptions {
     externalOnly?: boolean;

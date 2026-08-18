@@ -877,13 +877,25 @@ function endsDeclaration(
 
     const previous = tokens[index - 1];
 
-    if (previous && previous.kind === "symbol" && previous.raw === ".") {
+    /*
+     * Точка влияет только на имя той же строки. Незаконченная строка вида
+     * Var x = obj. — обычное состояние при наборе, и следующее END должно
+     * закрывать блок, а не считаться членом объекта.
+     */
+    if (
+        previous &&
+        previous.kind === "symbol" &&
+        previous.raw === "." &&
+        previous.line === token.line
+    ) {
         return false;
     }
 
     const word = normalizeIdentifier(token.value);
 
     return word === END_KEYWORD ||
+        word === "import" ||
+        isDeclarationModifier(word) ||
         DECLARATION_WORDS.has(word) ||
         BLOCK_START_KEYWORDS.includes(word);
 }

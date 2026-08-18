@@ -78,6 +78,12 @@ interface IResolutionCacheEntry {
     resolved: IIndexedSymbol | undefined;
 }
 
+/** Внешний класс вместе с модулем-владельцем; пустой ключ — библиотека. */
+export interface IRslExternalClass {
+    symbol: RslSymbol;
+    moduleKey: string;
+}
+
 /** Фильтр «годится любой символ»: узнаётся по ссылке, поэтому он один. */
 const ACCEPT_ANY = (): boolean => true;
 
@@ -1196,16 +1202,73 @@ export class RslScopeResolver {
         className: string,
         seedImports: readonly string[]
     ): RslSymbol | undefined {
+        return this.findExternalClass(uri, className, seedImports)?.symbol;
+    }
+
+    /**
+     * Встроенный или прикладной класс вместе с модулем-владельцем.
+     *
+     * Владелец нужен, чтобы разрешить базовый класс в его собственном
+     * контексте: имя базы ищется в модуле класса и его зависимостях, а не
+     * заново от активного документа. Иначе одноимённый класс проекта
+     * подменял бы базу класса прикладного модуля.
+     */
+    findExternalClassWithOwner(
+        uri: string,
+        className: string,
+        seedImports: readonly string[]
+    ): IRslExternalClass | undefined {
+        return this.findExternalClass(uri, className, seedImports);
+    }
+
+    /** База внешнего класса, разрешённая относительно его модуля. */
+    findExternalBaseClass(
+        owner: IRslExternalClass,
+        baseClassName: string
+    ): IRslExternalClass | undefined {
+        if (!baseClassName) {
+            return undefined;
+        }
+
+        if (owner.moduleKey) {
+            const platform = this.platformModules?.findBaseClass(
+                owner.moduleKey,
+                baseClassName
+            );
+
+            if (platform) {
+                return {
+                    symbol: platform.symbol,
+                    moduleKey: platform.moduleKey
+                };
+            }
+        }
+
+        /* У класса стандартной библиотеки модуля нет: база тоже встроенная. */
+        const builtin = this.builtins.findClass(baseClassName);
+
+        return builtin ? { symbol: builtin, moduleKey: "" } : undefined;
+    }
+
+    private findExternalClass(
+        uri: string,
+        className: string,
+        seedImports: readonly string[]
+    ): IRslExternalClass | undefined {
         const builtin = this.builtins.findClass(className);
 
         if (builtin) {
-            return builtin;
+            return { symbol: builtin, moduleKey: "" };
         }
 
-        return this.platformModules?.findClass(
+        const platform = this.platformModules?.findClass(
             this.visiblePlatformModules(uri, seedImports),
             className
-        )?.symbol;
+        );
+
+        return platform
+            ? { symbol: platform.symbol, moduleKey: platform.moduleKey }
+            : undefined;
     }
 
     /**
