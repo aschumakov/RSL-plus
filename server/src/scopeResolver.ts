@@ -78,6 +78,18 @@ interface IResolutionCacheEntry {
     resolved: IIndexedSymbol | undefined;
 }
 
+/**
+ * Класс для быстрого пути вместе с источником.
+ *
+ * moduleUri — класс файла workspace, owner — встроенный или прикладной.
+ * Источник нужен, чтобы разрешить базу в его собственном контексте.
+ */
+export interface IRslFastClass {
+    symbol: RslSymbol;
+    moduleUri?: string;
+    owner?: IRslExternalClass;
+}
+
 /** Внешний класс вместе с модулем-владельцем; пустой ключ — библиотека. */
 export interface IRslExternalClass {
     symbol: RslSymbol;
@@ -1219,6 +1231,165 @@ export class RslScopeResolver {
         seedImports: readonly string[]
     ): IRslExternalClass | undefined {
         return this.findExternalClass(uri, className, seedImports);
+    }
+
+    /**
+     * Класс по имени для быстрого пути: модуль workspace, встроенный или
+     * прикладной.
+     *
+     * Порядок тот же, что у полного разрешения имени типа, и живёт он здесь, а
+     * не в реестре подсказок: правила видимости — знание resolver, и дублировать
+     * их значит однажды разойтись.
+     */
+    findFastClass(
+        uri: string,
+        className: string,
+        imports: readonly string[]
+    ): IRslFastClass | undefined {
+        /*
+         * Обход начинается со СВЕЖЕГО списка Import, а не с того, что лежит в
+         * разобранной модели документа: она отстаёт на правку, и только что
+         * набранный Import иначе не действовал бы.
+         */
+        const found = this.findWorkspaceClasses(
+            this.resolveImportUris(imports),
+            className,
+            2
+        );
+
+        /*
+         * Одноимённые классы в разных Import — неоднозначность. Какой выберет
+         * компилятор, без полной модели неизвестно, и показать члены наугад хуже,
+         * чем не показать ничего.
+         */
+        if (found.length > 1) {
+            return undefined;
+        }
+
+        if (found.length === 1) {
+            return found[0];
+        }
+
+        const external = this.findExternalClass(uri, className, imports);
+
+        return external
+            ? { symbol: external.symbol, owner: external }
+            : undefined;
+    }
+
+    /** URI модулей из списка Import; неразрешённые пропускаются. */
+    private resolveImportUris(imports: readonly string[]): string[] {
+        const result: string[] = [];
+
+        for (const name of imports) {
+            const resolved = this.index.resolveWorkspaceFile(name);
+
+            if (resolved.kind === "resolved") {
+                result.push(resolved.value);
+            }
+        }
+
+        return result;
+    }
+
+    /**
+     * База класса, разрешённая относительно ЕГО источника.
+     *
+     * Класс модуля workspace может наследовать класс того же модуля, класс его
+     * Import, встроенный или прикладной — переход между источниками обязан
+     * работать в обе стороны. Класс прикладного модуля разрешает базу через
+     * своего владельца: одноимённый класс проекта в его иерархию попасть не
+     * должен.
+     */
+    findFastBaseClass(
+        from: IRslFastClass,
+        baseClassName: string,
+        imports: readonly string[]
+    ): IRslFastClass | undefined {
+        if (!baseClassName) {
+            return undefined;
+        }
+
+        if (from.owner) {
+            const base = this.findExternalBaseClass(from.owner, baseClassName);
+
+            return base ? { symbol: base.symbol, owner: base } : undefined;
+        }
+
+        if (!from.moduleUri) {
+            return undefined;
+        }
+
+        const inModule = this.findWorkspaceClasses(
+            [from.moduleUri],
+            baseClassName,
+            1
+        );
+
+        if (inModule.length === 1) {
+            return inModule[0];
+        }
+
+        /* В модуле базы нет: остаются встроенные и прикладные классы. */
+        const owned = this.index.getModule(from.moduleUri);
+        const external = this.findExternalClass(
+            from.moduleUri,
+            baseClassName,
+            owned ? owned.imports : imports
+        );
+
+        return external
+            ? { symbol: external.symbol, owner: external }
+            : undefined;
+    }
+
+    /** Классы с таким именем в модулях и во всём, что видно через их Import. */
+    private findWorkspaceClasses(
+        seeds: readonly string[],
+        className: string,
+        limit: number
+    ): IRslFastClass[] {
+        const wanted = normalizeIdentifier(className);
+        const seen = new Set<string>();
+        const queue = seeds.slice();
+        const result: IRslFastClass[] = [];
+
+        for (let position = 0; position < queue.length; position++) {
+            const current = queue[position];
+
+            if (seen.has(current)) {
+                continue;
+            }
+            seen.add(current);
+            const module = this.index.getModule(current);
+
+            if (!module) {
+                continue;
+            }
+
+            const symbol = module.symbolTree.children.find(item =>
+                normalizeIdentifier(item.name) === wanted &&
+                item.kind === CompletionItemKind.Class
+            );
+
+            if (symbol) {
+                result.push({ symbol, moduleUri: current });
+
+                if (result.length >= limit) {
+                    return result;
+                }
+            }
+
+            for (const name of module.imports) {
+                const resolved = this.index.resolveWorkspaceFile(name);
+
+                if (resolved.kind === "resolved") {
+                    queue.push(resolved.value);
+                }
+            }
+        }
+
+        return result;
     }
 
     /** База внешнего класса, разрешённая относительно его модуля. */

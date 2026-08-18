@@ -436,6 +436,43 @@ test("видимые имена не включают чужие области"
     assert.ok(!labels.includes("onlyFirst"), "чужая локальная не видна");
 });
 
+test("активный индекс не вытесняется, пока им пользуются", () => {
+    /*
+     * Порядок обязан быть по давности обращения, а не создания. С простой
+     * очередью активный файл оставался самым давним и вытеснялся, хотя запросы
+     * шли именно к нему — то есть индекс строился заново на каждое нажатие.
+     */
+    const blocks = [];
+
+    for (let macro = 0; macro < 3000; macro++) {
+        blocks.push("Macro Handler" + macro + "(a, b)" + "\n" +
+            "  Var value" + macro + ": Integer;" + "\n" + "End;");
+    }
+
+    const big = blocks.join("\n");
+    const active = createFastDocumentSnapshot(
+        TextDocument.create("file:///d:/lru-active.mac", "rsl", 1, big)
+    );
+    const first = getFastCompletionIndex(active);
+
+    for (let extra = 0; extra < 6; extra++) {
+        getFastCompletionIndex(createFastDocumentSnapshot(
+            TextDocument.create(
+                "file:///d:/lru-" + extra + ".mac",
+                "rsl",
+                1,
+                big
+            )
+        ));
+        /* Обращение к активному между чужими: он не должен стареть. */
+        assert.strictEqual(
+            getFastCompletionIndex(active),
+            first,
+            "индекс активного файла обязан переживать чужие обращения"
+        );
+    }
+});
+
 test("крупные индексы вытесняются по объёму", () => {
     /*
      * Ограничение считается по объёму, а не по числу файлов: индекс держит и

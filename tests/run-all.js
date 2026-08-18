@@ -37,6 +37,7 @@ const tests = [
     "index-memory.test.js",
     "fast-completion.test.js",
     "fast-completion-index.test.js",
+    "fast-completion-mutations.test.js",
 ];
 
 let failed = false;

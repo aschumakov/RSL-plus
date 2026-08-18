@@ -110,14 +110,6 @@ export interface IFastCompletionIndex {
     scopeMethods: Map<number, CompletionItem[]>;
 }
 
-/*
- * Индексы живут ровно у тех документов, в которых сейчас печатают.
- *
- * Ограничение — по приблизительному объёму, а не по числу файлов: четыре
- * записи на маленьких файлах ничего не стоят, а на файлах по 400 КБ это уже
- * десяток мегабайт. Объём считается по числу записей индекса, потому что
- * измерить занятую память объектами в Node нельзя.
- */
 /* Слова, которые начинают объявление даже посреди строки. */
 const DECLARATION_WORDS = new Set(DECLARATION_KEYWORDS);
 
@@ -126,10 +118,23 @@ const DECLARES_NAMES = new Set(
     DECLARATION_KEYWORDS.filter(word => word !== "macro" && word !== "class")
 );
 
-const INDEX_BUDGET_ENTRIES = 400000;
+/*
+ * Индексы живут ровно у тех документов, в которых сейчас печатают.
+ *
+ * Порядок — по давности ОБРАЩЕНИЯ, а не создания: Map с переустановкой ключа
+ * при попадании даёт настоящий LRU. Простая очередь этого не давала — активный
+ * файл оставался самым давним и вытеснялся, хотя им и пользовались.
+ *
+ * Вес считается по тому, что принадлежит самому индексу: границы областей,
+ * объявления, члены классов и элементы списка. Поток токенов сюда не входит —
+ * его держит быстрый снимок документа, и вытеснение индекса его не освобождает:
+ * по замеру на файле 253 КБ индекс отдаёт около 0,3 МиБ из 3, остальное живёт
+ * вместе со снимком.
+ */
+const INDEX_BUDGET_ENTRIES = 120000;
 const indexByUri = new Map<string, IFastCompletionIndex>();
 
-/** Приблизительный вес индекса: объявления, области, имена и члены классов. */
+/** Приблизительный вес индекса в записях. */
 function indexWeight(index: IFastCompletionIndex): number {
     let members = 0;
 
@@ -145,16 +150,18 @@ function indexWeight(index: IFastCompletionIndex): number {
         scoped += list.length;
     }
 
-    /*
-     * Поток токенов учитывается наравне с объявлениями: файл на 400 КБ с
-     * десятком процедур почти ничего не весил по одним объявлениям, а держит
-     * сотню тысяч токенов.
-     */
-    return index.tokens.length +
-        index.scopes.length +
+    let methods = 0;
+
+    for (const list of index.scopeMethods.values()) {
+        methods += list.length;
+    }
+
+    return index.scopes.length +
         index.globalItems.length +
+        index.imports.length +
         members +
-        scoped;
+        scoped +
+        methods;
 }
 
 /** Индекс этой версии; строится при первом обращении. */
@@ -164,6 +171,9 @@ export function getFastCompletionIndex(
     const known = indexByUri.get(snapshot.uri);
 
     if (known && known.tokens === snapshot.lex.tokens) {
+        /* Попадание обновляет давность: иначе это очередь, а не LRU. */
+        indexByUri.delete(snapshot.uri);
+        indexByUri.set(snapshot.uri, known);
         return known;
     }
 
@@ -177,7 +187,7 @@ export function getFastCompletionIndex(
         weight += indexWeight(value);
     }
 
-    /* Самый давний уходит первым: Map хранит порядок вставки. */
+    /* Самый давний по обращению уходит первым: Map хранит порядок вставки. */
     while (weight > INDEX_BUDGET_ENTRIES && indexByUri.size > 1) {
         const oldest = indexByUri.keys().next().value as string | undefined;
 

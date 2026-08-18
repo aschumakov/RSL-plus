@@ -4,7 +4,6 @@ import {
     CodeActionParams,
     CodeActionTriggerKind,
     CompletionItem,
-    CompletionItemKind,
     type CompletionParams,
     CompletionTriggerKind,
     Definition,
@@ -66,7 +65,7 @@ import type {
 import {
     RSL_BUILTIN_URI,
     RslScopeResolver,
-    type IRslExternalClass
+    type IRslFastClass
 } from "../scopeResolver";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 import type { PerformanceLogger } from "../performanceLogger";
@@ -1162,14 +1161,12 @@ export class RslLanguageFeatureRegistry {
     /**
      * Члены класса вместе с унаследованными, без полной модели.
      *
-     * Цепочка баз обходится от производного класса к базовому, и член
-     * производного перекрывает одноимённый член базы — так же, как это делает
-     * полный resolver.
-     *
-     * Каждая база ищется в контексте ВЛАДЕЛЬЦА своего класса, а не заново от
-     * активного документа: база класса подключённого модуля — в этом модуле и
-     * его Import, база класса прикладного модуля — в нём и его зависимостях.
-     * Иначе одноимённый класс текущего файла подменял бы чужую базу.
+     * Цепочка обходится от производного к базовому, член производного
+     * перекрывает одноимённый член базы. Каждый следующий уровень разрешает
+     * resolver — он же делает это для полного пути, поэтому правила видимости
+     * не раздваиваются: класс модуля workspace может наследовать класс своего
+     * модуля, класс его Import, встроенный или прикладной, а класс прикладного
+     * модуля — только в контексте своего владельца.
      */
     private findFastClassMembers(
         document: TextDocument,
@@ -1179,152 +1176,62 @@ export class RslLanguageFeatureRegistry {
     ): CompletionItem[] | undefined {
         const items: CompletionItem[] = [];
         const taken = new Set<string>();
-        /* Защита от цикла: класс, наследующий сам себя, встречается в правках. */
+        /* Цикл узнаётся по самому классу, а не по имени: имена повторяются. */
         const visited = new Set<string>();
-        let level = this.findFastClassLevel(
-            document,
-            className,
-            fastIndex,
-            offset,
-            undefined
-        );
-        const found = level !== undefined;
+        const resolver = this.environment.resolver;
+        let found = false;
+        let wanted = className;
 
-        while (level && !visited.has(normalizeIdentifier(level.name))) {
-            visited.add(normalizeIdentifier(level.name));
+        /* Пока база объявлена в этом же файле, её даёт индекс версии. */
+        for (;;) {
+            const key = "local:" + normalizeIdentifier(wanted);
+            const own = visited.has(key)
+                ? undefined
+                : findFastClass(fastIndex, wanted, offset);
 
-            for (const member of level.members) {
-                const key = normalizeIdentifier(member.label);
-
-                /* Первым идёт производный класс: его член и остаётся. */
-                if (!taken.has(key)) {
-                    taken.add(key);
-                    items.push(member);
-                }
+            if (!own) {
+                break;
             }
 
-            level = level.baseName
-                ? this.findFastClassLevel(
-                    document,
-                    level.baseName,
-                    fastIndex,
-                    offset,
-                    level.origin
-                )
-                : undefined;
-        }
-
-        return found ? items : undefined;
-    }
-
-    /**
-     * Один уровень цепочки: члены класса, имя базы и откуда класс взят.
-     *
-     * origin задаёт контекст поиска: undefined — обычный порядок от текущего
-     * файла; модуль workspace — сам модуль и его Import; внешний класс — только
-     * встроенные и прикладные, через владельца.
-     */
-    private findFastClassLevel(
-        document: TextDocument,
-        className: string,
-        fastIndex: IFastCompletionIndex,
-        offset: number,
-        origin: IRslFastClassOrigin | undefined
-    ): IRslFastClassLevel | undefined {
-        const wanted = normalizeIdentifier(className);
-
-        if (origin?.kind === "external") {
-            const base = this.environment.resolver.findExternalBaseClass(
-                origin.owner,
-                className
+            visited.add(key);
+            found = true;
+            addUnique(
+                items,
+                taken,
+                buildRslFastOwnClassMembers(fastIndex, wanted, offset) || []
             );
 
-            return base ? externalLevel(className, base) : undefined;
-        }
-
-        if (origin?.kind === "workspace") {
-            const symbol = findClassInModules(
-                this.moduleClosure(origin.module),
-                wanted
-            );
-
-            return symbol
-                ? workspaceLevel(className, symbol.symbol, symbol.module)
-                : undefined;
-        }
-
-        const own = findFastClass(fastIndex, className, offset);
-
-        if (own) {
-            return {
-                name: className,
-                members: buildRslFastOwnClassMembers(
-                    fastIndex,
-                    className,
-                    offset
-                ) || [],
-                baseName: own.baseName,
-                origin: { kind: "local" }
-            };
+            if (!own.baseName) {
+                return items;
+            }
+            wanted = own.baseName;
         }
 
         /*
-         * Одноимённые классы в разных Import — это неоднозначность, и какой из
-         * них выберет компилятор, без полной модели неизвестно.
+         * Дальше цепочку ведёт resolver: он же ведёт её для полного пути, и
+         * правила видимости не раздваиваются. Класс модуля workspace может
+         * наследовать класс своего модуля, класс его Import, встроенный или
+         * прикладной; класс прикладного модуля разрешает базу только через
+         * своего владельца.
          */
-        const matches = findAllClassesInModules(
-            this.importClosure(document),
-            wanted
-        );
-
-        if (matches.length > 1) {
-            return undefined;
-        }
-
-        if (matches.length === 1) {
-            return workspaceLevel(
-                className,
-                matches[0].symbol,
-                matches[0].module
-            );
-        }
-
-        const external = this.environment.resolver.findExternalClassWithOwner(
+        let current = resolver.findFastClass(
             document.uri,
             wanted,
             fastIndex.imports
         );
 
-        return external ? externalLevel(className, external) : undefined;
-    }
-
-    /** Модуль и всё, что видно через его Import, транзитивно. */
-    private moduleClosure(start: IIndexedModule): IIndexedModule[] {
-        const { index } = this.environment;
-        const result: IIndexedModule[] = [start];
-        const seen = new Set<string>([start.uri]);
-        const queue = [start];
-
-        while (queue.length > 0) {
-            const current = queue.shift()!;
-
-            for (const name of current.imports) {
-                const uri = resolvedUri(index.resolveWorkspaceFile(name));
-
-                if (!uri || seen.has(uri)) {
-                    continue;
-                }
-                seen.add(uri);
-                const module = index.getModule(uri);
-
-                if (module) {
-                    result.push(module);
-                    queue.push(module);
-                }
-            }
+        while (current && !visited.has(fastClassKey(current))) {
+            visited.add(fastClassKey(current));
+            found = true;
+            addUnique(items, taken, publicMembers(current.symbol));
+            current = resolver.findFastBaseClass(
+                current,
+                current.symbol.baseClassName || "",
+                fastIndex.imports
+            );
         }
 
-        return result;
+        return found ? items : undefined;
     }
 
     /**
@@ -1522,18 +1429,10 @@ const INLAY_REFRESH_COALESCE_MS = 300;
  * context — старый клиент; там безопаснее считать запрос явным, иначе подсказка
  * молчала бы до конца склейки правок.
  */
-/** Откуда взят класс: от этого зависит, где искать его базу. */
-type IRslFastClassOrigin =
-    | { kind: "local" }
-    | { kind: "workspace"; module: IIndexedModule }
-    | { kind: "external"; owner: IRslExternalClass };
-
-/** Один уровень цепочки наследования. */
-interface IRslFastClassLevel {
-    name: string;
-    members: CompletionItem[];
-    baseName: string;
-    origin: IRslFastClassOrigin;
+/** Ключ класса для защиты от цикла: источник плюс сам символ. */
+function fastClassKey(value: IRslFastClass): string {
+    return (value.moduleUri || value.owner?.moduleKey || "builtin") +
+        "#" + value.symbol.id;
 }
 
 /** Открытые члены символа класса: приватные чужого модуля недоступны. */
@@ -1547,57 +1446,20 @@ function publicMembers(symbol: RslSymbol): CompletionItem[] {
         }));
 }
 
-function workspaceLevel(
-    name: string,
-    symbol: RslSymbol,
-    module: IIndexedModule
-): IRslFastClassLevel {
-    return {
-        name,
-        members: publicMembers(symbol),
-        baseName: symbol.baseClassName || "",
-        origin: { kind: "workspace", module }
-    };
-}
+/** Добавляет члены, не перекрывая уже добавленные производным классом. */
+function addUnique(
+    items: CompletionItem[],
+    taken: Set<string>,
+    members: readonly CompletionItem[]
+): void {
+    for (const member of members) {
+        const key = normalizeIdentifier(member.label);
 
-function externalLevel(
-    name: string,
-    owner: IRslExternalClass
-): IRslFastClassLevel {
-    return {
-        name,
-        members: publicMembers(owner.symbol),
-        baseName: owner.symbol.baseClassName || "",
-        origin: { kind: "external", owner }
-    };
-}
-
-/** Класс с таким именем в перечисленных модулях; первый найденный. */
-function findClassInModules(
-    modules: readonly IIndexedModule[],
-    wanted: string
-): { symbol: RslSymbol; module: IIndexedModule } | undefined {
-    return findAllClassesInModules(modules, wanted)[0];
-}
-
-function findAllClassesInModules(
-    modules: readonly IIndexedModule[],
-    wanted: string
-): Array<{ symbol: RslSymbol; module: IIndexedModule }> {
-    const result: Array<{ symbol: RslSymbol; module: IIndexedModule }> = [];
-
-    for (const module of modules) {
-        const symbol = module.symbolTree.children.find(item =>
-            normalizeIdentifier(item.name) === wanted &&
-            item.kind === CompletionItemKind.Class
-        );
-
-        if (symbol) {
-            result.push({ symbol, module });
+        if (!taken.has(key)) {
+            taken.add(key);
+            items.push(member);
         }
     }
-
-    return result;
 }
 
 /** URI из разрешения имени модуля; неоднозначное и отсутствующее пропускаем. */

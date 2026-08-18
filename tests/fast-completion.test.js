@@ -895,6 +895,69 @@ test("холодный каталог: члены появляются без п
     );
 });
 
+test("импортированный класс наследует встроенный", async () => {
+    /*
+     * Переход между источниками обязан работать в обе стороны: класс модуля
+     * workspace вполне наследует встроенный. Пока база искалась только в самом
+     * модуле и его Import, у такого класса оставались одни собственные члены.
+     */
+    const lib = "file:///d:/fast/derived.mac";
+    const registry = createRegistry({
+        source: [
+            "Import derived;",
+            "Macro Work()",
+            "  Var d: DerivedFile;",
+            "  d.",
+            "End;"
+        ].join("\n"),
+        others: {
+            [lib]: [
+                "Class (TBFile) DerivedFile",
+                "  Var OwnDerived: String;",
+                "End;"
+            ].join("\n")
+        }
+    });
+    const labels = await completeAfterDot(registry, "  d.");
+
+    assert.ok(labels.includes("OwnDerived"), "свой член обязан быть");
+    assert.ok(
+        labels.includes("AddFilter") && labels.includes("GetFldInfo"),
+        "члены встроенной базы обязаны быть: " + labels.join(", ")
+    );
+});
+
+test("импортированный класс наследует прикладной", async () => {
+    const platform = new PlatformModuleCatalog({ log: () => undefined });
+    await platform.ensureModules(["RsbFormsInter"]);
+    const lib = "file:///d:/fast/label.mac";
+    const registry = createRegistry({
+        source: [
+            "Import label;",
+            "Macro Work()",
+            "  Var d: MyLabel;",
+            "  d.",
+            "End;"
+        ].join("\n"),
+        others: {
+            [lib]: [
+                "Import RsbFormsInter;",
+                "Class (TRsbLabel) MyLabel",
+                "  Var OwnField: String;",
+                "End;"
+            ].join("\n")
+        },
+        platform
+    });
+    const labels = await completeAfterDot(registry, "  d.");
+
+    assert.ok(labels.includes("OwnField"), "свой член обязан быть");
+    assert.ok(
+        labels.includes("text") && labels.includes("getPosition"),
+        "члены прикладной базы и её базы обязаны быть: " + labels.join(", ")
+    );
+});
+
 test("одноимённая процедура членов не имеет", async () => {
     /*
      * Проверяется именно класс. Выдать «члены» процедуры значило бы выдумать
