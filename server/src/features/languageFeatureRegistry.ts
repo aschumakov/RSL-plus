@@ -1185,9 +1185,18 @@ export class RslLanguageFeatureRegistry {
         /* Пока база объявлена в этом же файле, её даёт индекс версии. */
         for (;;) {
             const key = "local:" + normalizeIdentifier(wanted);
-            const own = visited.has(key)
-                ? undefined
-                : findFastClass(fastIndex, wanted, offset);
+
+            if (visited.has(key)) {
+                /*
+                 * Локальный цикл: класс наследует сам себя или пару выше по
+                 * цепочке. Иерархия на этом кончается, и продолжать её
+                 * одноимённым классом из Import нельзя — полный resolver так
+                 * тоже не делает.
+                 */
+                return items;
+            }
+
+            const own = findFastClass(fastIndex, wanted, offset);
 
             if (!own) {
                 break;

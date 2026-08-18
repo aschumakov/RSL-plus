@@ -1,1 +1,829 @@
-{"version":3,"classes":[{"name":"TRsbActiveVisualComponent","base":"TRsbVisualComponent","summary":"Базовый класс визуального компонента, являющегося источником событий.","members":[]},{"name":"TRsbCheckBox","base":"TRsbControl","summary":"Базовый класс элемента управления типа CheckBox.","members":[{"name":"checked","isMethod":false,"typeName":"Bool","description":"Признак наличия отметки в элементе управления типа CheckBox."}]},{"name":"TRsbComboBox","base":"TRsbControl","summary":"Базовый класс элемента управления типа ComboBox, представляющего собой выпадающий список.","members":[{"name":"currentChoice","isMethod":false,"typeName":"Integer","description":"Идентификационный номер текущего выбранного элемента из выпадающего списка."},{"name":"valueType","isMethod":false,"typeName":"Variant","description":"Тип значения привязываемой переменной."},{"name":"addChoice","isMethod":true,"signature":"addChoice(Id:Integer, text:String)","description":""}]},{"name":"TRsbControl","base":"TRsbActiveVisualComponent","summary":"Класс является базовым для классов TRsbEditField, TRsbComboBox, TRsbCheckBox, TRsbRadioButton, TRsbPushButton.","members":[{"name":"dataType","isMethod":false,"typeName":"Integer","description":"Код типа данных, содержащихся в элементе управления."},{"name":"editable","isMethod":false,"typeName":"Bool","description":"Признак редактируемости элемента управления."},{"name":"enabled","isMethod":false,"typeName":"Bool","description":"Признак активности элемента управления."},{"name":"focusable","isMethod":false,"typeName":"Bool","description":"Признак возможности установки фокуса ввода в элементе управления."},{"name":"format","isMethod":false,"typeName":"String","description":"Формат текста."},{"name":"name","isMethod":false,"typeName":"String","description":"Наименование элемента управления."},{"name":"textLength","isMethod":false,"typeName":"Integer","description":"Максимальная длина текстовой строки."},{"name":"valuePrecision","isMethod":false,"typeName":"Integer","description":"Количество знаков после запятой."},{"name":"getNeighbours","isMethod":true,"signature":"getNeighbours(left:Object, String, right:Object, String, upper:Object, String, lower:Object, String)","description":""}]},{"name":"TRsbEditField","base":"TRsbControl","summary":"Класс элемента управления типа \"Текстовое поле\".","members":[{"name":"RawType","isMethod":false,"typeName":"Bool","description":"Признак, указывающий на то, что элемент управления имеет тип Raw."},{"name":"value","isMethod":false,"typeName":"Variant","description":"Значение поля."}]},{"name":"TRsbEvent","summary":"Базовый класс объекта \"Событие\", для которого не существует специализированных классов-наследников.","members":[{"name":"id","isMethod":false,"typeName":"Integer","description":"Идентификационный номер события."},{"name":"source","isMethod":false,"typeName":"Object","description":"Визуальный компонент, который является источником события."}]},{"name":"TRsbEventQueue","base":"TRsbEvent","summary":"Базовый класс объекта \"Очередь событий\".","members":[{"name":"postEvent","isMethod":true,"signature":"postEvent(event:Object)","description":""}]},{"name":"TRsbEventSource","summary":"Базовый класс источника событий.","members":[{"name":"parent","isMethod":false,"typeName":"Object","description":"Объект класса TRsbEventSource, представляющий собой родительский источник событий."},{"name":"addEventHandler","isMethod":true,"signature":"addEventHandler(eventID:Integer, eventHandler:Object)","description":""}]},{"name":"TRsbForm","base":"TRsbWindow","summary":"Базовый класс визуального компонента \"Экранная форма\".","members":[{"name":"focusedControl","isMethod":false,"typeName":"Object","description":"Элемент управления, находящийся в фокусе ввода."},{"name":"messageTableName","isMethod":false,"typeName":"String","description":"Наименование таблицы сообщений системы, которая используется в методе prompt."},{"name":"numControls","isMethod":false,"typeName":"Integer","description":"Количество элементов управления, расположенных на форме."},{"name":"visible","isMethod":false,"typeName":"Bool","description":"Признак того, что форма отображается на экране."},{"name":"addControl","isMethod":true,"signature":"addControl(control:Object)","description":""}]},{"name":"TRsbFormContainer","base":"TRsbWindow","summary":"Класс объекта \"Контейнер форм\".","members":[{"name":"addForm","isMethod":true,"signature":"addForm(form:Object)","description":""}]},{"name":"TRsbKeyPressedEvent","base":"TRsbEvent","summary":"Класс события, определяемого константой RSB_EV_KEY_PRESSED.","members":[{"name":"keyCode","isMethod":false,"typeName":"Integer","description":"Код клавиши клавиатуры."}]},{"name":"TRsbLabel","base":"TRsbVisualComponent","summary":"Класс объекта \"Текстовая метка\".","members":[{"name":"text","isMethod":false,"typeName":"String","description":"Текст метки."}]},{"name":"TRsbMenu","summary":"Позволяет добавить новый пункт в меню.","members":[{"name":"addItem","isMethod":true,"signature":"addItem(item:Object)","description":""}]},{"name":"TRsbMenuItem","summary":"Класс объекта \"Пункт меню экранной формы\".","members":[{"name":"disabled","isMethod":false,"typeName":"Bool","description":"Признак не активного пункта меню."},{"name":"hidden","isMethod":false,"typeName":"Bool","description":"Признак скрытого пункта меню."},{"name":"hiddenInEmptyScrolling","isMethod":false,"typeName":"Bool","description":"Признак пункта меню, скрытого в случае пустого скроллинга."},{"name":"key","isMethod":false,"typeName":"Integer","description":"Клавиша, с помощью которой вызывается пункт меню."},{"name":"status","isMethod":false,"typeName":"String","description":"Статус-строка."},{"name":"text","isMethod":false,"typeName":"String","description":"Текст пункта меню."},{"name":"xOffset","isMethod":false,"typeName":"Integer","description":"Смещение пункта меню по горизонтали в знакоместах относительно верхнего левого края формы."},{"name":"addSubMenuItem","isMethod":true,"signature":"addSubMenuItem(item:Object)","description":""}]},{"name":"TRsbMouseEvent","base":"TRsbEvent","summary":"Класс события, определяемого константой RSB_EV_MOUSE.","members":[{"name":"action","isMethod":false,"typeName":"Integer","description":"Идентификатор действия мыши."}]},{"name":"TRsbPanel","base":"TRsbForm","summary":"Класс визуального компонента \"Панель\".","members":[{"name":"disableEditing","isMethod":true,"signature":"disableEditing()","description":""},{"name":"hide","isMethod":true,"signature":"hide()","description":""},{"name":"redraw","isMethod":true,"signature":"redraw()","description":""},{"name":"setCaption","isMethod":true,"signature":"setCaption(newCaption:String)","description":""}]},{"name":"TRsbPushButton","base":"TRsbControl","summary":"Класс элемента управления \"Кнопка\".","members":[{"name":"onClicked","isMethod":true,"signature":"onClicked(eventHandler:Object)","description":""}]},{"name":"TRsbRadioButton","base":"TRsbControl","summary":"Класс элемента управления типа RadioButton.","members":[{"name":"checked","isMethod":false,"typeName":"Bool","description":"Признак наличия отметки в элементе управления типа RadioButton."},{"name":"groupID","isMethod":false,"typeName":"Integer","description":"Идентификационный номер группы элементов управления типа RadioButton."},{"name":"onChecked","isMethod":true,"signature":"onChecked(eventHandler:Object)","description":""}]},{"name":"TRsbTabbedWindow","base":"TRsbFormContainer","summary":"Класс визуального компонента \"Окно с закладками\".","members":[{"name":"quitTab","isMethod":false,"typeName":"Object","description":"Закладка, с которой произошел выход из окна."},{"name":"startTab","isMethod":false,"typeName":"Object","description":"Стартовая закладка формы."},{"name":"hide","isMethod":true,"signature":"hide()","description":""},{"name":"show","isMethod":true,"signature":"show()","description":""},{"name":"redraw","isMethod":true,"signature":"redraw()","description":""},{"name":"run","isMethod":true,"signature":"run():Integer","description":""}]},{"name":"TRsbVisualComponent","summary":"Базовый класс визуального компонента.","members":[{"name":"getPosition","isMethod":true,"signature":"getPosition(x:Integer, y:Integer)","description":""}]},{"name":"TRsbWindow","base":"TRsbActiveVisualComponent","summary":"Класс является базовым для классов TRsbForm, TRsbFormContainer.","members":[{"name":"caption","isMethod":false,"typeName":"String","description":"Заголовок окна."},{"name":"status","isMethod":false,"typeName":"String","description":"Статус-строка окна."},{"name":"run","isMethod":true,"signature":"run():Integer","description":""}]},{"name":"TRsbWindowClosingEvent","base":"TRsbEvent","summary":"Класс события, определяемого константой RSB_EV_WINDOW_CLOSING.","members":[{"name":"statusCode","isMethod":false,"typeName":"Integer","description":"Код статуса закрытия окна."}]}],"procedures":[],"constants":[{"name":"RSB_EV_BUTTON_CLICKED","value":"5","description":"Идентификатор события, которое генерируется при нажатии на кнопку."},{"name":"RSB_EV_CONTROL_CHECKED","value":"4","description":"Идентификатор события, которое генерируется при установке или снятии отметки в элементе управления типа CheckBox или RadioButton."},{"name":"RSB_EV_ENTER_WINDOW","value":"6","description":"Идентификатор события, которое генерируется при входе в окно формы."},{"name":"RSB_EV_ITEM_SELECTED","value":"3","description":"Идентификатор события, которое генерируется при выборе значения в выпадающем списке (для элемента управления типа ComboBox)."},{"name":"RSB_EV_KEY_PRESSED","value":"1","description":"Идентификатор события, которое генерируется при нажатии клавиши клавиатуры."},{"name":"RSB_EV_MIN_USER","value":"100","description":"Минимальный идентификатор пользовательского события."},{"name":"RSB_EV_MOUSE","value":"2","description":"Идентификатор события, которое генерируется при нажатии клавиши мыши."},{"name":"RSB_EV_QUIT_WINDOW","value":"7","description":"Идентификатор события, которое генерируется при выходе из окна."},{"name":"RSB_EV_REMOVE_FOCUS","value":"9","description":"Идентификатор события, которое генерируется при снятии фокуса ввода с элемента управления."},{"name":"RSB_EV_SET_FOCUS","value":"8","description":"Идентификатор события, которое генерируется при установке фокуса ввода в элемент управления."},{"name":"RSB_EV_WINDOW_CLOSING","value":"0","description":"Идентификатор события, которое генерируется при инициировании закрытия окна."}]}
+{
+  "version": 3,
+  "classes": [
+    {
+      "name": "TRsbActiveVisualComponent",
+      "base": "TRsbVisualComponent",
+      "summary": "Базовый класс визуального компонента, являющегося источником событий.",
+      "members": []
+    },
+    {
+      "name": "TRsbCheckBox",
+      "base": "TRsbControl",
+      "summary": "Базовый класс элемента управления типа CheckBox.",
+      "members": [
+        {
+          "name": "checked",
+          "isMethod": false,
+          "typeName": "Bool",
+          "description": "Признак наличия отметки в элементе управления типа CheckBox."
+        },
+        {
+          "name": "onChecked",
+          "isMethod": true,
+          "signature": "onChecked(eventHandler:Object)",
+          "description": "Метод регистрирует обработчик события, определяемого константой RSB_EV_CONTROL_CHECKED."
+        }
+      ]
+    },
+    {
+      "name": "TRsbComboBox",
+      "base": "TRsbControl",
+      "summary": "Базовый класс элемента управления типа ComboBox, представляющего собой выпадающий список.",
+      "members": [
+        {
+          "name": "currentChoice",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Идентификационный номер текущего выбранного элемента из выпадающего списка."
+        },
+        {
+          "name": "valueType",
+          "isMethod": false,
+          "typeName": "Variant",
+          "description": "Тип значения привязываемой переменной."
+        },
+        {
+          "name": "addChoice",
+          "isMethod": true,
+          "signature": "addChoice(Id:Integer, text:String)",
+          "description": "Метод позволяет добавить новый элемент в выпадающий список."
+        },
+        {
+          "name": "naID",
+          "isMethod": false,
+          "typeName": "",
+          "description": "Номер группы значений поля T_ITYPEALG таблицы name_alg.dbt."
+        },
+        {
+          "name": "clear",
+          "isMethod": true,
+          "signature": "clear()",
+          "description": "Метод позволяет удалить значение поля путем помещения в него нулевого или пустого значения соответствующего типа."
+        },
+        {
+          "name": "onItemSelected",
+          "isMethod": true,
+          "signature": "onItemSelected(eventHandler:Object)",
+          "description": "Метод регистрирует обработчик события, определяемого константой RSB_EV_ITEM_SELECTED."
+        }
+      ]
+    },
+    {
+      "name": "TRsbControl",
+      "base": "TRsbActiveVisualComponent",
+      "summary": "Класс является базовым для классов TRsbEditField, TRsbComboBox, TRsbCheckBox, TRsbRadioButton, TRsbPushButton.",
+      "members": [
+        {
+          "name": "dataType",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Код типа данных, содержащихся в элементе управления."
+        },
+        {
+          "name": "editable",
+          "isMethod": false,
+          "typeName": "Bool",
+          "description": "Признак редактируемости элемента управления."
+        },
+        {
+          "name": "enabled",
+          "isMethod": false,
+          "typeName": "Bool",
+          "description": "Признак активности элемента управления."
+        },
+        {
+          "name": "focusable",
+          "isMethod": false,
+          "typeName": "Bool",
+          "description": "Признак возможности установки фокуса ввода в элементе управления."
+        },
+        {
+          "name": "format",
+          "isMethod": false,
+          "typeName": "String",
+          "description": "Формат текста."
+        },
+        {
+          "name": "name",
+          "isMethod": false,
+          "typeName": "String",
+          "description": "Наименование элемента управления."
+        },
+        {
+          "name": "textLength",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Максимальная длина текстовой строки."
+        },
+        {
+          "name": "valuePrecision",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Количество знаков после запятой."
+        },
+        {
+          "name": "getNeighbours",
+          "isMethod": true,
+          "signature": "getNeighbours(left:Object, String, right:Object, String, upper:Object, String, lower:Object, String)",
+          "description": "Метод возвращает элементы управления или наименования элементов управления, в которые устанавливается курсор при перемещении с выбранного элемента влево, вправо, вверх, вниз."
+        },
+        {
+          "name": "setNeighbours",
+          "isMethod": true,
+          "signature": "setNeighbours(left:Object, String, right:Object, String, upper:Object, String, lower:Object, String)",
+          "description": "Метод позволяет задать элементы управления или наименования элементов управления, в которые устанавливается курсор при перемещении с выбранного элемента влево, вправо, вверх, вниз."
+        },
+        {
+          "name": "getPosition",
+          "isMethod": true,
+          "signature": "getPosition(x:Integer, y:Integer)",
+          "description": "Метод позволяет получить позицию элемента управления, расположенного на форме."
+        },
+        {
+          "name": "setPosition",
+          "isMethod": true,
+          "signature": "setPosition(x:Integer, y:Integer)",
+          "description": "Метод задает позицию элемента управления."
+        },
+        {
+          "name": "getSize",
+          "isMethod": true,
+          "signature": "getSize(width:Integer, height:Integer)",
+          "description": "Метод позволяет получить размеры элемента управления, расположенного на экранной форме."
+        },
+        {
+          "name": "setSize",
+          "isMethod": true,
+          "signature": "setSize(width:Integer, height:Integer)",
+          "description": "Метод задает размеры элемента управления."
+        },
+        {
+          "name": "hide",
+          "isMethod": true,
+          "signature": "hide()",
+          "description": "Метод позволяет скрыть элемент управления."
+        },
+        {
+          "name": "show",
+          "isMethod": true,
+          "signature": "show()",
+          "description": "Метод отображает элемент управления на экранной форме."
+        },
+        {
+          "name": "onKeyPressed",
+          "isMethod": true,
+          "signature": "onKeyPressed(eventHandler:Object)",
+          "description": "Метод регистрирует обработчик события, определяемого константой RSB_EV_KEY_PRESSED."
+        },
+        {
+          "name": "redraw",
+          "isMethod": true,
+          "signature": "redraw()",
+          "description": "Метод предназначен для обновления элемента управления на экране."
+        }
+      ]
+    },
+    {
+      "name": "TRsbEditField",
+      "base": "TRsbControl",
+      "summary": "Класс элемента управления типа \"Текстовое поле\".",
+      "members": [
+        {
+          "name": "RawType",
+          "isMethod": false,
+          "typeName": "Bool",
+          "description": "Признак, указывающий на то, что элемент управления имеет тип Raw."
+        },
+        {
+          "name": "value",
+          "isMethod": false,
+          "typeName": "Variant",
+          "description": "Значение поля."
+        },
+        {
+          "name": "clear",
+          "isMethod": true,
+          "signature": "clear()",
+          "description": "Метод позволяет удалить значение поля путем помещения в него нулевого или пустого значения соответствующего типа."
+        },
+        {
+          "name": "bindValue",
+          "isMethod": true,
+          "signature": "bindValue(Obj:Object, propertyName:String, [textLength:Integer], [valueType:Integer])",
+          "description": "Метод позволяет привязать к элементу управления типа \"Текстовое поле\" переменную, в которой будет храниться значение этого поля."
+        }
+      ]
+    },
+    {
+      "name": "TRsbEvent",
+      "summary": "Базовый класс объекта \"Событие\", для которого не существует специализированных классов-наследников.",
+      "members": [
+        {
+          "name": "id",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Идентификационный номер события."
+        },
+        {
+          "name": "source",
+          "isMethod": false,
+          "typeName": "Object",
+          "description": "Визуальный компонент, который является источником события."
+        }
+      ]
+    },
+    {
+      "name": "TRsbEventQueue",
+      "base": "TRsbEvent",
+      "summary": "Базовый класс объекта \"Очередь событий\".",
+      "members": [
+        {
+          "name": "postEvent",
+          "isMethod": true,
+          "signature": "postEvent(event:Object)",
+          "description": "Метод предназначен для генерации события."
+        },
+        {
+          "name": "processQueue",
+          "isMethod": true,
+          "signature": "processQueue()",
+          "description": "Метод предназначен для обработки событий в очереди."
+        }
+      ]
+    },
+    {
+      "name": "TRsbEventSource",
+      "summary": "Базовый класс источника событий.",
+      "members": [
+        {
+          "name": "parent",
+          "isMethod": false,
+          "typeName": "Object",
+          "description": "Объект класса TRsbEventSource, представляющий собой родительский источник событий."
+        },
+        {
+          "name": "addEventHandler",
+          "isMethod": true,
+          "signature": "addEventHandler(eventID:Integer, eventHandler:Object)",
+          "description": "Метод позволяет добавить новый обработчик в список всех обработчиков события, идентификационный номер которого указан в параметре eventID."
+        },
+        {
+          "name": "postEvent",
+          "isMethod": true,
+          "signature": "postEvent(rsbEvent:Object)",
+          "description": "Метод предназначен для генерации события."
+        }
+      ]
+    },
+    {
+      "name": "TRsbForm",
+      "base": "TRsbWindow",
+      "summary": "Базовый класс визуального компонента \"Экранная форма\".",
+      "members": [
+        {
+          "name": "focusedControl",
+          "isMethod": false,
+          "typeName": "Object",
+          "description": "Элемент управления, находящийся в фокусе ввода."
+        },
+        {
+          "name": "messageTableName",
+          "isMethod": false,
+          "typeName": "String",
+          "description": "Наименование таблицы сообщений системы, которая используется в методе prompt."
+        },
+        {
+          "name": "numControls",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Количество элементов управления, расположенных на форме."
+        },
+        {
+          "name": "visible",
+          "isMethod": false,
+          "typeName": "Bool",
+          "description": "Признак того, что форма отображается на экране."
+        },
+        {
+          "name": "addControl",
+          "isMethod": true,
+          "signature": "addControl(control:Object)",
+          "description": "Метод позволяет добавить элемент управления на форму."
+        },
+        {
+          "name": "addLabel",
+          "isMethod": true,
+          "signature": "addLabel(label:Object)",
+          "description": "Метод предназначен для добавления текстовой метки на форму."
+        },
+        {
+          "name": "close",
+          "isMethod": true,
+          "signature": "close(statusCode:Integer)",
+          "description": "Метод предназначен для закрытия формы."
+        },
+        {
+          "name": "disableEditing",
+          "isMethod": true,
+          "signature": "disableEditing()",
+          "description": "Метод устанавливает запрет на редактирование формы."
+        },
+        {
+          "name": "hide",
+          "isMethod": true,
+          "signature": "hide()",
+          "description": "Метод позволяет скрыть форму."
+        },
+        {
+          "name": "show",
+          "isMethod": true,
+          "signature": "show()",
+          "description": "Метод позволяет отобразить форму на экране."
+        },
+        {
+          "name": "prompt",
+          "isMethod": true,
+          "signature": "prompt(msg:Integer, String, [control:Object, String])",
+          "description": "Метод выводит сообщение под указанным элементом управления."
+        },
+        {
+          "name": "redraw",
+          "isMethod": true,
+          "signature": "redraw()",
+          "description": "Метод предназначен для обновления данных в форме."
+        },
+        {
+          "name": "use",
+          "isMethod": true,
+          "signature": "use()",
+          "description": "Метод позволяет отобразить активную форму."
+        },
+        {
+          "name": "setFocus",
+          "isMethod": true,
+          "signature": "setFocus(control:Object, String)",
+          "description": "Метод позволяет установить фокус ввода в элемент управления."
+        },
+        {
+          "name": "updateNavigationRoute",
+          "isMethod": true,
+          "signature": "updateNavigationRoute()",
+          "description": "Метод предназначен для обновления маршрута перемещения по элементам управления, расположенным на экранной форме."
+        }
+      ]
+    },
+    {
+      "name": "TRsbFormContainer",
+      "base": "TRsbWindow",
+      "summary": "Класс объекта \"Контейнер форм\".",
+      "members": [
+        {
+          "name": "addForm",
+          "isMethod": true,
+          "signature": "addForm(form:Object)",
+          "description": "Метод предназначен для добавления новой формы в контейнер."
+        }
+      ]
+    },
+    {
+      "name": "TRsbKeyPressedEvent",
+      "base": "TRsbEvent",
+      "summary": "Класс события, определяемого константой RSB_EV_KEY_PRESSED.",
+      "members": [
+        {
+          "name": "keyCode",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Код клавиши клавиатуры."
+        }
+      ]
+    },
+    {
+      "name": "TRsbLabel",
+      "base": "TRsbVisualComponent",
+      "summary": "Класс объекта \"Текстовая метка\".",
+      "members": [
+        {
+          "name": "text",
+          "isMethod": false,
+          "typeName": "String",
+          "description": "Текст метки."
+        }
+      ]
+    },
+    {
+      "name": "TRsbMenu",
+      "summary": "Позволяет добавить новый пункт в меню.",
+      "members": [
+        {
+          "name": "addItem",
+          "isMethod": true,
+          "signature": "addItem(item:Object)",
+          "description": "Метод позволяет добавить новый пункт в меню."
+        },
+        {
+          "name": "disableItem",
+          "isMethod": true,
+          "signature": "disableItem(key:Integer, name:String, disable:Bool)",
+          "description": "Метод задает активность выбранного пункта меню."
+        },
+        {
+          "name": "hideItem",
+          "isMethod": true,
+          "signature": "hideItem(key:Integer, name:String, hide:Bool)",
+          "description": "Метод скрывает пункт меню."
+        },
+        {
+          "name": "load",
+          "isMethod": true,
+          "signature": "load(resName:String, [lbrName:String])",
+          "description": "Метод позволяет загрузить меню из библиотеки ресурсов."
+        }
+      ]
+    },
+    {
+      "name": "TRsbMenuItem",
+      "summary": "Класс объекта \"Пункт меню экранной формы\".",
+      "members": [
+        {
+          "name": "disabled",
+          "isMethod": false,
+          "typeName": "Bool",
+          "description": "Признак не активного пункта меню."
+        },
+        {
+          "name": "hidden",
+          "isMethod": false,
+          "typeName": "Bool",
+          "description": "Признак скрытого пункта меню."
+        },
+        {
+          "name": "hiddenInEmptyScrolling",
+          "isMethod": false,
+          "typeName": "Bool",
+          "description": "Признак пункта меню, скрытого в случае пустого скроллинга."
+        },
+        {
+          "name": "key",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Клавиша, с помощью которой вызывается пункт меню."
+        },
+        {
+          "name": "status",
+          "isMethod": false,
+          "typeName": "String",
+          "description": "Статус-строка."
+        },
+        {
+          "name": "text",
+          "isMethod": false,
+          "typeName": "String",
+          "description": "Текст пункта меню."
+        },
+        {
+          "name": "xOffset",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Смещение пункта меню по горизонтали в знакоместах относительно верхнего левого края формы."
+        },
+        {
+          "name": "addSubMenuItem",
+          "isMethod": true,
+          "signature": "addSubMenuItem(item:Object)",
+          "description": "Метод предназначен для добавления нового пункта в подменю, выпадающее из данного пункта меню."
+        }
+      ]
+    },
+    {
+      "name": "TRsbMouseEvent",
+      "base": "TRsbEvent",
+      "summary": "Класс события, определяемого константой RSB_EV_MOUSE.",
+      "members": [
+        {
+          "name": "action",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Идентификатор действия мыши."
+        }
+      ]
+    },
+    {
+      "name": "TRsbPanel",
+      "base": "TRsbForm",
+      "summary": "Класс визуального компонента \"Панель\".",
+      "members": [
+        {
+          "name": "disableEditing",
+          "isMethod": true,
+          "signature": "disableEditing()",
+          "description": "Метод устанавливает запрет на редактирование экранной формы."
+        },
+        {
+          "name": "hide",
+          "isMethod": true,
+          "signature": "hide()",
+          "description": "Метод позволяет скрыть форму."
+        },
+        {
+          "name": "redraw",
+          "isMethod": true,
+          "signature": "redraw()",
+          "description": "Метод предназначен для обновления данных в экранной форме."
+        },
+        {
+          "name": "setCaption",
+          "isMethod": true,
+          "signature": "setCaption(newCaption:String)",
+          "description": "Метод позволяет изменить наименование панели."
+        },
+        {
+          "name": "run",
+          "isMethod": true,
+          "signature": "run()",
+          "description": ""
+        },
+        {
+          "name": "use",
+          "isMethod": true,
+          "signature": "use()",
+          "description": ""
+        },
+        {
+          "name": "setFocus",
+          "isMethod": true,
+          "signature": "setFocus(control:Object, String)",
+          "description": "Метод устанавливает фокус ввода в элементе управления."
+        },
+        {
+          "name": "setHelpContext",
+          "isMethod": true,
+          "signature": "setHelpContext(helpContext:String)",
+          "description": "Метод устанавливает контекст помощи."
+        },
+        {
+          "name": "setHelpPage",
+          "isMethod": true,
+          "signature": "setHelpPage(HelpPage:Integer)",
+          "description": "Метод устанавливает номер страницы помощи для динамических панелей."
+        },
+        {
+          "name": "setStatus",
+          "isMethod": true,
+          "signature": "setStatus(newStatus:String)",
+          "description": "Метод устанавливает новую статус-строку для панели."
+        },
+        {
+          "name": "updateNavigationRoute",
+          "isMethod": true,
+          "signature": "updateNavigationRoute()",
+          "description": "Метод предназначен для обновления маршрута перемещения по элементам управления, расположенным на форме."
+        }
+      ]
+    },
+    {
+      "name": "TRsbPushButton",
+      "base": "TRsbControl",
+      "summary": "Класс элемента управления \"Кнопка\".",
+      "members": [
+        {
+          "name": "onClicked",
+          "isMethod": true,
+          "signature": "onClicked(eventHandler:Object)",
+          "description": "Метод регистрирует обработчик события, определяемого константой RSB_EV_BUTTON_CLICKED."
+        }
+      ]
+    },
+    {
+      "name": "TRsbRadioButton",
+      "base": "TRsbControl",
+      "summary": "Класс элемента управления типа RadioButton.",
+      "members": [
+        {
+          "name": "checked",
+          "isMethod": false,
+          "typeName": "Bool",
+          "description": "Признак наличия отметки в элементе управления типа RadioButton."
+        },
+        {
+          "name": "groupID",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Идентификационный номер группы элементов управления типа RadioButton."
+        },
+        {
+          "name": "onChecked",
+          "isMethod": true,
+          "signature": "onChecked(eventHandler:Object)",
+          "description": "Метод регистрирует обработчик события, определяемого константой RSB_EV_CONTROL_CHECKED."
+        }
+      ]
+    },
+    {
+      "name": "TRsbTabbedWindow",
+      "base": "TRsbFormContainer",
+      "summary": "Класс визуального компонента \"Окно с закладками\".",
+      "members": [
+        {
+          "name": "quitTab",
+          "isMethod": false,
+          "typeName": "Object",
+          "description": "Закладка, с которой произошел выход из окна."
+        },
+        {
+          "name": "startTab",
+          "isMethod": false,
+          "typeName": "Object",
+          "description": "Стартовая закладка формы."
+        },
+        {
+          "name": "hide",
+          "isMethod": true,
+          "signature": "hide()",
+          "description": "Метод позволяет скрыть окно."
+        },
+        {
+          "name": "show",
+          "isMethod": true,
+          "signature": "show()",
+          "description": "Метод позволяет отобразить окно."
+        },
+        {
+          "name": "redraw",
+          "isMethod": true,
+          "signature": "redraw()",
+          "description": "Метод предназначен для обновления содержимого окна."
+        },
+        {
+          "name": "run",
+          "isMethod": true,
+          "signature": "run():Integer",
+          "description": "Метод позволяет отобразить активное окно."
+        },
+        {
+          "name": "setCaption",
+          "isMethod": true,
+          "signature": "setCaption(newCaption:String)",
+          "description": "Метод устанавливает новый заголовок окна."
+        },
+        {
+          "name": "setFocus",
+          "isMethod": true,
+          "signature": "setFocus(form:Object, control:Object, String)",
+          "description": "Метод позволяет сделать активной закладку, указанную в параметре form, и установить фокус ввода в элементе управления, заданном в параметре control."
+        },
+        {
+          "name": "setStatus",
+          "isMethod": true,
+          "signature": "setStatus(newStatus:String)",
+          "description": "Метод устанавливает новую статус-строку окна."
+        }
+      ]
+    },
+    {
+      "name": "TRsbVisualComponent",
+      "summary": "Базовый класс визуального компонента.",
+      "members": [
+        {
+          "name": "getPosition",
+          "isMethod": true,
+          "signature": "getPosition(x:Integer, y:Integer)",
+          "description": "Метод позволяет получить позицию визуального компонента в знакоместах."
+        },
+        {
+          "name": "setPosition",
+          "isMethod": true,
+          "signature": "setPosition(x:Integer, y:Integer)",
+          "description": "Метод позволяет задать позицию визуального компонента в знакоместах."
+        },
+        {
+          "name": "getSize",
+          "isMethod": true,
+          "signature": "getSize(width:Integer, height:Integer)",
+          "description": "Метод позволяет получить размер визуального компонента в знакоместах."
+        },
+        {
+          "name": "setSize",
+          "isMethod": true,
+          "signature": "setSize(width:Integer, height:Integer)",
+          "description": "Метод позволяет задать размер визуального компонента в знакоместах."
+        },
+        {
+          "name": "hide",
+          "isMethod": true,
+          "signature": "hide()",
+          "description": "Метод позволяет скрыть визуальный компонент."
+        },
+        {
+          "name": "show",
+          "isMethod": true,
+          "signature": "show()",
+          "description": "Метод позволяет отобразить визуальный компонент."
+        },
+        {
+          "name": "redraw",
+          "isMethod": true,
+          "signature": "redraw()",
+          "description": "Метод предназначен для обновления визуального компонента."
+        }
+      ]
+    },
+    {
+      "name": "TRsbWindow",
+      "base": "TRsbActiveVisualComponent",
+      "summary": "Класс является базовым для классов TRsbForm, TRsbFormContainer.",
+      "members": [
+        {
+          "name": "caption",
+          "isMethod": false,
+          "typeName": "String",
+          "description": "Заголовок окна."
+        },
+        {
+          "name": "status",
+          "isMethod": false,
+          "typeName": "String",
+          "description": "Статус-строка окна."
+        },
+        {
+          "name": "run",
+          "isMethod": true,
+          "signature": "run():Integer",
+          "description": "Метод позволяет отобразить окно на экране в интерактивном режиме."
+        }
+      ]
+    },
+    {
+      "name": "TRsbWindowClosingEvent",
+      "base": "TRsbEvent",
+      "summary": "Класс события, определяемого константой RSB_EV_WINDOW_CLOSING.",
+      "members": [
+        {
+          "name": "statusCode",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Код статуса закрытия окна."
+        }
+      ]
+    }
+  ],
+  "procedures": [],
+  "constants": [
+    {
+      "name": "RSB_EV_BUTTON_CLICKED",
+      "value": "5",
+      "description": "Идентификатор события, которое генерируется при нажатии на кнопку."
+    },
+    {
+      "name": "RSB_EV_CONTROL_CHECKED",
+      "value": "4",
+      "description": "Идентификатор события, которое генерируется при установке или снятии отметки в элементе управления типа CheckBox или RadioButton."
+    },
+    {
+      "name": "RSB_EV_ENTER_WINDOW",
+      "value": "6",
+      "description": "Идентификатор события, которое генерируется при входе в окно формы."
+    },
+    {
+      "name": "RSB_EV_ITEM_SELECTED",
+      "value": "3",
+      "description": "Идентификатор события, которое генерируется при выборе значения в выпадающем списке (для элемента управления типа ComboBox)."
+    },
+    {
+      "name": "RSB_EV_KEY_PRESSED",
+      "value": "1",
+      "description": "Идентификатор события, которое генерируется при нажатии клавиши клавиатуры."
+    },
+    {
+      "name": "RSB_EV_MIN_USER",
+      "value": "100",
+      "description": "Минимальный идентификатор пользовательского события."
+    },
+    {
+      "name": "RSB_EV_MOUSE",
+      "value": "2",
+      "description": "Идентификатор события, которое генерируется при нажатии клавиши мыши."
+    },
+    {
+      "name": "RSB_EV_QUIT_WINDOW",
+      "value": "7",
+      "description": "Идентификатор события, которое генерируется при выходе из окна."
+    },
+    {
+      "name": "RSB_EV_REMOVE_FOCUS",
+      "value": "9",
+      "description": "Идентификатор события, которое генерируется при снятии фокуса ввода с элемента управления."
+    },
+    {
+      "name": "RSB_EV_SET_FOCUS",
+      "value": "8",
+      "description": "Идентификатор события, которое генерируется при установке фокуса ввода в элемент управления."
+    },
+    {
+      "name": "RSB_EV_WINDOW_CLOSING",
+      "value": "0",
+      "description": "Идентификатор события, которое генерируется при инициировании закрытия окна."
+    }
+  ]
+}

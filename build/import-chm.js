@@ -1,14 +1,22 @@
 "use strict";
 
 /**
- * Пополнение каталога прикладных модулей из справки RSLENG.chm.
+ * Пополнение каталога прикладных модулей из справки.
  *
- * Состав классов в справке разложен по нескольким топикам: сам класс несёт
- * конструктор и СВОЙСТВА, а методы вынесены в топики-продолжения
+ * Состав модуля разложен по страницам трёх видов: классы, процедуры и группы
+ * констант. Какому модулю принадлежит страница, известно из оглавления справки
+ * — по имени файла это не определяется: страницы `wldinter_*` описывают
+ * WIdInter, `calendar_ret_*` — Календарь, `total_mac_*` — total.
+ *
+ * Состав класса, в свою очередь, разложен по нескольким топикам: сам класс
+ * несёт конструктор и СВОЙСТВА, а методы вынесены в продолжения
  * `<модуль>_class_<класс>_pr_<N>.htm` («Методы класса …», «Методы поиска» и так
  * далее). Прежнее извлечение читало только часть первого топика, поэтому,
  * например, у RsbPayment из 271 члена в каталог попали 52 — без всех свойств
  * Payer* и Receiver*, то есть без самого платежа.
+ *
+ * Имена бывают и кириллическими: процедура ПолучитьИнформациюПоДокументу — имя
+ * не хуже прочих, и в подсказке она нужна наравне с латинскими.
  *
  * Скрипт НИЧЕГО не удаляет: он добавляет отсутствующие члены и заполняет пустые
  * описания. Правки, сделанные руками (исправленные типы, снятые дубликаты
@@ -17,7 +25,7 @@
  *   node build/import-chm.js <каталог-распакованного-chm>          — отчёт
  *   node build/import-chm.js <каталог> --write                     — записать
  *
- * Распаковать CHM: 7z x -o<каталог> RSLENG.chm
+ * Распаковать CHM: 7z x -o<каталог> <файл справки>
  */
 
 const fs = require("fs");
@@ -128,6 +136,35 @@ function primitiveDisplayNames() {
 
 const DISPLAY_NAMES = primitiveDisplayNames();
 
+/**
+ * Классы стандартной библиотеки.
+ *
+ * Справка описывает их и в разделах модулей — например TVarRecord в
+ * AcquirerObjects. Добавленный в модуль, такой класс затеняет полное описание
+ * стандартной библиотеки: разрешение базы начинается с модуля-владельца.
+ */
+function standardLibraryClasses() {
+    const result = new Set();
+
+    try {
+        /* eslint-disable-next-line global-require */
+        const { getDefaults } = require("../server/out/defaults");
+
+        for (const item of getDefaults().completionItems) {
+            result.add(String(item.label || "").toLowerCase());
+        }
+    } catch (error) {
+        console.warn(
+            "Стандартная библиотека не загружена (нужен npm run compile): " +
+            "дубликаты её классов не будут отсеяны."
+        );
+    }
+
+    return result;
+}
+
+const STANDARD_CLASSES = standardLibraryClasses();
+
 function normalizeTypeName(value) {
     const text = String(value || "").trim().replace(/[.,;]$/, "");
     const fixed = TYPE_FIXES[text.toLowerCase()] || text;
@@ -181,6 +218,369 @@ function readModuleTopics(chmDirectory) {
     return classes;
 }
 
+/*
+ * Оглавление справки: к какому модулю относится страница.
+ *
+ * По имени файла модуль не определяется: страницы `wldinter_class_*` лежат в
+ * разделе WIdInter, `calendar_ret_proc_*` — в Календаре, `total_mac_*` — в
+ * total. Прежде состав брался только из `<модуль>_class_*.htm` и только для
+ * модулей, уже описанных в каталоге, поэтому мимо проходили процедуры модулей,
+ * группы констант и целые модули без классов — ReportInter, RX_Exchange,
+ * BalanceInter.
+ */
+/* Класс \w кириллицу не покрывает: «Модуль» после \w* обрывается на «ь». */
+const MODULE_TITLES = [
+    /^Модул[а-яё]*\s+(\S+)/iu,
+    /(?:стандартн[а-яё]*\s+(?:RSL-)?|Макропроцедуры\s+)модул[а-яё]*\s+(\S+)/iu
+];
+
+/* Имя модуля пишут и латиницей, и кириллицей, и с расширением: total.mac. */
+const MODULE_NAME =
+    /^[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё0-9_]*(?:\.[A-Za-z0-9]+)?$/u;
+
+/** Модуль, названный в заголовке раздела; пустая строка, если не назван. */
+function moduleTitle(name) {
+    for (const pattern of MODULE_TITLES) {
+        const found = pattern.exec(name);
+
+        if (found && MODULE_NAME.test(found[1])) {
+            return found[1];
+        }
+    }
+
+    return "";
+}
+
+/** Узлы оглавления в порядке обхода с уровнем вложенности. */
+function readContentsNodes(chmDirectory) {
+    const file = path.join(chmDirectory, "RSLENG.hhc");
+
+    if (!fs.existsSync(file)) {
+        return [];
+    }
+
+    const text = decodeCp1251(fs.readFileSync(file));
+    const nodes = [];
+    let depth = 0;
+
+    for (const piece of text.split(/(<UL>|<\/UL>|<LI>)/i)) {
+        const tag = piece.trim().toUpperCase();
+
+        if (tag === "<UL>") {
+            depth++;
+            continue;
+        }
+
+        if (tag === "</UL>") {
+            depth--;
+            continue;
+        }
+
+        const name = /<param name="Name" value="([^"]*)"/i.exec(piece);
+
+        if (!name) {
+            continue;
+        }
+
+        const page = /<param name="Local" value="([^"]*)"/i.exec(piece);
+        nodes.push({
+            name: toText(name[1]).trim(),
+            page: page ? page[1].toLowerCase() : "",
+            depth
+        });
+    }
+
+    return nodes;
+}
+
+/**
+ * Разбор оглавления: модуль страницы, корневая страница модуля и признак
+ * раздела констант.
+ *
+ * Константы отличаются от прочих перечислений именно разделом: страница
+ * «Виды документов» — это константы BankInter, а внешне такой же список
+ * встречается и в описании параметров метода.
+ */
+function readContents(chmDirectory) {
+    const ownerByPage = new Map();
+    const rootByModule = new Map();
+    const constantPages = new Set();
+    /*
+     * Топики классов из оглавления, а не по имени файла: класс TDepClient
+     * описан на `tclientlist.htm`, без `_class_` в имени, и прежним отбором не
+     * читался вовсе — в каталоге от него остался один член.
+     */
+    const classTopics = [];
+    /* Модуль и раздел констант, объявленные на каждом уровне вложенности. */
+    const owners = [];
+    const inConstants = [];
+    const nodes = readContentsNodes(chmDirectory);
+    /* Открытый топик класса: следующие узлы глубже — его продолжения. */
+    let openClass;
+
+    for (const node of nodes) {
+        owners.length = node.depth;
+        inConstants.length = node.depth;
+        const own = moduleTitle(node.name);
+        owners[node.depth] = own;
+        inConstants[node.depth] = /^(?:\S+\s+)?константы$/iu.test(node.name);
+        const owner = owners.filter(Boolean).pop() || "";
+
+        if (!node.page || !owner) {
+            continue;
+        }
+
+        ownerByPage.set(node.page, owner);
+
+        if (own && !rootByModule.has(owner)) {
+            rootByModule.set(owner, node.page);
+        }
+
+        if (inConstants.some(Boolean)) {
+            constantPages.add(node.page);
+        }
+
+        const declared = /^Класс\s+([A-Za-z_][A-Za-z0-9_]*)$/u.exec(node.name);
+
+        if (declared) {
+            openClass = {
+                module: owner,
+                topicName: declared[1],
+                main: node.page,
+                continuations: [],
+                depth: node.depth
+            };
+            classTopics.push(openClass);
+            continue;
+        }
+
+        /* Свойства и методы класса вынесены в дочерние узлы того же раздела. */
+        if (openClass && node.depth > openClass.depth) {
+            openClass.continuations.push(node.page);
+            continue;
+        }
+
+        openClass = undefined;
+    }
+
+    return { ownerByPage, rootByModule, constantPages, classTopics };
+}
+
+/**
+ * Имя модуля для каталога.
+ *
+ * Раздел называет модуль так, как о нём говорят: «total.mac», «Календарь». В
+ * каталоге ключ — то, что пишут в Import, поэтому расширение снимается, а у
+ * кириллического названия ключом становится имя его корневой страницы: у
+ * Календаря это calendar, у Процентов — procent. Ровно так названы модули,
+ * попавшие в каталог раньше.
+ */
+function moduleKeyOf(title, rootPage, known) {
+    const bare = title.replace(/\.(?:mac|d32|dll)$/iu, "");
+
+    if (known.has(bare.toLowerCase())) {
+        return known.get(bare.toLowerCase());
+    }
+
+    if (/^[A-Za-z_][A-Za-z0-9_]*$/u.test(bare)) {
+        return bare;
+    }
+
+    const fromPage = String(rootPage || "").replace(/\.htm$/iu, "");
+
+    return known.get(fromPage.toLowerCase()) || fromPage || bare;
+}
+
+const SECTION_TITLES =
+    /^(?:Параметр|Парметр|Возвращаемое|Результат|Пример|Замечани|Примечани|Внимание|См\.)/iu;
+
+/**
+ * Процедура модуля со страницы вида «Процедура ПолучитьИнформациюПоДокументу».
+ *
+ * Имя берётся из заголовка страницы, а не из текста: в описании то и дело
+ * встречается «Функция позволяет …», и по такому вхождению в каталог попадала
+ * бы «позволяет».
+ */
+/*
+ * Заголовок страницы процедуры. Обычно это «Процедура <Имя>», но встречается и
+ * фраза — «Процедура выполнения операции из макроса MakeOperation»; имя тогда
+ * стоит последним словом.
+ */
+const PROCEDURE_TITLE =
+    /^(?:Процедура|Функция|Макропроцедура)\s+(?:.*\s)?([A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё0-9_]*)$/u;
+
+/*
+ * Объявление: тип итога пишут и через двоеточие, и просто через пробел
+ * (`) Integer`), строку иногда закрывают точкой с запятой, а у процедуры без
+ * параметров скобок может не быть вовсе.
+ */
+const PROCEDURE_DECLARATION =
+    /^([A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё0-9_]*)\s*(\(.*\))\s*(?::\s*|\s+)?([A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё0-9_]*)?\s*;?$/u;
+
+const PROCEDURE_WITHOUT_PARAMETERS =
+    /^([A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё0-9_]*)\s*:\s*([A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё0-9_]*)\s*;?$/u;
+
+function parseProcedure(text) {
+    const lines = text.split("\n").map(line => line.trim()).filter(Boolean);
+    const title = PROCEDURE_TITLE.exec(lines[0] || "");
+
+    if (!title) {
+        return undefined;
+    }
+
+    /*
+     * Имя есть в трёх местах: заголовок страницы, её собственный заголовок и
+     * строка объявления. Они расходятся: на странице CB_GetFormattedAcnt
+     * объявление скопировано у CB_CloseAccount, а у IsHoliday опечатка ровно
+     * наоборот — в заголовке страницы. Берётся то написание, которое
+     * подтверждено дважды.
+     */
+    const heading = PROCEDURE_TITLE.exec(lines[1] || "");
+    const named = value => [title[1], heading && heading[1]].some(candidate =>
+        String(candidate || "").toLowerCase() === value.toLowerCase()
+    );
+    let declaration;
+    const description = [];
+
+    for (let at = heading ? 2 : 1; at < lines.length; at++) {
+        const line = lines[at];
+
+        if (!declaration) {
+            declaration = PROCEDURE_DECLARATION.exec(line) || undefined;
+
+            if (!declaration) {
+                /*
+                 * Объявление без скобок принимается, только когда имя совпало
+                 * с заголовком: иначе им оказалась бы любая строка вида
+                 * «Внимание: текст».
+                 */
+                const bare = PROCEDURE_WITHOUT_PARAMETERS.exec(line);
+
+                if (bare && named(bare[1])) {
+                    declaration = [line, bare[1], "", bare[2]];
+                }
+            }
+            continue;
+        }
+
+        if (SECTION_TITLES.test(line)) {
+            break;
+        }
+        description.push(line);
+    }
+
+    if (!declaration) {
+        return undefined;
+    }
+
+    const same = (first, second) =>
+        String(first || "").toLowerCase() === String(second || "").toLowerCase();
+    const declared = declaration[1];
+    const name = heading && same(declared, heading[1]) ? declared : title[1];
+    const returned = declaration[3] ? normalizeTypeName(declaration[3]) : "";
+    /*
+     * Список параметров берётся только у своего объявления. Приписать чужие
+     * параметры к процедуре нельзя: в подсказке это выглядело бы как её
+     * собственная подпись.
+     */
+    const signature = same(declared, name)
+        ? name + declaration[2].replace(/\s+/gu, " ") +
+            (returned ? ":" + returned : "")
+        : name;
+
+    return {
+        name,
+        signature,
+        description: shortSummary(description.join(" "))
+    };
+}
+
+/*
+ * Константа: `RSB_EV_MOUSE =2 – идентификатор события …` или без значения —
+ * `RCB_VT_DATE – дата …`. Значение не домысливается: если его в справке нет,
+ * поле остаётся пустым, а подпись показывает одно имя.
+ */
+const CONSTANT_LINE =
+    /^([A-ZА-ЯЁ][A-ZА-ЯЁ0-9_]*)\s*(?:=\s*([^–—]*?)\s*)?[–—]\s*(\S.*)$/u;
+
+/**
+ * Описание константы.
+ *
+ * Первое предложение часто состоит из одного слова — «RCB_VT_DATE – дата.», —
+ * поэтому оно дополняется следующим, пока не станет читаемым. Начинается
+ * описание со строчной буквы, как продолжение имени: в подсказке оно стоит
+ * отдельно, и первую букву приходится поднимать.
+ */
+function constantSummary(value) {
+    const normalized = String(value || "").replace(/\s+/gu, " ").trim();
+    let text = "";
+
+    for (const sentence of normalized.split(/(?<=[.!?])\s+/u)) {
+        text = text ? text + " " + sentence : sentence;
+
+        if (text.length >= 20) {
+            break;
+        }
+    }
+
+    const capitalised = text.charAt(0).toUpperCase() + text.slice(1);
+    const closed = /[.!?]$/u.test(capitalised)
+        ? capitalised
+        : capitalised + ".";
+
+    return closed.length > 200 ? closed.slice(0, 197) + "..." : closed;
+}
+
+/** Константы со страницы-группы. */
+function parseConstants(text) {
+    const result = [];
+
+    for (const line of text.split("\n").map(item => item.trim())) {
+        const found = CONSTANT_LINE.exec(line);
+
+        if (!found || found[1].length < 2) {
+            continue;
+        }
+
+        /*
+         * Тип берётся только когда в скобках стоит примитивный тип RSL: в
+         * скобках справки бывает что угодно, и принимать за тип любое слово
+         * значило бы его выдумывать.
+         */
+        const parenthesised = /\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)/u
+            .exec(found[3]);
+        const typeName = parenthesised &&
+            DISPLAY_NAMES.has(parenthesised[1].toLowerCase())
+            ? normalizeTypeName(parenthesised[1])
+            : "";
+
+        /*
+         * В справке часть имён набрана дважды подряд — «OBJTYPE_VASTATE
+         * OBJTYPE_VASTATE» без пробела, одной строкой в исходном тексте
+         * страницы. Это опечатка вёрстки: такого имени в модуле нет.
+         */
+        const doubled = /^(.+)\1$/u.exec(found[1]);
+
+        result.push({
+            name: doubled ? doubled[1] : found[1],
+            value: (found[2] || "").trim(),
+            typeName,
+            description: constantSummary(found[3])
+        });
+    }
+
+    return result;
+}
+
+/*
+ * Значения, а не свойства.
+ *
+ * В описании свойства перечисляют, что оно может принимать: «TRUE – создается
+ * новая строка адреса». Строка выглядит как объявление свойства, и TRUE
+ * попадало в состав класса наравне с полями.
+ */
+const LITERALS = new Set(["true", "false", "null", "nil", "this", "undefined"]);
+
 const PROPERTY_SECTION_HEADINGS = [
     "Свойства:", "Свойства класса:", "Для класса реализованы свойства:"
 ];
@@ -229,7 +629,7 @@ function parseProperties(text) {
         const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s+[–—-]\s+(.+)$/
             .exec(line);
 
-        if (!match) {
+        if (!match || LITERALS.has(match[1].toLowerCase())) {
             continue;
         }
 
@@ -304,7 +704,13 @@ function parseClass(chmDirectory, entry) {
     const text = toText(html);
     const keyword = /<meta name="keywords" content="([^"]*)"/i.exec(html);
     const title = /Класс\s+([A-Za-z_][A-Za-z0-9_]*)/.exec(text);
-    const name = (keyword && keyword[1].trim()) ||
+    /*
+     * Ключевые слова страницы обычно и есть имя класса, но на общих страницах
+     * там лежит перечень: «BeginKeyCashing,CheckBufferSign,…». Такое имя классом
+     * быть не может, и тогда берётся заголовок.
+     */
+    const keyed = keyword && keyword[1].trim();
+    const name = (/^[A-Za-z_][A-Za-z0-9_]*$/.test(keyed || "") ? keyed : "") ||
         (title && title[1]) ||
         entry.topicName;
     const base =
@@ -345,8 +751,8 @@ function main() {
 
     if (!chmDirectory || !fs.existsSync(chmDirectory)) {
         console.error(
-            "Укажите каталог распакованного RSLENG.chm:\n" +
-            "  7z x -o<каталог> RSLENG.chm\n" +
+            "Укажите каталог распакованного файл справки:\n" +
+            "  7z x -o<каталог> <файл справки>\n" +
             "  node build/import-chm.js <каталог> [--write]"
         );
         process.exitCode = 1;
@@ -354,14 +760,58 @@ function main() {
     }
 
     const index = JSON.parse(fs.readFileSync(INDEX_FILE, "utf8"));
-    const moduleByKey = new Map(
+    const known = new Map(
         Object.keys(index.modules).map(name => [name.toLowerCase(), name])
     );
-    const topics = readModuleTopics(chmDirectory);
-    const parsedByModule = new Map();
+    const contents = readContents(chmDirectory);
+    const report = [];
+    /* Что добавить в каждый модуль: имя модуля -> состав. */
+    const additions = new Map();
 
-    for (const entry of topics.values()) {
-        const moduleName = moduleByKey.get(entry.moduleKey);
+    const addition = moduleName => {
+        const entry = additions.get(moduleName) || {
+            classes: [], procedures: [], constants: []
+        };
+        additions.set(moduleName, entry);
+        return entry;
+    };
+
+    /** Модуль страницы: раздел оглавления, иначе префикс имени файла. */
+    const moduleOfPage = page => {
+        const title = contents.ownerByPage.get(page.toLowerCase());
+
+        if (title) {
+            return moduleKeyOf(
+                title,
+                contents.rootByModule.get(title),
+                known
+            );
+        }
+
+        const prefix = /^([^_]+(?:_[^_]+)*?)_/u.exec(page);
+
+        return prefix ? known.get(prefix[1].toLowerCase()) : undefined;
+    };
+
+    /*
+     * Топики классов из двух источников: имена файлов `<модуль>_class_<класс>`
+     * и разделы оглавления. Второе шире — там есть классы на страницах с
+     * произвольным именем, — но первое даёт продолжения `_pr_N`, которые в
+     * оглавление вынесены не всегда.
+     */
+    const topics = [...readModuleTopics(chmDirectory).values()];
+    const readTopics = new Set(topics.map(entry => (entry.main || "")));
+
+    for (const topic of contents.classTopics) {
+        if (!readTopics.has(topic.main)) {
+            topics.push(topic);
+        }
+    }
+
+    for (const entry of topics) {
+        const moduleName = entry.main
+            ? moduleOfPage(entry.main) || known.get(entry.moduleKey)
+            : undefined;
 
         if (!moduleName) {
             continue;
@@ -369,110 +819,226 @@ function main() {
 
         const parsed = parseClass(chmDirectory, entry);
 
-        if (!parsed || parsed.members.length === 0) {
+        if (parsed && parsed.members.length > 0) {
+            addition(moduleName).classes.push(parsed);
+        }
+    }
+
+    const pages = fs.readdirSync(chmDirectory)
+        .filter(file => file.endsWith(".htm") && !/_class_/iu.test(file));
+
+    for (const page of pages) {
+        const moduleName = moduleOfPage(page);
+
+        if (!moduleName) {
             continue;
         }
 
-        const list = parsedByModule.get(moduleName) || [];
-        list.push(parsed);
-        parsedByModule.set(moduleName, list);
+        const text = toText(decodeCp1251(
+            fs.readFileSync(path.join(chmDirectory, page))
+        ));
+
+        if (contents.constantPages.has(page.toLowerCase())) {
+            addition(moduleName).constants.push(...parseConstants(text));
+            continue;
+        }
+
+        const procedure = parseProcedure(text);
+
+        if (procedure) {
+            addition(moduleName).procedures.push(procedure);
+        }
     }
 
-    let addedMembers = 0;
     let addedClasses = 0;
+    let addedMembers = 0;
+    let addedProcedures = 0;
+    let addedConstants = 0;
+    let addedModules = 0;
     let filledDescriptions = 0;
-    const report = [];
 
-    for (const [moduleName, parsedClasses] of parsedByModule) {
-        const file = path.join(DIRECTORY, index.modules[moduleName].file);
-        const body = JSON.parse(fs.readFileSync(file, "utf8"));
+    for (const [moduleName, parsed] of [...additions].sort()) {
+        let entry = index.modules[moduleName];
+
+        if (!entry) {
+            entry = { file: moduleName.toLowerCase() + ".json" };
+            index.modules[moduleName] = entry;
+            addedModules++;
+            report.push(moduleName + ": новый модуль (" +
+                parsed.classes.length + " классов, " +
+                parsed.procedures.length + " процедур, " +
+                parsed.constants.length + " констант)");
+        }
+
+        const file = path.join(DIRECTORY, entry.file);
+        const body = fs.existsSync(file)
+            ? JSON.parse(fs.readFileSync(file, "utf8"))
+            : { version: index.version, classes: [], procedures: [],
+                constants: [] };
         body.classes = body.classes || [];
-        let moduleAdded = 0;
+        body.procedures = body.procedures || [];
+        body.constants = body.constants || [];
+        let changed = false;
 
-        for (const parsed of parsedClasses) {
-            const existing = body.classes.find(item =>
-                item.name.toLowerCase() === parsed.name.toLowerCase()
+        for (const item of parsed.classes) {
+            const existing = body.classes.find(known =>
+                known.name.toLowerCase() === item.name.toLowerCase()
             );
 
             if (!existing) {
+                if (STANDARD_CLASSES.has(item.name.toLowerCase())) {
+                    continue;
+                }
+
                 body.classes.push({
-                    name: parsed.name,
-                    base: parsed.base,
-                    summary: parsed.summary,
-                    members: parsed.members
+                    name: item.name,
+                    base: item.base,
+                    summary: item.summary,
+                    members: item.members
                 });
                 addedClasses++;
-                moduleAdded += parsed.members.length;
-                addedMembers += parsed.members.length;
-                report.push(
-                    `${moduleName}.${parsed.name}: новый класс, ` +
-                    `${parsed.members.length} членов`
-                );
+                addedMembers += item.members.length;
+                changed = true;
+                report.push(moduleName + "." + item.name + ": новый класс, " +
+                    item.members.length + " членов");
                 continue;
             }
 
-            const known = new Set(
-                (existing.members || []).map(item => item.name.toLowerCase())
-            );
-            const missing = parsed.members.filter(item =>
-                !known.has(item.name.toLowerCase())
-            );
-
-            for (const member of (existing.members || [])) {
+            for (const member of existing.members || []) {
                 if (member.description) {
                     continue;
                 }
-                const source = parsed.members.find(item =>
-                    item.name.toLowerCase() === member.name.toLowerCase()
+
+                const source = item.members.find(candidate =>
+                    candidate.name.toLowerCase() === member.name.toLowerCase()
                 );
 
-                if (source?.description) {
+                if (source && source.description) {
                     member.description = source.description;
                     filledDescriptions++;
+                    changed = true;
                 }
             }
+
+            const haveMembers = new Set(
+                (existing.members || []).map(member =>
+                    member.name.toLowerCase()
+                )
+            );
+            const missing = item.members.filter(member =>
+                !haveMembers.has(member.name.toLowerCase())
+            );
 
             if (missing.length > 0) {
                 existing.members = (existing.members || []).concat(missing);
                 addedMembers += missing.length;
-                moduleAdded += missing.length;
-                report.push(
-                    `${moduleName}.${parsed.name}: ` +
-                    `${existing.members.length - missing.length} -> ` +
-                    `${existing.members.length} членов`
-                );
+                changed = true;
+                report.push(moduleName + "." + item.name + ": " +
+                    (existing.members.length - missing.length) + " -> " +
+                    existing.members.length + " членов");
             }
 
-            if (!existing.base && parsed.base) {
-                existing.base = parsed.base;
-                report.push(
-                    `${moduleName}.${parsed.name}: база ${parsed.base}`
-                );
+            if (!existing.base && item.base) {
+                existing.base = item.base;
+                changed = true;
+                report.push(moduleName + "." + item.name + ": база " +
+                    item.base);
             }
         }
 
-        if (write && moduleAdded > 0) {
-            index.modules[moduleName].classes = body.classes.length;
-            fs.writeFileSync(file, JSON.stringify(body), "utf8");
+        /*
+         * Процедуры и константы добавляются так же, как члены классов: то, что
+         * уже описано, не переписывается — правки, сделанные руками, остаются.
+         */
+        const merge = (list, parsedList, counted) => {
+            const have = new Map(
+                list.map(item => [item.name.toLowerCase(), item])
+            );
+            let added = 0;
+
+            for (const item of parsedList) {
+                const existing = have.get(item.name.toLowerCase());
+
+                if (!existing) {
+                    have.set(item.name.toLowerCase(), item);
+                    list.push(item);
+                    added++;
+                    continue;
+                }
+
+                if (!existing.description && item.description) {
+                    existing.description = item.description;
+                    filledDescriptions++;
+                    changed = true;
+                }
+            }
+
+            if (added > 0) {
+                changed = true;
+                report.push(moduleName + ": " + counted + " " +
+                    (list.length - added) + " -> " + list.length);
+            }
+
+            return added;
+        };
+
+        addedProcedures += merge(
+            body.procedures,
+            parsed.procedures.map(item => ({
+                name: item.name,
+                signature: item.signature,
+                description: item.description
+            })),
+            "процедур"
+        );
+        addedConstants += merge(
+            body.constants,
+            parsed.constants.map(item => {
+                const constant = {
+                    name: item.name,
+                    value: item.value,
+                    description: item.description
+                };
+
+                if (item.typeName) {
+                    constant.typeName = item.typeName;
+                }
+
+                return constant;
+            }),
+            "констант"
+        );
+
+        if (!write || !changed) {
+            continue;
         }
+
+        entry.classes = body.classes.length;
+        entry.procedures = body.procedures.length;
+        entry.constants = body.constants.length;
+        fs.writeFileSync(file, JSON.stringify(body), "utf8");
     }
 
     report.sort();
-    report.slice(0, 40).forEach(line => console.log(`  ${line}`));
+    report.slice(0, 40).forEach(line => console.log("  " + line));
 
     if (report.length > 40) {
-        console.log(`  ... ещё ${report.length - 40}`);
+        console.log("  ... ещё " + (report.length - 40));
     }
 
     console.log(
-        `\nНовых классов: ${addedClasses}, новых членов: ${addedMembers}, ` +
-        `заполнено описаний: ${filledDescriptions}`
+        "\nНовых модулей: " + addedModules +
+        ", классов: " + addedClasses +
+        ", членов: " + addedMembers +
+        ", процедур: " + addedProcedures +
+        ", констант: " + addedConstants +
+        ", заполнено описаний: " + filledDescriptions
     );
 
     if (write) {
         fs.writeFileSync(
             INDEX_FILE,
-            `${JSON.stringify(index, null, 1)}\n`,
+            JSON.stringify(index, null, 1) + "\n",
             "utf8"
         );
         console.log("Каталог обновлён.");
@@ -481,7 +1047,17 @@ function main() {
     }
 }
 
-module.exports = { decodeCp1251, toText, parseClass, readModuleTopics };
+
+module.exports = {
+    decodeCp1251,
+    toText,
+    parseClass,
+    readModuleTopics,
+    readContents,
+    moduleKeyOf,
+    parseProcedure,
+    parseConstants
+};
 
 if (require.main === module) {
     main();

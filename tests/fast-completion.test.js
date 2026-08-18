@@ -870,7 +870,12 @@ test("холодный каталог: члены появляются без п
      * появляются без всякой дополнительной подготовки.
      */
     const platform = new PlatformModuleCatalog({ log: () => undefined });
-    const build = () => createRegistry({
+    /*
+     * Registry один на оба запроса: проверяется, что УЖЕ созданный сервер
+     * начинает видеть прочитанный каталог, а не что его помогла увидеть
+     * пересборка.
+     */
+    const registry = createRegistry({
         source: [
             "Import RsbFormsInter;",
             "Macro Test()",
@@ -881,14 +886,14 @@ test("холодный каталог: члены появляются без п
         platform
     });
 
-    const cold = await completeAfterDot(build(), "  label.");
+    const cold = await completeAfterDot(registry, "  label.");
     assert.ok(
         !cold.includes("getPosition"),
         "до чтения каталога членов взяться неоткуда"
     );
 
     await platform.ensureModules(["RsbFormsInter"]);
-    const warm = await completeAfterDot(build(), "  label.");
+    const warm = await completeAfterDot(registry, "  label.");
     assert.ok(
         warm.includes("text") && warm.includes("getPosition"),
         "после чтения каталога обязаны прийти оба члена: " + warm.join(", ")
@@ -955,6 +960,185 @@ test("импортированный класс наследует прикла�
     assert.ok(
         labels.includes("text") && labels.includes("getPosition"),
         "члены прикладной базы и её базы обязаны быть: " + labels.join(", ")
+    );
+});
+
+const EDIT_CLASS = [
+    "Class TEdit",
+    "  Macro setNeighbours()",
+    "  End;",
+    "  Macro getNeighbours()",
+    "  End;",
+    "End;"
+].join("\n");
+
+for (const tail of ["Field7.", "Field7.s", "Field7.set", "Field7 . set"]) {
+    test("объектный список после набранного члена: " + tail, async () => {
+        /*
+         * obj. и obj.set — одно и то же обращение. Прежде учитывался только
+         * первый случай, и на набранных буквах быстрый путь отдавал общий
+         * список: пользователь ждал полного разбора именно там, где нажал
+         * Ctrl+Space.
+         */
+        const registry = createRegistry({
+            source: [
+                EDIT_CLASS,
+                "Macro Work()",
+                "  Var Field7: TEdit;",
+                "  " + tail,
+                "End;"
+            ].join("\n")
+        });
+        const labels = await completeAfterDot(registry, "  " + tail);
+
+        assert.ok(
+            labels.includes("setNeighbours"),
+            "член обязан быть в списке: " + labels.slice(0, 8).join(", ")
+        );
+        assert.ok(
+            !labels.includes("MsgBox"),
+            "это обязан быть список членов, а не общий приблизительный"
+        );
+    });
+}
+
+test("перевод строки обрывает обращение к члену", async () => {
+    const registry = createRegistry({
+        source: [
+            EDIT_CLASS,
+            "Macro Work()",
+            "  Var Field7: TEdit;",
+            "  Field7.",
+            "  setNeighbours",
+            "End;"
+        ].join("\n")
+    });
+    const labels = await completeAfterDot(registry, "  setNeighbours");
+
+    assert.ok(
+        labels.includes("MsgBox"),
+        "имя с новой строки к прошлой точке не относится"
+    );
+});
+
+test("локальный цикл не переходит в Import", async () => {
+    /*
+     * Класс наследует сам себя: иерархия на этом кончается. Одноимённый класс
+     * из Import её продолжать не должен — полный resolver так тоже не делает.
+     */
+    const lib = "file:///d:/fast/loop.mac";
+    const registry = createRegistry({
+        source: [
+            "Import loop;",
+            "Class (Loop) Loop",
+            "  Var Own: String;",
+            "End;",
+            "Macro Work()",
+            "  Var item: Loop;",
+            "  item.",
+            "End;"
+        ].join("\n"),
+        others: {
+            [lib]: [
+                "Class Loop",
+                "  Var Imported: String;",
+                "End;"
+            ].join("\n")
+        }
+    });
+
+    assert.deepStrictEqual(
+        await completeAfterDot(registry, "  item."),
+        ["Own"]
+    );
+});
+
+test("цикл из двух классов завершается", async () => {
+    const registry = createRegistry({
+        source: [
+            "Class (B) A",
+            "  Var FieldA: String;",
+            "End;",
+            "Class (A) B",
+            "  Var FieldB: String;",
+            "End;",
+            "Macro Work()",
+            "  Var item: A;",
+            "  item.",
+            "End;"
+        ].join("\n")
+    });
+
+    assert.deepStrictEqual(
+        (await completeAfterDot(registry, "  item.")).slice().sort(),
+        ["FieldA", "FieldB"]
+    );
+});
+
+test("две одноимённые базы из разных Import членов не дают", async () => {
+    /*
+     * У модуля производного класса два подключения с одинаковым Class Base.
+     * Собственные члены остаются, члены неизвестной базы — нет.
+     */
+    const derived = "file:///d:/fast/der.mac";
+    const first = "file:///d:/fast/base1.mac";
+    const second = "file:///d:/fast/base2.mac";
+    const registry = createRegistry({
+        source: [
+            "Import der;",
+            "Macro Work()",
+            "  Var d: Derived;",
+            "  d.",
+            "End;"
+        ].join("\n"),
+        others: {
+            [derived]: [
+                "Import base1;",
+                "Import base2;",
+                "Class (Base) Derived",
+                "  Var OwnDerived: String;",
+                "End;"
+            ].join("\n"),
+            [first]: "Class Base" + "\n" + "  Var FromFirst: String;" + "\n" + "End;",
+            [second]: "Class Base" + "\n" + "  Var FromSecond: String;" + "\n" + "End;"
+        }
+    });
+    const labels = await completeAfterDot(registry, "  d.");
+
+    assert.deepStrictEqual(labels, ["OwnDerived"],
+        "при неоднозначной базе её члены не показываются: " + labels.join(", "));
+});
+
+test("TRsbEditField: унаследованный setNeighbours после набранного set", async () => {
+    /*
+     * Контрольный пример ревью целиком: тип из конструктора, модель этой версии
+     * намеренно не готова, курсор после набранных букв. Метод достаётся из
+     * TRsbControl — то есть работают и цепочка наследования, и префикс.
+     */
+    const platform = new PlatformModuleCatalog({ log: () => undefined });
+    await platform.ensureModules(["RsbFormsInter"]);
+    const registry = createRegistry({
+        source: [
+            "Import RsbFormsInter;",
+            "Macro Test()",
+            "  Var Field7 = TRsbEditField();",
+            "  Field7.set",
+            "End;"
+        ].join("\n"),
+        platform
+    });
+    const items = await completeItems(registry, "  Field7.set");
+    const byName = new Map(items.map(item => [item.label, item.kind]));
+
+    assert.ok(
+        byName.has("setNeighbours"),
+        "унаследованный метод обязан быть: " +
+            Array.from(byName.keys()).slice(0, 10).join(", ")
+    );
+    assert.strictEqual(byName.get("setNeighbours"), CompletionItemKind.Method);
+    assert.ok(
+        !byName.has("MsgBox"),
+        "это обязан быть список членов, а не общий приблизительный"
     );
 });
 

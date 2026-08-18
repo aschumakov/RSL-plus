@@ -30,6 +30,9 @@ const {
 const {
     decodeRslSourceText
 } = require("../server/out/core/textDecoding");
+const {
+    extractCompactDeclarations
+} = require("../server/out/analysis/declarationExtractor");
 
 let passed = 0;
 let failed = 0;
@@ -93,9 +96,12 @@ function checkMutations(label, source) {
             counter++;
             states++;
             const cut = source.slice(0, at);
+            const where = label + ": срез после «" + anchor.name +
+                "» на " + at;
+            let index;
 
             try {
-                getFastCompletionIndex(createFastDocumentSnapshot(
+                index = getFastCompletionIndex(createFastDocumentSnapshot(
                     TextDocument.create(
                         "file:///d:/mutation-" + counter + ".mac",
                         "rsl",
@@ -104,9 +110,51 @@ function checkMutations(label, source) {
                     )
                 ));
             } catch (error) {
-                throw new Error(
-                    label + ": срез после «" + anchor.name + "» на " + at +
-                    " уронил построение — " + error.message
+                throw new Error(where + " уронил построение — " +
+                    error.message);
+            }
+
+            /*
+             * Отсутствия исключения мало: прежние ошибки не падали, а тихо
+             * портили области, Import и состав классов. Состав сверяется с
+             * полным извлекателем на том же обрезанном тексте.
+             */
+            const reference = extractCompactDeclarations(cut, {
+                includePrivate: true
+            });
+
+            assert.deepStrictEqual(
+                index.imports,
+                reference.imports,
+                where + ": состав Import разошёлся"
+            );
+            assert.strictEqual(
+                index.scopes.filter(scope => scope.parent === -1).length,
+                reference.declarations.filter(
+                    item => item.kind !== "variable"
+                ).length,
+                where + ": число процедур верхнего уровня разошлось"
+            );
+
+            for (const declaration of reference.declarations) {
+                if (declaration.kind !== "class") {
+                    continue;
+                }
+
+                const own = index.classes.get(
+                    declaration.name.toLowerCase()
+                ) || [];
+
+                /* Одноимённые классы сверять нечем: индекс их не сливает. */
+                if (own.length !== 1) {
+                    continue;
+                }
+
+                assert.strictEqual(
+                    own[0].members.length,
+                    declaration.children.length,
+                    where + ": состав класса " + declaration.name +
+                        " разошёлся"
                 );
             }
         }

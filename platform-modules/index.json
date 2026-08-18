@@ -10,8 +10,8 @@
   "BankInter": {
    "file": "bankinter.json",
    "classes": 30,
-   "procedures": 238,
-   "constants": 0,
+   "procedures": 244,
+   "constants": 376,
    "dependencies": [
     "AcquirerObjects",
     "PaymInter"
@@ -21,7 +21,7 @@
    "file": "bilfacturainter.json",
    "classes": 1,
    "procedures": 6,
-   "constants": 0
+   "constants": 5
   },
   "BookInter": {
    "file": "bookinter.json",
@@ -33,7 +33,7 @@
    "file": "calendar.json",
    "classes": 0,
    "procedures": 23,
-   "constants": 0
+   "constants": 7
   },
   "CarryDoc": {
    "file": "carrydoc.json",
@@ -49,8 +49,8 @@
   },
   "CommonInter": {
    "file": "commoninter.json",
-   "classes": 21,
-   "procedures": 196,
+   "classes": 22,
+   "procedures": 198,
    "constants": 0,
    "dependencies": [
     "AcquirerObjects"
@@ -66,7 +66,7 @@
    "file": "ctinter.json",
    "classes": 5,
    "procedures": 35,
-   "constants": 0
+   "constants": 640
   },
   "CurrInter": {
    "file": "currinter.json",
@@ -77,13 +77,13 @@
   "DealsInter": {
    "file": "dealsinter.json",
    "classes": 2,
-   "procedures": 21,
-   "constants": 0
+   "procedures": 23,
+   "constants": 163
   },
   "DeposInter": {
    "file": "deposinter.json",
    "classes": 0,
-   "procedures": 64,
+   "procedures": 74,
    "constants": 0
   },
   "DeskInter": {
@@ -95,32 +95,32 @@
   "DPInter": {
    "file": "dpinter.json",
    "classes": 1,
-   "procedures": 44,
-   "constants": 0
+   "procedures": 46,
+   "constants": 413
   },
   "DvInter": {
    "file": "dvinter.json",
    "classes": 0,
-   "procedures": 5,
-   "constants": 0
+   "procedures": 6,
+   "constants": 41
   },
   "ExchangeInter": {
    "file": "exchangeinter.json",
    "classes": 1,
-   "procedures": 13,
+   "procedures": 14,
    "constants": 0
   },
   "FIInter": {
    "file": "fiinter.json",
    "classes": 1,
-   "procedures": 31,
-   "constants": 0
+   "procedures": 45,
+   "constants": 60
   },
   "FMInter": {
    "file": "fminter.json",
    "classes": 2,
-   "procedures": 18,
-   "constants": 0
+   "procedures": 20,
+   "constants": 76
   },
   "FXInter": {
    "file": "fxinter.json",
@@ -132,13 +132,13 @@
    "file": "gate.json",
    "classes": 3,
    "procedures": 4,
-   "constants": 0
+   "constants": 3
   },
   "GateInter": {
    "file": "gateinter.json",
    "classes": 0,
    "procedures": 2,
-   "constants": 0
+   "constants": 1
   },
   "IFRSInter": {
    "file": "ifrsinter.json",
@@ -149,14 +149,14 @@
   "InsCarryDoc": {
    "file": "inscarrydoc.json",
    "classes": 1,
-   "procedures": 65,
-   "constants": 0
+   "procedures": 67,
+   "constants": 9
   },
   "LCInter": {
    "file": "lcinter.json",
    "classes": 6,
    "procedures": 7,
-   "constants": 0,
+   "constants": 140,
    "dependencies": [
     "BankInter"
    ]
@@ -176,7 +176,7 @@
   "LoansGUI": {
    "file": "loansgui.json",
    "classes": 0,
-   "procedures": 1,
+   "procedures": 7,
    "constants": 0
   },
   "LoansList": {
@@ -188,32 +188,32 @@
   "MesInter": {
    "file": "mesinter.json",
    "classes": 4,
-   "procedures": 7,
-   "constants": 0
+   "procedures": 18,
+   "constants": 153
   },
   "MmarkInter": {
    "file": "mmarkinter.json",
    "classes": 0,
-   "procedures": 9,
-   "constants": 0
+   "procedures": 11,
+   "constants": 7
   },
   "MonTransInter": {
    "file": "montransinter.json",
    "classes": 4,
-   "procedures": 8,
+   "procedures": 9,
    "constants": 0
   },
   "OprInter": {
    "file": "oprinter.json",
    "classes": 1,
-   "procedures": 47,
-   "constants": 0
+   "procedures": 49,
+   "constants": 107
   },
   "PaymInter": {
    "file": "payminter.json",
    "classes": 47,
-   "procedures": 163,
-   "constants": 0,
+   "procedures": 168,
+   "constants": 660,
    "dependencies": [
     "BankInter"
    ]
@@ -221,38 +221,38 @@
   "PcRateInter": {
    "file": "pcrateinter.json",
    "classes": 0,
-   "procedures": 1,
+   "procedures": 2,
    "constants": 0
   },
   "PercInter": {
    "file": "percinter.json",
    "classes": 4,
-   "procedures": 6,
+   "procedures": 23,
    "constants": 0
   },
   "procent": {
    "file": "procent.json",
    "classes": 1,
-   "procedures": 11,
-   "constants": 0
+   "procedures": 13,
+   "constants": 20
   },
   "procentbuh": {
    "file": "procentbuh.json",
    "classes": 0,
-   "procedures": 2,
+   "procedures": 6,
    "constants": 0
   },
   "PSBCInter": {
    "file": "psbcinter.json",
    "classes": 0,
    "procedures": 3,
-   "constants": 0
+   "constants": 6
   },
   "PsInter": {
    "file": "psinter.json",
    "classes": 11,
-   "procedures": 31,
-   "constants": 0,
+   "procedures": 32,
+   "constants": 167,
    "dependencies": [
     "PaymInter"
    ]
@@ -260,31 +260,31 @@
   "PTInter": {
    "file": "ptinter.json",
    "classes": 17,
-   "procedures": 69,
-   "constants": 0
+   "procedures": 78,
+   "constants": 426
   },
   "RcbCoreInter": {
    "file": "rcbcoreinter.json",
    "classes": 31,
    "procedures": 0,
-   "constants": 0
+   "constants": 35
   },
   "Reporting": {
    "file": "reporting.json",
    "classes": 9,
    "procedures": 1,
-   "constants": 0
+   "constants": 20
   },
   "ReptCBCommon": {
    "file": "reptcbcommon.json",
    "classes": 0,
-   "procedures": 6,
+   "procedures": 8,
    "constants": 0
   },
   "ReptCBInter": {
    "file": "reptcbinter.json",
    "classes": 0,
-   "procedures": 3,
+   "procedures": 49,
    "constants": 0
   },
   "ReptCBMath": {
@@ -296,8 +296,8 @@
   "RmInter": {
    "file": "rminter.json",
    "classes": 0,
-   "procedures": 6,
-   "constants": 0
+   "procedures": 12,
+   "constants": 24
   },
   "RsbDataSet": {
    "file": "rsbdataset.json",
@@ -315,7 +315,7 @@
    "file": "rsbobjfactory.json",
    "classes": 1,
    "procedures": 0,
-   "constants": 0
+   "constants": 3
   },
   "RslCellObjects": {
    "file": "rslcellobjects.json",
@@ -340,7 +340,7 @@
    "file": "rssyslog.json",
    "classes": 1,
    "procedures": 3,
-   "constants": 0
+   "constants": 7
   },
   "safecells": {
    "file": "safecells.json",
@@ -354,14 +354,14 @@
   "SbCrdInter": {
    "file": "sbcrdinter.json",
    "classes": 1,
-   "procedures": 51,
-   "constants": 10
+   "procedures": 82,
+   "constants": 641
   },
   "SFInter": {
    "file": "sfinter.json",
    "classes": 1,
    "procedures": 40,
-   "constants": 0
+   "constants": 33
   },
   "spCardInter": {
    "file": "spcardinter.json",
@@ -372,37 +372,67 @@
   "SPInter": {
    "file": "spinter.json",
    "classes": 0,
-   "procedures": 47,
-   "constants": 0
+   "procedures": 52,
+   "constants": 286
   },
   "total": {
    "file": "total.json",
    "classes": 0,
-   "procedures": 15,
+   "procedures": 28,
    "constants": 0
   },
   "TSInter": {
    "file": "tsinter.json",
    "classes": 0,
    "procedures": 46,
-   "constants": 0
+   "constants": 94
   },
   "VAInter": {
    "file": "vainter.json",
    "classes": 0,
-   "procedures": 7,
-   "constants": 0
+   "procedures": 8,
+   "constants": 2
   },
   "VSInter": {
    "file": "vsinter.json",
    "classes": 0,
-   "procedures": 22,
-   "constants": 0
+   "procedures": 26,
+   "constants": 45
   },
   "WIdInter": {
    "file": "widinter.json",
    "classes": 7,
-   "procedures": 25,
+   "procedures": 82,
+   "constants": 87
+  },
+  "BalanceInter": {
+   "file": "balanceinter.json",
+   "classes": 0,
+   "procedures": 4,
+   "constants": 0
+  },
+  "RCW": {
+   "file": "rcw.json",
+   "classes": 0,
+   "procedures": 9,
+   "constants": 0
+  },
+  "RX_Exchange": {
+   "file": "rx_exchange.json",
+   "classes": 0,
+   "procedures": 7,
+   "constants": 0
+  },
+  "ReportInter": {
+   "file": "reportinter.json",
+   "classes": 0,
+   "procedures": 4,
+   "constants": 0
+  },
+  "replib": {
+   "file": "replib.json",
+   "classes": 0,
+   "procedures": 3,
    "constants": 0
   }
  }

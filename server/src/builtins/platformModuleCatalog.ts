@@ -666,8 +666,15 @@ function constantDefinition(
         name: item.name,
         kind: CompletionItemKind.Constant,
         typeName: item.typeName || inferConstantType(item.value),
-        /* Значение показывается рядом с именем: оно и есть смысл константы. */
-        signature: `${item.name} = ${item.value}`,
+        /*
+         * Значение показывается рядом с именем: оно и есть смысл константы.
+         * Но справка приводит его не всегда — у констант вида RCB_VT_DATE
+         * описан только смысл. Тогда в подписи остаётся одно имя: «RCB_VT_DATE =»
+         * с пустотой справа читалось бы как значение, которого нет.
+         */
+        signature: item.value
+            ? `${item.name} = ${item.value}`
+            : item.name,
         value: item.value,
         summary: item.description
     };

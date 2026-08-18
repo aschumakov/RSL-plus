@@ -10,6 +10,7 @@ import {
 } from "./fastCompletionIndex";
 import type { IFastDocumentSnapshot } from "../services/fastDocumentSnapshot";
 import { normalizeIdentifier, type IRslToken } from "../lexer";
+import { rankCompletionItemsForPrefix } from "./completionRanking";
 
 /**
  * Объявления файла без ожидания полной модели.
@@ -61,7 +62,20 @@ export function buildRslFastMemberCompletions(
     const index = known || getFastCompletionIndex(snapshot);
     const found = lookupFastName(index, receiver.name, offset);
 
-    return found.typeName ? findClassMembers(found.typeName) : undefined;
+    if (!found.typeName) {
+        return undefined;
+    }
+
+    const members = findClassMembers(found.typeName);
+
+    /*
+     * Отбор по набранной части имени. Клиент отберёт и сам, но ответ помечен
+     * неполным и будет перезапрошен, а до тех пор список обязан относиться к
+     * тому, что уже написано.
+     */
+    return members && receiver.prefix
+        ? rankCompletionItemsForPrefix(members, receiver.prefix)
+        : members;
 }
 
 /** Члены класса, объявленного в этом же файле; undefined, если его здесь нет. */
@@ -121,47 +135,69 @@ function tokenIndexBefore(
     return low - 1;
 }
 
-/** Имя перед точкой, на которой стоит курсор. */
+/**
+ * Получатель перед точкой и уже набранная часть имени члена.
+ *
+ * Курсор может стоять и сразу после точки, и после нескольких набранных
+ * букв: obj. и obj.set — одно и то же обращение к члену. Прежде учитывался
+ * только первый случай, и на obj.set быстрый путь отказывался от объектного
+ * ответа: пользователь получал общий список и ждал полного разбора — ровно
+ * та задержка, которую видно по Ctrl+Space.
+ */
 function findReceiverBeforeDot(
     tokens: readonly IRslToken[],
     offset: number
-): { name: string; index: number } | undefined {
+): { name: string; prefix: string } | undefined {
     /*
      * Позиция ищется двоичным поиском, а не перебором с конца потока: на файле
      * 1 МБ обращение в его начале обходилось в несколько миллисекунд только на
      * то, чтобы дойти до нужного токена.
      */
-    let dotIndex = -1;
+    let index = tokenIndexBefore(tokens, offset);
+    let prefix = "";
 
-    for (let index = tokenIndexBefore(tokens, offset); index >= 0; index--) {
-        const token = tokens[index];
-
-        if (
-            token.end > offset || token.kind === "whitespace" ||
-            token.kind === "newline"
-        ) {
-            continue;
-        }
-
-        dotIndex = token.kind === "symbol" && token.raw === "." ? index : -1;
-        break;
+    /* Токены после курсора и пробелы к обращению не относятся. */
+    while (index >= 0 && !endsAtOrBefore(tokens[index], offset)) {
+        index--;
     }
 
-    if (dotIndex <= 0) {
+    if (index < 0) {
         return undefined;
     }
 
-    for (let index = dotIndex - 1; index >= 0; index--) {
-        const token = tokens[index];
-
-        if (token.kind === "whitespace" || token.kind === "newline") {
-            continue;
-        }
-
-        return token.kind === "identifier"
-            ? { name: normalizeIdentifier(token.value), index }
-            : undefined;
+    /* Набранная часть имени члена: она примыкает к курсору без пробела. */
+    if (tokens[index].kind === "identifier" && tokens[index].end === offset) {
+        prefix = tokens[index].value;
+        index--;
     }
 
-    return undefined;
+    /*
+     * Пробелы вокруг точки допустимы, а перевод строки — нет: он значит, что
+     * обращение относится к другой строке.
+     */
+    while (index >= 0 && tokens[index].kind === "whitespace") {
+        index--;
+    }
+
+    if (
+        index < 0 ||
+        tokens[index].kind !== "symbol" ||
+        tokens[index].raw !== "."
+    ) {
+        return undefined;
+    }
+    index--;
+
+    while (index >= 0 && tokens[index].kind === "whitespace") {
+        index--;
+    }
+
+    return index >= 0 && tokens[index].kind === "identifier"
+        ? { name: normalizeIdentifier(tokens[index].value), prefix }
+        : undefined;
+}
+
+/** Токен закончился не позже курсора: всё, что правее, ещё не набрано. */
+function endsAtOrBefore(token: IRslToken, offset: number): boolean {
+    return token.kind !== "newline" && token.end <= offset;
 }

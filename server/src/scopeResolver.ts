@@ -1320,18 +1320,37 @@ export class RslScopeResolver {
             return undefined;
         }
 
-        const inModule = this.findWorkspaceClasses(
-            [from.moduleUri],
+        /*
+         * Класс своего модуля перекрывает импортированные, поэтому сначала
+         * ищется только он сам.
+         */
+        const inOwn = this.findClassInModule(from.moduleUri, baseClassName);
+
+        if (inOwn) {
+            return inOwn;
+        }
+
+        const owned = this.index.getModule(from.moduleUri);
+        /*
+         * Среди подключений допускается ровно один кандидат: две одноимённые
+         * базы — неоднозначность, и какую выберет компилятор, без полной
+         * модели неизвестно.
+         */
+        const imported = this.findWorkspaceClasses(
+            this.resolveImportUris(owned ? owned.imports : []),
             baseClassName,
-            1
+            2
         );
 
-        if (inModule.length === 1) {
-            return inModule[0];
+        if (imported.length > 1) {
+            return undefined;
+        }
+
+        if (imported.length === 1) {
+            return imported[0];
         }
 
         /* В модуле базы нет: остаются встроенные и прикладные классы. */
-        const owned = this.index.getModule(from.moduleUri);
         const external = this.findExternalClass(
             from.moduleUri,
             baseClassName,
@@ -1341,6 +1360,26 @@ export class RslScopeResolver {
         return external
             ? { symbol: external.symbol, owner: external }
             : undefined;
+    }
+
+    /** Класс с таким именем в одном модуле, без его подключений. */
+    private findClassInModule(
+        uri: string,
+        className: string
+    ): IRslFastClass | undefined {
+        const module = this.index.getModule(uri);
+
+        if (!module) {
+            return undefined;
+        }
+
+        const wanted = normalizeIdentifier(className);
+        const symbol = module.symbolTree.children.find(item =>
+            normalizeIdentifier(item.name) === wanted &&
+            item.kind === CompletionItemKind.Class
+        );
+
+        return symbol ? { symbol, moduleUri: uri } : undefined;
     }
 
     /** Классы с таким именем в модулях и во всём, что видно через их Import. */

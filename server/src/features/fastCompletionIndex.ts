@@ -719,15 +719,7 @@ function openScope(
             break;
         }
     }
-    const scope = scopes.length;
     const start = tokens[keywordIndex].start;
-    scopes.push({
-        start,
-        end: start,
-        parent,
-        kind: word === "class" ? "class" : "macro"
-    });
-
     let index = keywordIndex + 1;
 
     /* Базовый класс в скобках перед именем: class (TRsbPanel) tPanel. */
@@ -756,9 +748,22 @@ function openScope(
         ? nameToken.value
         : "";
 
-    if (name) {
-        index++;
+    /*
+     * Имени ещё нет — заголовок как раз набирают. Область без имени не
+     * создаётся: членов и подсказок она не даёт, а её END закрывал бы чужой
+     * блок. Полный извлекатель поступает так же.
+     */
+    if (!name) {
+        return keywordIndex;
     }
+    index++;
+    const scope = scopes.length;
+    scopes.push({
+        start,
+        end: start,
+        parent,
+        kind: word === "class" ? "class" : "macro"
+    });
 
     if (word === "class") {
         const info: IFastClassInfo = {
@@ -776,11 +781,9 @@ function openScope(
             classes.set(key, [info]);
         }
 
-        if (name) {
-            globalItems.push({ label: name, kind: CompletionItemKind.Class });
-        }
+        globalItems.push({ label: name, kind: CompletionItemKind.Class });
 
-        if (name && context.owner) {
+        if (context.owner) {
             /* Класс, объявленный в теле класса, — его член. */
             context.owner.members.push({
                 name,
@@ -794,7 +797,7 @@ function openScope(
         return index - 1;
     }
 
-    if (name && context.owner) {
+    if (context.owner) {
         /*
          * Метод виден по имени только внутри своего класса: снаружи его
          * вызывают через объект.
@@ -812,7 +815,7 @@ function openScope(
                 kind: CompletionItemKind.Method
             });
         }
-    } else if (name && parent >= 0) {
+    } else if (parent >= 0) {
         /*
          * Macro внутри другой Macro — локальная процедура: она видна только в
          * объемлющей области. Прежде такая процедура попадала в общий список и
@@ -822,7 +825,7 @@ function openScope(
             label: name,
             kind: CompletionItemKind.Function
         });
-    } else if (name) {
+    } else {
         globalItems.push({ label: name, kind: CompletionItemKind.Function });
     }
 
