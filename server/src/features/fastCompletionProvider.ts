@@ -70,7 +70,7 @@ export function buildRslFastOwnClassMembers(
     className: string,
     offset: number
 ): CompletionItem[] | undefined {
-    const own = findFastClass(index, className);
+    const own = findFastClass(index, className, offset);
 
     if (!own) {
         return undefined;

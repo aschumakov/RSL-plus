@@ -36,6 +36,7 @@ const tests = [
     "resolver-cache.test.js",
     "index-memory.test.js",
     "fast-completion.test.js",
+    "fast-completion-index.test.js",
 ];
 
 let failed = false;

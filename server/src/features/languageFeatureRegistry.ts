@@ -252,14 +252,6 @@ export class RslLanguageFeatureRegistry {
              */
             const module = this.getRequestModule(document);
 
-            if (module) {
-                /*
-                 * Модель готова: приблизительный индекс больше не нужен, и
-                 * держать его до следующей правки значит держать память зря.
-                 */
-                dropFastCompletionIndex(document.uri);
-            }
-
             if (!module) {
                 /*
                  * Разбор идёт своим ходом, но его отказ обязан быть перехвачен:
@@ -1080,11 +1072,14 @@ export class RslLanguageFeatureRegistry {
     invalidate(uri: string): void {
         this.presentationFeatures.invalidate(uri);
         this.semanticTokensFeatures.invalidate(uri);
+        /* Текст изменился: индекс этой версии больше не нужен. */
+        dropFastCompletionIndex(uri);
     }
 
     forget(uri: string): void {
         this.presentationFeatures.forget(uri);
         this.semanticTokensFeatures.forget(uri);
+        dropFastCompletionIndex(uri);
     }
 
     /**
@@ -1101,6 +1096,12 @@ export class RslLanguageFeatureRegistry {
     notifyParsed(uri: string): void {
         this.semanticTokensFeatures.notifyParsed(uri);
         this.refreshInlayHintsIfPending(uri);
+        /*
+         * Модель готова, и дальше отвечает она. Прежде индекс освобождался
+         * только при следующем Completion — то есть у файла, в который больше
+         * не заходят, он оставался в памяти до вытеснения по счётчику.
+         */
+        dropFastCompletionIndex(uri);
     }
 
     /**

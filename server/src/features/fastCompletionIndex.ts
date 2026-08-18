@@ -2,6 +2,7 @@ import { CompletionItem, CompletionItemKind } from "vscode-languageserver";
 
 import {
     BLOCK_START_KEYWORDS,
+    DECLARATION_KEYWORDS,
     END_KEYWORD,
     isDeclarationModifier
 } from "../language/rslLanguageReference";
@@ -109,11 +110,40 @@ export interface IFastCompletionIndex {
 /*
  * Индексы живут ровно у тех документов, в которых сейчас печатают.
  *
- * Записей немного: смысл кэша — обслужить поток нажатий в одном файле, а не
- * хранить проект.
+ * Ограничение — по приблизительному объёму, а не по числу файлов: четыре
+ * записи на маленьких файлах ничего не стоят, а на файлах по 400 КБ это уже
+ * десяток мегабайт. Объём считается по числу записей индекса, потому что
+ * измерить занятую память объектами в Node нельзя.
  */
-const INDEX_LIMIT = 4;
+/* Слова, которые начинают объявление даже посреди строки. */
+const DECLARATION_WORDS = new Set(DECLARATION_KEYWORDS);
+
+/* Из них имена переменных вводят все, кроме MACRO и CLASS: у тех свои области. */
+const DECLARES_NAMES = new Set(
+    DECLARATION_KEYWORDS.filter(word => word !== "macro" && word !== "class")
+);
+
+const INDEX_BUDGET_ENTRIES = 60000;
 const indexByUri = new Map<string, IFastCompletionIndex>();
+
+/** Приблизительный вес индекса: объявления, области, имена и члены классов. */
+function indexWeight(index: IFastCompletionIndex): number {
+    let members = 0;
+
+    for (const list of index.classes.values()) {
+        for (const info of list) {
+            members += info.members.length;
+        }
+    }
+
+    let scoped = 0;
+
+    for (const list of index.scopeBindings.values()) {
+        scoped += list.length;
+    }
+
+    return index.scopes.length + index.globalItems.length + members + scoped;
+}
 
 /** Индекс этой версии; строится при первом обращении. */
 export function getFastCompletionIndex(
@@ -129,12 +159,22 @@ export function getFastCompletionIndex(
     indexByUri.delete(snapshot.uri);
     indexByUri.set(snapshot.uri, built);
 
-    while (indexByUri.size > INDEX_LIMIT) {
+    let weight = 0;
+
+    for (const value of indexByUri.values()) {
+        weight += indexWeight(value);
+    }
+
+    /* Самый давний уходит первым: Map хранит порядок вставки. */
+    while (weight > INDEX_BUDGET_ENTRIES && indexByUri.size > 1) {
         const oldest = indexByUri.keys().next().value as string | undefined;
 
         if (oldest === undefined) {
             break;
         }
+
+        const dropped = indexByUri.get(oldest);
+        weight -= dropped ? indexWeight(dropped) : 0;
         indexByUri.delete(oldest);
     }
 
@@ -251,16 +291,25 @@ function nearestBinding(
 /** Класс файла по имени; undefined, если его нет или имя неоднозначно. */
 export function findFastClass(
     index: IFastCompletionIndex,
-    className: string
+    className: string,
+    offset: number
 ): IFastClassInfo | undefined {
     const found = index.classes.get(normalizeIdentifier(className));
 
+    if (!found || found.length === 0) {
+        return undefined;
+    }
+
+    if (found.length === 1) {
+        return found[0];
+    }
+
     /*
-     * Неоднозначное имя не разрешается вовсе: показать члены первого
-     * попавшегося класса значит подсказать наугад, а выбор компилятора здесь,
-     * без полной модели, неизвестен.
+     * Одно имя на два объявления. Внутри одного из них выбор очевиден — это
+     * оно; снаружи выбор компилятора без полной модели неизвестен, и показать
+     * члены наугад хуже, чем не показать ничего.
      */
-    return found && found.length === 1 ? found[0] : undefined;
+    return found.find(info => offset >= info.start && offset <= info.end);
 }
 
 /** Имена, видимые в этой точке: общие плюс собственные объемлющих областей. */
@@ -293,8 +342,15 @@ export function visibleFastItems(
     return result;
 }
 
-/** Открытый блок: у Macro и Class есть область, у IF и WHILE — нет. */
+/**
+ * Открытый блок.
+ *
+ * Своя область есть только у Macro и Class. IF, WHILE, FOR и WITH тоже
+ * закрываются словом END, но собственных имён не вводят, поэтому запоминаются
+ * лишь для того, чтобы их END не закрыл чужую область.
+ */
 interface IOpenBlock {
+    /** Индекс области; -1 — блок без собственной области. */
     scope: number;
     classInfo?: IFastClassInfo;
 }
@@ -329,15 +385,28 @@ function buildFastCompletionIndex(
     const blocks: IOpenBlock[] = [];
     let modifier = "";
 
-    const currentScope = (): number =>
-        blocks.length > 0 ? blocks[blocks.length - 1].scope : -1;
-
-    const enclosingClass = (): IFastClassInfo | undefined => {
+    /** Ближайшая область: блоки без собственной области пропускаются. */
+    const currentScope = (): number => {
         for (let level = blocks.length - 1; level >= 0; level--) {
-            const info = blocks[level].classInfo;
+            if (blocks[level].scope >= 0) {
+                return blocks[level].scope;
+            }
+        }
 
-            if (info) {
-                return info;
+        return -1;
+    };
+
+    /**
+     * Класс, которому принадлежит объявляемая здесь процедура.
+     *
+     * Именно НЕПОСРЕДСТВЕННО объемлющий, а не любой вышестоящий: Macro внутри
+     * метода — локальная процедура, а не второй метод класса. Прежний поиск шёл
+     * вверх по всем блокам, и вложенная Macro становилась членом класса.
+     */
+    const owningClass = (): IFastClassInfo | undefined => {
+        for (let level = blocks.length - 1; level >= 0; level--) {
+            if (blocks[level].scope >= 0) {
+                return blocks[level].classInfo;
             }
         }
 
@@ -388,9 +457,7 @@ function buildFastCompletionIndex(
             scopeBindings.set(scope, [binding]);
         }
 
-        const owner = blocks.length > 0
-            ? blocks[blocks.length - 1].classInfo
-            : undefined;
+        const owner = owningClass();
 
         if (owner) {
             /* Объявление прямо в теле класса — это его поле. */
@@ -404,31 +471,122 @@ function buildFastCompletionIndex(
 
     };
 
+    /*
+     * Ключевое слово опознаётся только там, где оно действительно ключевое.
+     *
+     * Те же три ограничения, что и у полного извлекателя объявлений: слово
+     * должно начинать предложение, не стоять после точки и не быть внутри
+     * скобок. Без них имя поля записи в obj.End закрывало Macro, а obj.Class
+     * открывало новую область — на обычном коде подсказки просто пропадали.
+     */
+    let canStartStatement = true;
+    let groupDepth = 0;
+    let afterDot = false;
+    let currentLine = -1;
+
     for (let index = 0; index < tokens.length; index++) {
         const token = tokens[index];
 
+        if (token.line !== currentLine) {
+            currentLine = token.line;
+            canStartStatement = true;
+            /*
+             * Признак «после точки» не переживает перевод строки. Полный
+             * извлекатель гасит его самим токеном перевода, а здесь их нет:
+             * обход идёт по значимым токенам. Без сброса незаконченная строка
+             * вида "self." — то есть ровно та, в которой и вызывают подсказку —
+             * превращала следующее END в имя поля, и блок оставался незакрытым.
+             */
+            afterDot = false;
+        }
+
+        if (token.kind === "symbol") {
+            if (token.raw === "(" || token.raw === "[" || token.raw === "{") {
+                groupDepth++;
+            } else if (
+                token.raw === ")" || token.raw === "]" || token.raw === "}"
+            ) {
+                groupDepth = Math.max(0, groupDepth - 1);
+            }
+
+            if (token.raw === ";") {
+                canStartStatement = true;
+                /* Незакрытая скобка не должна глушить весь остаток файла. */
+                groupDepth = 0;
+            } else if (token.raw !== ",") {
+                canStartStatement = false;
+            }
+
+            afterDot = token.raw === ".";
+            continue;
+        }
+
         if (token.kind !== "identifier") {
+            canStartStatement = false;
+            afterDot = false;
             continue;
         }
 
         const word = normalizeIdentifier(token.value);
+        const previousAfterDot = afterDot;
+        afterDot = false;
 
+        /*
+         * END обрабатывается до проверки начала инструкции: он закрывает
+         * блок и посреди строки — например в
+         * if (...) return X end;. Единственное ограничение — точка перед
+         * ним: obj.End — это имя поля.
+         */
         if (word === END_KEYWORD) {
-            const block = blocks.pop();
+            canStartStatement = false;
+            modifier = "";
 
-            if (block) {
-                scopes[block.scope].end = token.end;
+            if (previousAfterDot) {
+                continue;
+            }
 
-                if (block.classInfo) {
-                    block.classInfo.end = token.end;
+            const closed = blocks.pop();
+
+            if (closed && closed.scope >= 0) {
+                scopes[closed.scope].end = token.end;
+
+                if (closed.classInfo) {
+                    closed.classInfo.end = token.end;
                 }
             }
+            continue;
+        }
+
+        /*
+         * Остальные слова обязаны начинать инструкцию. Исключение — те же,
+         * что и у полного извлекателя: объявление и Import опознаются и
+         * посреди строки, но только вне скобок и не после точки.
+         */
+        if (
+            !canStartStatement &&
+            !(
+                groupDepth === 0 &&
+                !previousAfterDot &&
+                (DECLARATION_WORDS.has(word) || word === "import")
+            )
+        ) {
+            canStartStatement = false;
             modifier = "";
             continue;
         }
 
+        if (previousAfterDot || groupDepth > 0) {
+            canStartStatement = false;
+            modifier = "";
+            continue;
+        }
+
+        canStartStatement = false;
+
         if (isDeclarationModifier(word)) {
             modifier = word;
+            /* Модификатор относится к следующему слову той же инструкции. */
+            canStartStatement = true;
             continue;
         }
 
@@ -440,20 +598,31 @@ function buildFastCompletionIndex(
                 globalItems,
                 addItem,
                 addBinding,
-                owner: enclosingClass()
+                owner: owningClass(),
+                isPrivate: modifier === "private" || modifier === "local"
             });
             modifier = "";
             continue;
         }
 
         if (BLOCK_START_KEYWORDS.includes(word)) {
-            /* IF, WHILE, FOR и WITH тоже закрываются END, но области не дают. */
-            blocks.push({ scope: currentScope() });
+            /*
+             * IF, WHILE, FOR и WITH тоже закрываются END, но собственной
+             * области не вводят. Прежде такой блок запоминал ЧУЖУЮ область и
+             * его END закрывал её: на верхнем уровне это обращение к
+             * scopes[-1] и исключение, внутри Macro — преждевременный конец
+             * этой Macro.
+             */
+            blocks.push({ scope: -1 });
             modifier = "";
             continue;
         }
 
-        if (word === "var" || word === "const") {
+        /*
+         * Имена вводят не только VAR и CONST: ARRAY, FILE и RECORD — тоже
+         * объявления, и в реальном коде поля класса объявляют через ARRAY.
+         */
+        if (DECLARES_NAMES.has(word)) {
             index = readDeclarationList(
                 tokens,
                 index,
@@ -473,6 +642,10 @@ function buildFastCompletionIndex(
 
     /* Незакрытые блоки: файл в правке, и END ещё не набран. */
     for (const block of blocks) {
+        if (block.scope < 0) {
+            continue;
+        }
+
         scopes[block.scope].end = snapshot.text.length;
 
         if (block.classInfo) {
@@ -502,7 +675,9 @@ interface IScopeContext {
     globalItems: CompletionItem[];
     addItem(scope: number, item: CompletionItem): void;
     addBinding: AddBinding;
+    /** Класс, которому принадлежит объявление; undefined — это не метод. */
     owner: IFastClassInfo | undefined;
+    isPrivate: boolean;
 }
 
 /** Заголовок Macro или Class: область, имя, параметры и членство в классе. */
@@ -513,7 +688,15 @@ function openScope(
     context: IScopeContext
 ): number {
     const { scopes, blocks, classes, globalItems } = context;
-    const parent = blocks.length > 0 ? blocks[blocks.length - 1].scope : -1;
+    /* Родитель — ближайшая настоящая область: IF и WHILE её не создают. */
+    let parent = -1;
+
+    for (let level = blocks.length - 1; level >= 0; level--) {
+        if (blocks[level].scope >= 0) {
+            parent = blocks[level].scope;
+            break;
+        }
+    }
     const scope = scopes.length;
     const start = tokens[keywordIndex].start;
     scopes.push({
@@ -558,6 +741,17 @@ function openScope(
         if (name) {
             globalItems.push({ label: name, kind: CompletionItemKind.Class });
         }
+
+        if (name && context.owner) {
+            /* Класс, объявленный в теле класса, — его член. */
+            context.owner.members.push({
+                name,
+                kind: "variable",
+                typeName: name,
+                isPrivate: context.isPrivate
+            });
+        }
+
         blocks.push({ scope, classInfo: info });
         return index - 1;
     }
@@ -571,11 +765,24 @@ function openScope(
             name,
             kind: "macro",
             typeName: "",
-            isPrivate: false
+            isPrivate: context.isPrivate
         });
+
+        if (!context.isPrivate || parent >= 0) {
+            context.addItem(parent, {
+                label: name,
+                kind: CompletionItemKind.Method
+            });
+        }
+    } else if (name && parent >= 0) {
+        /*
+         * Macro внутри другой Macro — локальная процедура: она видна только в
+         * объемлющей области. Прежде такая процедура попадала в общий список и
+         * предлагалась по всему файлу.
+         */
         context.addItem(parent, {
             label: name,
-            kind: CompletionItemKind.Method
+            kind: CompletionItemKind.Function
         });
     } else if (name) {
         globalItems.push({ label: name, kind: CompletionItemKind.Function });
@@ -622,6 +829,43 @@ function skipParens(
     return openIndex;
 }
 
+/** Слово, на котором объявление заведомо кончилось. */
+function endsDeclaration(token: IRslToken): boolean {
+    if (token.kind !== "identifier") {
+        return false;
+    }
+
+    const word = normalizeIdentifier(token.value);
+
+    return word === END_KEYWORD ||
+        DECLARATION_WORDS.has(word) ||
+        BLOCK_START_KEYWORDS.includes(word);
+}
+
+/**
+ * Написанный тип после двоеточия.
+ *
+ * Знак @ перед именем типа означает передачу по ссылке и к самому типу
+ * отношения не имеет, поэтому пропускается.
+ */
+function writtenTypeName(
+    tokens: readonly IRslToken[],
+    colonIndex: number
+): string {
+    let index = colonIndex + 1;
+
+    if (
+        tokens[index] &&
+        tokens[index].kind === "symbol" &&
+        tokens[index].raw === "@"
+    ) {
+        index++;
+    }
+
+    const written = tokens[index];
+    return written && written.kind === "identifier" ? written.value : "";
+}
+
 /** Объявление вида Var a: TFile, b = TStringList(); до точки с запятой. */
 function readDeclarationList(
     tokens: readonly IRslToken[],
@@ -635,19 +879,20 @@ function readDeclarationList(
     while (index < tokens.length) {
         const name = tokens[index];
 
-        if (name.kind !== "identifier") {
-            break;
+        if (name.kind !== "identifier" || endsDeclaration(name)) {
+            /*
+             * Служебное слово принадлежит уже следующей инструкции: вернуть
+             * нужно позицию ПЕРЕД ним, иначе главный цикл его перескочит и
+             * END не закроет блок.
+             */
+            return index - 1;
         }
 
         const after = tokens[index + 1];
         let typeName = "";
 
         if (after && after.kind === "symbol" && after.raw === ":") {
-            const written = tokens[index + 2];
-
-            if (written && written.kind === "identifier") {
-                typeName = written.value;
-            }
+            typeName = writtenTypeName(tokens, index + 1);
         } else if (after && after.kind === "symbol" && after.raw === "=") {
             typeName = initializerTypeName(tokens, index + 2);
         }
@@ -655,12 +900,43 @@ function readDeclarationList(
         add(name.value, typeName, name.start, isConstant, isPrivate);
         index++;
 
-        /* До следующего имени: выражение начального значения пропускается. */
-        while (
-            index < tokens.length &&
-            !(tokens[index].kind === "symbol" &&
-                (tokens[index].raw === "," || tokens[index].raw === ";"))
-        ) {
+        /*
+         * До следующего имени. Запятая считается разделителем объявлений
+         * только вне скобок: в Var x = Make(a, b) запятая принадлежит
+         * вызову, и b объявлением не является.
+         */
+        let depth = 0;
+
+        while (index < tokens.length) {
+            const token = tokens[index];
+
+            if (token.kind === "symbol") {
+                if (
+                    token.raw === "(" || token.raw === "[" ||
+                    token.raw === "{"
+                ) {
+                    depth++;
+                } else if (
+                    token.raw === ")" || token.raw === "]" ||
+                    token.raw === "}"
+                ) {
+                    depth = Math.max(0, depth - 1);
+                } else if (
+                    depth === 0 &&
+                    (token.raw === "," || token.raw === ";")
+                ) {
+                    break;
+                }
+            } else if (depth === 0 && endsDeclaration(token)) {
+                /*
+                 * Точку с запятой в конце объявления ставят не всегда:
+                 * Var A = 1, B = 2 end; встречается в реальном коде. Без этой
+                 * проверки END доставался списку объявлений и класс оставался
+                 * незакрытым до конца файла.
+                 */
+                return index - 1;
+            }
+
             index++;
         }
 
@@ -721,11 +997,7 @@ function readParameterList(
         let typeName = "";
 
         if (after && after.kind === "symbol" && after.raw === ":") {
-            const written = tokens[index + 2];
-
-            if (written && written.kind === "identifier") {
-                typeName = written.value;
-            }
+            typeName = writtenTypeName(tokens, index + 1);
         }
 
         add(token.value, typeName, token.start, false, false);
@@ -750,14 +1022,49 @@ function readParameterList(
     return index;
 }
 
-/** Имя модуля идёт сразу за словом Import и заканчивается точкой с запятой. */
+/**
+ * Одно и то же имя модуля.
+ *
+ * Регистр в RSL не различается, а расширение .mac подразумевается: Import
+ * "oralib.mac" и Import oralib — это один и тот же файл, и полный извлекатель
+ * считает их одним модулем.
+ */
+function sameModule(left: string, right: string): boolean {
+    const key = (value: string): string =>
+        value.toLowerCase().replace(/.mac$/u, "");
+
+    return key(left) === key(right);
+}
+
+/**
+ * Имена модулей после слова Import и до точки с запятой.
+ *
+ * Их может быть несколько через запятую, и путь может быть строкой:
+ * Import common, "foldercards.mac"; — это два модуля, а не один с
+ * запятой в имени. Прежде всё до точки с запятой склеивалось в одну строку,
+ * и ни один из модулей не находился.
+ */
 function readImport(
     tokens: readonly IRslToken[],
     keywordIndex: number,
     imports: string[]
 ): number {
-    const parts: string[] = [];
+    let parts: string[] = [];
     let index = keywordIndex + 1;
+
+    const flush = (): void => {
+        const name = parts.join("").trim();
+        parts = [];
+
+        /*
+         * Повтор того же модуля отбрасывается — так же, как это делает общий
+         * извлекатель. Список уходит в разрешение модулей, и он обязан
+         * совпадать с тем, что построит полный путь.
+         */
+        if (name && !imports.some(known => sameModule(known, name))) {
+            imports.push(name);
+        }
+    };
 
     while (index < tokens.length) {
         const token = tokens[index];
@@ -766,16 +1073,17 @@ function readImport(
             break;
         }
 
+        if (token.kind === "symbol" && token.raw === ",") {
+            flush();
+            index++;
+            continue;
+        }
+
         parts.push(token.kind === "string" ? token.value : token.raw);
         index++;
     }
 
-    const name = parts.join("").trim();
-
-    if (name) {
-        imports.push(name);
-    }
-
+    flush();
     return index;
 }
 
