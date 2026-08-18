@@ -20,7 +20,9 @@ import {
 } from "../language/rslLanguageReference";
 import { normalizeIdentifier, type IRslToken } from "../lexer";
 import type { RslScopeResolver } from "../scopeResolver";
-import { isRslSystemSpecialVariableName } from "../systemSpecialVariables";
+import {
+    isRslSpecialVariableReference
+} from "../systemSpecialVariables";
 import type { IIndexedModule } from "../workspaceIndex";
 
 /**
@@ -321,11 +323,17 @@ function isExpressionIdentifier(
     const token = tokens[index];
     const word = normalizeIdentifier(token.value);
 
+    /*
+     * Спецпеременная — любое имя в фигурных скобках, и объявлять её в макросе
+     * не требуется: значение подставляет система. Прежде исключение делалось
+     * только для двадцати восьми общесистемных, поэтому {GROUP_MODE} из
+     * SbCrdInter и заведённая банком {Филиал} объявлялись «необъявленными».
+     */
     if (
         isRslKeyword(word) ||
         isRslType(word) ||
         isRslSystemConstant(word) ||
-        isRslSystemSpecialVariableName(token.value)
+        isRslSpecialVariableReference(token.raw)
     ) {
         return false;
     }

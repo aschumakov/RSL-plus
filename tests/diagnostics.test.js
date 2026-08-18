@@ -371,11 +371,11 @@ test("Общесистемная спецпеременная {oper} не счи
 
 test("Общесистемные спецпеременные имеют документированные типы", () => {
     const expectedTypes = new Map([
-        ["oper", "integer"],
-        ["curdate", "date"],
-        ["BPromUse", "bool"],
-        ["MFO_Bank", "string"],
-        ["BranchCurDate", "string"]
+        ["oper", "Integer"],
+        ["curdate", "Date"],
+        ["BPromUse", "Bool"],
+        ["MFO_Bank", "String"],
+        ["BranchCurDate", "String"]
     ]);
 
     for (const [name, expectedType] of expectedTypes) {

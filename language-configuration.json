@@ -1,4 +1,5 @@
 {
+    "wordPattern": "(?:\\{[^{}\\r\\n]*\\}?)|(?:[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё0-9_]*)",
     "comments": {
         "lineComment": "//",
         "blockComment": [

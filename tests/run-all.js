@@ -39,6 +39,7 @@ const tests = [
     "fast-completion-index.test.js",
     "fast-completion-mutations.test.js",
     "import-chm.test.js",
+    "special-variables.test.js",
 ];
 
 let failed = false;

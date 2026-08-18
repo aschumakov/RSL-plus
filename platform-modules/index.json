@@ -108,7 +108,8 @@
    "file": "exchangeinter.json",
    "classes": 1,
    "procedures": 14,
-   "constants": 0
+   "constants": 0,
+   "variables": 15
   },
   "FIInter": {
    "file": "fiinter.json",
@@ -355,7 +356,8 @@
    "file": "sbcrdinter.json",
    "classes": 1,
    "procedures": 82,
-   "constants": 641
+   "constants": 641,
+   "variables": 11
   },
   "SFInter": {
    "file": "sfinter.json",

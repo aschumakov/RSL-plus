@@ -537,7 +537,12 @@ connection.onInitialize((params: InitializeParams) => {
             textDocumentSync: TextDocumentSyncKind.Incremental,
             completionProvider: {
                 resolveProvider: true,
-                triggerCharacters: [".", "\"", "'", "/", "\\"]
+                /*
+                 * `{` открывает список спецпеременных: имя целиком, вместе со
+                 * скобками, — это `{curdate}`, а не `curdate`, поэтому по
+                 * первой букве внутри скобок редактор список сам не покажет.
+                 */
+                triggerCharacters: [".", "\"", "'", "/", "\\", "{"]
             },
             signatureHelpProvider: {
                 triggerCharacters: ["(", ","],

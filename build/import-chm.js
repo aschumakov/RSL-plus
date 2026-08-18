@@ -573,6 +573,47 @@ function parseConstants(text) {
 }
 
 /*
+ * Спецпеременная модуля: `{GROUP_MODE} – признак пакетного выполнения
+ * операции. Спецпеременная имеет тип Bool.`
+ *
+ * Фигурные скобки — часть имени, а внутри допустимо что угодно, включая
+ * пробелы: `{Название отчета}`. Поэтому имя берётся целиком со скобками, как
+ * оно и пишется в коде.
+ */
+const SPECIAL_VARIABLE_LINE = /^(\{[^{}\r\n]{1,60}\})\s*[–—]\s*(\S.*)$/u;
+
+const SPECIAL_VARIABLE_TYPE =
+    /(?:имеет\s+тип|тип[а]?)\s+([A-Za-z_][A-Za-z0-9_]*)/iu;
+
+/** Спецпеременные со страницы модуля. */
+function parseSpecialVariables(text) {
+    const result = [];
+
+    for (const line of text.split("\n").map(item => item.trim())) {
+        const found = SPECIAL_VARIABLE_LINE.exec(line);
+
+        if (!found) {
+            continue;
+        }
+
+        const written = SPECIAL_VARIABLE_TYPE.exec(found[2]);
+        /* Тип принимается только известный: угадывать по тексту нечего. */
+        const typeName = written &&
+            DISPLAY_NAMES.has(written[1].toLowerCase())
+            ? normalizeTypeName(written[1])
+            : "";
+
+        result.push({
+            name: found[1],
+            typeName,
+            description: constantSummary(found[2])
+        });
+    }
+
+    return result;
+}
+
+/*
  * Значения, а не свойства.
  *
  * В описании свойства перечисляют, что оно может принимать: «TRUE – создается
@@ -770,7 +811,7 @@ function main() {
 
     const addition = moduleName => {
         const entry = additions.get(moduleName) || {
-            classes: [], procedures: [], constants: []
+            classes: [], procedures: [], constants: [], variables: []
         };
         additions.set(moduleName, entry);
         return entry;
@@ -838,6 +879,17 @@ function main() {
             fs.readFileSync(path.join(chmDirectory, page))
         ));
 
+        /*
+         * Спецпеременные ищутся на любой странице модуля, а не только в разделе
+         * констант: в ExchangeInter они лежат на своей странице, в SbCrdInter —
+         * среди глобальных переменных, а {DMONEY_MAX} — на странице констант.
+         */
+        const special = parseSpecialVariables(text);
+
+        if (special.length > 0) {
+            addition(moduleName).variables.push(...special);
+        }
+
         if (contents.constantPages.has(page.toLowerCase())) {
             addition(moduleName).constants.push(...parseConstants(text));
             continue;
@@ -854,6 +906,7 @@ function main() {
     let addedMembers = 0;
     let addedProcedures = 0;
     let addedConstants = 0;
+    let addedVariables = 0;
     let addedModules = 0;
     let filledDescriptions = 0;
 
@@ -873,11 +926,17 @@ function main() {
         const file = path.join(DIRECTORY, entry.file);
         const body = fs.existsSync(file)
             ? JSON.parse(fs.readFileSync(file, "utf8"))
-            : { version: index.version, classes: [], procedures: [],
-                constants: [] };
+            : {
+                version: index.version,
+                classes: [],
+                procedures: [],
+                constants: [],
+                variables: []
+            };
         body.classes = body.classes || [];
         body.procedures = body.procedures || [];
         body.constants = body.constants || [];
+        body.variables = body.variables || [];
         let changed = false;
 
         for (const item of parsed.classes) {
@@ -1008,6 +1067,22 @@ function main() {
             }),
             "констант"
         );
+        addedVariables += merge(
+            body.variables,
+            parsed.variables.map(item => {
+                const variable = {
+                    name: item.name,
+                    description: item.description
+                };
+
+                if (item.typeName) {
+                    variable.typeName = item.typeName;
+                }
+
+                return variable;
+            }),
+            "спецпеременных"
+        );
 
         if (!write || !changed) {
             continue;
@@ -1016,6 +1091,7 @@ function main() {
         entry.classes = body.classes.length;
         entry.procedures = body.procedures.length;
         entry.constants = body.constants.length;
+        entry.variables = body.variables.length;
         fs.writeFileSync(file, JSON.stringify(body), "utf8");
     }
 
@@ -1032,6 +1108,7 @@ function main() {
         ", членов: " + addedMembers +
         ", процедур: " + addedProcedures +
         ", констант: " + addedConstants +
+        ", спецпеременных: " + addedVariables +
         ", заполнено описаний: " + filledDescriptions
     );
 
@@ -1056,7 +1133,8 @@ module.exports = {
     readContents,
     moduleKeyOf,
     parseProcedure,
-    parseConstants
+    parseConstants,
+    parseSpecialVariables
 };
 
 if (require.main === module) {

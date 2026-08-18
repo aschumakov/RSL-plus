@@ -15,7 +15,8 @@ const os = require("os");
 const path = require("path");
 
 const {
-    readContents, moduleKeyOf, parseProcedure, parseConstants, toText
+    readContents, moduleKeyOf, parseProcedure, parseConstants,
+    parseSpecialVariables, toText
 } = require("../build/import-chm.js");
 
 let passed = 0;
@@ -244,6 +245,26 @@ test("константы с значением и без него", () => {
         "Дата. Используется для хранения показателей формы.");
     /* Имя, набранное в справке дважды подряд, — опечатка вёрстки. */
     assert.strictEqual(parsed[2].name, "OBJTYPE_VASTATE");
+});
+
+test("спецпеременные модуля: имя со скобками, тип из текста", () => {
+    const parsed = parseSpecialVariables(page([
+        "{GROUP_MODE} – признак пакетного выполнения операции." +
+            " Спецпеременная имеет тип Bool.",
+        "{BaseCur} – внутрисистемный код базовой валюты. Переменная типа Integer.",
+        "{РЕЗЕРВ_ПО_ПОРТФЕЛЮ} – резерв по просроченному долгу по портфелю.",
+        "{Название отчета} – название отчетной формы."
+    ]));
+
+    assert.strictEqual(parsed.length, 4);
+    assert.deepStrictEqual(
+        parsed.map(item => item.name),
+        ["{GROUP_MODE}", "{BaseCur}", "{РЕЗЕРВ_ПО_ПОРТФЕЛЮ}", "{Название отчета}"]
+    );
+    assert.strictEqual(parsed[0].typeName, "Bool");
+    assert.strictEqual(parsed[1].typeName, "Integer");
+    /* Тип не назван — выдумывать его нечем. */
+    assert.strictEqual(parsed[2].typeName, "");
 });
 
 fs.rmSync(directory, { recursive: true, force: true });

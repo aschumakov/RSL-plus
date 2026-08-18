@@ -53,6 +53,7 @@ import {
     type RslSquareKind
 } from "./lexer";
 import {
+    isRslSpecialVariableReference,
     isRslSystemSpecialVariableName
 } from "./systemSpecialVariables";
 import {
@@ -2374,13 +2375,13 @@ function isRslSystemSpecialVariableReference(
     const previous = tokens[index - 1];
     const next = tokens[index + 1];
 
+    /*
+     * Скобки делают именем всё, что внутри: одноимённая переменная модуля к
+     * {oper} отношения не имеет, каким бы ни было имя в скобках.
+     */
     return token?.kind === "identifier" &&
         (
-            (
-                token.raw.startsWith("{") &&
-                token.raw.endsWith("}") &&
-                isRslSystemSpecialVariableName(token.value)
-            ) ||
+            isRslSpecialVariableReference(token.raw) ||
             (
                 isRslSystemSpecialVariableName(token.value) &&
                 previous?.kind === "symbol" &&

@@ -1,10 +1,10 @@
 import { normalizeIdentifier } from "./lexer";
 
 export type RslSystemSpecialVariableType =
-    | "string"
-    | "integer"
-    | "bool"
-    | "date";
+    | "String"
+    | "Integer"
+    | "Bool"
+    | "Date";
 
 export interface IRslSystemSpecialVariable {
     name: string;
@@ -22,142 +22,142 @@ export const RSL_SYSTEM_SPECIAL_VARIABLES:
 IRslSystemSpecialVariable[] = [
     {
         name: "BranchCurDate",
-        type: "string",
+        type: "String",
         description: "Дата операционного дня, открытого последним в филиале работающего пользователя."
     },
     {
         name: "BPromUse",
-        type: "bool",
+        type: "Bool",
         description: "Признак работы ИБС RS-Bank в режиме промышленной эксплуатации."
     },
     {
         name: "CCYNatCur",
-        type: "string",
+        type: "String",
         description: "Буквенный ISO-код национальной валюты."
     },
     {
         name: "CORAC_Bank",
-        type: "string",
+        type: "String",
         description: "Корсчёт банка в расчётном центре."
     },
     {
         name: "cRealTypePerson",
-        type: "string",
+        type: "String",
         description: "Наименование актуального уровня доступа текущего пользователя."
     },
     {
         name: "cTypePerson",
-        type: "string",
+        type: "String",
         description: "Код уровня доступа текущего пользователя."
     },
     {
         name: "curdate",
-        type: "date",
+        type: "Date",
         description: "Дата текущего операционного дня."
     },
     {
         name: "FIO_Book",
-        type: "string",
+        type: "String",
         description: "ФИО главного бухгалтера."
     },
     {
         name: "FIO_Boss",
-        type: "string",
+        type: "String",
         description: "ФИО управляющего."
     },
     {
         name: "GroupOperF",
-        type: "string",
+        type: "String",
         description: "Нижняя граница диапазона номеров подчинённых пользователей."
     },
     {
         name: "GroupOperL",
-        type: "string",
+        type: "String",
         description: "Верхняя граница диапазона номеров подчинённых пользователей."
     },
     {
         name: "INN_Bank",
-        type: "string",
+        type: "String",
         description: "ИНН банка."
     },
     {
         name: "ISONatCur",
-        type: "string",
+        type: "String",
         description: "Цифровой ISO-код национальной валюты."
     },
     {
         name: "Legal_Addr",
-        type: "string",
+        type: "String",
         description: "Юридический адрес банка."
     },
     {
         name: "MFO_Bank",
-        type: "string",
+        type: "String",
         description: "БИК банка."
     },
     {
         name: "MFO_RCC",
-        type: "string",
+        type: "String",
         description: "БИК расчётного центра."
     },
     {
         name: "Name_Bank",
-        type: "string",
+        type: "String",
         description: "Название банка."
     },
     {
         name: "Name_Book",
-        type: "string",
+        type: "String",
         description: "Должность главного бухгалтера."
     },
     {
         name: "Name_Boss",
-        type: "string",
+        type: "String",
         description: "Должность управляющего."
     },
     {
         name: "NumDprt",
-        type: "integer",
+        type: "Integer",
         description: "Номер головного отделения банка."
     },
     {
         name: "oper",
-        type: "integer",
+        type: "Integer",
         description: "Номер исполнителя, с которым пользователь зарегистрировался в системе."
     },
     {
         name: "OperDprt",
-        type: "integer",
+        type: "Integer",
         description: "Идентификатор филиала текущего пользователя."
     },
     {
         name: "OperDprtNode",
-        type: "string",
+        type: "String",
         description: "Идентификатор подразделения текущего пользователя."
     },
     {
         name: "OurBank",
-        type: "integer",
+        type: "Integer",
         description: "Идентификатор связанного субъекта филиала текущего пользователя."
     },
     {
         name: "Post_Addr",
-        type: "string",
+        type: "String",
         description: "Почтовый адрес банка."
     },
     {
         name: "Real_Addr",
-        type: "string",
+        type: "String",
         description: "Фактический адрес банка."
     },
     {
         name: "ResidentCountryCode",
-        type: "string",
+        type: "String",
         description: "Трёхбуквенный код страны резидентности."
     },
     {
         name: "Version",
-        type: "string",
+        type: "String",
         description: "Номер версии системы."
     }
 ];
@@ -168,6 +168,23 @@ const RSL_SYSTEM_SPECIAL_VARIABLE_NAMES = new Set(
     )
 );
 
+/**
+ * Ссылка на спецпеременную: любая последовательность символов в фигурных
+ * скобках.
+ *
+ * Сводка синтаксиса RSL определяет SPNAME именно так, поэтому именами
+ * являются и {curdate}, и {Филиал}, и {Название отчета}. Знать их все
+ * невозможно: часть приходит из общесистемного globals.mac, часть — из
+ * прикладного модуля, часть заводит сам банк, а объявлять их в макросе не
+ * требуется. Поэтому проверки, требующие объявления, к ним не применяются.
+ */
+export function isRslSpecialVariableReference(value: string): boolean {
+    const text = String(value || "").trim();
+
+    return text.length > 2 && text.startsWith("{") && text.endsWith("}");
+}
+
+/** Спецпеременная из общесистемного списка: у неё известны тип и описание. */
 export function isRslSystemSpecialVariableName(name: string): boolean {
     const normalized = normalizeIdentifier(name);
     const bareName = normalized.startsWith("{") &&

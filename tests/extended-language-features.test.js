@@ -66,7 +66,8 @@ function codes(items) {
         const catalog = getDefaults();
         assert.ok(catalog.size > 200);
         assert.strictEqual(catalog.find("StrLen").typeName, "Integer");
-        assert.strictEqual(catalog.find("{oper}").typeName, "integer");
+        /* Тип спецпеременной пишется как в RSL: раньше здесь было «integer». */
+        assert.strictEqual(catalog.find("{oper}").typeName, "Integer");
         assert.ok(catalog.find("Version").signature.startsWith("Version"));
         const command = catalog.findClass("RsdCommand");
         assert.ok(command);
