@@ -45,7 +45,7 @@ const CP866_HIGH: readonly number[] = Object.freeze([
     /* 0xF8 */ 0x00B0, 0x2219, 0x00B7, 0x221A, 0x2116, 0x00A4, 0x25A0, 0x00A0
 ]);
 
-export type RslSourceEncoding = "utf8" | "cp866";
+export type RslSourceEncoding = "utf8" | "cp866" | "utf16";
 
 export interface IRslDecodedSource {
     text: string;
@@ -79,6 +79,33 @@ function tryDecodeUtf8(buffer: Buffer): string | undefined {
     }
 }
 
+/**
+ * Текст файла в UTF-16 по его BOM.
+ *
+ * Такие макросы встречаются: в проверенном репозитории их 12 из 5784. Без этого
+ * файл читался побайтно — между буквами оказывались нулевые символы, и
+ * содержимое не разбиралось вовсе: ни подсветка, ни подсказки, ни Problems по
+ * нему не работали.
+ */
+function decodeUtf16(buffer: Buffer): string | undefined {
+    if (buffer.length < 2) {
+        return undefined;
+    }
+
+    if (buffer[0] === 0xFF && buffer[1] === 0xFE) {
+        return buffer.toString("utf16le", 2);
+    }
+
+    if (buffer[0] === 0xFE && buffer[1] === 0xFF) {
+        /* Big-endian: Node умеет только LE, поэтому байты меняются местами. */
+        const swapped = Buffer.from(buffer.subarray(2));
+        swapped.swap16();
+        return swapped.toString("utf16le");
+    }
+
+    return undefined;
+}
+
 /** Исходник и кодировка, в которой он оказался записан. */
 export function decodeRslSource(buffer: Buffer): IRslDecodedSource {
     /* BOM снимается: иначе он попадёт в текст первым символом. */
@@ -90,6 +117,12 @@ export function decodeRslSource(buffer: Buffer): IRslDecodedSource {
             text: buffer.toString("utf8", 3),
             encoding: "utf8"
         };
+    }
+
+    const utf16 = decodeUtf16(buffer);
+
+    if (utf16 !== undefined) {
+        return { text: utf16, encoding: "utf16" };
     }
 
     const utf8 = tryDecodeUtf8(buffer);

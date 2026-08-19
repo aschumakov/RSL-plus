@@ -53,6 +53,10 @@ import {
     type RslSquareKind
 } from "./lexer";
 import {
+    buildSpecialVariableDiagnostics,
+    normalizeSpecialVariablesMode
+} from "./diagnostics/specialVariableDiagnostics";
+import {
     isRslSpecialVariableReference,
     isRslSystemSpecialVariableName
 } from "./systemSpecialVariables";
@@ -112,6 +116,7 @@ export const DEFAULT_DIAGNOSTIC_SETTINGS: Required<IRslDiagnosticSettings> = {
      */
     redundantImports: true,
     unknownVariables: "off",
+    unknownSpecialVariables: "all",
     unknownVariablesKnownGlobalsFile: "",
     unknownVariablesAuditFile: "",
     dialect: "rsBank",
@@ -136,6 +141,9 @@ export function normalizeDiagnosticSettings(
         redundantImports: settings?.redundantImports !== false,
         unknownVariables: normalizeUnknownVariablesMode(
             settings?.unknownVariables
+        ),
+        unknownSpecialVariables: normalizeSpecialVariablesMode(
+            settings?.unknownSpecialVariables
         ),
         unknownVariablesKnownGlobalsFile:
             settings?.unknownVariablesKnownGlobalsFile || "",
@@ -693,6 +701,25 @@ function planWorkspaceRslDiagnostics(
                     module,
                     index,
                     resolver
+                ));
+            }
+        ],
+        [
+            "specialVariables",
+            options.unknownSpecialVariables !== "off",
+            () => {
+                result.push(...buildSpecialVariableDiagnostics(
+                    module,
+                    resolver,
+                    {
+                        mode: options.unknownSpecialVariables,
+                        knownGlobalsFile:
+                            options.unknownVariablesKnownGlobalsFile,
+                        limit: Math.max(
+                            0,
+                            options.maxProblems - result.length
+                        )
+                    }
                 ));
             }
         ],

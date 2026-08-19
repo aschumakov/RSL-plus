@@ -40,6 +40,7 @@ const tests = [
     "fast-completion-mutations.test.js",
     "import-chm.test.js",
     "special-variables.test.js",
+    "expression-checks.test.js",
 ];
 
 let failed = false;

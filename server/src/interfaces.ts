@@ -72,6 +72,14 @@ export interface IRslDiagnosticSettings {
      * объявления в проекте само по себе ошибкой не является.
      */
     unknownVariables?: RslUnknownVariablesSetting;
+    /**
+     * Предупреждать о спецпеременной, которой нет ни в справочнике, ни в
+     * объявлениях файла.
+     *
+     * По умолчанию assigned: проверяются только имена, которым в файле
+     * присваивают значение, — такие ведут себя как обычные переменные.
+     */
+    unknownSpecialVariables?: RslSpecialVariablesSetting;
     /** Файл со списком известных глобальных имён: одно имя на строку. */
     unknownVariablesKnownGlobalsFile?: string;
     /**
@@ -84,6 +92,9 @@ export interface IRslDiagnosticSettings {
 }
 
 export type RslUnknownVariablesSetting = "off" | "safe" | "strict";
+
+/** Режим проверки спецпеременных: предупреждать или молчать. */
+export type RslSpecialVariablesSetting = "off" | "assigned" | "all";
 
 export type RslLanguageDialect = "rsBank" | "coreRsl";
 

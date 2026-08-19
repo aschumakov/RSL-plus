@@ -588,18 +588,22 @@ export function classifySquareBlock(
         next++;
     }
 
-    if (source.charAt(next) === "(" || /#+/.test(body)) {
-        return "output";
-    }
-
+    /*
+     * Сначала смотрим на само содержимое: блок с запросом остаётся запросом и
+     * тогда, когда за ним идут подстановки — `[select …] (Account, Summa:l);`.
+     * Прежде такой блок считался формой только потому, что за ним стоит `(`.
+     */
     const significant = body
         .replace(/^\s*(?:(?:--|\/\/)\s*[^\r\n]*(?:\r?\n|$)|\/\*[\s\S]*?\*\/)*/g, "")
         .trimStart();
     const word = significant.match(/^([A-Za-zА-Яа-яЁё_][\wА-Яа-яЁё]*)/);
 
-    return word && SQL_SQUARE_START.has(word[1].toLowerCase())
-        ? "sql"
-        : "output";
+    if (word && SQL_SQUARE_START.has(word[1].toLowerCase())) {
+        return "sql";
+    }
+
+    /* Всё остальное — текст: форма вывода с подстановками или просто текст. */
+    return "output";
 }
 
 function isArrayIndexStart(
@@ -627,20 +631,175 @@ function isArrayIndexStart(
             token.kind === "number" ||
             token.kind === "string"
         ) {
-            return true;
+            /*
+             * Индексируют переменную, а не служебное слово: в
+             * `else [<n_d>0</n_d>];` скобки открывают текстовый блок.
+             */
+            return token.kind !== "identifier" ||
+                !STATEMENT_BEFORE_BLOCK.has(normalizeIdentifier(token.value));
         }
 
+        /*
+         * Закрывающая скобка условия индексом не начинается: в
+         * `if ( ll.isdop ) [<n_d>1</n_d>];` квадратные скобки — текстовый
+         * блок, а не обращение к элементу массива.
+         */
         return token.kind === "symbol" &&
-            (token.raw === ")" || token.raw === "]");
+            (token.raw === "]" ||
+                (token.raw === ")" && !closesCondition(tokens, index)));
     }
 
     return false;
 }
 
+/** Скобка `)` закрывает условие IF, WHILE, FOR, WITH или UNTIL. */
+function closesCondition(tokens: IRslToken[], index: number): boolean {
+    let depth = 0;
 
+    for (let at = index; at >= 0; at--) {
+        const token = tokens[at];
+
+        if (token.kind !== "symbol") {
+            continue;
+        }
+
+        if (token.raw === ")") {
+            depth++;
+            continue;
+        }
+
+        if (token.raw !== "(") {
+            continue;
+        }
+
+        depth--;
+
+        if (depth > 0) {
+            continue;
+        }
+
+        for (let before = at - 1; before >= 0; before--) {
+            const previous = tokens[before];
+
+            if (
+                previous.kind === "whitespace" ||
+                previous.kind === "newline" ||
+                previous.kind === "comment"
+            ) {
+                continue;
+            }
+
+            return previous.kind === "identifier" &&
+                CONDITION_KEYWORDS.has(normalizeIdentifier(previous.value));
+        }
+
+        return false;
+    }
+
+    return false;
+}
+
+/* Служебные слова, после которых квадратная скобка открывает текст. */
+const STATEMENT_BEFORE_BLOCK = new Set([
+    "else", "then", "do", "begin", "end", "return", "import"
+]);
+
+const CONDITION_KEYWORDS = new Set([
+    "if", "elseif", "while", "for", "with", "until"
+]);
+
+
+/**
+ * Конец текстового блока `[ … ]`.
+ *
+ * Блок кончается той скобкой, которая закрывает предложение: за ней идёт `;`
+ * или список подстановок `(…)`. Прочие `]` внутри — часть текста: в экранных
+ * формах ими помечают поля, `│27.1 Договор  [#]`. Раньше блок обрывался на
+ * первой же скобке, и остаток формы разбирался как код — со всеми
+ * вытекающими замечаниями о синтаксисе в тексте документа.
+ */
 function findSimpleSquareEnd(source: string, start: number): number {
-    const close = source.indexOf("]", start + 1);
-    return close >= 0 ? close + 1 : source.length;
+    const balanced = findBalancedSquareEnd(source, start);
+
+    if (balanced >= 0) {
+        return balanced;
+    }
+
+    /*
+     * Скобки не сошлись — в тексте формы попадается одиночная. Тогда блок
+     * кончается той скобкой, за которой идёт конец предложения или список
+     * подстановок, а если и такой нет — первой попавшейся, как раньше.
+     */
+    let close = source.indexOf("]", start + 1);
+
+    while (close >= 0) {
+        let next = close + 1;
+
+        while (next < source.length && /\s/.test(source.charAt(next))) {
+            next++;
+        }
+
+        const following = source.charAt(next);
+
+        if (following === ";" || following === "(") {
+            return close + 1;
+        }
+
+        close = source.indexOf("]", close + 1);
+    }
+
+    const first = source.indexOf("]", start + 1);
+
+    return first >= 0 ? first + 1 : source.length;
+}
+
+/**
+ * Парная закрывающая скобка блока; -1, если её нет.
+ *
+ * Внутренние `[ ]` считаются: в экранной форме ими помечают поля —
+ * `│27.1 Договор  [#]`, — и блок кончается не на них. Содержимое кавычек
+ * пропускается: `select '[^[[:digit:]]]*' from dual` скобки не открывает.
+ */
+function findBalancedSquareEnd(source: string, start: number): number {
+    let depth = 0;
+
+    for (let index = start; index < source.length; index++) {
+        const character = source.charAt(index);
+
+        if (character === "\"" || character === "'") {
+            index = findQuoteEnd(source, index, character);
+            continue;
+        }
+
+        if (character === "[") {
+            depth++;
+            continue;
+        }
+
+        if (character === "]") {
+            depth--;
+
+            if (depth === 0) {
+                return index + 1;
+            }
+        }
+    }
+
+    return -1;
+}
+
+/** Индекс закрывающей кавычки; при её отсутствии — конец текста. */
+function findQuoteEnd(source: string, start: number, quote: string): number {
+    for (let index = start + 1; index < source.length; index++) {
+        if (
+            source.charAt(index) === quote &&
+            !isEscapedByBackslashes(source, index)
+        ) {
+            return index;
+        }
+    }
+
+    return source.length;
 }
 
 function advanceTo(

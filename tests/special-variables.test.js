@@ -12,6 +12,9 @@
  */
 
 const assert = require("assert");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
 
 const { lexRsl } = require("../server/out/lexer");
 const { buildRslDiagnostics } = require("../server/out/diagnostics");
@@ -109,9 +112,13 @@ async function main() {
             RSL_SYSTEM_SPECIAL_VARIABLES.map(variable => variable.type)
         );
 
+        /*
+         * Variant — у тех, что объявлены в globals.mac поставки: там указаны
+         * только имена, тип придумывать нечем.
+         */
         assert.deepStrictEqual(
             [...types].sort(),
-            ["Bool", "Date", "Integer", "String"]
+            ["Bool", "Date", "Integer", "String", "Variant"]
         );
 
         const byName = new Map(
@@ -162,6 +169,158 @@ async function main() {
         assert.match(
             String(found.symbol.documentation || ""),
             /код структурного подразделения/i
+        );
+    });
+
+    await test("присваивание без объявления замечается по умолчанию", () => {
+        const source = [
+            "Macro Test()",
+            "  Var x, {Объявленная};",
+            "  {Объявленная} = 1;",
+            "  {txtfile} = GetIniString(\"TEXTDIR\");",
+            "  x = {curdate};",
+            "End;"
+        ].join("\n");
+        const found = diagnose(source, {})
+            .filter(item => item.code === "unknown-special-variable");
+
+        /*
+         * Имя, которому присваивают, — обычная переменная, и её объявляют
+         * через VAR. Объявленная рядом и общесистемная {curdate} к проверке
+         * отношения не имеют.
+         */
+        assert.deepStrictEqual(
+            found.map(item => String(item.data.name)),
+            ["{txtfile}"]
+        );
+        assert.match(found[0].message, /объявления нет/u);
+    });
+
+    await test("описка в имени замечается и называет похожее", () => {
+        /*
+         * Ради этого правило и включено: компилятор `{currdate}` не заметит —
+         * имя в скобках законно любое, и значение просто окажется пустым.
+         */
+        const source = [
+            "Macro Test()",
+            "  Var x;",
+            "  x = {currdate};",
+            "  x = {curdate};",
+            "End;"
+        ].join("\n");
+        const found = diagnose(source, {})
+            .filter(item => item.code === "unknown-special-variable");
+
+        assert.deepStrictEqual(
+            found.map(item => String(item.data.name)),
+            ["{currdate}"]
+        );
+        assert.match(found[0].message, /имелась в виду \{curdate\}/u);
+        assert.strictEqual(found[0].severity, 2);
+    });
+
+    await test("известное имя и режим off замечаний не дают", () => {
+        const source = [
+            "Macro Test()",
+            "  Var x;",
+            "  x = {Name_Oper};",
+            "  x = {ДругоеИмяБанка};",
+            "End;"
+        ].join("\n");
+
+        /* {Name_Oper} объявлена в globals.mac — она известна. */
+        assert.deepStrictEqual(
+            diagnose(source, {})
+                .filter(item => item.code === "unknown-special-variable")
+                .map(item => String(item.data.name)),
+            ["{ДругоеИмяБанка}"]
+        );
+        assert.deepStrictEqual(
+            diagnose(source, { unknownSpecialVariables: "off" })
+                .filter(item => item.code === "unknown-special-variable"),
+            []
+        );
+        /* Режим assigned проверяет только имена с присваиванием. */
+        assert.deepStrictEqual(
+            diagnose(source, { unknownSpecialVariables: "assigned" })
+                .filter(item => item.code === "unknown-special-variable"),
+            []
+        );
+    });
+
+    await test("режим all ловит и читаемое незнакомое имя", () => {
+        const source = [
+            "Macro Test()",
+            "  Var x, {МойПараметр};",
+            "  x = {curdate};",
+            "  x = {Name_Oper};",
+            "  x = {МойПараметр};",
+            "  x = {CNum};",
+            "  x = {ResidentCountryCodeNuum};",
+            "End;"
+        ].join("\n");
+        const found = diagnose(source, { unknownSpecialVariables: "all" })
+            .filter(item => item.code === "unknown-special-variable")
+            .map(item => String(item.data.name));
+
+        /*
+         * {curdate} описана в справке, {Name_Oper} объявлена в globals.mac,
+         * {МойПараметр} объявлена рядом, {CNum} встречается в примерах
+         * справки. Остаётся описка в имени.
+         */
+        assert.deepStrictEqual(found, ["{ResidentCountryCodeNuum}"]);
+    });
+
+    await test("список известных имён снимает замечание", () => {
+        const file = path.join(
+            fs.mkdtempSync(path.join(os.tmpdir(), "rsl-known-")),
+            "known.txt"
+        );
+        fs.writeFileSync(file, "# имена банка\n{txtfile}\n", "utf8");
+        const source = [
+            "Macro Test()",
+            "  Var x;",
+            "  x = {txtfile};",
+            "End;"
+        ].join("\n");
+        const settings = {
+            unknownSpecialVariables: "all",
+            unknownVariablesKnownGlobalsFile: file
+        };
+
+        assert.deepStrictEqual(
+            diagnose(source, settings)
+                .filter(item => item.code === "unknown-special-variable"),
+            []
+        );
+        assert.strictEqual(
+            diagnose(source, { unknownSpecialVariables: "all" })
+                .filter(item => item.code === "unknown-special-variable")
+                .length,
+            1
+        );
+    });
+
+    await test("мусор из двоичной вставки именем не считается", () => {
+        /*
+         * В репозитории есть `.mac` со встроенным содержимым XLSX: открывающая
+         * скобка там попадается случайно, и «именем» оказывается страница
+         * мусора. Предел — 80 символов из сводки синтаксиса.
+         */
+        const junk = "{" + "ЮЇнйR".repeat(3) + "}";
+        const long = "{" + "И".repeat(100) + "}";
+        const source = [
+            "Macro Test()",
+            "  Var x;",
+            "  x = " + junk + ";",
+            "  x = " + long + ";",
+            "End;"
+        ].join("\n");
+
+        assert.deepStrictEqual(
+            diagnose(source, { unknownSpecialVariables: "all" })
+                .filter(item => item.code === "unknown-special-variable"),
+            []
         );
     });
 

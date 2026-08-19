@@ -4,7 +4,9 @@ export type RslSystemSpecialVariableType =
     | "String"
     | "Integer"
     | "Bool"
-    | "Date";
+    | "Date"
+    /* Тип известен не всегда: globals.mac объявляет имена без типов. */
+    | "Variant";
 
 export interface IRslSystemSpecialVariable {
     name: string;
@@ -13,7 +15,7 @@ export interface IRslSystemSpecialVariable {
 }
 
 /**
- * Общесистемные спецпеременные RS-Bank.
+ * Общесистемные спецпеременные RS-Bank: из справки и из globals.mac поставки.
  *
  * Фигурные скобки входят в синтаксис ссылки, но не в имя, которое хранится
  * здесь. Список также используется для completion и семантической проверки.
@@ -159,6 +161,43 @@ IRslSystemSpecialVariable[] = [
         name: "Version",
         type: "String",
         description: "Номер версии системы."
+    },
+    /*
+     * Дальше — те, что объявлены в globals.mac поставки RS-Bank, но в справку
+     * не попали. Тип и смысл там не указаны: файл только объявляет имена, —
+     * поэтому тип Variant, а описание говорит ровно то, что известно. В коде
+     * их пишут наравне с описанными: `p.Name_Oper = {Name_Oper};` стоит рядом
+     * с `p.curdate = {curdate};`.
+     */
+    {
+        name: "Name_Oper",
+        type: "Variant",
+        description: "Объявлена в globals.mac; в справке не описана."
+    },
+    {
+        name: "ResidentCountryCodeNum",
+        type: "Variant",
+        description: "Объявлена в globals.mac; в справке не описана."
+    },
+    {
+        name: "HeadBankID",
+        type: "Variant",
+        description: "Объявлена в globals.mac; в справке не описана."
+    },
+    {
+        name: "DprtCurDate",
+        type: "Variant",
+        description: "Объявлена в globals.mac; в справке не описана."
+    },
+    {
+        name: "OperCloseDateRestrict",
+        type: "Variant",
+        description: "Объявлена в globals.mac; в справке не описана."
+    },
+    {
+        name: "WebSessionID",
+        type: "Variant",
+        description: "Объявлена в globals.mac; в справке не описана."
     }
 ];
 
@@ -167,6 +206,32 @@ const RSL_SYSTEM_SPECIAL_VARIABLE_NAMES = new Set(
         normalizeIdentifier(variable.name)
     )
 );
+
+/**
+ * Спецпеременные, которые справка показывает только в примерах.
+ *
+ * Описания и типа у них нет: {CNum} стоит в примере обращения к другому
+ * макросу, {SelfID} — в примерах PTInter. Придумывать им смысл нельзя, но и
+ * считать неизвестными неправильно: справка их всё-таки называет.
+ */
+export const RSL_SPECIAL_VARIABLES_FROM_EXAMPLES: readonly string[] = [
+    "CNum",
+    "SelfID"
+];
+
+const EXAMPLE_NAMES = new Set(
+    RSL_SPECIAL_VARIABLES_FROM_EXAMPLES.map(name => name.toLowerCase())
+);
+
+/** Имя из примеров справки; скобки в имени не обязательны. */
+export function isRslSpecialVariableFromExamples(name: string): boolean {
+    const text = String(name || "").trim();
+    const bare = text.startsWith("{") && text.endsWith("}")
+        ? text.slice(1, -1)
+        : text;
+
+    return EXAMPLE_NAMES.has(bare.toLowerCase());
+}
 
 /**
  * Ссылка на спецпеременную: любая последовательность символов в фигурных

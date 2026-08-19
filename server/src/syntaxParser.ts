@@ -205,6 +205,185 @@ const BINARY_PRECEDENCE: { [operator: string]: number } = {
     "&": 4
 };
 
+/*
+ * Операторы, у которых обязателен левый операнд. `+`, `-`, `@`, `~` и NOT в
+ * список не входят: они бывают унарными, и `x = -y` — обычная запись.
+ */
+const REQUIRES_LEFT_OPERAND = new Set([
+    "*", "/", "%", "<", ">", "<=", ">=", "==", "!=", "=", "&", "|", "^"
+]);
+
+/* Перед таким токеном операнда нет: там начало выражения или другой оператор. */
+const OPERAND_ABSENT_BEFORE = new Set([
+    "(", ",", "*", "/", "%", "<", ">", "<=", ">=", "==", "!=", "=", "&", "|",
+    "^", "+", "-", "@", "~", ":"
+]);
+
+/** Что может стоять сразу после точки: имя члена или свойство по умолчанию. */
+function isMemberNameToken(token?: IRslToken): boolean {
+    if (!token) {
+        return false;
+    }
+
+    return token.kind === "identifier" ||
+        (token.kind === "symbol" && token.raw === "(");
+}
+
+/**
+ * Дешёвые проверки выражения по его токенам.
+ *
+ * Разбор оператора уже собрал этот список токенов, поэтому отдельного прохода
+ * по документу и повторного лексирования здесь нет: один линейный просмотр
+ * того, что и так в руках.
+ *
+ * Проверяется только то, что подтверждено рабочим кодом: пропущенное имя после
+ * точки, оператор без левого операнда и присваивание не туда. Пустой аргумент
+ * не проверяется — в рабочих файлах встречается `var a, , b`, и правило RSL на
+ * этот счёт не подтверждено.
+ */
+export function checkExpressionTokens(
+    tokens: readonly IRslToken[],
+    problems: IRslSyntaxDiagnostic[]
+): void {
+    for (let index = 0; index < tokens.length; index++) {
+        const token = tokens[index];
+
+        if (token.kind !== "symbol") {
+            continue;
+        }
+
+        const next = tokens[index + 1];
+        const previous = tokens[index - 1];
+
+        /*
+         * Точка без имени: `obj..field`, `Call(obj.)`, `Call(obj., value)`.
+         * Точка в самом конце выражения не считается ошибкой: там ещё печатают,
+         * и подсказка членов как раз для этого и вызывается.
+         */
+        if (token.raw === "." && next && !isMemberNameToken(next)) {
+            problems.push({
+                code: "missing-member-name",
+                message: "После точки пропущено имя члена",
+                start: token.start,
+                end: token.end,
+                severity: "error"
+            });
+            continue;
+        }
+
+        /*
+         * Оператор без левого операнда: `value = * rate`, `a + / b`.
+         * Исключение — звёздочка формата: `String(Value:*:*, 0, Point)` и
+         * `string(Value:o:12:*:0)` в RSL законны, `*` там значит «по месту».
+         */
+        if (REQUIRES_LEFT_OPERAND.has(token.raw)) {
+            const formatPlaceholder = token.raw === "*" &&
+                previous?.kind === "symbol" && previous.raw === ":";
+            const absent = !previous ||
+                (previous.kind === "symbol" &&
+                    OPERAND_ABSENT_BEFORE.has(previous.raw));
+
+            if (absent && !formatPlaceholder) {
+                problems.push({
+                    code: "missing-operand",
+                    message: `Перед оператором '${token.raw}' пропущен операнд`,
+                    start: token.start,
+                    end: token.end,
+                    severity: "error"
+                });
+                continue;
+            }
+        }
+
+        if (token.raw === "=") {
+            checkAssignmentTarget(tokens, index, problems);
+        }
+    }
+}
+
+/**
+ * Куда присваивают.
+ *
+ * Слева от `=` может стоять имя, поле, элемент массива и параметризованное
+ * свойство: `cmd.value("t_ref") = AddRef` — обычная запись RSL, таких в
+ * проверенном репозитории 43945. Литерал и скобочное выражение — нет.
+ */
+function checkAssignmentTarget(
+    tokens: readonly IRslToken[],
+    index: number,
+    problems: IRslSyntaxDiagnostic[]
+): void {
+    const target = tokens[index - 1];
+
+    if (!target) {
+        return;
+    }
+
+    const invalid = (start: number, end: number): void => {
+        problems.push({
+            code: "invalid-assignment-target",
+            message: "Присвоить можно переменной, полю, элементу или свойству",
+            start,
+            end,
+            severity: "error"
+        });
+    };
+
+    if (target.kind === "number" || target.kind === "string") {
+        invalid(target.start, target.end);
+        return;
+    }
+
+    if (target.kind !== "symbol" || target.raw !== ")") {
+        return;
+    }
+
+    /*
+     * Закрывающая скобка бывает и концом вызова, и концом скобочного
+     * выражения. Различает их то, что стоит перед открывающей: имя, точка,
+     * `)` или `]` — значит вызов, индекс или свойство по умолчанию. Последнее
+     * в RSL пишут постоянно: `dlg.("KNP") = ""`, `this.(id) = value`.
+     */
+    let depth = 0;
+
+    for (let at = index - 1; at >= 0; at--) {
+        const item = tokens[at];
+
+        if (item.kind !== "symbol") {
+            continue;
+        }
+
+        if (item.raw === ")") {
+            depth++;
+            continue;
+        }
+
+        if (item.raw !== "(") {
+            continue;
+        }
+
+        depth--;
+
+        if (depth > 0) {
+            continue;
+        }
+
+        const before = tokens[at - 1];
+        const isCall = before &&
+            (before.kind === "identifier" ||
+                (before.kind === "symbol" &&
+                    (before.raw === ")" ||
+                        before.raw === "]" ||
+                        before.raw === ".")));
+
+        if (!isCall) {
+            invalid(item.start, tokens[index - 1].end);
+        }
+
+        return;
+    }
+}
+
 /**
  * Строит best-effort дерево выражения. Круглые скобки после выражения
  * намеренно называются PostfixAccessExpression: в RSL одна форма обозначает
@@ -2183,6 +2362,13 @@ class Parser {
     private parseExpression(
         tokens: IRslToken[]
     ): IRslSyntaxNode | undefined {
+        /*
+         * Проверки выражения идут по тем же токенам, что разбор уже собрал для
+         * этого оператора, и не зависят от того, строится ли дерево: на рабочем
+         * пути оно выключено ради скорости.
+         */
+        checkExpressionTokens(tokens, this.diagnostics);
+
         return this.buildExpressionTree
             ? parseRslExpressionTokens(tokens)
             : undefined;
