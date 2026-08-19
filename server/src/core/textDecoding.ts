@@ -92,18 +92,29 @@ function decodeUtf16(buffer: Buffer): string | undefined {
         return undefined;
     }
 
-    if (buffer[0] === 0xFF && buffer[1] === 0xFE) {
-        return buffer.toString("utf16le", 2);
+    const littleEndian = buffer[0] === 0xFF && buffer[1] === 0xFE;
+    const bigEndian = buffer[0] === 0xFE && buffer[1] === 0xFF;
+
+    if (!littleEndian && !bigEndian) {
+        return undefined;
     }
 
-    if (buffer[0] === 0xFE && buffer[1] === 0xFF) {
-        /* Big-endian: Node умеет только LE, поэтому байты меняются местами. */
-        const swapped = Buffer.from(buffer.subarray(2));
-        swapped.swap16();
-        return swapped.toString("utf16le");
+    /*
+     * Последний символ может быть оборван: файл записан не до конца или испорчен.
+     * Неполная пара байтов отбрасывается — иначе swap16 бросает RangeError, и
+     * вместе с чтением файла срывается индексация всего модуля.
+     */
+    const body = buffer.subarray(2, buffer.length - (buffer.length % 2));
+
+    if (littleEndian) {
+        return body.toString("utf16le");
     }
 
-    return undefined;
+    /* Big-endian: Node умеет только LE, поэтому байты меняются местами. */
+    const swapped = Buffer.from(body);
+    swapped.swap16();
+
+    return swapped.toString("utf16le");
 }
 
 /** Исходник и кодировка, в которой он оказался записан. */

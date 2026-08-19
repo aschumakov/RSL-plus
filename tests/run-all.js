@@ -41,6 +41,7 @@ const tests = [
     "import-chm.test.js",
     "special-variables.test.js",
     "expression-checks.test.js",
+    "stability-regressions.test.js",
 ];
 
 let failed = false;

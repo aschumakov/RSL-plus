@@ -245,11 +245,26 @@ export function checkExpressionTokens(
     tokens: readonly IRslToken[],
     problems: IRslSyntaxDiagnostic[]
 ): void {
+    /*
+     * Круглые скобки считаются по ходу: чтобы отличить `f(x) = y` от
+     * `(a + b) = y`, нужна парная открывающая скобка, и искать её обходом
+     * назад для каждого `=` значит платить за длину выражения дважды.
+     */
+    const openParens: number[] = [];
+    let lastCloseOpensAt = -1;
+
     for (let index = 0; index < tokens.length; index++) {
         const token = tokens[index];
 
         if (token.kind !== "symbol") {
             continue;
+        }
+
+        if (token.raw === "(") {
+            openParens.push(index);
+        } else if (token.raw === ")") {
+            const opened = openParens.pop();
+            lastCloseOpensAt = opened === undefined ? -1 : opened;
         }
 
         const next = tokens[index + 1];
@@ -296,7 +311,7 @@ export function checkExpressionTokens(
         }
 
         if (token.raw === "=") {
-            checkAssignmentTarget(tokens, index, problems);
+            checkAssignmentTarget(tokens, index, lastCloseOpensAt, problems);
         }
     }
 }
@@ -311,6 +326,8 @@ export function checkExpressionTokens(
 function checkAssignmentTarget(
     tokens: readonly IRslToken[],
     index: number,
+    /* Позиция скобки, открывающей последнюю закрытую группу; -1, если её нет. */
+    lastCloseOpensAt: number,
     problems: IRslSyntaxDiagnostic[]
 ): void {
     const target = tokens[index - 1];
@@ -344,43 +361,21 @@ function checkAssignmentTarget(
      * `)` или `]` — значит вызов, индекс или свойство по умолчанию. Последнее
      * в RSL пишут постоянно: `dlg.("KNP") = ""`, `this.(id) = value`.
      */
-    let depth = 0;
-
-    for (let at = index - 1; at >= 0; at--) {
-        const item = tokens[at];
-
-        if (item.kind !== "symbol") {
-            continue;
-        }
-
-        if (item.raw === ")") {
-            depth++;
-            continue;
-        }
-
-        if (item.raw !== "(") {
-            continue;
-        }
-
-        depth--;
-
-        if (depth > 0) {
-            continue;
-        }
-
-        const before = tokens[at - 1];
-        const isCall = before &&
-            (before.kind === "identifier" ||
-                (before.kind === "symbol" &&
-                    (before.raw === ")" ||
-                        before.raw === "]" ||
-                        before.raw === ".")));
-
-        if (!isCall) {
-            invalid(item.start, tokens[index - 1].end);
-        }
-
+    if (lastCloseOpensAt < 0) {
         return;
+    }
+
+    const opening = tokens[lastCloseOpensAt];
+    const before = tokens[lastCloseOpensAt - 1];
+    const isCall = before &&
+        (before.kind === "identifier" ||
+            (before.kind === "symbol" &&
+                (before.raw === ")" ||
+                    before.raw === "]" ||
+                    before.raw === ".")));
+
+    if (!isCall) {
+        invalid(opening.start, target.end);
     }
 }
 

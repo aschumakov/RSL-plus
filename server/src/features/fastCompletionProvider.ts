@@ -156,8 +156,22 @@ function findReceiverBeforeDot(
     let index = tokenIndexBefore(tokens, offset);
     let prefix = "";
 
-    /* Токены после курсора и пробелы к обращению не относятся. */
+    /*
+     * Токены после курсора к обращению не относятся, а перевод строки его
+     * заканчивает: в
+     *
+     *     Field7.
+     *     |
+     *
+     * точка осталась на прошлой строке, и члены Field7 здесь уже не при чём.
+     * Прежде перевод строки просто пропускался — с пробелами на новой строке
+     * ошибка не проявлялась, потому что до него доходил другой цикл.
+     */
     while (index >= 0 && !endsAtOrBefore(tokens[index], offset)) {
+        if (tokens[index].kind === "newline" && tokens[index].end <= offset) {
+            return undefined;
+        }
+
         index--;
     }
 
