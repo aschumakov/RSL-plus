@@ -911,15 +911,29 @@ async function testImportContextDrivesHighlightAndNavigation() {
 
 function testCompletionPayloadIsBoundedAndResolvedLazily() {
     const transport = new CompletionTransport({
-        maxItems: 3,
+        searchLimit: 3,
         cacheEntries: 8
     });
-    const prepared = transport.prepare(Array.from({ length: 5 }, (_, index) => ({
+    const source = Array.from({ length: 5 }, (ignored, index) => ({
         label: `Item${index}`,
         detail: `Detail${index}`,
         documentation: `Documentation${index}`,
         data: { source: "test" }
-    })));
+    }));
+
+    /*
+     * Обычный список отдаётся целиком и помечается полным: `isIncomplete`
+     * означает «перезапроси на каждую букву», а не «результатов больше».
+     */
+    const whole = transport.prepare(source);
+    assert.strictEqual(whole.items.length, 5);
+    assert.strictEqual(whole.isIncomplete, false);
+
+    /* Ограничение и неполнота — только у поиска по всему проекту. */
+    const prepared = transport.prepare(source, {
+        limit: transport.limitForSearch,
+        incomplete: true
+    });
 
     assert.strictEqual(prepared.items.length, 3);
     assert.strictEqual(prepared.isIncomplete, true);
@@ -1055,11 +1069,19 @@ async function testInteractiveFallbackDoesNotMixVersions() {
         null,
         "Hover не должен отвечать по модели другой версии документа"
     );
+    /*
+     * Список отдаётся полным и до готовности модели.
+     *
+     * `isIncomplete` для редактора значит «перезапроси провайдер на каждую
+     * следующую букву», а не «ответ приблизительный». Пометка ответа из
+     * быстрого индекса неполным и приводила к пересчёту на каждый символ:
+     * состав и порядок менялись под руками, а разбор конкурировал с вводом.
+     */
     assert.strictEqual(
         completion.isIncomplete,
-        true,
-        "Completion обязан вернуть именно isIncomplete, чтобы клиент " +
-            "повторил запрос после готовности parse"
+        false,
+        "ответ до готовности модели не должен заставлять клиента " +
+            "перезапрашивать список на каждую букву"
     );
     /*
      * Пустой список пользователь читает как «в файле ничего не объявлено».

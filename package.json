@@ -4,7 +4,7 @@
    "description": "RSL / Object RSL language support with diagnostics, navigation and Quick Fixes",
    "author": "Veniamin Rakov + AChumakov",
    "license": "SEE LICENSE IN LICENSE.txt",
-   "version": "1.1.12",
+   "version": "1.2.0",
    "icon": "icon.png",
    "bugs": {
       "url": "https://github.com/aschumakov/RSL-plus/issues"
@@ -374,7 +374,8 @@
       "test:diagnostics": "npm run compile && node tests/diagnostics.test.js",
       "test:features": "npm run compile && node tests/language-features.test.js",
       "test:architecture": "npm run compile && node tests/server-services.test.js && node tests/scope-index.test.js && node tests/workspace-resolution.test.js",
-      "perf-report": "node build/perf-report.js"
+      "perf-report": "node build/perf-report.js",
+      "bench:completion": "npm run compile && node build/bench-completion.js"
    },
    "devDependencies": {
       "@types/node": "22.16.5",

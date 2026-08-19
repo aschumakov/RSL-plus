@@ -12,17 +12,34 @@ export function completionPrefixAt(source: string, offset: number): string {
     return fragment.match(/[\p{L}\p{N}_{}-]+$/u)?.[0] || "";
 }
 
+export interface IRslCompletionRankingOptions {
+    /**
+     * Отбрасывать нерелевантные элементы.
+     *
+     * Полный список, помеченный `isIncomplete: false`, отбрасывать нельзя:
+     * дальше фильтрует редактор, и после Backspace он фильтровал бы уже
+     * урезанный набор. Отбор нужен только там, где список заведомо
+     * ограничен — например при поиске по всему проекту.
+     */
+    dropIrrelevant?: boolean;
+}
+
 /**
- * Фильтрация и ранжирование в стиле language server-ов общего назначения:
- * сначала точный prefix, затем substring и fuzzy subsequence. При двух и
- * более введённых символах нерелевантные элементы не передаются клиенту.
+ * Ранжирование в стиле language server-ов общего назначения: сначала точный
+ * prefix, затем substring и fuzzy subsequence.
+ *
+ * Порядок задаётся до конца, без опоры на порядок сборки: приоритет, имя,
+ * вид элемента и модуль. Одинаковый снимок документа обязан давать не только
+ * тот же состав, но и тот же порядок.
  */
 export function rankCompletionItemsForPrefix(
     items: readonly CompletionItem[],
-    prefix: string
+    prefix: string,
+    options: IRslCompletionRankingOptions = {}
 ): CompletionItem[] {
     const normalizedPrefix = normalizeIdentifier(prefix);
-    const filterIrrelevant = normalizedPrefix.length >= 2;
+    const filterIrrelevant = options.dropIrrelevant === true &&
+        normalizedPrefix.length >= 2;
     const ranked: CompletionItem[] = [];
 
     for (const item of items) {
@@ -34,8 +51,7 @@ export function rankCompletionItemsForPrefix(
         ranked.push({
             ...item,
             filterText: item.filterText || label,
-            sortText: `${score}_${item.sortText ||
-                `7_${normalizeIdentifier(label)}`}`
+            sortText: stableSortText(item, score, label)
         });
     }
 
@@ -97,4 +113,28 @@ function isSubsequence(needle: string, haystack: string): boolean {
         }
     }
     return needleIndex === needle.length;
+}
+
+/**
+ * Окончательный ключ сортировки: приоритет, собственный порядок элемента,
+ * имя, вид и модуль.
+ *
+ * Последние части нужны для устойчивости: без них два одноимённых члена из
+ * разных модулей вставали в список в том порядке, в каком их успели собрать.
+ */
+function stableSortText(
+    item: CompletionItem,
+    score: number,
+    label: string
+): string {
+    const own = item.sortText || "7";
+    const detail = typeof item.detail === "string" ? item.detail : "";
+
+    return [
+        score,
+        own,
+        normalizeIdentifier(label),
+        item.kind ?? 0,
+        normalizeIdentifier(detail).slice(0, 40)
+    ].join("_");
 }

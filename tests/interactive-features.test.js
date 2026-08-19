@@ -217,7 +217,7 @@ function applyTextEdit(document, edit) {
         assert.ok(importItems.some(item => item.label === "library"));
     });
 
-    await test("Completion фильтрует по префиксу и сохраняет приоритет области", () => {
+    await test("Completion ранжирует по префиксу, не отбрасывая элементы", () => {
         const source = "Macro Test()\n  GetOr\nEnd;";
         const prefix = completionPrefixAt(
             source,
@@ -230,8 +230,29 @@ function applyTextEdit(document, edit) {
             { label: "UnrelatedImported", sortText: "5_unrelatedimported" },
             { label: "GetOrigin", sortText: "2_getorigin" }
         ], prefix);
+        /*
+         * Список отдаётся клиенту полным: отбор — его дело. Сервер задаёт
+         * только порядок, поэтому непохожее имя остаётся в наборе, но
+         * уходит в конец.
+         */
+        const order = [...items]
+            .sort((first, second) =>
+                String(first.sortText).localeCompare(String(second.sortText))
+            )
+            .map(item => item.label);
         assert.deepStrictEqual(
-            items.map(item => item.label),
+            order,
+            ["GetOrigin", "GetOrderFromImport", "UnrelatedImported"]
+        );
+
+        /* С отбором — только то, что похоже на набранное. */
+        const dropped = rankCompletionItemsForPrefix([
+            { label: "GetOrderFromImport", sortText: "5_getorderfromimport" },
+            { label: "UnrelatedImported", sortText: "5_unrelatedimported" },
+            { label: "GetOrigin", sortText: "2_getorigin" }
+        ], prefix, { dropIrrelevant: true });
+        assert.deepStrictEqual(
+            dropped.map(item => item.label),
             ["GetOrderFromImport", "GetOrigin"]
         );
         const own = items.find(item => item.label === "GetOrigin");

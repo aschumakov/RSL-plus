@@ -355,25 +355,34 @@ function getImportReferencesFromTokens(
     return references;
 }
 
-function computeImportReferences(
+export interface IRslImportReferenceScanner {
+    step(token: IRslToken, index: number): void;
+    finish(): IImportDefinitionTarget[];
+}
+
+/**
+ * Поиск директив Import, который можно прервать.
+ *
+ * Обход значимых токенов сам по себе стоит около пяти миллисекунд на файле
+ * 700 КБ — не из-за разбора директив, которых в файле десяток, а из-за самой
+ * длины потока. Фоновому расчёту это нельзя делать одним куском, поэтому
+ * состояние обхода живёт в замыкании: разобранная директива отмечает, до какого
+ * токена дальше идти нечего.
+ */
+export function createImportReferenceScanner(
     sourceTokens: IRslToken[]
-): IImportDefinitionTarget[] {
+): IRslImportReferenceScanner {
     /* Тот же отфильтрованный поток, что и у остальных: он уже посчитан. */
     const tokens = cachedSignificantTokens(sourceTokens);
     const result: IImportDefinitionTarget[] = [];
+    let resumeAt = 0;
 
-    for (let index = 0; index < tokens.length; index++) {
-        const token = tokens[index];
-
-        if (
-            token.kind !== "identifier" ||
-            token.value.toLowerCase() !== "import"
-        ) {
-            continue;
+    const step = (token: IRslToken, index: number): void => {
+        if (index < resumeAt || !isImportWord(token)) {
+            return;
         }
 
         let current: IRslToken[] = [];
-        let directiveFinished = false;
 
         for (let cursor = index + 1; cursor < tokens.length; cursor++) {
             const part = tokens[cursor];
@@ -386,9 +395,8 @@ function computeImportReferences(
                 current = [];
 
                 if (part.raw === ";") {
-                    index = cursor;
-                    directiveFinished = true;
-                    break;
+                    resumeAt = cursor + 1;
+                    return;
                 }
 
                 continue;
@@ -398,27 +406,53 @@ function computeImportReferences(
              * В повреждённом коде без ; не захватываем следующую
              * директиву Import как часть имени предыдущего файла.
              */
-            if (
-                current.length > 0 &&
-                part.kind === "identifier" &&
-                part.value.toLowerCase() === "import"
-            ) {
+            if (current.length > 0 && isImportWord(part)) {
                 addImportReference(current, result);
-                index = cursor - 1;
-                directiveFinished = true;
-                break;
+                resumeAt = cursor;
+                return;
             }
 
             current.push(part);
         }
 
-        if (!directiveFinished) {
-            addImportReference(current, result);
-            break;
+        /* Директива не закрыта до конца файла: дальше искать нечего. */
+        addImportReference(current, result);
+        resumeAt = tokens.length;
+    };
+
+    return {
+        step,
+        finish: () => {
+            importReferencesCache.set(sourceTokens, result);
+
+            return result;
         }
+    };
+}
+
+/**
+ * Слово Import.
+ *
+ * Длина проверяется раньше регистра: приведение к нижнему регистру создаёт
+ * строку на каждый идентификатор файла, а слово Import — ровно шесть символов.
+ */
+function isImportWord(token: IRslToken): boolean {
+    return token.kind === "identifier" &&
+        token.value.length === 6 &&
+        token.value.toLowerCase() === "import";
+}
+
+function computeImportReferences(
+    sourceTokens: IRslToken[]
+): IImportDefinitionTarget[] {
+    const scanner = createImportReferenceScanner(sourceTokens);
+    const tokens = cachedSignificantTokens(sourceTokens);
+
+    for (let index = 0; index < tokens.length; index++) {
+        scanner.step(tokens[index], index);
     }
 
-    return result;
+    return scanner.finish();
 }
 
 function addImportReference(

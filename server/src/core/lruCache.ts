@@ -47,6 +47,11 @@ export class LruCache<K, V> {
         this.values.delete(key);
     }
 
+    /** Ключи от давних к недавним; порядок использования при этом не меняется. */
+    keys(): IterableIterator<K> {
+        return this.values.keys();
+    }
+
     clear(): void {
         this.values.clear();
     }

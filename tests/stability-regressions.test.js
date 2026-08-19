@@ -142,7 +142,20 @@ test("подсказка членов не переходит через пер�
     /* Курсор сразу за точкой — обращение к члену. */
     assert.strictEqual(ask(head).length, 2);
     assert.strictEqual(ask(head + " ").length, 2);
-    assert.strictEqual(ask(head + "set").length, 1);
+
+    /*
+     * С набранной частью имени состав тот же: список отдаётся полным, а
+     * набранное задаёт только порядок — отбор делает редактор.
+     */
+    const typed = ask(head + "set");
+    assert.strictEqual(typed.length, 2);
+    assert.strictEqual(
+        [...typed]
+            .sort((first, second) =>
+                String(first.sortText).localeCompare(String(second.sortText))
+            )[0].label,
+        "setText"
+    );
     /* После перевода строки точка относится к прошлой строке. */
     assert.strictEqual(ask(head + "\n"), undefined);
     assert.strictEqual(ask(head + "\n  "), undefined);
@@ -152,25 +165,34 @@ test("подсказка членов не переходит через пер�
 test("проверки выражения не меняют характер роста разбора", () => {
     /*
      * Проверки выражения идут по токенам оператора и добавляют постоянную долю
-     * к разбору. Предел закреплён именно как рост: на файле вдвое большего
-     * размера время не должно вырастать больше чем в три раза.
+     * к разбору. Предел закреплён именно как характер роста.
      */
     const line = "value = a + b * (c - d) / e;\n";
-    const small = line.repeat(4000);
-    const large = line.repeat(8000);
+    const small = line.repeat(6000);
+    const large = line.repeat(24000);
     const parse = source => parseRslSyntax(source, undefined, {
         buildExpressionTree: false
     });
-    parse(small);
-    parse(large);
 
-    const smallTime = milliseconds(() => parse(small), 3);
-    const largeTime = milliseconds(() => parse(large), 3);
+    for (let run = 0; run < 3; run++) {
+        parse(small);
+        parse(large);
+    }
+
+    const smallTime = milliseconds(() => parse(small));
+    const largeTime = milliseconds(() => parse(large));
     const ratio = largeTime / Math.max(smallTime, 0.001);
 
+    /*
+     * Размер вчетверо, и оба размера — из ровной части кривой: на файлах
+     * меньше сотни килобайт разбор ускоряют кэши процессора, и отношение
+     * говорило бы о них, а не об алгоритме. Линейный разбор даёт около четырёх,
+     * квадратичный — около шестнадцати; порог посередине различает их и не
+     * зависит от того, насколько занята машина.
+     */
     assert.ok(
-        ratio < 3,
-        "рост в " + ratio.toFixed(1) + " раза при двукратном размере: " +
+        ratio < 8,
+        "рост в " + ratio.toFixed(1) + " раза при четырёхкратном размере: " +
             smallTime.toFixed(1) + " мс -> " + largeTime.toFixed(1) + " мс"
     );
 });

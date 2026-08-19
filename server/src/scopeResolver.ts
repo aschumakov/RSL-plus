@@ -521,6 +521,17 @@ export class RslScopeResolver {
      * имена — дело Auto Import, у которого поиск по проекту свой (см.
      * findAutoImportCandidates).
      */
+    /**
+     * Ревизия прикладных каталогов.
+     *
+     * Входит в ключ сеанса Completion: состав подсказок зависит от того,
+     * какие модули уже прочитаны, и догрузка каталога обязана попасть в
+     * следующий сеанс, а не изменить уже открытый список.
+     */
+    get catalogRevision(): number {
+        return this.platformModules?.revision ?? 0;
+    }
+
     resolveName(
         uri: string,
         tree: RslSymbol,

@@ -1,7 +1,10 @@
+import { CompletionItemKind } from "vscode-languageserver";
+
 import {
     extractCompactDeclarations
 } from "./declarationExtractor";
 import { normalizeIdentifier, type IRslToken } from "../lexer";
+import type { RslSymbol } from "../symbols/rslSymbol";
 
 /**
  * Единица документа — часть файла, которую можно переанализировать отдельно.
@@ -170,6 +173,96 @@ export function sameUnitText(
     return true;
 }
 
+/**
+ * Верхнеуровневый блок: Macro или Class с его методами.
+ *
+ * Границы блоков берутся из двух источников. У открытого документа уже есть
+ * дерево символов, построенное при разборе, и повторное извлечение объявлений
+ * ради тех же границ стоило на файле 700 КБ около двадцати миллисекунд —
+ * ровно перед первой порцией расчёта, то есть в самом неудачном месте. Там,
+ * где дерева нет (внешний модуль, проверка по одному тексту), границы
+ * по-прежнему извлекаются по токенам.
+ */
+interface IUnitBlock {
+    kind: "macro" | "class";
+    name: string;
+    start: number;
+    end: number;
+    methods: ReadonlyArray<{ name: string; start: number; end: number }>;
+}
+
+/** Границы блоков по дереву символов: обход одного уровня детей. */
+function blocksFromSymbolTree(tree: RslSymbol): IUnitBlock[] {
+    const blocks: IUnitBlock[] = [];
+
+    for (const symbol of tree.children) {
+        const isMacro = symbol.kind === CompletionItemKind.Function ||
+            symbol.kind === CompletionItemKind.Method;
+        const isClass = symbol.kind === CompletionItemKind.Class;
+
+        if (!isMacro && !isClass) {
+            continue;
+        }
+
+        blocks.push({
+            kind: isClass ? "class" : "macro",
+            name: symbol.name,
+            start: symbol.range.start,
+            end: symbol.range.end,
+            methods: isClass
+                ? symbol.children
+                    .filter(child =>
+                        child.kind === CompletionItemKind.Method ||
+                        child.kind === CompletionItemKind.Function
+                    )
+                    .map(child => ({
+                        name: child.name,
+                        start: child.range.start,
+                        end: child.range.end
+                    }))
+                : []
+        });
+    }
+
+    return blocks;
+}
+
+/** Границы блоков по токенам: тот же вид, что и у дерева символов. */
+function blocksFromTokens(
+    source: string,
+    tokens: readonly IRslToken[]
+): IUnitBlock[] {
+    const declarations = extractCompactDeclarations(source, {
+        includePrivate: true,
+        tokens: tokens as IRslToken[]
+    }).declarations;
+    const blocks: IUnitBlock[] = [];
+
+    for (const declaration of declarations) {
+        if (declaration.kind !== "macro" && declaration.kind !== "class") {
+            continue;
+        }
+
+        blocks.push({
+            kind: declaration.kind,
+            name: declaration.name,
+            start: declaration.start,
+            end: declaration.end,
+            methods: declaration.kind === "class"
+                ? declaration.children
+                    .filter(member => member.kind === "macro")
+                    .map(member => ({
+                        name: member.name,
+                        start: member.start,
+                        end: member.end
+                    }))
+                : []
+        });
+    }
+
+    return blocks;
+}
+
 /** Верхнеуровневый OnError: обработчик ошибок модуля. */
 function findTopLevelOnError(
     tokens: readonly IRslToken[]
@@ -177,7 +270,19 @@ function findTopLevelOnError(
     let depth = 0;
 
     for (const token of tokens) {
+        /*
+         * Длина отсеивает почти все идентификаторы файла до приведения к
+         * нижнему регистру: интересны только слова длиной 2, 3, 4, 5 и 7
+         * символов. На файле 700 КБ приведение каждого идентификатора стоило
+         * больше самого поиска.
+         */
         if (token.kind !== "identifier") {
+            continue;
+        }
+
+        const length = token.value.length;
+
+        if (length > 7 || length < 2 || length === 6) {
             continue;
         }
 
@@ -219,12 +324,13 @@ function findTopLevelOnError(
  */
 export function splitRslDocumentUnits(
     source: string,
-    tokens: readonly IRslToken[]
+    tokens: readonly IRslToken[],
+    /* Готовое дерево символов документа, если оно уже построено. */
+    symbolTree?: RslSymbol
 ): IRslDocumentUnit[] {
-    const declarations = extractCompactDeclarations(source, {
-        includePrivate: true,
-        tokens: tokens as IRslToken[]
-    }).declarations;
+    const blocks = symbolTree
+        ? blocksFromSymbolTree(symbolTree)
+        : blocksFromTokens(source, tokens);
 
     const units: IRslDocumentUnit[] = [];
     const ordinals = new Map<string, number>();
@@ -250,11 +356,7 @@ export function splitRslDocumentUnits(
     const onError = findTopLevelOnError(tokens);
     const covered: Array<{ start: number; end: number }> = [];
 
-    for (const declaration of declarations) {
-        if (declaration.kind !== "macro" && declaration.kind !== "class") {
-            continue;
-        }
-
+    for (const declaration of blocks) {
         /* OnError модуля не попадает внутрь единицы Macro или Class. */
         const end = onError && declaration.end > onError.start
             ? Math.min(declaration.end, onError.start)
@@ -275,11 +377,7 @@ export function splitRslDocumentUnits(
         const methods: Array<{ start: number; end: number }> = [];
 
         if (declaration.kind === "class") {
-            for (const member of declaration.children) {
-                if (member.kind !== "macro") {
-                    continue;
-                }
-
+            for (const member of declaration.methods) {
                 methods.push({ start: member.start, end: member.end });
                 const ranges = [{ start: member.start, end: member.end }];
                 units.push({

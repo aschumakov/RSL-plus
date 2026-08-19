@@ -32,19 +32,31 @@ export interface IRslWorkSlice {
  */
 const DEFAULT_BUDGET_MS = 8;
 
+/**
+ * Часы порции — монотонные и с высоким разрешением.
+ *
+ * Date.now() на Windows идёт шагом системного таймера, около 16 мс: внутри
+ * одного шага он показывает нулевую разницу, поэтому бюджет 8 мс не срабатывал
+ * до следующего тика, и порция занимала поток до 18 мс. Ещё Date.now() умеет
+ * идти назад при переводе часов.
+ */
+export function monotonicMs(): number {
+    return performance.now();
+}
+
 export function createWorkSlice(budgetMs = DEFAULT_BUDGET_MS): IRslWorkSlice {
     const budget = Math.max(1, budgetMs);
-    let startedAt = Date.now();
+    let startedAt = monotonicMs();
     let yields = 0;
 
     return {
         shouldYield(): boolean {
-            return Date.now() - startedAt >= budget;
+            return monotonicMs() - startedAt >= budget;
         },
         async yieldNow(): Promise<void> {
             yields++;
             await new Promise<void>(resolve => setImmediate(resolve));
-            startedAt = Date.now();
+            startedAt = monotonicMs();
         },
         async yieldIfNeeded(): Promise<void> {
             if (this.shouldYield()) {

@@ -9,6 +9,13 @@ import {
 } from "vscode-languageserver";
 
 import { RslSymbol } from "./symbols/rslSymbol";
+import { LruCache } from "./core/lruCache";
+import {
+    collectRslUnitDiagnostics,
+    planRslUnitDiagnostics,
+    tokensOfRslUnits,
+    type IRslUnitDiagnosticsEntry
+} from "./diagnostics/unitDiagnosticsCache";
 import {
     BLOCK_START_KEYWORDS,
     DECLARATION_MODIFIERS,
@@ -22,7 +29,9 @@ import { getScopeChain, RslScopeResolver } from "./scopeResolver";
 import {
     GetDynamicMacroReferencesFromTokens,
     GetImportDefinitionTargetsFromTokens,
-    IImportDefinitionTarget
+    IImportDefinitionTarget,
+    createImportReferenceScanner,
+    type IRslImportReferenceScanner
 } from "./execMacroDefinition";
 import {
     IRslDiagnosticSettings
@@ -35,7 +44,8 @@ import {
     buildRedundantImportDiagnostics
 } from "./diagnostics/redundantImportDiagnostics";
 import {
-    buildScalarMemberDiagnostics
+    addScalarMemberDiagnostic,
+    isScalarMemberCandidate
 } from "./diagnostics/scalarMemberDiagnostics";
 import {
     createUnreachableCodeScanner
@@ -46,6 +56,7 @@ import {
 } from "./core/timeSlice";
 import {
     cachedSignificantTokens,
+    createSignificantTokenFilter,
     findUnrecognizedEscapes,
     IRslToken,
     normalizeIdentifier,
@@ -231,14 +242,19 @@ export type IRslDiagnosticStage = (
  * бюджете 8 мс это доли процента от порции, зато перерасход ограничен временем
  * обработки 64 элементов.
  */
+/**
+ * Кэш локальных диагностик по единицам документа.
+ *
+ * Живёт по файлам: у каждого открытого документа своя запись, и её хватает
+ * ровно на то, чтобы после правки не считать заново единицы, которые не
+ * менялись. Число записей ограничено — открытых файлов не бывает много.
+ */
+const unitDiagnosticsCache = new LruCache<string, IRslUnitDiagnosticsEntry>(
+    24
+);
+
 const BUDGET_CHECK_INTERVAL = 64;
 
-/*
- * Там, где на каждый элемент приходится обращение к resolver, шаг сверки меньше:
- * одно разрешение имени стоит порядка десятка микросекунд, а первое в файле —
- * заметно больше, и 64 таких элемента уже выносят порцию за бюджет.
- */
-const RESOLVER_CHECK_INTERVAL = 8;
 
 /** Пора ли прерваться: бюджет проверяется не на каждом элементе. */
 function budgetExpired(
@@ -250,6 +266,121 @@ function budgetExpired(
         processed % interval === 0 &&
         processed > 0 &&
         shouldYield();
+}
+
+/*
+ * Шаг сверки бюджета по областям видимости.
+ *
+ * На область приходится либо поиск границ её сигнатуры, либо разбор её
+ * объявлений — работа не на токен, а на область, поэтому шаг мелкий.
+ */
+const SCOPE_CHECK_INTERVAL = 4;
+
+/**
+ * Возобновляемый обход областей видимости.
+ *
+ * Дерево символов обходится один раз, до первой паузы: сам обход дешёвый,
+ * дорога работа на области. Дальше области перебираются по порядку, и между
+ * ними расчёт волен вернуть управление редактору.
+ */
+function createScopeScanStage(
+    tree: RslSymbol,
+    step: (scope: RslSymbol) => void,
+    finish?: () => void
+): IRslDiagnosticStage {
+    let scopes: RslSymbol[] | undefined;
+    let cursor = 0;
+
+    return (_isCancelled, shouldYield) => {
+        /* Бюджет уже израсходован соседним этапом: см. createScanStage. */
+        if (shouldYield?.() === true) {
+            return true;
+        }
+
+        if (!scopes) {
+            const list: RslSymbol[] = [];
+            walkScopes(tree, scope => {
+                list.push(scope);
+            });
+            scopes = list;
+        }
+
+        while (cursor < scopes.length) {
+            if (budgetExpired(cursor, shouldYield, SCOPE_CHECK_INTERVAL)) {
+                return true;
+            }
+
+            step(scopes[cursor]);
+            cursor++;
+        }
+
+        finish?.();
+
+        return false;
+    };
+}
+
+/**
+ * Возобновляемый обход токенов для проверок с обращением к резолверу.
+ *
+ * Такие проверки состоят из дешёвого отбора и дорогой части: разрешение имени
+ * стоит от десятков микросекунд на знакомом имени до нескольких миллисекунд на
+ * первом обращении в файле. Поэтому бюджет сверяется по-разному: на просмотре —
+ * изредка, перед дорогой частью — каждый раз. Сама сверка стоит десятки
+ * наносекунд, то есть рядом с разрешением имени она бесплатна.
+ *
+ * prepare выполняется один раз перед обходом и может отменить его целиком:
+ * например, когда в файле нет ни одного local-объявления, проверять нечего.
+ */
+function createResolverScanStage(
+    items: () => readonly IRslToken[],
+    isCandidate: (tokens: readonly IRslToken[], index: number) => boolean,
+    inspect: (tokens: readonly IRslToken[], index: number) => void,
+    prepare?: () => boolean
+): IRslDiagnosticStage {
+    let cursor = 0;
+    let prepared = false;
+    let skip = false;
+
+    return (_isCancelled, shouldYield) => {
+        /* Бюджет уже израсходован соседним этапом: см. createScanStage. */
+        if (shouldYield?.() === true) {
+            return true;
+        }
+
+        if (!prepared) {
+            skip = prepare !== undefined && prepare() === false;
+            prepared = true;
+        }
+
+        if (skip) {
+            return false;
+        }
+
+        const tokens = items();
+        let processed = 0;
+
+        while (cursor < tokens.length) {
+            const candidate = isCandidate(tokens, cursor);
+
+            if (
+                candidate
+                    ? shouldYield?.() === true
+                    : budgetExpired(processed, shouldYield)
+            ) {
+                return true;
+            }
+
+            if (candidate) {
+                inspect(tokens, cursor);
+            }
+
+            cursor++;
+            processed++;
+        }
+
+        return false;
+    };
 }
 
 /**
@@ -315,10 +446,20 @@ export function buildLocalRslDiagnostics(
      * Отмена проверяется между этапами: доводить расчёт до конца для файла,
      * который пользователь покинул, значит задержать тот, который он ждёт.
      */
-    isCancelled?: () => boolean
+    isCancelled?: () => boolean,
+    /*
+     * Общий resolver сервера, если он есть.
+     *
+     * Свой resolver на каждый пересчёт означал бы холодные кэши на каждую
+     * правку: на файле 700 КБ первое разрешение имени строит внутренние
+     * индексы модуля и стоит около пятнадцати миллисекунд, а всего разрешений
+     * там больше сотни миллисекунд. Общий resolver сбрасывает кэши сам — по
+     * ревизии индекса и версии модуля.
+     */
+    sharedResolver?: RslScopeResolver
 ): Diagnostic[] {
     return runDiagnosticPlan(
-        planLocalRslDiagnostics(module, index, settings),
+        planLocalRslDiagnostics(module, index, settings, sharedResolver),
         isCancelled
     );
 }
@@ -337,10 +478,12 @@ export async function buildLocalRslDiagnosticsChunked(
     isCancelled?: () => boolean,
     slice: IRslWorkSlice = createWorkSlice(),
     /* Длительность порций: по ней видно, какая проверка держит поток. */
-    onStage?: RslDiagnosticStageObserver
+    onStage?: RslDiagnosticStageObserver,
+    /* См. buildLocalRslDiagnostics. */
+    sharedResolver?: RslScopeResolver
 ): Promise<Diagnostic[]> {
     return runDiagnosticPlanChunked(
-        planLocalRslDiagnostics(module, index, settings),
+        planLocalRslDiagnostics(module, index, settings, sharedResolver),
         isCancelled,
         slice,
         onStage
@@ -387,12 +530,12 @@ async function runDiagnosticPlanChunked(
                 return plan.finish();
             }
 
-            const started = onStage ? Date.now() : 0;
+            const started = onStage ? performance.now() : 0;
             unfinished = stage.run(
                 isCancelled,
                 () => slice.shouldYield()
             ) === true;
-            onStage?.(stage.name, Date.now() - started);
+            onStage?.(stage.name, performance.now() - started);
         }
     }
 
@@ -402,7 +545,8 @@ async function runDiagnosticPlanChunked(
 function planLocalRslDiagnostics(
     module: IIndexedModule,
     index: WorkspaceIndex,
-    settings?: IRslDiagnosticSettings
+    settings?: IRslDiagnosticSettings,
+    sharedResolver?: RslScopeResolver
 ): IRslDiagnosticPlan {
     const options = normalizeDiagnosticSettings(settings);
 
@@ -413,7 +557,7 @@ function planLocalRslDiagnostics(
     const result: Diagnostic[] = [];
     const hasCapacity = (): boolean =>
         result.length < options.maxProblems;
-    let resolver: RslScopeResolver | undefined;
+    let resolver: RslScopeResolver | undefined = sharedResolver;
     const getResolver = (): RslScopeResolver => {
         if (!resolver) {
             resolver = new RslScopeResolver(index);
@@ -432,9 +576,11 @@ function planLocalRslDiagnostics(
      */
     let localFacts: ILocalDiagnosticFacts | undefined;
     const identifierIndex = new Map<string, IRslToken[]>();
+    /* Заполняется этапом declarationFacts; иначе считается на месте. */
+    let collectedDeclarations: IDeclarationInfo[] | undefined;
     const getLocalFacts = (): ILocalDiagnosticFacts => {
         if (!localFacts) {
-            const declarations = collectDeclarations(
+            const declarations = collectedDeclarations || collectDeclarations(
                 module,
                 module.syntax.tokens
             );
@@ -452,6 +598,24 @@ function planLocalRslDiagnostics(
 
         return localFacts;
     };
+
+    /*
+     * Пересчитывается не весь файл, а изменившиеся единицы документа.
+     *
+     * Правка задевает одну единицу из нескольких десятков, а проверки, чей
+     * результат зависит ровно от своей единицы, для остальных остаются
+     * прежними — им нужен перенос смещений, а не пересчёт. Проверки,
+     * смотрящие за пределы единицы, по-прежнему считаются целиком.
+     */
+    const unitPlan = planRslUnitDiagnostics(
+        module,
+        unitDiagnosticsCache.get(module.uri)
+    );
+    /* Диагностики единиц собираются отдельно: их и запоминает кэш. */
+    const unitResult: Diagnostic[] = [];
+    const unitTokens = (): readonly IRslToken[] => unitPlan.full
+        ? module.lex.tokens
+        : tokensOfRslUnits(module.lex.tokens, unitPlan.stale);
 
     /*
      * Этапы перечислены таблицей, а не цепочкой if.
@@ -473,8 +637,8 @@ function planLocalRslDiagnostics(
             "limits",
             true,
             createScanStage(
-                () => module.lex.tokens,
-                token => addDocumentedLimitDiagnostic(module, token, result),
+                unitTokens,
+                token => addDocumentedLimitDiagnostic(module, token, unitResult),
                 () => addFileNameLimitDiagnostic(module, result)
             )
         ],
@@ -482,24 +646,44 @@ function planLocalRslDiagnostics(
             "unterminated",
             options.structure,
             createScanStage(
-                () => module.lex.tokens,
-                token => addUnterminatedTokenDiagnostic(module, token, result)
+                unitTokens,
+                token => addUnterminatedTokenDiagnostic(module, token, unitResult)
             )
         ],
         [
             "escapes",
             options.structure,
             createScanStage(
-                () => module.lex.tokens,
-                token => addUnrecognizedEscapeDiagnostic(module, token, result)
+                unitTokens,
+                token => addUnrecognizedEscapeDiagnostic(module, token, unitResult)
             )
         ],
         [
             "brackets",
             options.structure,
-            () => addBracketDiagnostics(module, result)
+            (() => {
+                const scanner = createBracketScanner(result);
+
+                return createScanStage(
+                    () => module.syntax.tokens,
+                    token => scanner.step(token),
+                    () => scanner.finish()
+                );
+            })()
         ],
-        ["end", options.structure, () => addEndDiagnostics(module, result)],
+        [
+            "end",
+            options.structure,
+            (() => {
+                const scanner = createEndScanner(module, result);
+
+                return createScanStage(
+                    () => module.syntax.tokens,
+                    token => scanner.step(token),
+                    () => scanner.finish()
+                );
+            })()
+        ],
         [
             "unreachable",
             options.structure,
@@ -517,7 +701,66 @@ function planLocalRslDiagnostics(
         [
             "duplicates",
             options.structure,
-            () => addDuplicateDeclarationDiagnostics(module, result)
+            createScopeScanStage(
+                module.symbolTree,
+                scope => addDuplicateDeclarationDiagnostics(
+                    module,
+                    scope,
+                    result
+                )
+            )
+        ],
+        /*
+         * Отбор значимых токенов — отдельный этап.
+         *
+         * Он линейный по файлу и нужен почти всем последующим проверкам, а
+         * считался внутри первой из них: её собственное время складывалось с
+         * этим отбором в один неделимый кусок. На файле 700 КБ отбор занимает
+         * около пяти миллисекунд.
+         */
+        [
+            "significantTokens",
+            options.structure,
+            (() => {
+                const filter = createSignificantTokenFilter(module.lex.tokens);
+
+                return createScanStage(
+                    () => module.lex.tokens,
+                    token => filter.step(token),
+                    () => {
+                        filter.finish();
+                    }
+                );
+            })()
+        ],
+        /*
+         * Поиск самих директив Import — тоже отдельный этап: обход потока
+         * значимых токенов стоит столько же, сколько их отбор.
+         */
+        [
+            "importReferences",
+            options.structure,
+            (() => {
+                let scanner: IRslImportReferenceScanner | undefined;
+                /* Сканер создаётся при первом шаге: план строится заранее. */
+                const ensure = (): IRslImportReferenceScanner => {
+                    if (!scanner) {
+                        scanner = createImportReferenceScanner(
+                            module.lex.tokens
+                        );
+                    }
+
+                    return scanner;
+                };
+
+                return createScanStage(
+                    () => cachedSignificantTokens(module.lex.tokens),
+                    (token, index) => ensure().step(token, index),
+                    () => {
+                        ensure().finish();
+                    }
+                );
+            })()
         ],
         [
             "imports",
@@ -529,6 +772,29 @@ function planLocalRslDiagnostics(
             options.structure,
             () => addImportPlacementDiagnostics(module, result)
         ],
+        /*
+         * Первое обращение к резолверу — отдельный этап.
+         *
+         * Оно строит его внутренние кэши и на файле 700 КБ стоит около шести
+         * миллисекунд неделимо. Складываясь с обходом следующей проверки, эти
+         * шесть превращали её первую порцию в пятнадцать миллисекунд занятого
+         * потока. Результат разрешения не нужен: важно, что кэши построены.
+         */
+        [
+            "resolverWarmup",
+            options.structure,
+            () => {
+                const first = module.syntax.tokens[0];
+
+                if (first) {
+                    getResolver().resolveAt(
+                        module.uri,
+                        module.symbolTree,
+                        first.start
+                    );
+                }
+            }
+        ],
         [
             "constantAssignment",
             options.structure,
@@ -537,15 +803,22 @@ function planLocalRslDiagnostics(
         [
             "localVisibility",
             options.structure,
-            () => addLocalVisibilityDiagnostics(module, getResolver(), result)
+            createLocalVisibilityStage(module, getResolver, result)
         ],
         [
             "scalarMembers",
             options.structure,
-            () => result.push(...buildScalarMemberDiagnostics(
-                module,
-                getResolver()
-            ))
+            createResolverScanStage(
+                () => module.syntax.tokens,
+                (tokens, index) => isScalarMemberCandidate(tokens, index),
+                (tokens, index) => addScalarMemberDiagnostic(
+                    module,
+                    getResolver(),
+                    tokens,
+                    index,
+                    result
+                )
+            )
         ],
         [
             "coreDialect",
@@ -573,9 +846,10 @@ function planLocalRslDiagnostics(
         [
             "declarationFacts",
             options.useBeforeDeclaration || options.unusedVariables,
-            () => {
+            createDeclarationFactsStage(module, items => {
+                collectedDeclarations = items;
                 getLocalFacts();
-            }
+            })
         ],
         [
             "useBeforeDeclaration",
@@ -592,16 +866,16 @@ function planLocalRslDiagnostics(
             "deprecated",
             options.deprecatedDeclarations,
             createScanStage(
-                () => module.lex.tokens,
-                token => addDeprecatedDeclarationDiagnostic(module, token, result)
+                unitTokens,
+                token => addDeprecatedDeclarationDiagnostic(module, token, unitResult)
             )
         ],
         [
             "debugBreak",
             options.debugBreak,
             createScanStage(
-                () => module.lex.tokens,
-                token => addDebugBreakDiagnostic(module, token, result)
+                unitTokens,
+                token => addDebugBreakDiagnostic(module, token, unitResult)
             )
         ],
         [
@@ -620,8 +894,55 @@ function planLocalRslDiagnostics(
     return {
         stages: enabledStages(stages),
         hasCapacity,
-        finish: () =>
-            deduplicateDiagnostics(result).slice(0, options.maxProblems)
+        finish: () => {
+            /*
+             * Посчитанное по изменившимся единицам запоминается, а
+             * прежнее переносится: вместе это полный результат файла.
+             */
+            const byUnit = collectRslUnitDiagnostics(
+                module,
+                unitPlan.units,
+                unitResult
+            );
+
+            /*
+             * Переносятся записи ТОЛЬКО переиспользованных единиц.
+             *
+             * У пересчитанной единицы новый результат полон, в том числе когда
+             * он пуст: правка могла убрать находку. Перенос прежних записей по
+             * признаку «сейчас ничего не нашлось» оставлял бы исправленное в
+             * кэше навсегда.
+             */
+            if (!unitPlan.full) {
+                const previous = unitDiagnosticsCache.get(module.uri);
+
+                for (const unit of unitPlan.keep) {
+                    if (byUnit.has(unit.id)) {
+                        continue;
+                    }
+
+                    const kept = previous?.byUnit.get(unit.id);
+
+                    if (kept) {
+                        byUnit.set(unit.id, kept);
+                    }
+                }
+            }
+
+            unitDiagnosticsCache.set(module.uri, {
+                uri: module.uri,
+                version: module.version,
+                source: module.source,
+                units: unitPlan.units,
+                byUnit
+            });
+
+            return deduplicateDiagnostics([
+                ...result,
+                ...unitResult,
+                ...unitPlan.reused
+            ]).slice(0, options.maxProblems);
+        }
     };
 }
 
@@ -678,6 +999,40 @@ function planWorkspaceRslDiagnostics(
     const result: Diagnostic[] = [];
     const resolver = sharedResolver || new RslScopeResolver(index);
     const stages: readonly IRslDiagnosticStageEntry[] = [
+        /*
+         * Ссылки Import собираются отдельным этапом — как и в локальной фазе.
+         *
+         * Их спрашивают почти все проверки этой фазы, а сам сбор — проход по
+         * всему потоку токенов: на модуле 700 КБ он занимал поток на семнадцать
+         * миллисекунд внутри первой же проверки. Результат запоминается на
+         * версию потока токенов, поэтому дальше он бесплатен.
+         */
+        [
+            "importReferences",
+            options.structure || options.unusedImports,
+            (() => {
+                let scanner: ReturnType<
+                    typeof createImportReferenceScanner
+                > | undefined;
+                const ensure = (): NonNullable<typeof scanner> => {
+                    if (!scanner) {
+                        scanner = createImportReferenceScanner(
+                            module.lex.tokens
+                        );
+                    }
+
+                    return scanner;
+                };
+
+                return createScanStage(
+                    () => module.lex.tokens,
+                    (token, tokenIndex) => ensure().step(token, tokenIndex),
+                    () => {
+                        ensure().finish();
+                    }
+                );
+            })()
+        ],
         [
             "selfImport",
             options.structure,
@@ -691,7 +1046,7 @@ function planWorkspaceRslDiagnostics(
         [
             "unusedImports",
             options.unusedImports,
-            () => addUnusedImportDiagnostics(module, index, result)
+            createUnusedImportStage(module, index, resolver, result)
         ],
         [
             "redundantImports",
@@ -956,16 +1311,23 @@ function createConstantAssignmentStage(
     result: Diagnostic[]
 ): IRslDiagnosticStage {
     /* Общее для всех порций считается один раз — на первой из них. */
-    let declarationStarts: Set<number> | undefined;
-    let cursor = 0;
+    let declarationStarts = new Set<number>();
 
-    return (_isCancelled, shouldYield) => {
-        /* Бюджет уже израсходован соседним этапом: см. createScanStage. */
-        if (shouldYield?.() === true) {
-            return true;
-        }
-
-        if (!declarationStarts) {
+    return createResolverScanStage(
+        () => cachedSignificantTokens(module.lex.tokens),
+        (tokens, index) => index + 1 < tokens.length &&
+            isConstantAssignmentCandidate(
+                declarationStarts,
+                tokens[index],
+                tokens[index + 1]
+            ),
+        (tokens, index) => addConstantAssignmentDiagnostic(
+            module,
+            getResolver(),
+            tokens[index],
+            result
+        ),
+        () => {
             const starts = new Set<number>();
             walkScopes(module.symbolTree, scope => {
                 for (const child of scope.children) {
@@ -975,50 +1337,30 @@ function createConstantAssignmentStage(
                 }
             });
             declarationStarts = starts;
+
+            return true;
         }
+    );
+}
 
-        const tokens = cachedSignificantTokens(module.lex.tokens);
-        const last = tokens.length - 1;
-        let processed = 0;
-
-        while (cursor < last) {
-            if (budgetExpired(processed, shouldYield, RESOLVER_CHECK_INTERVAL)) {
-                return true;
-            }
-
-            addConstantAssignmentDiagnostic(
-                module,
-                getResolver(),
-                declarationStarts,
-                tokens[cursor],
-                tokens[cursor + 1],
-                result
-            );
-            cursor++;
-            processed++;
-        }
-
-        return false;
-    };
+/** Похоже ли на присваивание константе: проверка без резолвера. */
+function isConstantAssignmentCandidate(
+    declarationStarts: ReadonlySet<number>,
+    token: IRslToken,
+    next: IRslToken
+): boolean {
+    return token.kind === "identifier" &&
+        next.kind === "symbol" &&
+        next.raw === "=" &&
+        !declarationStarts.has(token.start);
 }
 
 function addConstantAssignmentDiagnostic(
     module: IIndexedModule,
     resolver: RslScopeResolver,
-    declarationStarts: ReadonlySet<number>,
     token: IRslToken,
-    next: IRslToken,
     result: Diagnostic[]
 ): void {
-    if (
-        token.kind !== "identifier" ||
-        next.kind !== "symbol" ||
-        next.raw !== "=" ||
-        declarationStarts.has(token.start)
-    ) {
-        return;
-    }
-
     const resolved = resolver.resolveAt(
         module.uri,
         module.symbolTree,
@@ -1046,12 +1388,47 @@ function addConstantAssignmentDiagnostic(
  * фильтрует local наравне с private при экспорте/поиске из других файлов) —
  * эта проверка касается только ссылок внутри одного файла.
  */
-function addLocalVisibilityDiagnostics(
+function createLocalVisibilityStage(
     module: IIndexedModule,
-    resolver: RslScopeResolver,
+    getResolver: () => RslScopeResolver,
     result: Diagnostic[]
-): void {
+): IRslDiagnosticStage {
     const ownerOf = new Map<RslSymbol, RslSymbol>();
+    const localDeclarations = new Set<RslSymbol>();
+    const declarationStarts = new Set<number>();
+
+    return createResolverScanStage(
+        () => cachedSignificantTokens(module.lex.tokens),
+        (tokens, index) => tokens[index].kind === "identifier" &&
+            !declarationStarts.has(tokens[index].start),
+        (tokens, index) => addLocalVisibilityDiagnostic(
+            module,
+            getResolver(),
+            { ownerOf, localDeclarations },
+            tokens[index],
+            result
+        ),
+        () => {
+            prepareLocalVisibility(
+                module,
+                ownerOf,
+                localDeclarations,
+                declarationStarts
+            );
+
+            /* Нет local-объявлений — нет и проверки: обходить нечего. */
+            return localDeclarations.size > 0;
+        }
+    );
+}
+
+/** Владельцы объявлений и позиции их имён: считается один раз на файл. */
+function prepareLocalVisibility(
+    module: IIndexedModule,
+    ownerOf: Map<RslSymbol, RslSymbol>,
+    localDeclarations: Set<RslSymbol>,
+    declarationStarts: Set<number>
+): void {
     walkScopes(module.symbolTree, scope => {
         for (const child of scope.children) {
             ownerOf.set(child, scope);
@@ -1072,8 +1449,6 @@ function addLocalVisibilityDiagnostics(
      * сообщением про процедуру инициализации модуля, к которой он не имеет
      * отношения.
      */
-    const localDeclarations = new Set<RslSymbol>();
-    const declarationStarts = new Set<number>();
     for (const [symbol, owner] of ownerOf) {
         if (
             symbol.visibility === "local" &&
@@ -1084,32 +1459,34 @@ function addLocalVisibilityDiagnostics(
             declarationStarts.add(findObjectNameRange(module, symbol).start);
         }
     }
+}
 
-    if (localDeclarations.size === 0) {
-        return;
-    }
-
-    const tokens = cachedSignificantTokens(module.lex.tokens);
-
-    for (const token of tokens) {
-        if (token.kind !== "identifier" || declarationStarts.has(token.start)) {
-            continue;
-        }
-
+/** Одна ссылка: доступен ли ей local-объект, на который она указывает. */
+function addLocalVisibilityDiagnostic(
+    module: IIndexedModule,
+    resolver: RslScopeResolver,
+    facts: {
+        ownerOf: Map<RslSymbol, RslSymbol>;
+        localDeclarations: Set<RslSymbol>;
+    },
+    token: IRslToken,
+    result: Diagnostic[]
+): void {
+    {
         const resolved = resolver.resolveAt(
             module.uri,
             module.symbolTree,
             token.start
         );
 
-        if (!resolved || !localDeclarations.has(resolved.symbol)) {
-            continue;
+        if (!resolved || !facts.localDeclarations.has(resolved.symbol)) {
+            return;
         }
 
-        const owner = ownerOf.get(resolved.symbol);
+        const owner = facts.ownerOf.get(resolved.symbol);
 
         if (!owner) {
-            continue;
+            return;
         }
 
         const refChain = getScopeChain(module.symbolTree, token.start);
@@ -1123,7 +1500,7 @@ function addLocalVisibilityDiagnostics(
         );
 
         if (allowed) {
-            continue;
+            return;
         }
 
         const ownerLabel = owner.kind === CompletionItemKind.Class
@@ -1447,10 +1824,16 @@ function addUnterminatedTokenDiagnostic(
 }
 
 
-function addBracketDiagnostics(
-    module: IIndexedModule,
+/**
+ * Проверка скобок порциями.
+ *
+ * Стек открытых скобок живёт в замыкании и переживает паузу, поэтому обход,
+ * разорванный на порции, видит ровно то же, что видел бы целиком. Прежде обход
+ * шёл одним куском: на файле 700 КБ это до 31 мс непрерывной работы.
+ */
+function createBracketScanner(
     result: Diagnostic[]
-): void {
+): { step(token: IRslToken): void; finish(): void } {
     const stacks: { [close: string]: IRslToken[] } = {
         ")": [],
         "}": []
@@ -1464,20 +1847,20 @@ function addBracketDiagnostics(
         "}": "{"
     };
 
-    for (const token of module.syntax.tokens) {
+    const step = (token: IRslToken): void => {
         if (token.kind !== "symbol") {
-            continue;
+            return;
         }
 
         const close = pair[token.raw];
 
         if (close) {
             stacks[close].push(token);
-            continue;
+            return;
         }
 
         if (!stacks[token.raw]) {
-            continue;
+            return;
         }
 
         const opening = stacks[token.raw].pop();
@@ -1495,25 +1878,37 @@ function addBracketDiagnostics(
                 }
             ));
         }
-    }
+    };
 
-    Object.keys(stacks).forEach(close => {
-        stacks[close].forEach(opening => {
-            result.push(createTokenDiagnostic(
-                opening,
-                DiagnosticSeverity.Error,
-                `Для скобки ${openingFor[close]} не найдена закрывающая ${close}`,
-                "missing-closing-bracket"
-            ));
+    /* Незакрытые скобки видны только после последнего токена файла. */
+    const finish = (): void => {
+        Object.keys(stacks).forEach(close => {
+            stacks[close].forEach(opening => {
+                result.push(createTokenDiagnostic(
+                    opening,
+                    DiagnosticSeverity.Error,
+                    `Для скобки ${openingFor[close]} не найдена закрывающая ` +
+                        close,
+                    "missing-closing-bracket"
+                ));
+            });
         });
-    });
+    };
+
+    return { step, finish };
 }
 
-function addEndDiagnostics(
+/**
+ * Проверка блоков порциями.
+ *
+ * Стек открытых блоков, признак начала предложения и текущая строка живут в
+ * замыкании и переживают паузу: обход, разорванный на порции, видит то же, что
+ * видел бы целиком. Прежде он шёл одним куском — на крупном файле до 12 мс.
+ */
+function createEndScanner(
     module: IIndexedModule,
     result: Diagnostic[]
-): void {
-    const tokens = module.syntax.tokens;
+): { step(token: IRslToken): void; finish(): void } {
     const stack: IBlockEntry[] = [];
     const onErrorOwners = new Set<string>();
     const unitEndStarts = new Set(
@@ -1526,8 +1921,14 @@ function addEndDiagnostics(
     );
     let canStartBlock = true;
     let currentLine = -1;
+    /* END единицы документа заканчивает обход: дальше проверять нечего. */
+    let stopped = false;
 
-    for (const token of tokens) {
+    const step = (token: IRslToken): void => {
+        if (stopped) {
+            return;
+        }
+
         if (token.line !== currentLine) {
             currentLine = token.line;
             canStartBlock = true;
@@ -1539,14 +1940,15 @@ function addEndDiagnostics(
             } else {
                 canStartBlock = false;
             }
-            continue;
+            return;
         }
 
         const word = normalizeIdentifier(token.value);
 
         if (word === END_KEYWORD) {
             if (unitEndStarts.has(token.start)) {
-                break;
+                stopped = true;
+                return;
             }
 
             if (stack.length === 0) {
@@ -1566,7 +1968,7 @@ function addEndDiagnostics(
             }
 
             canStartBlock = true;
-            continue;
+            return;
         }
 
         if (canStartBlock && (word === "elif" || word === "else")) {
@@ -1607,7 +2009,7 @@ function addEndDiagnostics(
             }
 
             canStartBlock = false;
-            continue;
+            return;
         }
 
         /* ONERROR открывает обработчик до END родительского MACRO или EOF. */
@@ -1644,15 +2046,15 @@ function addEndDiagnostics(
                 }
             }
             canStartBlock = false;
-            continue;
+            return;
         }
 
         if (!canStartBlock) {
-            continue;
+            return;
         }
 
         if (MODIFIERS.has(word)) {
-            continue;
+            return;
         }
 
         canStartBlock = false;
@@ -1664,16 +2066,22 @@ function addEndDiagnostics(
                 hasElse: false
             });
         }
-    }
+    };
 
-    stack.reverse().forEach(block => {
-        result.push(createTokenDiagnostic(
-            block.token,
-            DiagnosticSeverity.Error,
-            `Для блока ${block.keyword.toUpperCase()} не найден закрывающий END`,
-            "missing-end"
-        ));
-    });
+    /* Незакрытые блоки видны только после последнего токена файла. */
+    const finish = (): void => {
+        stack.reverse().forEach(block => {
+            result.push(createTokenDiagnostic(
+                block.token,
+                DiagnosticSeverity.Error,
+                `Для блока ${block.keyword.toUpperCase()} не найден ` +
+                    "закрывающий END",
+                "missing-end"
+            ));
+        });
+    };
+
+    return { step, finish };
 }
 
 function addUnusedDeclarationDiagnostics(
@@ -1960,41 +2368,41 @@ function addUseBeforeDeclarationDiagnostic(
     };
 }
 
+/** Повторные имена внутри одной области видимости. */
 function addDuplicateDeclarationDiagnostics(
     module: IIndexedModule,
+    scope: RslSymbol,
     result: Diagnostic[]
 ): void {
-    walkScopes(module.symbolTree, scope => {
-        const byName = new Map<string, RslSymbol[]>();
+    const byName = new Map<string, RslSymbol[]>();
 
-        for (const child of scope.children) {
-            const name = normalizeIdentifier(child.name);
+    for (const child of scope.children) {
+        const name = normalizeIdentifier(child.name);
 
-            if (!name) {
-                continue;
-            }
-
-            const list = byName.get(name) || [];
-            list.push(child);
-            byName.set(name, list);
+        if (!name) {
+            continue;
         }
 
-        byName.forEach(items => {
-            if (items.length < 2) {
-                return;
-            }
+        const list = byName.get(name) || [];
+        list.push(child);
+        byName.set(name, list);
+    }
 
-            items.slice(1).forEach(item => {
-                const nameRange = findObjectNameRange(module, item);
-                result.push(createOffsetDiagnostic(
-                    module,
-                    nameRange.start,
-                    nameRange.end,
-                    DiagnosticSeverity.Warning,
-                    `Имя ${item.name} повторно объявлено в той же области видимости`,
-                    "duplicate-declaration"
-                ));
-            });
+    byName.forEach(items => {
+        if (items.length < 2) {
+            return;
+        }
+
+        items.slice(1).forEach(item => {
+            const nameRange = findObjectNameRange(module, item);
+            result.push(createOffsetDiagnostic(
+                module,
+                nameRange.start,
+                nameRange.end,
+                DiagnosticSeverity.Warning,
+                `Имя ${item.name} повторно объявлено в той же области видимости`,
+                "duplicate-declaration"
+            ));
         });
     });
 }
@@ -2096,18 +2504,89 @@ function addSelfImportDiagnostics(
     }
 }
 
-function addUnusedImportDiagnostics(
-    module: IIndexedModule,
-    index: WorkspaceIndex,
-    result: Diagnostic[]
-): void {
-    const references = GetImportDefinitionTargetsFromTokens(module.lex.tokens);
-    const dynamicMacroNames = GetDynamicMacroReferencesFromTokens(module.lex.tokens);
-    const importInfos: Array<{
+interface IUnusedImportContext {
+    references: readonly IImportDefinitionTarget[];
+    importInfos: Array<{
         reference: IImportDefinitionTarget;
         closureUris: Set<string>;
         publicNames: Set<string>;
-    }> = [];
+    }>;
+    allPublicNames: Set<string>;
+    usedImportedUris: Set<string>;
+}
+
+/**
+ * Неиспользуемые Import — порциями.
+ *
+ * Проверка идёт по всем идентификаторам файла и для похожих на импортированное
+ * имя обращается к резолверу. Одним куском на модуле 700 КБ это занимало поток
+ * на двадцать миллисекунд; теперь бюджет сверяется перед каждым обращением, а
+ * дешёвый просмотр — изредка, как и в остальных таких проверках.
+ *
+ * Резолвер берётся общий: свой означал бы холодные кэши на каждый пересчёт.
+ */
+function createUnusedImportStage(
+    module: IIndexedModule,
+    index: WorkspaceIndex,
+    resolver: RslScopeResolver,
+    result: Diagnostic[]
+): IRslDiagnosticStage {
+    let context: IUnusedImportContext | undefined;
+    let cursor = 0;
+
+    return (_isCancelled, shouldYield) => {
+        /* Бюджет уже израсходован соседним этапом: см. createScanStage. */
+        if (shouldYield?.() === true) {
+            return true;
+        }
+
+        if (!context) {
+            context = prepareUnusedImports(module, index);
+        }
+
+        const tokens = module.lex.tokens;
+        let processed = 0;
+
+        while (cursor < tokens.length) {
+            const token = tokens[cursor];
+            const candidate = token.kind === "identifier" &&
+                context.allPublicNames.has(
+                    normalizeIdentifier(token.value)
+                ) &&
+                !context.references.some(reference =>
+                    reference.start <= token.start && token.end <= reference.end
+                );
+
+            if (
+                candidate
+                    ? shouldYield?.() === true
+                    : budgetExpired(processed, shouldYield)
+            ) {
+                return true;
+            }
+
+            if (candidate) {
+                markUsedImport(module, index, resolver, token, context);
+            }
+
+            cursor++;
+            processed++;
+        }
+
+        reportUnusedImports(module, context, result);
+
+        return false;
+    };
+}
+
+/** Что импортировано и какие имена оттуда видны: считается один раз. */
+function prepareUnusedImports(
+    module: IIndexedModule,
+    index: WorkspaceIndex
+): IUnusedImportContext {
+    const references = GetImportDefinitionTargetsFromTokens(module.lex.tokens);
+    const dynamicMacroNames = GetDynamicMacroReferencesFromTokens(module.lex.tokens);
+    const importInfos: IUnusedImportContext["importInfos"] = [];
 
     for (const reference of references) {
         const imported = index.findModuleByName(reference.moduleName);
@@ -2150,45 +2629,56 @@ function addUnusedImportDiagnostics(
         info.publicNames.forEach(name => allPublicNames.add(name))
     );
 
-    const resolver = new RslScopeResolver(index);
     const usedImportedUris = new Set<string>();
 
-    module.lex.tokens
-        .filter(token => token.kind === "identifier")
-        .filter(token => !references.some(reference =>
-            reference.start <= token.start && token.end <= reference.end
-        ))
-        .filter(token =>
-            allPublicNames.has(normalizeIdentifier(token.value))
-        )
-        .forEach(token => {
-            const candidates = index.findImportedSymbols(
-                module.uri,
-                token.value
-            );
-
-            if (candidates.length > 1) {
-                candidates.forEach(candidate =>
-                    usedImportedUris.add(candidate.uri)
-                );
-                return;
-            }
-
-            const resolved = resolver.resolveAt(
-                module.uri,
-                module.symbolTree,
-                token.start
-            );
-
-            if (resolved && resolved.uri !== module.uri) {
-                usedImportedUris.add(resolved.uri);
-            }
-        });
-
+    /*
+     * Динамические вызовы учитываются сразу: их немного, и они не зависят от
+     * обхода токенов.
+     */
     dynamicMacroNames.forEach(name => {
         index.findImportedSymbols(module.uri, name)
             .forEach(resolved => usedImportedUris.add(resolved.uri));
     });
+
+    return { references, importInfos, allPublicNames, usedImportedUris };
+}
+
+/** Одна ссылка: из какого импортированного модуля пришло это имя. */
+function markUsedImport(
+    module: IIndexedModule,
+    index: WorkspaceIndex,
+    resolver: RslScopeResolver,
+    token: IRslToken,
+    context: IUnusedImportContext
+): void {
+    const candidates = index.findImportedSymbols(module.uri, token.value);
+
+    if (candidates.length > 1) {
+        candidates.forEach(candidate =>
+            context.usedImportedUris.add(candidate.uri)
+        );
+
+        return;
+    }
+
+    const resolved = resolver.resolveAt(
+        module.uri,
+        module.symbolTree,
+        token.start
+    );
+
+    if (resolved && resolved.uri !== module.uri) {
+        context.usedImportedUris.add(resolved.uri);
+    }
+}
+
+/** Итог обхода: какие Import остались невостребованными. */
+function reportUnusedImports(
+    module: IIndexedModule,
+    context: IUnusedImportContext,
+    result: Diagnostic[]
+): void {
+    const { importInfos, usedImportedUris } = context;
 
     importInfos.forEach(info => {
         /* Модуль без публичных объявлений может импортироваться ради side effects. */
@@ -2331,37 +2821,80 @@ function collectDeclarations(
     >();
 
     walkScopes(module.symbolTree, scope => {
-        if (
-            scope.kind === CompletionItemKind.Function ||
-            scope.kind === CompletionItemKind.Method
-        ) {
-            signatureRanges.set(
-                scope,
-                findSignatureRange(codeTokens, scope)
-            );
-        }
-
-        for (const child of scope.children) {
-            if (
-                !VARIABLE_KINDS.has(child.kind) ||
-                isReservedIdentifier(child.name)
-            ) {
-                continue;
-            }
-
-            const signature = signatureRanges.get(scope);
-
-            result.push({
-                symbol: child,
-                scope,
-                parameter: !!signature &&
-                    signature.start < child.range.start &&
-                    child.range.end <= signature.end
-            });
-        }
+        collectScopeDeclarations(
+            codeTokens,
+            scope,
+            signatureRanges,
+            result
+        );
     });
 
     return result;
+}
+
+/** Объявления одной области: единица работы порционного сбора. */
+function collectScopeDeclarations(
+    codeTokens: IRslToken[],
+    scope: RslSymbol,
+    signatureRanges: Map<RslSymbol, { start: number; end: number } | undefined>,
+    result: IDeclarationInfo[]
+): void {
+    if (
+        scope.kind === CompletionItemKind.Function ||
+        scope.kind === CompletionItemKind.Method
+    ) {
+        signatureRanges.set(scope, findSignatureRange(codeTokens, scope));
+    }
+
+    for (const child of scope.children) {
+        if (
+            !VARIABLE_KINDS.has(child.kind) ||
+            isReservedIdentifier(child.name)
+        ) {
+            continue;
+        }
+
+        const signature = signatureRanges.get(scope);
+
+        result.push({
+            symbol: child,
+            scope,
+            parameter: !!signature &&
+                signature.start < child.range.start &&
+                child.range.end <= signature.end
+        });
+    }
+}
+
+/**
+ * Справочник объявлений порциями.
+ *
+ * Раньше он собирался одним куском: обход дерева с поиском границ сигнатуры у
+ * каждой процедуры — это в сумме проход по всему файлу, и на модуле 470 КБ он
+ * занимал поток на тринадцать миллисекунд подряд. Область — естественная
+ * единица работы: её сигнатура ищется целиком, между областями состояние
+ * хранить не нужно.
+ */
+function createDeclarationFactsStage(
+    module: IIndexedModule,
+    finished: (declarations: IDeclarationInfo[]) => void
+): IRslDiagnosticStage {
+    const result: IDeclarationInfo[] = [];
+    const signatureRanges = new Map<
+        RslSymbol,
+        { start: number; end: number } | undefined
+    >();
+
+    return createScopeScanStage(
+        module.symbolTree,
+        scope => collectScopeDeclarations(
+            module.syntax.tokens,
+            scope,
+            signatureRanges,
+            result
+        ),
+        () => finished(result)
+    );
 }
 
 /**

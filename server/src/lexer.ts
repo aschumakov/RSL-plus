@@ -78,6 +78,11 @@ export function lexRsl(
         lastCloseIsCondition: false
     };
 
+    /* Память о том, что конца предложения дальше уже нет. */
+    const squares: ISquareScanState = {
+        noTerminatorAfter: Number.POSITIVE_INFINITY
+    };
+
     const eol = detectEol(text);
     const hasFinalEol = /(?:\r\n|\n|\r)$/.test(text);
     const hasBom = text.charCodeAt(0) === 0xFEFF;
@@ -191,7 +196,11 @@ export function lexRsl(
                 pushToken(tokens, text, position, "symbol", 1, lineStarts);
             } else {
                 const start = snapshot(position);
-                const simpleEnd = findSimpleSquareEnd(text, start.index);
+                const simpleEnd = findSimpleSquareEnd(
+                    text,
+                    start.index,
+                    squares
+                );
                 const preliminaryKind = classifySquareBlock(
                     text,
                     start.index,
@@ -260,9 +269,7 @@ export function lexRsl(
             }
 
             pushSnapshotToken(tokens, text, "identifier", start, position);
-            parens.lastWord = normalizeIdentifier(
-                tokens[tokens.length - 1].value
-            );
+            parens.lastWord = tokens[tokens.length - 1].value;
             continue;
         }
 
@@ -335,7 +342,7 @@ export function lexRsl(
          * квадратичным — 107 мс на 20 КБ против 4 мс.
          */
         if (current === "(") {
-            parens.conditions.push(CONDITION_KEYWORDS.has(parens.lastWord));
+            parens.conditions.push(isConditionKeyword(parens.lastWord));
         } else if (current === ")") {
             parens.lastCloseIsCondition = parens.conditions.pop() === true;
         }
@@ -354,13 +361,7 @@ export function lexRsl(
 }
 
 export function significantTokens(tokens: IRslToken[]): IRslToken[] {
-    return tokens.filter(token =>
-        token.kind !== "whitespace" &&
-        token.kind !== "newline" &&
-        token.kind !== "comment" &&
-        token.kind !== "square" &&
-        token.kind !== "bom"
-    );
+    return tokens.filter(isSignificantToken);
 }
 
 /*
@@ -389,6 +390,48 @@ export function cachedSignificantTokens(tokens: IRslToken[]): IRslToken[] {
     const filtered = significantTokens(tokens);
     significantTokensCache.set(tokens, filtered);
     return filtered;
+}
+
+/**
+ * Фильтр значимых токенов, который можно прервать.
+ *
+ * Нужен фоновым расчётам: сам фильтр линейный и на файле 700 КБ обходится в
+ * 5 мс непрерывной работы, а порция фоновой работы не должна занимать поток
+ * дольше восьми. Готовый список кладётся в тот же кэш, поэтому обычный
+ * cachedSignificantTokens после этого ничего не считает.
+ */
+export function createSignificantTokenFilter(
+    tokens: IRslToken[]
+): { step(token: IRslToken): void; finish(): IRslToken[] } {
+    const filtered: IRslToken[] = [];
+
+    return {
+        step: token => {
+            if (isSignificantToken(token)) {
+                filtered.push(token);
+            }
+        },
+        finish: () => {
+            const known = significantTokensCache.get(tokens);
+
+            if (known) {
+                return known;
+            }
+
+            significantTokensCache.set(tokens, filtered);
+
+            return filtered;
+        }
+    };
+}
+
+/** Один и тот же критерий значимости для обоих способов фильтрации. */
+function isSignificantToken(token: IRslToken): boolean {
+    return token.kind !== "whitespace" &&
+        token.kind !== "newline" &&
+        token.kind !== "comment" &&
+        token.kind !== "square" &&
+        token.kind !== "bom";
 }
 
 export function codeTokens(tokens: IRslToken[]): IRslToken[] {
@@ -693,6 +736,18 @@ const STATEMENT_BEFORE_BLOCK = new Set([
     "else", "then", "do", "begin", "end", "return", "import"
 ]);
 
+/**
+ * Слово условия перед круглой скобкой.
+ *
+ * Нижний регистр берётся здесь, а не на каждом идентификаторе: приведение
+ * строки стоит одну аллокацию, и на файле в сотню килобайт таких
+ * аллокаций были десятки тысяч.
+ */
+function isConditionKeyword(word: string): boolean {
+    return word.length >= 2 && word.length <= 6 &&
+        CONDITION_KEYWORDS.has(word.toLowerCase());
+}
+
 const CONDITION_KEYWORDS = new Set([
     "if", "elseif", "while", "for", "with", "until"
 ]);
@@ -707,49 +762,37 @@ const CONDITION_KEYWORDS = new Set([
  * первой же скобке, и остаток формы разбирался как код — со всеми
  * вытекающими замечаниями о синтаксисе в тексте документа.
  */
-function findSimpleSquareEnd(source: string, start: number): number {
-    const balanced = findBalancedSquareEnd(source, start);
+/**
+ * Конец текстового блока `[ … ]` — один просмотр вперёд.
+ *
+ * Блок кончается парной скобкой: внутренние `[ ]` считаются, потому что в
+ * экранной форме ими помечают поля — `│27.1 Договор  [#]`. Содержимое кавычек
+ * пропускается: `select '[^[[:digit:]]]*' from dual` скобки не открывает.
+ *
+ * Если скобки не сошлись — в тексте формы попадается одиночная, — просмотр
+ * заканчивается на скобке, за которой идёт конец предложения или список
+ * подстановок. Без этой границы поиск парной скобки уходил до конца файла, и
+ * лексирование файла с такими блоками замедлялось в разы.
+ */
+function findSimpleSquareEnd(
+    source: string,
+    start: number,
+    state: ISquareScanState
+): number {
+    const first = source.indexOf("]", start + 1);
 
-    if (balanced >= 0) {
-        return balanced;
+    if (first < 0) {
+        return source.length;
     }
 
     /*
-     * Скобки не сошлись — в тексте формы попадается одиночная. Тогда блок
-     * кончается той скобкой, за которой идёт конец предложения или список
-     * подстановок, а если и такой нет — первой попавшейся, как раньше.
+     * Дальше этой границы конца предложения уже не встречалось: повторно
+     * доходить до конца файла для каждого следующего блока незачем.
      */
-    let close = source.indexOf("]", start + 1);
-
-    while (close >= 0) {
-        let next = close + 1;
-
-        while (next < source.length && /\s/.test(source.charAt(next))) {
-            next++;
-        }
-
-        const following = source.charAt(next);
-
-        if (following === ";" || following === "(") {
-            return close + 1;
-        }
-
-        close = source.indexOf("]", close + 1);
+    if (start >= state.noTerminatorAfter) {
+        return first + 1;
     }
 
-    const first = source.indexOf("]", start + 1);
-
-    return first >= 0 ? first + 1 : source.length;
-}
-
-/**
- * Парная закрывающая скобка блока; -1, если её нет.
- *
- * Внутренние `[ ]` считаются: в экранной форме ими помечают поля —
- * `│27.1 Договор  [#]`, — и блок кончается не на них. Содержимое кавычек
- * пропускается: `select '[^[[:digit:]]]*' from dual` скобки не открывает.
- */
-function findBalancedSquareEnd(source: string, start: number): number {
     let depth = 0;
 
     for (let index = start; index < source.length; index++) {
@@ -765,16 +808,37 @@ function findBalancedSquareEnd(source: string, start: number): number {
             continue;
         }
 
-        if (character === "]") {
-            depth--;
+        if (character !== "]") {
+            continue;
+        }
 
-            if (depth === 0) {
-                return index + 1;
-            }
+        depth--;
+
+        if (depth === 0 || endsStatementAt(source, index + 1)) {
+            return index + 1;
         }
     }
 
-    return -1;
+    state.noTerminatorAfter = start;
+
+    return first + 1;
+}
+
+interface ISquareScanState {
+    noTerminatorAfter: number;
+}
+
+/** За скобкой идёт `;` или список подстановок — предложение закончилось. */
+function endsStatementAt(source: string, from: number): boolean {
+    let index = from;
+
+    while (index < source.length && /\s/.test(source.charAt(index))) {
+        index++;
+    }
+
+    const character = source.charAt(index);
+
+    return character === ";" || character === "(";
 }
 
 /** Индекс закрывающей кавычки; при её отсутствии — конец текста. */

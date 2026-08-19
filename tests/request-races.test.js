@@ -505,15 +505,13 @@ const SAME_LENGTH = SOURCE.replace("Var local = value;", "Var lokal = value;");
     );
 
     await test(
-        "Ctrl+Space и точка торопят разбор, набор букв — нет",
+        "Completion не торопит разбор, а только назначает его",
         async () => {
             /*
-             * Пользователь, открывший список, ждёт его сейчас. Поток букв,
-             * наоборот, идёт на каждый символ, и разбор по нему снимал бы
-             * склейку правок.
-             *
-             * Проверяется путь БЕЗ готовой модели: когда она есть, разбор не
-             * нужен вовсе и не назначается — ни тем, ни другим запросом.
+             * Список собирается из быстрого индекса, поэтому торопить разбор
+             * незачем: начатый впереди очереди разбор задерживал следующую
+             * клавишу ровно тогда, когда список уже показан. Модель всё равно
+             * нужна — она назначается обычной склейкой правок.
              */
             const { handlers, calls, state } = createRegistry({
                 uri: URI,
@@ -533,26 +531,23 @@ const SAME_LENGTH = SOURCE.replace("Var local = value;", "Var lokal = value;");
                 );
             };
 
-            /* Ctrl+Space. */
-            await request({ triggerKind: 1 });
-            assert.strictEqual(calls.forced, 1, "Ctrl+Space назначает разбор");
-
-            /* Точка. */
-            await request({ triggerKind: 2, triggerCharacter: "." });
-            assert.strictEqual(calls.forced, 1, "trigger-символ тоже");
-
-            /* Повторный запрос по неполному списку — это поток набора. */
-            await request({ triggerKind: 3 });
-            assert.strictEqual(
-                calls.forced,
-                0,
-                "набор букв обязан ждать уже назначенный разбор"
-            );
-            assert.strictEqual(
-                calls.scheduled,
-                1,
-                "но модель ему всё равно нужна"
-            );
+            for (const context of [
+                { triggerKind: 1 },
+                { triggerKind: 2, triggerCharacter: "." },
+                { triggerKind: 3 }
+            ]) {
+                await request(context);
+                assert.strictEqual(
+                    calls.forced,
+                    0,
+                    "Completion не назначает разбор впереди очереди"
+                );
+                assert.strictEqual(
+                    calls.scheduled,
+                    1,
+                    "но модель ему всё равно нужна"
+                );
+            }
         }
     );
 

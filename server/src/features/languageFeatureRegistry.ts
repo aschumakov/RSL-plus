@@ -4,6 +4,7 @@ import {
     CodeActionParams,
     CodeActionTriggerKind,
     CompletionItem,
+    type CompletionList,
     type CompletionParams,
     CompletionTriggerKind,
     Definition,
@@ -51,6 +52,7 @@ import {
 import {
     buildRslFastCompletions,
     buildRslFastMemberCompletions,
+    findReceiverBeforeDot,
     buildRslFastOwnClassMembers
 } from "./fastCompletionProvider";
 import {
@@ -88,7 +90,16 @@ import {
     buildRslSourceCodeActions,
     RSL_FIX_ALL_KIND
 } from "./sourceCodeActions";
+import {
+    collectRslCompletionCandidates,
+    deduplicateCompletionItems,
+    type IRslCompletionFacts
+} from "./completionCandidates";
 import { CompletionTransport } from "./completionTransport";
+import {
+    CompletionSessionCache,
+    type ICompletionSessionKey
+} from "./completionSession";
 import { PresentationFeatureRegistry } from "./presentationFeatureRegistry";
 import { SemanticTokensFeatureRegistry } from "./semanticTokensFeatureRegistry";
 import {
@@ -151,6 +162,7 @@ export class RslLanguageFeatureRegistry {
     private referenceIndex: ReferenceIndex;
     private callHierarchyProvider: RslCallHierarchyProvider;
     private completionTransport = new CompletionTransport();
+    private completionSessions = new CompletionSessionCache();
     private presentationFeatures: PresentationFeatureRegistry;
     private semanticTokensFeatures: SemanticTokensFeatureRegistry;
     /** Файлы, которым отдали пустые подсказки: модель тогда не была готова. */
@@ -202,25 +214,21 @@ export class RslLanguageFeatureRegistry {
 
             this.environment.noteInteractiveActivity?.();
             const version = document.version;
+            const offset = document.offsetAt(params.position);
             /*
-             * Ctrl+Space и trigger-символ — это действие пользователя: он
-             * открыл список и ждёт его сейчас. Такой запрос назначает разбор
-             * сам. Обычный набор букв, наоборот, идёт потоком и лишь ждёт
-             * уже назначенный: иначе именно Completion и снимал бы склейку
-             * правок, ради которой она сделана.
-             */
-            const waitMode: ParseWaitMode = isExplicitCompletion(params)
-                ? "force"
-                : "scheduled";
-            /*
-             * Спан покрывает и ожидание модели: по одному лишь analysis.full
-             * не видно, какой запрос его вызвал и сколько ждал сам запрос.
+             * Разбор Completion больше не назначает принудительно.
+             *
+             * Прежде Ctrl+Space и точка требовали разбор в режиме force, то
+             * есть впереди очереди. Список при этом всё равно собирался из
+             * быстрого индекса, а начатый разбор задерживал следующую клавишу.
+             * Теперь источник Completion — быстрый индекс, а полный разбор
+             * идёт обычной склейкой правок.
              */
             const span = this.environment.performance?.enabled
                 ? this.environment.performance.start("completion", {
                     uri: document.uri,
                     version,
-                    waitMode
+                    trigger: completionTrigger(params)
                 })
                 : undefined;
             const finish = <T>(
@@ -232,91 +240,14 @@ export class RslLanguageFeatureRegistry {
                 }
                 return result;
             };
-            /*
-             * Бюджет ожидания короткий, а не 200 мс.
-             *
-             * Полный бюджет имел смысл, когда альтернативой был пустой список:
-             * лучше подождать, чем ответить «ничего нет». Теперь есть
-             * приблизительный ответ из быстрого снимка, и ждать модель дольше
-             * пары десятков миллисекунд значит держать список закрытым ровно
-             * тогда, когда пользователь его открыл. Разбор при этом не
-             * отменяется — по его готовности клиент перезапросит список.
-             */
-            /*
-             * Модель либо уже готова, либо ответ будет приблизительным.
-             *
-             * Ждать здесь нечего: бюджет ожидания был не жёстким. Пока идёт
-             * синхронная фаза разбора, таймер сработать не может — управление
-             * к нему не возвращается, — и на загруженной машине «25 мс»
-             * превращались в сколько угодно. Разбор всё равно назначается, а
-             * isIncomplete заставит клиента перезапросить список по готовности.
-             */
+            const contextStarted = performance.now();
             const module = this.getRequestModule(document);
 
             if (!module) {
-                /*
-                 * Разбор идёт своим ходом, но его отказ обязан быть перехвачен:
-                 * отделённый Promise без catch превращает ошибку разбора в
-                 * необработанное отклонение и валит процесс сервера.
-                 */
-                ensureDocumentParsed(document, waitMode).catch(error =>
+                ensureDocumentParsed(document, "scheduled").catch(error =>
                     this.environment.log(
                         `Completion: разбор не удался; ${errorText(error)}`
                     )
-                );
-
-                if (requestIsStale(document, version, cancellationToken)) {
-                    return finish(
-                        { isIncomplete: false, items: [] },
-                        { cancelled: true, items: 0 }
-                    );
-                }
-
-                /*
-                 * Пустым списком отвечать нельзя: пользователь читает его как
-                 * «в файле ничего нет». Состав — из быстрого снимка плюс то,
-                 * что от модели не зависит: встроенные имена и символы
-                 * прочитанных Import.
-                 */
-                const snapshot = this.environment.getFastDocumentSnapshot(
-                    document
-                );
-                const offset = document.offsetAt(params.position);
-                /*
-                 * Компактный индекс версии вместо повторного извлечения.
-                 *
-                 * Прежде каждый запрос заново обходил весь файл: на модуле
-                 * 237 КБ это 6 мс в медиане и до 29 мс в худшем случае, и так
-                 * на каждое нажатие клавиши.
-                 */
-                const fastIndex = getFastCompletionIndex(snapshot);
-                const members = buildRslFastMemberCompletions(
-                    snapshot,
-                    offset,
-                    name => this.findFastClassMembers(
-                        document,
-                        name,
-                        fastIndex,
-                        offset
-                    ),
-                    fastIndex
-                );
-                const fast = members || deduplicateCompletionItems(
-                    buildRslFastCompletions(snapshot, offset, fastIndex),
-                    this.defaultCompletionItems,
-                    this.knownImportCompletions(document)
-                );
-
-                return finish(
-                    {
-                        isIncomplete: true,
-                        items: this.completionTransport.prepare(fast).items
-                    },
-                    {
-                        pendingModel: true,
-                        source: members ? "fastMembers" : "fastNames",
-                        items: fast.length
-                    }
                 );
             }
 
@@ -326,52 +257,24 @@ export class RslLanguageFeatureRegistry {
                     { cancelled: true, items: 0 }
                 );
             }
-            const contextual = buildRslContextCompletions(
+
+            /*
+             * Отсюда и до возврата поток занят непрерывно: именно это
+             * пользователь видит как задержку следующей клавиши.
+             */
+            const blockingStarted = performance.now();
+            const prepared = this.buildCompletionList(
+                document,
                 module,
-                index,
-                document.offsetAt(params.position),
-                resolver
+                offset,
+                contextStarted
             );
-            if (contextual !== undefined) {
-                return finish(
-                    this.completionTransport.prepare(contextual),
-                    { source: "context", items: contextual.length }
-                );
-            }
-            const context = this.getPositionContext(params);
 
-            if (!context || isBlockedToken(context.token)) {
-                return finish(
-                    { isIncomplete: false, items: [] },
-                    { blocked: true, items: 0 }
-                );
-            }
-
-            const prefix = completionPrefixAt(
-                module.source,
-                context.offset
-            );
-            const items = deduplicateCompletionItems(
-                resolver.getCompletions(
-                    document.uri,
-                    context.tree,
-                    context.offset
-                ),
-                this.defaultCompletionItems,
-                this.environment.getSettings(document.uri).autoImport.enabled
-                    ? buildKnownAutoImportCompletions(
-                        module,
-                        index,
-                        prefix
-                    )
-                    : []
-            );
-            return finish(
-                this.completionTransport.prepare(
-                    rankCompletionItemsForPrefix(items, prefix)
-                ),
-                { source: "scope", items: items.length }
-            );
+            return finish(prepared.list, {
+                ...prepared.fields,
+                blockingMs: performance.now() - blockingStarted,
+                items: prepared.list.items.length
+            });
         });
 
         connection.onCompletionResolve(item =>
@@ -1073,14 +976,16 @@ export class RslLanguageFeatureRegistry {
     invalidate(uri: string): void {
         this.presentationFeatures.invalidate(uri);
         this.semanticTokensFeatures.invalidate(uri);
-        /* Текст изменился: индекс этой версии больше не нужен. */
+        /* Текст изменился: индекс и сеансы этой версии больше не нужны. */
         dropFastCompletionIndex(uri);
+        this.completionSessions.forget(uri);
     }
 
     forget(uri: string): void {
         this.presentationFeatures.forget(uri);
         this.semanticTokensFeatures.forget(uri);
         dropFastCompletionIndex(uri);
+        this.completionSessions.forget(uri);
     }
 
     /**
@@ -1103,6 +1008,7 @@ export class RslLanguageFeatureRegistry {
          * не заходят, он оставался в памяти до вытеснения по счётчику.
          */
         dropFastCompletionIndex(uri);
+        this.completionSessions.forget(uri);
     }
 
     /**
@@ -1305,6 +1211,233 @@ export class RslLanguageFeatureRegistry {
         return result;
     }
 
+    /**
+     * Список Completion для одного состояния документа.
+     *
+     * Состав кандидатов не зависит от набранного префикса: префикс только
+     * фильтрует и ранжирует. Поэтому набор запоминается сеансом, и повторный
+     * запрос при том же состоянии не считает ничего заново — он лишь фильтрует
+     * готовый набор.
+     */
+    private buildCompletionList(
+        document: TextDocument,
+        module: IIndexedModule | undefined,
+        offset: number,
+        contextStartedMs: number
+    ): {
+        list: CompletionList;
+        fields: Record<string, string | number | boolean>;
+    } {
+        const { index, resolver } = this.environment;
+        /*
+         * Снимок берётся только когда модели нет: у готовой модели есть
+         * и текст, и токены, а лишнее обращение к снимку — это шанс
+         * пересобрать его на горячем пути.
+         */
+        const snapshot = module
+            ? undefined
+            : this.environment.getFastDocumentSnapshot(document);
+        const source = module ? module.source : snapshot!.text;
+        const tokens = module ? module.lex.tokens : snapshot!.lex.tokens;
+        const prefix = completionPrefixAt(source, offset);
+        const receiver = findReceiverBeforeDot(tokens, offset);
+        const sessionKey: ICompletionSessionKey = {
+            uri: document.uri,
+            version: document.version,
+            source: module ? "model" : "fast",
+            receiver: receiver ? receiver.name : "",
+            wordStart: offset - prefix.length,
+            revision: `${index.revision}:${resolver.catalogRevision}`
+        };
+        const contextMs = performance.now() - contextStartedMs;
+        const cached = this.completionSessions.get(sessionKey);
+
+        if (cached) {
+            return {
+                list: this.completionTransport.prepare(
+                    rankCompletionItemsForPrefix(cached.candidates, prefix),
+                    { incomplete: cached.incomplete }
+                ),
+                fields: {
+                    source: sessionKey.source,
+                    cacheHit: true,
+                    incomplete: cached.incomplete,
+                    candidates: cached.candidates.length,
+                    requests: cached.requests,
+                    contextMs
+                }
+            };
+        }
+
+        const collectStartedMs = performance.now();
+        const blocked = module
+            ? isBlockedToken(tokenAtOffset(module.lex.tokens, offset, true))
+            : false;
+
+        if (blocked) {
+            return {
+                list: { isIncomplete: false, items: [] },
+                fields: { blocked: true, items: 0, contextMs }
+            };
+        }
+
+        const collected = collectRslCompletionCandidates(
+            module
+                ? this.modelFacts(
+                    document,
+                    module,
+                    offset,
+                    prefix,
+                    sessionKey.receiver
+                )
+                : this.fastFacts(document, snapshot!, offset)
+        );
+
+        const session = this.completionSessions.set(
+            sessionKey,
+            collected.candidates,
+            collected.incomplete
+        );
+
+        return {
+            list: this.completionTransport.prepare(
+                rankCompletionItemsForPrefix(session.candidates, prefix),
+                { incomplete: session.incomplete }
+            ),
+            fields: {
+                source: collected.source,
+                cacheHit: false,
+                incomplete: session.incomplete,
+                candidates: session.candidates.length,
+                requests: session.requests,
+                contextMs,
+                collectMs: performance.now() - collectStartedMs
+            }
+        };
+    }
+
+    /**
+     * Факты готовой модели.
+     *
+     * Метод отвечает только на вопрос «что известно об этой точке». Что из
+     * этого показать — решают общие правила в collectRslCompletionCandidates,
+     * одни и те же для модели и для быстрого индекса.
+     */
+    private modelFacts(
+        document: TextDocument,
+        module: IIndexedModule,
+        offset: number,
+        prefix: string,
+        receiver: string
+    ): IRslCompletionFacts {
+        const { index, resolver } = this.environment;
+        const names = (): readonly CompletionItem[] => module.symbolTree
+            ? resolver.getCompletions(document.uri, module.symbolTree, offset)
+            : [];
+
+        return {
+            name: "model",
+            contextCandidates: () => buildRslContextCompletions(
+                module,
+                index,
+                offset,
+                resolver
+            ),
+            /*
+             * Модель разрешает получателя сама: в позиции после точки её
+             * getCompletions возвращает именно члены. Признак обращения нужен,
+             * чтобы к ним не добавились общие имена.
+             */
+            memberCandidates: () => receiver ? names() : undefined,
+            visibleCandidates: names,
+            ambientCandidates: () => deduplicateCompletionItems(
+                this.defaultCompletionItems,
+                this.knownImportCompletions(document)
+            ),
+            searchCandidates: () => this.workspaceSearchCandidates(
+                document,
+                module,
+                prefix
+            )
+        };
+    }
+
+    /** Факты компактного индекса версии: модель этой версии ещё считается. */
+    private fastFacts(
+        document: TextDocument,
+        snapshot: IFastDocumentSnapshot,
+        offset: number
+    ): IRslCompletionFacts {
+        const fastIndex = getFastCompletionIndex(snapshot);
+
+        return {
+            name: "fast",
+            /*
+             * Контекстные списки — имя модуля в Import, путь в строке — считает
+             * модель: они и нужны там, где текст уже разобран.
+             */
+            contextCandidates: () => undefined,
+            memberCandidates: () => buildRslFastMemberCompletions(
+                snapshot,
+                offset,
+                name => this.findFastClassMembers(
+                    document,
+                    name,
+                    fastIndex,
+                    offset
+                ),
+                fastIndex
+            ),
+            visibleCandidates: () => buildRslFastCompletions(
+                snapshot,
+                offset,
+                fastIndex
+            ),
+            ambientCandidates: () => deduplicateCompletionItems(
+                this.defaultCompletionItems,
+                this.knownImportCompletions(document)
+            ),
+            /*
+             * Поиск по проекту требует модели файла: правка Import считается по
+             * ней. До её готовности предлагается то, что уже известно.
+             */
+            searchCandidates: () => ({ items: [], truncated: false })
+        };
+    }
+
+    /**
+     * Поиск по всему проекту — отдельно от обычного списка.
+     *
+     * Обычные кандидаты — имена файла, области, встроенные и символы
+     * подключённых модулей — известны заранее и отдаются целиком. Auto Import
+     * ищет среди неподключённых символов проекта, и их число ничем не
+     * ограничено: такой поиск ведётся только по осмысленному префиксу и
+     * ограничен по числу, а ограничение честно помечает список неполным.
+     */
+    private workspaceSearchCandidates(
+        document: TextDocument,
+        module: IIndexedModule,
+        prefix: string
+    ): { items: readonly CompletionItem[]; truncated: boolean } {
+        const settings = this.environment.getSettings(document.uri);
+
+        if (!settings.autoImport.enabled || prefix.length < 2) {
+            return { items: [], truncated: false };
+        }
+
+        const found = buildKnownAutoImportCompletions(
+            module,
+            this.environment.index,
+            prefix
+        );
+        const limit = this.completionTransport.limitForSearch;
+
+        return {
+            items: found.slice(0, limit),
+            truncated: found.length > limit
+        };
+    }
+
     private knownImportCompletions(document: TextDocument): CompletionItem[] {
         const { index } = this.environment;
 
@@ -1478,12 +1611,16 @@ function resolvedUri(
     return resolution.kind === "resolved" ? resolution.value : undefined;
 }
 
-function isExplicitCompletion(params: CompletionParams): boolean {
-    const kind = params.context?.triggerKind;
-
-    return kind === undefined ||
-        kind === CompletionTriggerKind.Invoked ||
-        kind === CompletionTriggerKind.TriggerCharacter;
+/** Причина запроса: её видно в журнале рядом со временем ответа. */
+function completionTrigger(params: CompletionParams): string {
+    switch (params.context?.triggerKind) {
+        case CompletionTriggerKind.TriggerCharacter:
+            return "символ " + (params.context?.triggerCharacter || "");
+        case CompletionTriggerKind.TriggerForIncompleteCompletions:
+            return "повтор";
+        default:
+            return "вызов";
+    }
 }
 
 function errorText(error: unknown): string {
@@ -1528,29 +1665,3 @@ function requestIsStale(
         cancellationToken?.isCancellationRequested === true;
 }
 
-function deduplicateCompletionItems(
-    ...groups: readonly (readonly CompletionItem[])[]
-): CompletionItem[] {
-    const result: CompletionItem[] = [];
-    const seen = new Set<string>();
-
-    for (const items of groups) {
-        for (const item of items) {
-            const autoImportUri = (
-                item.data as { rslAutoImportUri?: unknown } | undefined
-            )?.rslAutoImportUri;
-            const key = autoImportUri
-                ? `${String(item.label).toLowerCase()}:${autoImportUri}`
-                : String(item.label).toLowerCase();
-
-            if (seen.has(key)) {
-                continue;
-            }
-
-            seen.add(key);
-            result.push(item);
-        }
-    }
-
-    return result;
-}

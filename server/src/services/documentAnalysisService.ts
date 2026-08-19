@@ -2,6 +2,7 @@ import type { TextDocuments } from "vscode-languageserver/node";
 import type { TextDocument } from "vscode-languageserver-textdocument";
 
 import { createOpenModuleModel } from "../moduleModel";
+import { monotonicMs } from "../core/timeSlice";
 import { RslSymbol } from "../symbols/rslSymbol";
 import { parseRslSyntax } from "../syntaxParser";
 import type { RslSettingsService } from "./settingsService";
@@ -1084,7 +1085,7 @@ export class DocumentAnalysisService {
             return;
         }
 
-        const started = Date.now();
+        const started = monotonicMs();
         const wasKnown = !!this.index.getModule(uri);
         const performance = this.options.performance;
         const fullSpan = performance?.enabled
@@ -1138,7 +1139,7 @@ export class DocumentAnalysisService {
         }
 
         /* Отсюда и до следующего возврата управления поток занят непрерывно. */
-        let blockingSinceMs = Date.now();
+        let blockingSinceMs = monotonicMs();
 
         /*
          * Продолжение прерванного разбора: syntax этой версии уже посчитан.
@@ -1199,7 +1200,7 @@ export class DocumentAnalysisService {
              */
             this.rememberCheckpoint(uri, version, syntax);
             await yieldToEventLoop();
-            blockingSinceMs = Date.now();
+            blockingSinceMs = monotonicMs();
         }
 
         if (!this.stillCurrent(uri, version, generation)) {
@@ -1245,7 +1246,7 @@ export class DocumentAnalysisService {
          */
         this.options.onParsed(indexed, wasKnown);
 
-        const elapsed = Date.now() - started;
+        const elapsed = monotonicMs() - started;
         if (fullSpan) {
             performance.end(fullSpan, {
                 cancelled: false,
@@ -1377,7 +1378,7 @@ function yieldToEventLoop(): Promise<void> {
  * Считается по времени между возвратами.
  */
 function blockingMs(sinceMs: number): number {
-    return Date.now() - sinceMs;
+    return monotonicMs() - sinceMs;
 }
 
 function errorToString(error: unknown): string {

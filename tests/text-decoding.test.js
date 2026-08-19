@@ -129,12 +129,17 @@ test("таблица CP866 верна на всех 256 байтах", () => {
     assert.deepStrictEqual(wrong, [], "таблица CP866 обязана совпасть целиком");
 });
 
-test("UTF-8 остаётся UTF-8, в том числе с BOM", () => {
+test("кодировка определяется по BOM: есть BOM — UTF-8, нет — CP866", () => {
     const source = "Macro НоваяОперация()\nEnd;";
+
+    /*
+     * Файл без BOM читается как CP866 — так принято в репозитории банка.
+     * Прежде такой файл сначала проверялся на корректный UTF-8, и файл,
+     * случайно оказавшийся корректным UTF-8, читался не по соглашению.
+     */
     const plain = decodeRslSource(Buffer.from(source, "utf8"));
 
-    assert.strictEqual(plain.encoding, "utf8");
-    assert.strictEqual(plain.text, source);
+    assert.strictEqual(plain.encoding, "cp866");
 
     const withBom = decodeRslSource(
         Buffer.concat([Buffer.from([0xEF, 0xBB, 0xBF]), Buffer.from(source, "utf8")])
@@ -202,11 +207,12 @@ test("кириллическое имя остаётся идентификат�
 
 test("пустой файл и чистый ASCII не ломаются", () => {
     assert.strictEqual(decodeRslSourceText(Buffer.alloc(0)), "");
-    assert.strictEqual(decodeRslSource(Buffer.alloc(0)).encoding, "utf8");
+    assert.strictEqual(decodeRslSource(Buffer.alloc(0)).encoding, "cp866");
 
+    /* На чистом ASCII CP866 и UTF-8 совпадают байт в байт. */
     const ascii = "Macro Test()\r\n  Var x = 1;\r\nEnd;\r\n";
     const decoded = decodeRslSource(Buffer.from(ascii, "ascii"));
-    assert.strictEqual(decoded.encoding, "utf8");
+    assert.strictEqual(decoded.encoding, "cp866");
     assert.strictEqual(decoded.text, ascii);
 });
 

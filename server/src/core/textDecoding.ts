@@ -67,22 +67,9 @@ function decodeCp866(buffer: Buffer): string {
 }
 
 /**
- * Проверка «это корректный UTF-8» делается строгим декодером, а не поиском
- * символа замены: файл имеет право содержать U+FFFD сам по себе, и тогда поиск
- * объявил бы UTF-8 сломанным.
- */
-function tryDecodeUtf8(buffer: Buffer): string | undefined {
-    try {
-        return new TextDecoder("utf-8", { fatal: true }).decode(buffer);
-    } catch (error) {
-        return undefined;
-    }
-}
-
-/**
  * Текст файла в UTF-16 по его BOM.
  *
- * Такие макросы встречаются: в проверенном репозитории их 12 из 5784. Без этого
+ * Такие макросы встречаются: в проверенном репозитории их 10 из 5825. Без этого
  * файл читался побайтно — между буквами оказывались нулевые символы, и
  * содержимое не разбиралось вовсе: ни подсветка, ни подсказки, ни Problems по
  * нему не работали.
@@ -117,7 +104,15 @@ function decodeUtf16(buffer: Buffer): string | undefined {
     return swapped.toString("utf16le");
 }
 
-/** Исходник и кодировка, в которой он оказался записан. */
+/**
+ * Исходник и кодировка, в которой он оказался записан.
+ *
+ * Правило простое и совпадает с принятым в репозитории банка: есть BOM —
+ * читаем по нему, нет BOM — CP866. Прежде файл без BOM сначала проверялся на
+ * корректный UTF-8, и такая догадка меняла смысл: файл без BOM, случайно
+ * оказавшийся корректным UTF-8, читался как UTF-8, хотя по соглашению он
+ * CP866.
+ */
 export function decodeRslSource(buffer: Buffer): IRslDecodedSource {
     /* BOM снимается: иначе он попадёт в текст первым символом. */
     if (
@@ -130,17 +125,18 @@ export function decodeRslSource(buffer: Buffer): IRslDecodedSource {
         };
     }
 
+    /*
+     * BOM UTF-16 — тоже BOM. По соглашению таких файлов быть не должно, но в
+     * проверенном репозитории их 10, и прочитанные как CP866 они дают
+     * бессмыслицу: между буквами стоят нулевые символы.
+     */
     const utf16 = decodeUtf16(buffer);
 
     if (utf16 !== undefined) {
         return { text: utf16, encoding: "utf16" };
     }
 
-    const utf8 = tryDecodeUtf8(buffer);
-
-    return utf8 === undefined
-        ? { text: decodeCp866(buffer), encoding: "cp866" }
-        : { text: utf8, encoding: "utf8" };
+    return { text: decodeCp866(buffer), encoding: "cp866" };
 }
 
 /** Текст без сведений о кодировке — для мест, которым она безразлична. */

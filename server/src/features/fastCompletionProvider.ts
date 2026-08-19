@@ -69,9 +69,9 @@ export function buildRslFastMemberCompletions(
     const members = findClassMembers(found.typeName);
 
     /*
-     * Отбор по набранной части имени. Клиент отберёт и сам, но ответ помечен
-     * неполным и будет перезапрошен, а до тех пор список обязан относиться к
-     * тому, что уже написано.
+     * Порядок — по набранной части имени, но состав полный: список отдаётся
+     * клиенту как полный, и дальше фильтрует он. Отбрось здесь лишнее — и
+     * после Backspace редактор отфильтрует уже урезанный набор.
      */
     return members && receiver.prefix
         ? rankCompletionItemsForPrefix(members, receiver.prefix)
@@ -143,8 +143,11 @@ function tokenIndexBefore(
  * только первый случай, и на obj.set быстрый путь отказывался от объектного
  * ответа: пользователь получал общий список и ждал полного разбора — ровно
  * та задержка, которую видно по Ctrl+Space.
+ *
+ * Получатель нужен и ключу сеанса Completion: состав списка зависит от
+ * него, поэтому он входит в ключ.
  */
-function findReceiverBeforeDot(
+export function findReceiverBeforeDot(
     tokens: readonly IRslToken[],
     offset: number
 ): { name: string; prefix: string } | undefined {

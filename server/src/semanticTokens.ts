@@ -79,6 +79,22 @@ interface IObjectInfo {
  * resolver, и тысяча токенов складывалась в 23 мс непрерывной работы — столько
  * же, сколько занимал самый долгий подготовительный проход.
  */
+/*
+ * Шаг сверки по областям, а не по токенам: на каждую область приходится поиск
+ * границ её сигнатуры — это проход по её телу, поэтому шаг мелкий.
+ */
+const SCOPE_CHECK_INTERVAL = 4;
+
+/*
+ * Шаг сверки по идентификаторам основного цикла.
+ *
+ * Работа там приходится только на идентификаторы: остальные токены цикл
+ * отбрасывает сразу, а на идентификатор — разрешение имени, десятки микросекунд.
+ * Сверка раз в триста ТОКЕНОВ на плотном коде означала до трёхсот разрешений
+ * подряд, то есть порцию под двадцать миллисекунд.
+ */
+const IDENTIFIER_CHECK_INTERVAL = 32;
+
 const CANCEL_CHECK_INTERVAL = 300;
 
 /**
@@ -174,7 +190,12 @@ function* semanticTokenSteps(
 ): Generator<void, SemanticTokens, void> {
     const resolver = sharedResolver || new RslScopeResolver(index);
     const tokens = module.syntax.tokens;
-    const objects = collectObjects(module, tokens, isCancelled);
+    const objects = yield* collectObjectsSteps(
+        module,
+        tokens,
+        isCancelled,
+        shouldYield
+    );
 
     /*
      * Граница порции после обхода дерева символов: он идёт по всему файлу даже
@@ -262,6 +283,8 @@ function* semanticTokenSteps(
     const firstTokenIndex = range
         ? lowerBoundByLine(tokens, Math.max(0, range.startLine))
         : 0;
+    /* Сколько идентификаторов уже разобрано: по ним и сверяется бюджет. */
+    let inspected = 0;
 
     for (let tokenIndex = firstTokenIndex; tokenIndex < tokens.length; tokenIndex++) {
         if (
@@ -297,6 +320,17 @@ function* semanticTokenSteps(
         }
         if (token.kind !== "identifier") {
             continue;
+        }
+
+        if (
+            ++inspected % IDENTIFIER_CHECK_INTERVAL === 0 &&
+            (shouldYield === undefined || shouldYield())
+        ) {
+            yield;
+
+            if (isCancelled()) {
+                return { data: [] };
+            }
         }
 
         if (formatSpecifierStarts.has(token.start)) {
@@ -552,28 +586,50 @@ function createVirtualToken(
     };
 }
 
-function collectObjects(
+/**
+ * Объекты файла и их области — порциями.
+ *
+ * Раньше этот обход шёл одним куском перед первой паузой: поиск границ
+ * сигнатуры проходит по телу каждой процедуры, то есть в сумме по всему файлу,
+ * и на файле 563 КБ это давало почти тридцать миллисекунд занятого потока — до
+ * того, как расчёт вообще успевал отдать управление.
+ *
+ * Область — единица работы: сигнатура одной процедуры целиком либо не
+ * начинается вовсе, поэтому пауза между областями не требует хранить состояние
+ * поиска.
+ */
+function* collectObjectsSteps(
     module: IIndexedModule,
     code: IRslToken[],
-    isCancelled: () => boolean = () => false
-): IObjectInfo[] {
-    const result: IObjectInfo[] = [];
-    let visited = 0;
-    let cancelled = false;
-
+    isCancelled: () => boolean,
+    shouldYield?: () => boolean
+): Generator<void, IObjectInfo[], void> {
+    /*
+     * Сначала собираются сами области — этот обход дешёвый, дорога сигнатура.
+     */
+    const scopes: RslSymbol[] = [];
     walk(module.symbolTree, scope => {
-        /*
-         * Обход идёт по всему дереву даже для Range-запроса, поэтому проверка
-         * отмены нужна и здесь, а не только в цикле по токенам.
-         */
-        if (cancelled) {
-            return;
-        }
-        if (++visited % CANCEL_CHECK_INTERVAL === 0 && isCancelled()) {
-            cancelled = true;
-            return;
+        scopes.push(scope);
+    });
+
+    const result: IObjectInfo[] = [];
+
+    for (let visited = 0; visited < scopes.length; visited++) {
+        if (visited > 0 && visited % SCOPE_CHECK_INTERVAL === 0) {
+            /*
+             * Обход идёт по всему дереву даже для Range-запроса, поэтому
+             * проверка отмены нужна и здесь, а не только в цикле по токенам.
+             */
+            if (isCancelled()) {
+                return result;
+            }
+
+            if (shouldYield === undefined || shouldYield()) {
+                yield;
+            }
         }
 
+        const scope = scopes[visited];
         const signature = isCallable(scope)
             ? findSignatureRange(code, scope)
             : undefined;
@@ -592,7 +648,7 @@ function collectObjects(
                     )
             });
         });
-    });
+    }
 
     return result;
 }

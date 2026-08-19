@@ -37,24 +37,59 @@ export function buildScalarMemberDiagnostics(
     const result: Diagnostic[] = [];
 
     for (let index = 2; index < tokens.length; index++) {
+        if (!isScalarMemberCandidate(tokens, index)) {
+            continue;
+        }
+
+        addScalarMemberDiagnostic(module, resolver, tokens, index, result);
+    }
+
+    return result;
+}
+
+/**
+ * Похоже ли на обращение к члену: отбор без резолвера.
+ *
+ * Дорогая часть проверки — определение типа получателя, и делать её имеет смысл
+ * только для `имя . имя`. Отбор вынесен наружу, чтобы обход мог сверяться с
+ * бюджетом порции ровно перед дорогой частью.
+ */
+export function isScalarMemberCandidate(
+    tokens: readonly IRslToken[],
+    index: number
+): boolean {
+    if (index < 2) {
+        return false;
+    }
+
+    const member = tokens[index];
+    const dot = tokens[index - 1];
+    const receiver = tokens[index - 2];
+
+    if (
+        member.kind !== "identifier" ||
+        dot.kind !== "symbol" ||
+        dot.raw !== "." ||
+        receiver.kind !== "identifier"
+    ) {
+        return false;
+    }
+
+    /* Цепочка `a.b.c`: про `c` судить нельзя, тип `a.b` нам неизвестен. */
+    return !isAfterDot(tokens, index - 2);
+}
+
+/** Проверка одного отобранного обращения: здесь и живёт работа резолвера. */
+export function addScalarMemberDiagnostic(
+    module: IIndexedModule,
+    resolver: RslScopeResolver,
+    tokens: readonly IRslToken[],
+    index: number,
+    result: Diagnostic[]
+): void {
+    {
         const member = tokens[index];
-        const dot = tokens[index - 1];
         const receiver = tokens[index - 2];
-
-        if (
-            member.kind !== "identifier" ||
-            dot.kind !== "symbol" ||
-            dot.raw !== "." ||
-            receiver.kind !== "identifier"
-        ) {
-            continue;
-        }
-
-        /* Цепочка `a.b.c`: про `c` судить нельзя, тип `a.b` нам неизвестен. */
-        if (isAfterDot(tokens, index - 2)) {
-            continue;
-        }
-
         const declaredType = declaredScalarTypeOf(
             module,
             resolver,
@@ -62,7 +97,7 @@ export function buildScalarMemberDiagnostics(
         );
 
         if (!declaredType) {
-            continue;
+            return;
         }
 
         result.push({
@@ -85,8 +120,6 @@ export function buildScalarMemberDiagnostics(
             }
         });
     }
-
-    return result;
 }
 
 /**

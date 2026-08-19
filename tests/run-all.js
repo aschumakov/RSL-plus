@@ -32,6 +32,7 @@ const tests = [
     "parse-scheduling.test.js",
     "model-equivalence.test.js",
     "document-units.test.js",
+    "incremental-diagnostics.test.js",
     "text-decoding.test.js",
     "resolver-cache.test.js",
     "index-memory.test.js",
@@ -42,6 +43,8 @@ const tests = [
     "special-variables.test.js",
     "expression-checks.test.js",
     "stability-regressions.test.js",
+    "completion-protocol.test.js",
+    "completion-differential.test.js",
 ];
 
 let failed = false;

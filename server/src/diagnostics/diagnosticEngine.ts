@@ -139,7 +139,8 @@ export class RslDiagnosticEngine {
                 context.module,
                 context.index,
                 context.settings,
-                context.isCancelled
+                context.isCancelled,
+                context.resolver
             ),
             runChunked: (context, slice) => buildLocalRslDiagnosticsChunked(
                 context.module,
@@ -147,7 +148,8 @@ export class RslDiagnosticEngine {
                 context.settings,
                 context.isCancelled,
                 slice,
-                context.onStage
+                context.onStage,
+                context.resolver
             )
         });
         this.register({
