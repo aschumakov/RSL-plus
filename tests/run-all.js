@@ -47,6 +47,7 @@ const tests = [
     "completion-differential.test.js",
     "completion-stability.test.js",
     "interactive-fast-path.test.js",
+    "interactive-differential.test.js",
     "range-formatting.test.js",
     "problems-lifecycle.test.js",
     "quick-fixes-and-type-definition.test.js",

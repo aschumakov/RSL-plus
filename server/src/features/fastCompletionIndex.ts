@@ -54,6 +54,23 @@ export interface IFastClassInfo {
     members: IFastClassMember[];
 }
 
+/**
+ * Подпись процедуры этой версии текста.
+ *
+ * Нужна подсказке параметров: брать её у последней разобранной модели нельзя —
+ * модель отстаёт на правку, и после переименования параметра подсказка
+ * показывала прежний список.
+ */
+export interface IFastSignature {
+    name: string;
+    /** Параметры как они написаны: имя и, если указан, тип. */
+    parameters: string[];
+    /** Индекс области; -1 — процедура верхнего уровня модуля. */
+    scope: number;
+    /** Метод класса: снаружи вызывается только через объект. */
+    isMethod: boolean;
+}
+
 /** Что известно об имени в этой точке. */
 export interface IFastNameLookup {
     /** Объявление найдено: внешнее одноимённое затенено и смотреть его нельзя. */
@@ -108,6 +125,8 @@ export interface IFastCompletionIndex {
      * дешевле, чем восстановление на каждый запрос.
      */
     scopeMethods: Map<number, CompletionItem[]>;
+    /** Подписи процедур и методов по нормализованному имени. */
+    signatures: Map<string, IFastSignature[]>;
 }
 
 /* Слова, которые начинают объявление даже посреди строки. */
@@ -403,6 +422,7 @@ function buildFastCompletionIndex(
     const bindings = new Map<string, IFastBinding[]>();
     const globalItems: CompletionItem[] = [];
     const scopeBindings = new Map<number, IFastBinding[]>();
+    const signatures = new Map<string, IFastSignature[]>();
     const imports: string[] = [];
     const blocks: IOpenBlock[] = [];
     let modifier = "";
@@ -620,6 +640,7 @@ function buildFastCompletionIndex(
                 globalItems,
                 addItem,
                 addBinding,
+                signatures,
                 owner: owningClass(),
                 isPrivate: modifier === "private" || modifier === "local"
             });
@@ -686,7 +707,8 @@ function buildFastCompletionIndex(
         imports,
         globalItems: deduplicateByLabel(globalItems),
         scopeBindings,
-        scopeMethods
+        scopeMethods,
+        signatures
     };
 }
 
@@ -697,6 +719,8 @@ interface IScopeContext {
     globalItems: CompletionItem[];
     addItem(scope: number, item: CompletionItem): void;
     addBinding: AddBinding;
+    /** Подписи процедур этой версии: их собирает openScope. */
+    signatures: Map<string, IFastSignature[]>;
     /** Класс, которому принадлежит объявление; undefined — это не метод. */
     owner: IFastClassInfo | undefined;
     isPrivate: boolean;
@@ -709,6 +733,8 @@ function openScope(
     word: string,
     context: IScopeContext
 ): number {
+    /* Параметры процедуры запоминаются по ходу чтения списка. */
+    const parameters: string[] = [];
     const { scopes, blocks, classes, globalItems } = context;
     /* Родитель — ближайшая настоящая область: IF и WHILE её не создают. */
     let parent = -1;
@@ -837,10 +863,50 @@ function openScope(
         tokens[index].kind === "symbol" &&
         tokens[index].raw === "("
     ) {
-        return readParameterList(tokens, index, context.addBinding);
+        const after = readParameterList(
+            tokens,
+            index,
+            (name, typeName, start, isConstant, isPrivate) => {
+                parameters.push(typeName ? name + ":" + typeName : name);
+                context.addBinding(name, typeName, start, isConstant, isPrivate);
+            }
+        );
+        rememberSignature(context, name, parent, parameters);
+
+        return after;
     }
 
+    rememberSignature(context, name, parent, parameters);
+
     return index - 1;
+}
+
+/** Запоминает подпись процедуры этой версии текста. */
+function rememberSignature(
+    context: IScopeContext,
+    name: string,
+    parent: number,
+    parameters: readonly string[]
+): void {
+    const key = normalizeIdentifier(name);
+
+    if (!key) {
+        return;
+    }
+
+    const signature: IFastSignature = {
+        name,
+        parameters: [...parameters],
+        scope: parent,
+        isMethod: !!context.owner
+    };
+    const list = context.signatures.get(key);
+
+    if (list) {
+        list.push(signature);
+    } else {
+        context.signatures.set(key, [signature]);
+    }
 }
 
 function skipParens(

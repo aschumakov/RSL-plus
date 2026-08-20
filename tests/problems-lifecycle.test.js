@@ -177,6 +177,50 @@ test("локальная ошибка исчезает после правки",
     );
 });
 
+test("межфайловая ошибка не переносится на правленый текст", async () => {
+    /*
+     * Правка в самой первой строке сдвигает весь текст ниже. Старое
+     * межфайловое подчёркивание указывало бы уже на другой код, а номер
+     * версии в публикации говорил бы клиенту, что список актуален. Такую
+     * находку показывать нельзя — она вернётся после пересчёта.
+     */
+    const stand = createStand(WITH_UNUSED_IMPORT);
+    stand.coordinator.scheduleLocal(MAIN, 0);
+    stand.coordinator.scheduleWorkspace(MAIN, 0);
+    await settle();
+
+    assert.ok(
+        codes(stand.publications[stand.publications.length - 1])
+            .includes("unused-import"),
+        "межфайловая находка обязана быть показана"
+    );
+
+    /* Import убран: находка о нём относится к тексту, которого уже нет. */
+    const before = stand.publications.length;
+    stand.change(WITH_UNUSED_IMPORT
+        .split("\n")
+        .slice(1)
+        .join("\n"));
+    stand.coordinator.scheduleLocal(MAIN, 0);
+    await settle();
+
+    const after = stand.publications.slice(before);
+    assert.ok(after.length > 0, "публикация после правки обязана быть");
+
+    for (const publication of after) {
+        assert.ok(
+            !codes(publication).includes("unused-import"),
+            "старая межфайловая находка не имеет права выходить с новой " +
+                "версией: " + codes(publication).join(", ")
+        );
+        assert.strictEqual(
+            publication.version,
+            stand.document.version,
+            "публикуется список именно для текущей версии"
+        );
+    }
+});
+
 test("публикация несёт версию документа", async () => {
     const stand = createStand(WITH_LOCAL_ERROR);
     stand.coordinator.scheduleLocal(MAIN, 0);

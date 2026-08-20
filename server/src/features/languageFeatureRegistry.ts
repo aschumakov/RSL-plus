@@ -226,8 +226,17 @@ export class RslLanguageFeatureRegistry {
             }
 
             if (fastContext.module) {
-                /* Модель есть, а ответа нет: добавить его неоткуда. */
-                return null;
+                /*
+                 * Модель этой же версии уже есть — ждать нечего, а знает
+                 * она больше: тип переменной, выведенный из присваивания,
+                 * быстрому индексу недоступен. Раньше здесь возвращался
+                 * null, и подсказка по такому вызову пропадала совсем.
+                 */
+                return buildRslSignatureHelp(
+                    fastContext.module,
+                    resolver,
+                    fastContext.offset
+                );
             }
 
             await waitForParseBudget(

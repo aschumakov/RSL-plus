@@ -61,7 +61,18 @@ export class DiagnosticsCoordinator {
     private workspaceTimers = new Map<string, NodeJS.Timeout>();
     private workspaceFirstScheduled = new Map<string, number>();
     private localCache = new Map<string, Diagnostic[]>();
-    private workspaceCache = new Map<string, Diagnostic[]>();
+    /**
+     * Межфайловый результат вместе с текстом, по которому он посчитан.
+     *
+     * Текст нужен, чтобы после правки отличить находки, чьи позиции ещё верны,
+     * от тех, что сдвинулись. Публиковать вторые с номером новой версии
+     * нельзя: подчёркивание указывало бы на другой текст.
+     */
+    private workspaceCache = new Map<string, {
+        source: string;
+        version: number;
+        diagnostics: Diagnostic[];
+    }>();
     private localKeys = new Map<string, string>();
     private workspaceKeys = new Map<string, string>();
     private publishedSignatures = new Map<string, string>();
@@ -405,7 +416,11 @@ export class DiagnosticsCoordinator {
                     ...stages.fields()
                 });
             }
-            this.workspaceCache.set(uri, diagnostics);
+            this.workspaceCache.set(uri, {
+                source: state.module.source,
+                version: state.module.version,
+                diagnostics
+            });
             this.workspaceKeys.set(uri, key);
             this.logSlow("workspace", uri, state.module.version, started);
         }
@@ -488,7 +503,7 @@ export class DiagnosticsCoordinator {
         const seen = new Set<string>();
         for (const item of [
             ...(this.localCache.get(uri) || []),
-            ...(this.workspaceCache.get(uri) || [])
+            ...this.transferableWorkspaceDiagnostics(uri)
         ]) {
             const key = diagnosticItemKey(item);
             if (!seen.has(key)) {
@@ -543,6 +558,42 @@ export class DiagnosticsCoordinator {
                 this.sendIfChanged(document.uri, diagnostics.slice());
             }
         }
+    }
+
+    /**
+     * Межфайловые находки, которые можно показать вместе с текущим текстом.
+     *
+     * Пока текст тот же — все. После правки остаются те, что лежат ЦЕЛИКОМ до
+     * места правки: их позиции от правки ниже не двигаются, и это проверяется,
+     * а не предполагается. Остальные не показываются до пересчёта: исчезнуть на
+     * мгновение — меньшее зло, чем подчёркивание не на своём месте.
+     *
+     * Так закрывается и мерцание, и ложная диагностика: правка в теле процедуры
+     * не убирает неиспользуемый Import в первой строке файла, а правка в самом
+     * Import не оставляет старое подчёркивание висеть на новом тексте.
+     */
+    private transferableWorkspaceDiagnostics(
+        uri: string
+    ): readonly Diagnostic[] {
+        const entry = this.workspaceCache.get(uri);
+
+        if (!entry) {
+            return [];
+        }
+
+        const module = this.index.getModule(uri);
+        const current = module?.source;
+
+        if (current === undefined || current === entry.source) {
+            return entry.diagnostics;
+        }
+
+        const unchanged = commonPrefixLength(entry.source, current);
+        const lineStarts = module.lex.lineStarts;
+
+        return entry.diagnostics.filter(item =>
+            offsetOfPosition(lineStarts, item.range.end) <= unchanged
+        );
     }
 
     private getOpenUris(): string[] {
@@ -664,6 +715,27 @@ function diagnosticsSettingsKey(settings: IRslSettings): string {
             dialect: settings.language?.dialect
         })
     );
+}
+
+/** Длина совпадающего начала двух текстов. */
+function commonPrefixLength(left: string, right: string): number {
+    const limit = Math.min(left.length, right.length);
+    let index = 0;
+
+    while (index < limit && left.charCodeAt(index) === right.charCodeAt(index)) {
+        index++;
+    }
+
+    return index;
+}
+
+function offsetOfPosition(
+    lineStarts: readonly number[],
+    position: { line: number; character: number }
+): number {
+    const line = Math.max(0, Math.min(position.line, lineStarts.length - 1));
+
+    return lineStarts[line] + position.character;
 }
 
 function diagnosticItemKey(item: Diagnostic): string {

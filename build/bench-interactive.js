@@ -5,7 +5,7 @@
  *
  * Отвечает на вопрос, который нельзя проверить набором тестов: сколько ждёт
  * пользователь, нажавший Ctrl+Click, наведший курсор или открывший подсказку
- * параметров. Три режима:
+ * параметров. Режимы:
  *
  * 1. Холодный  — модель этой версии текста ещё не построена, как сразу после
  *                правки. Ожидание разбора попадает в замер: именно его и видит
@@ -364,7 +364,9 @@ async function measureMode(label, source, platform, options) {
         const times = [];
         let answered = false;
 
-        for (let request = 0; request < REQUESTS; request++) {
+        const repeats = options.once ? 1 : REQUESTS;
+
+        for (let request = 0; request < repeats; request++) {
             /*
              * Холодный режим — это каждый раз новая правка: и модель, и
              * быстрый индекс версии строятся заново.
@@ -425,6 +427,18 @@ async function measureMode(label, source, platform, options) {
 
     await measureMode("тёплый режим (модель готова):",
         source, platform, { stand: warm, target: 50 });
+
+    /*
+     * Первый запрос после notifyParsed: модель только что стала готовой,
+     * и обработчик впервые обращается к ней вместо быстрого индекса.
+     * Отдельный режим потому, что кэши сеанса на этом событии
+     * сбрасываются, и цена первого запроса — это цена их построения.
+     */
+    const parsed = createStand(source, { platform, modelReady: true });
+    parsed.registry.notifyParsed(MAIN);
+
+    await measureMode("первый запрос после notifyParsed:",
+        source, platform, { stand: parsed, target: 50, once: true });
 
     const stop = startBackground(warm.index, MAIN);
     await measureMode("под фоновым расчётом Problems:",

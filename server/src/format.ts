@@ -163,6 +163,29 @@ export function FormatCode(
             splitLineCode(normalizedLine);
 
         updateParenthesisStack(codeTokens, indentColumn, parenthesisStack);
+
+        /*
+         * Точка с запятой закрывает оператор: открытых скобок после неё нет.
+         *
+         * Колонки скобок считаются по отдельному лексированию строки, а оно не
+         * знает о строковых литералах, продолженных обратным слешом на
+         * следующую строку: скобки из текста литерала попадали в стек и не
+         * закрывались уже никогда. Дальше каждая строка файла выравнивалась по
+         * такой скобке — на checkUFV.mac проверенного репозитория к строке 1029
+         * набегало 297 пробелов отступа. Заодно это разошлось с
+         * форматированием по выделению, которое начинает счёт от границы блока.
+         *
+         * Конец оператора определяется по токенам файла, а не строки: они
+         * знают, где литерал, и «;» внутри текста за конец не принимается.
+         * Заголовок FOR — единственное место, где «;» стоит внутри скобок
+         * законно, и он исключён.
+         */
+        if (
+            structure.firstKeyword !== "for" &&
+            endsStatement(lineTokens)
+        ) {
+            parenthesisStack.length = 0;
+        }
         continuation = getNextContinuationContext(
             lineCode,
             codeTokens,
@@ -460,6 +483,24 @@ function normalizeCodeSegment(segment: string): string {
         )
         .replace(/,[ \t]*/g, ", ")
         .replace(/[ \t]+/g, " ");
+}
+
+/** Заканчивается ли строка концом оператора. */
+function endsStatement(tokens: readonly IRslToken[]): boolean {
+    for (let index = tokens.length - 1; index >= 0; index--) {
+        const token = tokens[index];
+
+        if (
+            token.kind === "whitespace" || token.kind === "newline" ||
+            token.kind === "comment" || token.kind === "bom"
+        ) {
+            continue;
+        }
+
+        return token.kind === "symbol" && token.raw === ";";
+    }
+
+    return false;
 }
 
 function updateParenthesisStack(

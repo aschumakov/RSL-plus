@@ -110,7 +110,9 @@ function createCompletionRegistry(options) {
         uri,
         "rsl",
         options.modelReady === false ? 2 : 1,
-        source
+        options.editedSource === undefined
+            ? source
+            : options.editedSource
     );
     const handlers = {};
     /* Снимок кэшируется по версии — так делает и сервер. */
@@ -127,7 +129,7 @@ function createCompletionRegistry(options) {
             getDefaults(),
             options.platform
         ),
-        definitionProvider: {
+        definitionProvider: options.definitionProvider || {
             findImportDefinition: async () => undefined,
             findDynamicDefinition: async () => undefined,
             createObjectLocationByUri: () => ({ uri, range: null })
@@ -147,7 +149,17 @@ function createCompletionRegistry(options) {
     });
     registry.register();
 
-    return { handlers, document, index, module, registry, uri, source };
+    return {
+        handlers,
+        document,
+        index,
+        module,
+        registry,
+        uri,
+        source,
+        /* Текст, который видит редактор: он же — текст запросов. */
+        text: document.getText()
+    };
 }
 
 /** Список для позиции сразу за указанным текстом образца. */

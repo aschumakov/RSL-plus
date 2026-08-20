@@ -91,19 +91,23 @@ export function findRslCallContext(
     allTokens: readonly IRslToken[],
     offset: number
 ): ICallContext | undefined {
-    const tokens = allTokens.filter(token =>
-        token.start < offset &&
-        token.kind !== "whitespace" &&
-        token.kind !== "newline" &&
-        token.kind !== "comment" &&
-        token.kind !== "bom" &&
-        token.kind !== "square"
-    );
+    /*
+     * Обход идёт от позиции курсора назад, а не по всему файлу.
+     *
+     * Прежде поток токенов фильтровался целиком и копировался в новый
+     * массив: на модуле 700 КБ это сотни тысяч элементов на каждое
+     * нажатие «(» или «,». Незакрытая скобка вызова лежит рядом с
+     * курсором, поэтому цена теперь зависит от размера вызова.
+     */
     let depth = 0;
     let openIndex = -1;
 
-    for (let index = tokens.length - 1; index >= 0; index--) {
-        const token = tokens[index];
+    for (let index = lastTokenBefore(allTokens, offset); index >= 0; index--) {
+        const token = allTokens[index];
+
+        if (!isCallToken(token)) {
+            continue;
+        }
 
         if (token.kind !== "symbol") {
             continue;
@@ -111,12 +115,22 @@ export function findRslCallContext(
 
         if (token.raw === ")") {
             depth++;
-        } else if (token.raw === "(") {
+            continue;
+        }
+
+        if (token.raw === "(") {
             if (depth === 0) {
                 openIndex = index;
                 break;
             }
+
             depth--;
+            continue;
+        }
+
+        /* Точка с запятой закрывает оператор: вызова здесь нет. */
+        if (token.raw === ";") {
+            return undefined;
         }
     }
 
@@ -124,40 +138,107 @@ export function findRslCallContext(
         return undefined;
     }
 
-    const callee = tokens[openIndex - 1];
-    if (callee.kind !== "identifier") {
+    const callee = previousCallToken(allTokens, openIndex);
+
+    if (!callee || callee.kind !== "identifier") {
         return undefined;
     }
 
-    let activeParameter = 0;
-    let nestedParentheses = 0;
-    let nestedBrackets = 0;
+    return {
+        callee,
+        activeParameter: countArguments(allTokens, openIndex, offset)
+    };
+}
+
+/** Индекс последнего токена, начинающегося раньше позиции. */
+function lastTokenBefore(
+    tokens: readonly IRslToken[],
+    offset: number
+): number {
+    let low = 0;
+    let high = tokens.length;
+
+    while (low < high) {
+        const middle = (low + high) >>> 1;
+
+        if (tokens[middle].start < offset) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+
+    return low - 1;
+}
+
+/** Токены, из которых состоит вызов: без пробелов, комментариев и блоков. */
+function isCallToken(token: IRslToken): boolean {
+    return token.kind !== "whitespace" &&
+        token.kind !== "newline" &&
+        token.kind !== "comment" &&
+        token.kind !== "bom" &&
+        token.kind !== "square";
+}
+
+function previousCallToken(
+    tokens: readonly IRslToken[],
+    index: number
+): IRslToken | undefined {
+    for (let at = index - 1; at >= 0; at--) {
+        if (isCallToken(tokens[at])) {
+            return tokens[at];
+        }
+    }
+
+    return undefined;
+}
+
+/**
+ * Номер аргумента, в котором стоит курсор.
+ *
+ * Считаются запятые своего уровня: вложенные вызовы и индексы к номеру
+ * аргумента отношения не имеют.
+ */
+function countArguments(
+    tokens: readonly IRslToken[],
+    openIndex: number,
+    offset: number
+): number {
+    let active = 0;
+    let parentheses = 0;
+    let brackets = 0;
 
     for (let index = openIndex + 1; index < tokens.length; index++) {
         const token = tokens[index];
+
+        if (token.start >= offset) {
+            break;
+        }
 
         if (token.kind !== "symbol") {
             continue;
         }
 
         if (token.raw === "(") {
-            nestedParentheses++;
+            parentheses++;
         } else if (token.raw === ")") {
-            nestedParentheses = Math.max(0, nestedParentheses - 1);
-        } else if (token.raw === "[" || token.raw === "{") {
-            nestedBrackets++;
-        } else if (token.raw === "]" || token.raw === "}") {
-            nestedBrackets = Math.max(0, nestedBrackets - 1);
+            if (parentheses === 0) {
+                break;
+            }
+
+            parentheses--;
+        } else if (token.raw === "[") {
+            brackets++;
+        } else if (token.raw === "]") {
+            brackets = Math.max(0, brackets - 1);
         } else if (
-            token.raw === "," &&
-            nestedParentheses === 0 &&
-            nestedBrackets === 0
+            token.raw === "," && parentheses === 0 && brackets === 0
         ) {
-            activeParameter++;
+            active++;
         }
     }
 
-    return { callee, activeParameter };
+    return active;
 }
 
 function extractParameterLabels(symbol: RslSymbol): string[] {

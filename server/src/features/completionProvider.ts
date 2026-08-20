@@ -8,21 +8,18 @@ import {
 import type { TextDocument } from "vscode-languageserver-textdocument";
 
 import { getDefaults } from "../defaults";
-import { normalizeIdentifier, tokenAtOffset } from "../lexer";
+import { tokenAtOffset } from "../lexer";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
-import type { IRslFastClass } from "../scopeResolver";
-import type { RslSymbol } from "../symbols/rslSymbol";
 import {
     buildRslFastCompletions,
     buildRslFastMemberCompletions,
-    buildRslFastOwnClassMembers,
     findReceiverBeforeDot
 } from "./fastCompletionProvider";
 import {
-    findFastClass,
     getFastCompletionIndex,
     type IFastCompletionIndex
 } from "./fastCompletionIndex";
+import { collectRslClassMembers } from "./fastClassChain";
 import {
     getFastDocumentImports,
     type IFastDocumentSnapshot
@@ -244,73 +241,18 @@ export class RslCompletionProvider {
         fastIndex: IFastCompletionIndex,
         offset: number
     ): CompletionItem[] | undefined {
-        const items: CompletionItem[] = [];
-        const taken = new Set<string>();
-        /* Цикл узнаётся по самому классу, а не по имени: имена повторяются. */
-        const visited = new Set<string>();
-        const resolver = this.environment.resolver;
-        let found = false;
-        let wanted = className;
-
-        /* Пока база объявлена в этом же файле, её даёт индекс версии. */
-        for (;;) {
-            const key = "local:" + normalizeIdentifier(wanted);
-
-            if (visited.has(key)) {
-                /*
-                 * Локальный цикл: класс наследует сам себя или пару выше по
-                 * цепочке. Иерархия на этом кончается, и продолжать её
-                 * одноимённым классом из Import нельзя — полный resolver так
-                 * тоже не делает.
-                 */
-                return items;
-            }
-
-            const own = findFastClass(fastIndex, wanted, offset);
-
-            if (!own) {
-                break;
-            }
-
-            visited.add(key);
-            found = true;
-            addUnique(
-                items,
-                taken,
-                buildRslFastOwnClassMembers(fastIndex, wanted, offset) || []
-            );
-
-            if (!own.baseName) {
-                return items;
-            }
-            wanted = own.baseName;
-        }
-
         /*
-         * Дальше цепочку ведёт resolver: он же ведёт её для полного пути, и
-         * правила видимости не раздваиваются. Класс модуля workspace может
-         * наследовать класс своего модуля, класс его Import, встроенный или
-         * прикладной; класс прикладного модуля разрешает базу только через
-         * своего владельца.
+         * Обход иерархии общий с переходом, Hover и подсказкой параметров:
+         * правила видимости и защита от цикла обязаны совпадать. Раньше
+         * каждый обходил цепочку сам, и они расходились.
          */
-        let current = resolver.findFastClass(
-            document.uri,
-            wanted,
-            fastIndex.imports
-        );
-
-        while (current && !visited.has(fastClassKey(current))) {
-            visited.add(fastClassKey(current));
-            found = true;
-            addUnique(items, taken, publicMembers(current.symbol));
-            current = resolver.findFastBaseClass(
-                current,
-                current.symbol.baseClassName || "",
-                fastIndex.imports
-            );
-        }
-
-        return found ? items : undefined;
+        return collectRslClassMembers(className, {
+            resolver: this.environment.resolver,
+            uri: document.uri,
+            imports: fastIndex.imports,
+            fastIndex,
+            offset
+        });
     }
 
     /**
@@ -679,46 +621,6 @@ export class RslCompletionProvider {
     }
 }
 
-
-/**
- * Список открыт действием пользователя, а не набором текста.
- *
- * Ctrl+Space и trigger-символ означают, что он ждёт подсказку сейчас. Отсутствие
- * context — старый клиент; там безопаснее считать запрос явным, иначе подсказка
- * молчала бы до конца склейки правок.
- */
-/** Ключ класса для защиты от цикла: источник плюс сам символ. */
-function fastClassKey(value: IRslFastClass): string {
-    return (value.moduleUri || value.owner?.moduleKey || "builtin") +
-        "#" + value.symbol.id;
-}
-
-/** Открытые члены символа класса: приватные чужого модуля недоступны. */
-function publicMembers(symbol: RslSymbol): CompletionItem[] {
-    return symbol.children
-        .filter(member => member.visibility !== "private")
-        .map(member => ({
-            label: member.name,
-            kind: member.kind,
-            detail: member.typeName || undefined
-        }));
-}
-
-/** Добавляет члены, не перекрывая уже добавленные производным классом. */
-function addUnique(
-    items: CompletionItem[],
-    taken: Set<string>,
-    members: readonly CompletionItem[]
-): void {
-    for (const member of members) {
-        const key = normalizeIdentifier(member.label);
-
-        if (!taken.has(key)) {
-            taken.add(key);
-            items.push(member);
-        }
-    }
-}
 
 /** URI из разрешения имени модуля; неоднозначное и отсутствующее пропускаем. */
 function resolvedUri(

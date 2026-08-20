@@ -6,6 +6,8 @@ import {
 import type { TextDocument } from "vscode-languageserver-textdocument";
 
 import { FormatCode } from "../format";
+import { normalizeIdentifier, type IRslToken } from "../lexer";
+import { BLOCK_START_KEYWORDS } from "../language/rslLanguageReference";
 
 /**
  * Форматирует только полные строки, пересекающие выделение.
@@ -35,6 +37,15 @@ export interface IRangeFormattingOptions {
      * весь документ — медленно, зато тем же текстом.
      */
     blockStartLines?: readonly number[];
+    /**
+     * Токены текущей версии.
+     *
+     * По ним проверяется, что перед выделением не осталось открытых блоков:
+     * только тогда форматтер подходит к контрольной точке с нулевым отступом и
+     * кусок даёт тот же текст, что весь документ. Иначе — и когда токенов нет —
+     * форматируется весь документ: медленно, зато тем же текстом.
+     */
+    tokens?: readonly IRslToken[];
 }
 
 export function formatRslDocumentRange(
@@ -88,7 +99,7 @@ function formatLines(
         document
     );
 
-    if (!window) {
+    if (!window || openBlocksBefore(options.tokens, window.from) !== 0) {
         const whole = FormatCode(source, tabSize, { insertSpaces });
         const offsets = lineRangeOffsets(whole, startLine, endLine);
 
@@ -115,6 +126,90 @@ function formatLines(
     );
 
     return formatted.substring(offsets.start, offsets.end);
+}
+
+/*
+ * Слова, которые открывают блок и закрываются END.
+ *
+ * Тот же список, что у проверки парности END: расходиться им нельзя, иначе
+ * «сбалансированным» считался бы файл, который таковым не является.
+ */
+const BLOCK_OPENERS = new Set(BLOCK_START_KEYWORDS);
+
+/**
+ * Сколько блоков открыто перед контрольной точкой.
+ *
+ * Ноль означает, что форматтер подходит к этой строке с нулевым отступом, и
+ * только тогда кусок можно считать отдельно. Форматирование одного и того же
+ * кода обязано не зависеть от того, выделили его или нет, поэтому файл с
+ * незакрытым блоком выше считается целиком.
+ *
+ * undefined — посчитать нельзя: нет токенов, END больше, чем открытых
+ * блоков, либо выше есть обработчик ошибок. Такой файл тоже считается
+ * целиком.
+ */
+function openBlocksBefore(
+    tokens: readonly IRslToken[] | undefined,
+    line: number
+): number | undefined {
+    if (!tokens) {
+        return undefined;
+    }
+
+    let depth = 0;
+    let previous: IRslToken | undefined;
+
+    for (const token of tokens) {
+        if (token.line >= line) {
+            return depth;
+        }
+
+        if (
+            token.kind === "whitespace" || token.kind === "newline" ||
+            token.kind === "comment" || token.kind === "bom"
+        ) {
+            continue;
+        }
+
+        const afterDot = previous?.kind === "symbol" && previous.raw === ".";
+        previous = token;
+
+        if (token.kind !== "identifier" || afterDot) {
+            continue;
+        }
+
+        const word = normalizeIdentifier(token.value);
+
+        if (BLOCK_OPENERS.has(word)) {
+            depth++;
+            continue;
+        }
+
+        if (word === "end") {
+            depth--;
+
+            /* Ушли в минус: END больше, чем открытых блоков. */
+            if (depth < 0) {
+                return undefined;
+            }
+
+            continue;
+        }
+
+        /*
+         * Обработчик ошибок форматтер считает и ветвью, и открытым блоком —
+         * в зависимости от того, на каком уровне он стоит. Повторять этот
+         * учёт здесь значило бы держать вторую копию модели отступов, а она
+         * уже расходилась: на cardcashoper.mac проверенного репозитория кусок
+         * получал отступ на уровень меньше, чем документ целиком. Такой файл
+         * считается целиком.
+         */
+        if (word === "onerror") {
+            return undefined;
+        }
+    }
+
+    return depth;
 }
 
 /**

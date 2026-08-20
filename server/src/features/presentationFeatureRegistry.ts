@@ -135,7 +135,9 @@ export class PresentationFeatureRegistry {
                 return formatRslDocumentRange(document, params, {
                     blockStartLines: this.environment.getBlockStartLines
                         ? this.environment.getBlockStartLines(document)
-                        : undefined
+                        : undefined,
+                    tokens: this.environment
+                        .getFastDocumentSnapshot(document).lex.tokens
                 });
             } catch (error) {
                 this.environment.log(`Range formatting failed: ${document.uri}\n${errorText(error)}`);
