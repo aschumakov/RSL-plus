@@ -70,15 +70,15 @@ export function buildRslContextCompletions(
     resolver?: RslScopeResolver
 ): CompletionItem[] | undefined {
     const tokens = cachedSignificantTokens(module.lex.tokens);
+    const imports = buildRslImportContextCompletions(
+        { uri: module.uri, source: module.source },
+        tokens,
+        index,
+        offset
+    );
 
-    if (isImportContext(tokens, offset)) {
-        return buildModuleItems(
-            module,
-            index,
-            false,
-            undefined,
-            importPrefixAt(module.source, offset)
-        );
+    if (imports) {
+        return imports;
     }
 
     const staticItems = buildStaticContextItems(
@@ -121,7 +121,7 @@ export function buildRslContextCompletions(
 
     if (call.argumentIndex === 0) {
         return buildModuleItems(
-            module,
+            module.uri,
             index,
             true,
             replacement,
@@ -188,8 +188,35 @@ function buildStaticContextItems(
     return undefined;
 }
 
+/**
+ * Имена модулей в строке Import.
+ *
+ * Отделено от остального контекста намеренно: здесь хватает потока токенов и
+ * uri документа, поэтому подсказка работает и до готовности модели. Без этого
+ * быстрый путь предлагал в `Import ` обычные имена области видимости — то
+ * есть заведомо не то, а после готовности модели список менялся.
+ */
+export function buildRslImportContextCompletions(
+    document: { uri: string; source: string },
+    tokens: readonly IRslToken[],
+    index: WorkspaceIndex,
+    offset: number
+): CompletionItem[] | undefined {
+    if (!isImportContext(tokens, offset)) {
+        return undefined;
+    }
+
+    return buildModuleItems(
+        document.uri,
+        index,
+        false,
+        undefined,
+        importPrefixAt(document.source, offset)
+    );
+}
+
 function buildModuleItems(
-    module: IIndexedModule,
+    currentUri: string,
     index: WorkspaceIndex,
     includeExtension: boolean,
     replacement?: ReturnType<typeof stringContentRange>,
@@ -200,7 +227,7 @@ function buildModuleItems(
     const normalizedPrefix = typedPrefix.toLowerCase();
 
     for (const uri of index.getWorkspaceFileUris()) {
-        if (uri === module.uri) {
+        if (uri === currentUri) {
             continue;
         }
 

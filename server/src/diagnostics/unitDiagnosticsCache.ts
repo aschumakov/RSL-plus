@@ -6,6 +6,7 @@ import {
     type IRslDocumentUnit
 } from "../analysis/documentUnits";
 import { positionAtOffset } from "../core/documentPosition";
+import { LruCache } from "../core/lruCache";
 import type { IIndexedModule } from "../workspaceIndex";
 
 /**
@@ -34,25 +35,37 @@ export interface IRslUnitDiagnosticRecord {
     diagnostic: Diagnostic;
 }
 
-export interface IRslUnitDiagnosticsEntry {
+interface IRslUnitDiagnosticsEntry {
     uri: string;
-    version: number;
+    /**
+     * Отпечаток настроек, при которых результат посчитан.
+     *
+     * Кэшируемые проверки включаются настройками, и выключенная проверка не
+     * даёт находок — а не даёт «те же находки, что и раньше». Без отпечатка
+     * снятая галочка `debugBreak` оставляла бы предупреждения в файле до
+     * закрытия, а поставленная — не добавляла их в нетронутых процедурах.
+     */
+    fingerprint: string;
     source: string;
     units: readonly IRslDocumentUnit[];
     byUnit: Map<string, IRslUnitDiagnosticRecord[]>;
+    /** Оценка занятой памяти: по ней кэш и ограничивается. */
+    bytes: number;
 }
 
-export interface IRslUnitDiagnosticsPlan {
+/**
+ * Один расчёт файла: что переиспользовать и чем закончить.
+ *
+ * Расчёт заканчивается двояко. Полный проход всех кэшируемых проверок даёт
+ * результат, который можно запомнить, — это commit. Отменённый расчёт и расчёт,
+ * упёршийся в лимит Problems, дают неполный результат: запоминать его нельзя,
+ * иначе следующая правка «переиспользует» находки, которых не искали. Такой
+ * расчёт заканчивается abort, и прежняя запись остаётся нетронутой.
+ */
+export interface IRslUnitDiagnosticsRun {
     /** Единицы, которые нужно посчитать заново. */
     readonly stale: readonly IRslDocumentUnit[];
-    /**
-     * Единицы, чей результат взят из прошлой записи.
-     *
-     * Только их записи переносятся в новую запись кэша. Переносить записи
-     * пересчитанной единицы нельзя: если правка убрала из неё находку, пустой
-     * результат пересчёта унаследовал бы прежнюю — и она осталась бы в кэше
-     * навсегда, показывая в Problems уже исправленное.
-     */
+    /** Единицы, чей результат взят из прошлой записи. */
     readonly keep: readonly IRslDocumentUnit[];
     /** Готовые диагностики неизменившихся единиц, уже с новыми позициями. */
     readonly reused: readonly Diagnostic[];
@@ -60,55 +73,271 @@ export interface IRslUnitDiagnosticsPlan {
     readonly units: readonly IRslDocumentUnit[];
     /** Пересчитывается весь файл: прошлого результата нет или он не годится. */
     readonly full: boolean;
+    /** Запомнить посчитанное: только после полного прохода. */
+    commit(diagnostics: readonly Diagnostic[]): void;
+    /** Ничего не менять: результат неполон. */
+    abort(): void;
+}
+
+/*
+ * Оценка веса одной записи.
+ *
+ * Считать точно нечем: JS не сообщает размер объекта. Берётся то, что задаёт
+ * порядок величины, — исходный текст (по два байта на символ) и находки, у
+ * каждой из которых есть сообщение, позиции и код. Ошибка такой оценки в разы
+ * не страшна: она нужна, чтобы кэш не удерживал десятки мегабайт, а не чтобы
+ * знать их точное число.
+ */
+const BYTES_PER_RECORD = 256;
+
+/** Записей в кэше: открытых документов не бывает много. */
+const DEFAULT_MAX_ENTRIES = 24;
+
+/**
+ * Верхняя граница памяти кэша.
+ *
+ * Ограничения по числу файлов мало: в проверенном репозитории есть модули по
+ * 700 КБ, и двадцать четыре таких записи — это десятки мегабайт, удерживаемых
+ * ради ускорения повторного расчёта.
+ */
+const DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
+
+export interface IRslUnitDiagnosticsCacheOptions {
+    maxEntries?: number;
+    maxBytes?: number;
+}
+
+export class RslUnitDiagnosticsCache {
+    private readonly entries: LruCache<string, IRslUnitDiagnosticsEntry>;
+    private readonly maxBytes: number;
+    private usedBytes = 0;
+
+    constructor(options: IRslUnitDiagnosticsCacheOptions = {}) {
+        this.entries = new LruCache(
+            Math.max(1, options.maxEntries ?? DEFAULT_MAX_ENTRIES)
+        );
+        this.maxBytes = Math.max(1, options.maxBytes ?? DEFAULT_MAX_BYTES);
+    }
+
+    /**
+     * Начать расчёт файла.
+     *
+     * Прошлая запись используется, только если она о том же файле и посчитана
+     * при тех же настройках: единицы сопоставляются по устойчивому
+     * идентификатору, а совпадение текста проверяется по обоим исходникам, а не
+     * по одному отпечатку.
+     */
+    begin(
+        module: IIndexedModule,
+        fingerprint: string
+    ): IRslUnitDiagnosticsRun {
+        const units = splitRslDocumentUnits(
+            module.source,
+            module.lex.tokens,
+            module.symbolTree
+        );
+        const previous = this.entries.get(module.uri);
+        const usable = previous &&
+            previous.uri === module.uri &&
+            previous.fingerprint === fingerprint
+            ? previous
+            : undefined;
+
+        if (!usable) {
+            return this.createRun(module, fingerprint, {
+                units,
+                stale: units,
+                keep: [],
+                reused: [],
+                full: true,
+                previous: undefined
+            });
+        }
+
+        const diff = diffRslDocumentUnits(usable.units, units, {
+            previous: usable.source,
+            next: module.source
+        });
+        const keep = [...diff.unchanged, ...diff.shifted];
+        const reused: Diagnostic[] = [];
+
+        for (const unit of keep) {
+            for (const record of usable.byUnit.get(unit.id) || []) {
+                reused.push(shiftDiagnostic(module, unit, record));
+            }
+        }
+
+        return this.createRun(module, fingerprint, {
+            units,
+            stale: [...diff.changed, ...diff.added],
+            keep,
+            reused,
+            full: false,
+            previous: usable
+        });
+    }
+
+    /** Файл закрыт: держать его текст и находки больше незачем. */
+    forget(uri: string): void {
+        const entry = this.entries.get(uri);
+
+        if (!entry) {
+            return;
+        }
+
+        this.usedBytes -= entry.bytes;
+        this.entries.delete(uri);
+    }
+
+    clear(): void {
+        this.entries.clear();
+        this.usedBytes = 0;
+    }
+
+    /** Сколько записей и сколько памяти удерживается: для тестов и профиля. */
+    get size(): number {
+        return this.entries.size;
+    }
+
+    get bytes(): number {
+        return this.usedBytes;
+    }
+
+    private createRun(
+        module: IIndexedModule,
+        fingerprint: string,
+        plan: {
+            units: readonly IRslDocumentUnit[];
+            stale: readonly IRslDocumentUnit[];
+            keep: readonly IRslDocumentUnit[];
+            reused: readonly Diagnostic[];
+            full: boolean;
+            previous: IRslUnitDiagnosticsEntry | undefined;
+        }
+    ): IRslUnitDiagnosticsRun {
+        let finished = false;
+
+        return {
+            ...plan,
+            commit: (diagnostics: readonly Diagnostic[]): void => {
+                if (finished) {
+                    return;
+                }
+                finished = true;
+                this.store(module, fingerprint, plan, diagnostics);
+            },
+            abort: (): void => {
+                finished = true;
+            }
+        };
+    }
+
+    private store(
+        module: IIndexedModule,
+        fingerprint: string,
+        plan: {
+            units: readonly IRslDocumentUnit[];
+            keep: readonly IRslDocumentUnit[];
+            previous: IRslUnitDiagnosticsEntry | undefined;
+        },
+        diagnostics: readonly Diagnostic[]
+    ): void {
+        const byUnit = collectRslUnitDiagnostics(
+            module,
+            plan.units,
+            diagnostics
+        );
+
+        /*
+         * Переносятся записи ТОЛЬКО переиспользованных единиц.
+         *
+         * У пересчитанной единицы новый результат полон, в том числе когда он
+         * пуст: правка могла убрать находку. Перенос прежних записей по
+         * признаку «сейчас ничего не нашлось» оставлял бы исправленное в кэше
+         * навсегда.
+         */
+        for (const unit of plan.keep) {
+            if (byUnit.has(unit.id)) {
+                continue;
+            }
+
+            const kept = plan.previous?.byUnit.get(unit.id);
+
+            if (kept) {
+                byUnit.set(unit.id, kept);
+            }
+        }
+
+        let records = 0;
+        byUnit.forEach(list => {
+            records += list.length;
+        });
+
+        const bytes = module.source.length * 2 + records * BYTES_PER_RECORD;
+
+        /* Запись, которая одна не помещается в границу, не запоминается. */
+        if (bytes > this.maxBytes) {
+            this.forget(module.uri);
+
+            return;
+        }
+
+        this.forget(module.uri);
+        this.evictOldest(bytes);
+        this.entries.set(module.uri, {
+            uri: module.uri,
+            fingerprint,
+            source: module.source,
+            units: plan.units,
+            byUnit,
+            bytes
+        });
+        this.usedBytes += bytes;
+    }
+
+    /** Освободить место под новую запись: сначала уходят самые давние. */
+    private evictOldest(incoming: number): void {
+        while (this.usedBytes + incoming > this.maxBytes) {
+            const oldest = this.entries.peekOldest();
+
+            if (oldest === undefined) {
+                this.usedBytes = 0;
+
+                return;
+            }
+
+            this.forget(oldest);
+        }
+    }
 }
 
 /**
- * Что пересчитывать и что переносить.
+ * Расчёт без кэша: считается всё, запоминать некуда.
  *
- * Прошлая запись используется только если она о том же файле: единицы
- * сопоставляются по устойчивому идентификатору, а совпадение текста проверяется
- * по обоим исходникам, а не по одному отпечатку.
+ * Так работают прямые вызовы диагностик — из тестов и batch-клиентов. Кэш
+ * принадлежит движку и живёт вместе с открытыми документами; у одиночного
+ * вызова владельца нет, и заводить общий на модуль значило бы делить состояние
+ * между несвязанными расчётами.
  */
-export function planRslUnitDiagnostics(
-    module: IIndexedModule,
-    previous: IRslUnitDiagnosticsEntry | undefined
-): IRslUnitDiagnosticsPlan {
-    /* Границы берутся из уже построенного дерева: см. splitRslDocumentUnits. */
-    const units = splitRslDocumentUnits(
-        module.source,
-        module.lex.tokens,
-        module.symbolTree
-    );
-
-    if (!previous || previous.uri !== module.uri) {
-        return { stale: units, keep: [], reused: [], units, full: true };
-    }
-
-    const diff = diffRslDocumentUnits(previous.units, units, {
-        previous: previous.source,
-        next: module.source
-    });
-    const reused: Diagnostic[] = [];
-    const keep = [...diff.unchanged, ...diff.shifted];
-
-    for (const unit of keep) {
-        const records = previous.byUnit.get(unit.id);
-
-        if (!records) {
-            continue;
-        }
-
-        for (const record of records) {
-            reused.push(shiftDiagnostic(module, unit, record));
-        }
-    }
-
+export function runRslUnitDiagnosticsWithoutCache(
+    _module: IIndexedModule
+): IRslUnitDiagnosticsRun {
+    /*
+     * Разбиение на единицы здесь не считается вовсе.
+     *
+     * Оно нужно только для того, чтобы решить, что переиспользовать, и чтобы
+     * разложить результат по единицам. Без кэша не делается ни то, ни другое,
+     * а на мелком файле лишний обход дерева заметен: таких вызовов по одному
+     * на файл при сплошном проходе по проекту.
+     */
     return {
-        stale: [...diff.changed, ...diff.added],
-        keep,
-        reused,
-        units,
-        full: false
+        units: [],
+        stale: [],
+        keep: [],
+        reused: [],
+        full: true,
+        commit: () => undefined,
+        abort: () => undefined
     };
 }
 
@@ -158,7 +387,7 @@ function withOffsets(data: unknown, start: number, end: number): unknown {
  * Позиция диагностики переводится в смещение по строкам новой версии: так
  * запись не зависит от того, что именно её создало.
  */
-export function collectRslUnitDiagnostics(
+function collectRslUnitDiagnostics(
     module: IIndexedModule,
     units: readonly IRslDocumentUnit[],
     diagnostics: readonly Diagnostic[]

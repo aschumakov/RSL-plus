@@ -225,7 +225,9 @@ async function testReadinessOrderForOpenDocument() {
             },
             buildWorkspaceAsync(...args) {
                 return Promise.resolve(this.buildWorkspace(...args));
-            }
+            },
+            /* Координатор сообщает движку о закрытии файла. */
+            forget: () => undefined
         },
         {
             isParseBusy: requested => analysis?.isBusyFor(requested) ?? false,

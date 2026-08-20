@@ -11,6 +11,9 @@
  *    браться из сеанса и не считать ничего заново.
  * 4. Сколько ждёт список во время фонового расчёта Problems и подсветки.
  * 5. Сколько раз редактор обращается к серверу за один открытый список.
+ * 6. Сколько ждёт список в большом проекте, пока пользователь набирает имя:
+ *    Auto Import ищет среди неподключённых символов всего проекта, и это
+ *    единственный список, который редактор перезапрашивает на каждую букву.
  *
  * Запуск:
  *   node build/bench-completion.js [каталог-или-файл ...]
@@ -107,8 +110,20 @@ function createConnection(handlers) {
 
 /** Реестр обработчиков над одним файлом; version решает, готова ли модель. */
 function createRegistry(uri, text, options) {
-    const index = new WorkspaceIndex();
-    index.registerWorkspaceFiles([uri]);
+    const index = options.index || new WorkspaceIndex();
+
+    if (!options.index) {
+        const workspace = options.workspace || [];
+        index.registerWorkspaceFiles([
+            uri,
+            ...workspace.map(item => item.uri)
+        ]);
+
+        for (const item of workspace) {
+            index.updateExternalModule(item.uri, item.text, 1);
+        }
+    }
+
     const module = index.updateOpenModule(uri, text, 1);
     /*
      * Документ той же версии, что и модель, — это «тёплый» случай. Версия
@@ -317,12 +332,117 @@ async function measureFile(name, text, platform) {
     await stop();
     report("под фоновой нагрузкой", underLoad, 25);
 
+    /*
+     * Это вывод из контракта CompletionList, а не измерение: редактор
+     * перезапрашивает список только у помеченных неполными. Настоящую
+     * последовательность запросов на каждую букву мерит отдельный замер
+     * набора имени ниже — там запросы считаются по факту.
+     */
     const incomplete = requestsPerList.filter(value => value > 1).length;
     console.log("  обращений на список         " +
         (incomplete === 0
             ? "1 (список полный, дальше фильтрует редактор)"
             : incomplete + " из " + requestsPerList.length +
                 " списков помечены неполными"));
+}
+
+/**
+ * Проект из множества неподключённых модулей.
+ *
+ * Auto Import ищет именно среди них, и его цена растёт с размером проекта, а не
+ * файла. Имена нарочно похожи: пользовательский префикс отбирает не один
+ * символ, а сотни, — так и бывает в реальном проекте с общими префиксами.
+ */
+function syntheticWorkspace(modules, symbolsPerModule) {
+    const result = [];
+
+    for (let file = 0; file < modules; file++) {
+        const lines = [];
+
+        for (let symbol = 0; symbol < symbolsPerModule; symbol++) {
+            const name = "Set" + (file * symbolsPerModule + symbol);
+            lines.push("Macro " + name + "(value)");
+            lines.push("  return value;");
+            lines.push("End;");
+        }
+
+        result.push({
+            uri: "file:///bench/lib/module" + file + ".mac",
+            text: lines.join("\n")
+        });
+    }
+
+    return result;
+}
+
+/**
+ * Набор имени в большом проекте.
+ *
+ * Список Auto Import помечается неполным — значит редактор обязан
+ * перезапрашивать его на каждую букву. Здесь измеряется именно это: не один
+ * запрос, а последовательность `s`, `se`, `set`, `setu`, как её видит сервер.
+ */
+async function measureWorkspaceSearch(platform, modules, symbolsPerModule) {
+    const uri = "file:///bench/typing.mac";
+    const workspace = syntheticWorkspace(modules, symbolsPerModule);
+    const head = "Macro Test()\n  Var result;\n  result = ";
+    const tail = ";\nEnd;\n";
+    const symbols = modules * symbolsPerModule;
+
+    console.log("проект " + modules + " модулей, " + symbols +
+        " символов: набор имени");
+
+    const perLetter = new Map();
+    let requests = 0;
+    /*
+     * Индекс проекта общий для всех нажатий: у сервера он живёт постоянно, а
+     * построение с нуля на каждую букву мерило бы индексацию, а не подсказку.
+     */
+    const shared = createRegistry(uri, head + tail, {
+        platform,
+        modelReady: true,
+        workspace
+    });
+
+    for (const typed of ["s", "se", "set", "setu"]) {
+        const text = head + typed + tail;
+        const registry = createRegistry(uri, text, {
+            platform,
+            modelReady: true,
+            index: shared.index
+        });
+        const offset = head.length + typed.length;
+        const times = [];
+
+        for (let run = 0; run < 5; run++) {
+            /* Каждая буква — новая версия документа: сеанс не переиспользуется. */
+            registry.registry.invalidate(uri);
+            const answer = await ask(
+                registry.handlers,
+                registry.document,
+                offset,
+                { triggerKind: 1 }
+            );
+            times.push(answer.ms);
+            requests++;
+
+            if (run === 0) {
+                perLetter.set(typed, {
+                    items: answer.list.items.length,
+                    incomplete: answer.list.isIncomplete
+                });
+            }
+        }
+
+        report("после «" + typed + "»", times, 15);
+    }
+
+    for (const [typed, info] of perLetter) {
+        console.log("  «" + typed + "»: элементов " + info.items +
+            (info.incomplete ? ", список неполный" : ", список полный"));
+    }
+
+    console.log("  всего запросов                " + requests);
 }
 
 function syntheticSource() {
@@ -393,6 +513,7 @@ function collectFiles(targets) {
             console.log("Подходящих файлов не найдено; беру образец.");
         }
         await measureFile("образец.mac", syntheticSource(), platform);
+        await measureWorkspaceSearch(platform, 400, 25);
         return;
     }
 
@@ -403,6 +524,8 @@ function collectFiles(targets) {
             platform
         );
     }
+
+    await measureWorkspaceSearch(platform, 400, 25);
 })().catch(error => {
     console.error(error);
     process.exitCode = 1;

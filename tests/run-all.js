@@ -45,6 +45,7 @@ const tests = [
     "stability-regressions.test.js",
     "completion-protocol.test.js",
     "completion-differential.test.js",
+    "completion-stability.test.js",
 ];
 
 let failed = false;

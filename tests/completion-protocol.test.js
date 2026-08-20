@@ -119,10 +119,9 @@ test("ключ сеанса различает состояние, от кото
     const base = {
         uri: "file:///m.mac",
         version: 7,
-        source: "fast",
         receiver: "Field7",
         wordStart: 42,
-        revision: "3:1"
+        knowledge: "lib.mac@1 | 3"
     };
     const same = completionSessionKey({ ...base, receiver: "field7" });
 
@@ -132,12 +131,21 @@ test("ключ сеанса различает состояние, от кото
         "регистр имени получателя состав не меняет"
     );
 
+    /*
+     * Источник в ключ не входит: готовность модели наступает сама собой, и по
+     * тому же тексту список обязан остаться прежним.
+     */
+    assert.strictEqual(
+        completionSessionKey({ ...base, source: "model" }),
+        completionSessionKey({ ...base, source: "fast" }),
+        "готовность модели сама по себе не начинает новый сеанс"
+    );
+
     for (const changed of [
         { version: 8 },
-        { source: "model" },
         { receiver: "Other" },
         { wordStart: 43 },
-        { revision: "4:1" }
+        { knowledge: "lib.mac@2 | 3" }
     ]) {
         assert.notStrictEqual(
             completionSessionKey({ ...base, ...changed }),
@@ -155,7 +163,7 @@ test("повторный запрос берётся из сеанса и мен
         source: "fastMembers",
         receiver: "Field7",
         wordStart: 10,
-        revision: "1:0"
+        knowledge: "1:0"
     };
     const candidates = [
         { label: "getText", kind: 2 },

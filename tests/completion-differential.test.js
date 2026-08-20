@@ -12,77 +12,25 @@
 
 const assert = require("assert");
 
-const { WorkspaceIndex } = require("../server/out/workspaceIndex");
-const { RslScopeResolver } = require("../server/out/scopeResolver");
-const { getDefaults } = require("../server/out/defaults");
 const {
     PlatformModuleCatalog
 } = require("../server/out/builtins/platformModuleCatalog");
 const {
-    RslLanguageFeatureRegistry
-} = require("../server/out/features/languageFeatureRegistry");
-const {
-    createFastDocumentSnapshot
-} = require("../server/out/services/fastDocumentSnapshot");
-const {
-    TextDocument
-} = require("../server/node_modules/vscode-languageserver-textdocument");
+    createCompletionRegistry,
+    completeAfter,
+    orderedLabels
+} = require("./completion-harness");
 
 const MAIN = "file:///d:/differential/main.mac";
-
-/** Заглушка соединения: реестр регистрирует все обработчики сразу. */
-function createConnection(handlers) {
-    const register = name => callback => {
-        handlers[name] = callback;
-    };
-
-    return {
-        onCompletion: register("completion"),
-        onCompletionResolve: register("completionResolve"),
-        onSignatureHelp: register("signatureHelp"),
-        onHover: register("hover"),
-        onDocumentHighlight: register("documentHighlight"),
-        onDefinition: register("definition"),
-        onReferences: register("references"),
-        onWorkspaceSymbol: register("workspaceSymbol"),
-        onCodeAction: register("codeAction"),
-        onSelectionRanges: register("selectionRanges"),
-        onExecuteCommand: register("executeCommand"),
-        onPrepareRename: register("prepareRename"),
-        onRenameRequest: register("rename"),
-        onRequest: (method, callback) => {
-            handlers[method] = callback;
-        },
-        onDocumentSymbol: register("documentSymbol"),
-        onFoldingRanges: register("foldingRanges"),
-        onDocumentFormatting: register("documentFormatting"),
-        onDocumentRangeFormatting: register("documentRangeFormatting"),
-        sendRequest: async () => undefined,
-        languages: {
-            callHierarchy: {
-                onPrepare: register("callHierarchyPrepare"),
-                onIncomingCalls: register("callHierarchyIncoming"),
-                onOutgoingCalls: register("callHierarchyOutgoing")
-            },
-            semanticTokens: {
-                on: register("semanticTokens"),
-                onDelta: register("semanticTokensDelta"),
-                onRange: register("semanticTokensRange"),
-                refresh: () => undefined
-            },
-            inlayHint: {
-                on: register("inlayHint"),
-                refresh: () => undefined
-            }
-        }
-    };
-}
 
 const SOURCE = [
     "Import RsbFormsInter;",
     "Macro Test()",
     "  Var Field7: TRsbEditField = TRsbEditField(7);",
     "  Field7.",
+    "  Field7.set",
+    "  /* Field7. в комментарии */",
+    "  Var text = \"Field7.\";",
     "End;"
 ].join("\n");
 
@@ -101,79 +49,16 @@ async function test(name, action) {
     }
 }
 
-const defaults = {
-    diagnostics: {},
-    imports: { enabled: true },
-    autoImport: { enabled: false },
-    semanticHighlighting: { maxFileSizeKb: 512 },
-    inlayHints: { variableTypes: true },
-    editor: { completeBlocksOnEnter: false }
-};
-
-/**
- * Реестр обработчиков.
- *
- * `modelReady` решает, какой путь работает: без модели отвечает быстрый индекс,
- * с моделью — полная модель. Сам текст в обоих случаях один и тот же.
- */
-function createRegistry({ platform, modelReady }) {
-    const index = new WorkspaceIndex();
-    index.registerWorkspaceFiles([MAIN]);
-    const module = index.updateOpenModule(MAIN, SOURCE, 1);
-    const document = TextDocument.create(MAIN, "rsl", modelReady ? 1 : 2, SOURCE);
-    const handlers = {};
-
-    const registry = new RslLanguageFeatureRegistry({
-        connection: createConnection(handlers),
-        documents: {
-            get: uri => uri === MAIN ? document : undefined,
-            all: () => [document]
-        },
-        index,
-        resolver: new RslScopeResolver(index, getDefaults(), platform),
-        definitionProvider: {
-            findImportDefinition: async () => undefined,
-            findDynamicDefinition: async () => undefined,
-            createObjectLocationByUri: () => ({ uri: MAIN, range: null })
-        },
-        getFastDocumentSnapshot: () => createFastDocumentSnapshot(document),
-        ensureDocumentParsed: async () => undefined,
-        requestDocumentParse: () => undefined,
-        getSettings: () => defaults,
-        supportsRefresh: () => false,
-        log: () => undefined
+function stand(platform, modelReady) {
+    return createCompletionRegistry({
+        uri: MAIN,
+        source: SOURCE,
+        platform,
+        modelReady
     });
-    registry.register();
-
-    return { handlers, document, module };
 }
 
-/** Список от обработчика для позиции сразу за указанным текстом. */
-async function complete(registry, marker) {
-    const at = SOURCE.indexOf(marker);
-    assert.ok(at >= 0, "в образце нет: " + marker);
-
-    return registry.handlers.completion(
-        {
-            textDocument: { uri: MAIN },
-            position: registry.document.positionAt(at + marker.length),
-            context: { triggerKind: 2, triggerCharacter: "." }
-        },
-        {
-            isCancellationRequested: false,
-            onCancellationRequested: () => ({ dispose: () => undefined })
-        }
-    );
-}
-
-/** Состав и порядок — то, что видит пользователь. */
-function order(list) {
-    return [...list.items]
-        .sort((first, second) =>
-            String(first.sortText).localeCompare(String(second.sortText))
-        )
-        .map(item => String(item.label));
-}
+const MEMBER_TRIGGER = { triggerKind: 2, triggerCharacter: "." };
 
 async function main() {
     const platform = new PlatformModuleCatalog({ log: () => undefined });
@@ -181,19 +66,21 @@ async function main() {
     assert.ok(platform.ready, "каталог прикладных модулей не прочитан");
 
     await test("быстрый путь и полная модель дают один список", async () => {
-        const fast = await complete(
-            createRegistry({ platform, modelReady: false }),
-            "  Field7."
+        const fast = await completeAfter(
+            stand(platform, false),
+            "  Field7.",
+            MEMBER_TRIGGER
         );
-        const full = await complete(
-            createRegistry({ platform, modelReady: true }),
-            "  Field7."
+        const full = await completeAfter(
+            stand(platform, true),
+            "  Field7.",
+            MEMBER_TRIGGER
         );
 
         assert.ok(fast.items.length > 0, "быстрый путь вернул пустой список");
         assert.deepStrictEqual(
-            order(fast),
-            order(full),
+            orderedLabels(fast),
+            orderedLabels(full),
             "состав и порядок обязаны совпадать: пользователь не должен видеть " +
                 "разницы между ответом до и после готовности модели"
         );
@@ -201,9 +88,10 @@ async function main() {
 
     await test("оба ответа помечены полными", async () => {
         for (const modelReady of [false, true]) {
-            const list = await complete(
-                createRegistry({ platform, modelReady }),
-                "  Field7."
+            const list = await completeAfter(
+                stand(platform, modelReady),
+                "  Field7.",
+                MEMBER_TRIGGER
             );
             assert.strictEqual(
                 list.isIncomplete,
@@ -213,15 +101,17 @@ async function main() {
         }
     });
 
-    await test("холодный каталог не меняет состав", async () => {
+    await test("прогретый каталог добавляет члены класса", async () => {
         const cold = new PlatformModuleCatalog({ log: () => undefined });
-        const warm = await complete(
-            createRegistry({ platform, modelReady: false }),
-            "  Field7."
+        const warm = await completeAfter(
+            stand(platform, false),
+            "  Field7.",
+            MEMBER_TRIGGER
         );
-        const coldList = await complete(
-            createRegistry({ platform: cold, modelReady: false }),
-            "  Field7."
+        const coldList = await completeAfter(
+            stand(cold, false),
+            "  Field7.",
+            MEMBER_TRIGGER
         );
 
         /*
@@ -230,29 +120,85 @@ async function main() {
          */
         assert.ok(coldList.items.length > 0, "холодный ответ пуст");
         assert.notDeepStrictEqual(
-            order(coldList),
-            order(warm),
+            orderedLabels(coldList),
+            orderedLabels(warm),
             "прогретый каталог обязан добавлять члены класса"
         );
+    });
 
-        /* Тот же холодный каталог второй раз даёт то же самое. */
-        const again = await complete(
-            createRegistry({ platform: cold, modelReady: false }),
-            "  Field7."
+    await test("холодный каталог отвечает одинаково на повторный запрос", async () => {
+        const cold = new PlatformModuleCatalog({ log: () => undefined });
+        const first = await completeAfter(
+            stand(cold, false),
+            "  Field7.",
+            MEMBER_TRIGGER
         );
-        assert.deepStrictEqual(order(again), order(coldList));
+        const again = await completeAfter(
+            stand(cold, false),
+            "  Field7.",
+            MEMBER_TRIGGER
+        );
+
+        assert.deepStrictEqual(orderedLabels(again), orderedLabels(first));
     });
 
     await test("набранная часть имени меняет порядок, а не состав", async () => {
-        const registry = createRegistry({ platform, modelReady: false });
-        const empty = await complete(registry, "  Field7.");
-        const typed = await complete(registry, "  Field7.");
+        /*
+         * Две РАЗНЫЕ позиции одного документа: после точки и после точки с
+         * набранным «set». Прежде тест дважды спрашивал одну и ту же позицию и
+         * потому не проверял ничего.
+         */
+        const registry = stand(platform, true);
+        const empty = await completeAfter(
+            registry,
+            "  Field7.",
+            MEMBER_TRIGGER
+        );
+        const typed = await completeAfter(registry, "  Field7.set");
 
+        assert.ok(typed.items.length > 0, "по набранному «set» список пуст");
         assert.deepStrictEqual(
-            order(empty).sort(),
-            order(typed).sort(),
+            orderedLabels(empty).slice().sort(),
+            orderedLabels(typed).slice().sort(),
             "состав не зависит от набранного"
         );
+        assert.notDeepStrictEqual(
+            orderedLabels(typed),
+            orderedLabels(empty),
+            "набранное обязано менять порядок"
+        );
+        assert.ok(
+            /^set/i.test(orderedLabels(typed)[0]),
+            "первым обязан идти член, начинающийся с набранного: " +
+                orderedLabels(typed)[0]
+        );
+    });
+
+    await test("в комментарии и в строке подсказок нет ни на одном пути", async () => {
+        for (const modelReady of [false, true]) {
+            const registry = stand(platform, modelReady);
+            const comment = await completeAfter(
+                registry,
+                "  /* Field7.",
+                MEMBER_TRIGGER
+            );
+            const string = await completeAfter(
+                registry,
+                "  Var text = \"Field7.",
+                MEMBER_TRIGGER
+            );
+
+            assert.strictEqual(
+                comment.items.length,
+                0,
+                "в комментарии подсказок нет, modelReady=" + modelReady
+            );
+            assert.strictEqual(
+                string.items.length,
+                0,
+                "в строке подсказок нет, modelReady=" + modelReady
+            );
+        }
     });
 
     console.log("\nПройдено: " + passed + ", провалено: " + failed);

@@ -927,7 +927,7 @@ async function main() {
         );
 
         /* Зато Auto Import обязан его предложить — с правкой Import. */
-        const offered = buildKnownAutoImportCompletions(module, index, "Hel");
+        const offered = buildKnownAutoImportCompletions(module, index, "Hel").items;
         const candidate = offered.find(item => item.label === "Helper");
         assert.ok(candidate, "Auto Import обязан предложить класс проекта");
         assert.ok(

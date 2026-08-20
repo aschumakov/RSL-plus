@@ -8,6 +8,16 @@ export interface IRslClientSettings {
         workspaceIndexing: "activeImports" | "workspaceIdle" | "full";
     };
     semanticHighlighting: { maxFileSizeKb: number };
+    inlayHints: { variableTypes: boolean };
+    /*
+     * Раздел обязан перечислять ВСЕ настройки диагностик из package.json.
+     *
+     * Сервер берёт значения только отсюда: то, что клиент не прочитал, до него
+     * не доходит вовсе. Настройка, объявленная в package.json и забытая здесь,
+     * видна в интерфейсе VS Code и не делает ничего — так было с
+     * redundantImports, unknownVariables, файлами известных имён и
+     * unknownSpecialVariables.
+     */
     diagnostics: {
         enabled: boolean;
         deprecatedDeclarations: boolean;
@@ -17,6 +27,11 @@ export interface IRslClientSettings {
         debugBreak: boolean;
         useBeforeDeclaration: boolean;
         ambiguousReferences: boolean;
+        redundantImports: boolean;
+        unknownVariables: string;
+        unknownVariablesKnownGlobalsFile: string;
+        unknownVariablesAuditFile: string;
+        unknownSpecialVariables: string;
         maxProblems: number;
     };
 }
@@ -46,6 +61,13 @@ export function readRslSettings(resource?: Uri): IRslClientSettings {
             maxFileSizeKb: readSetting(
                 "semanticHighlighting.maxFileSizeKb",
                 512,
+                resource
+            )
+        },
+        inlayHints: {
+            variableTypes: readSetting(
+                "inlayHints.variableTypes",
+                true,
                 resource
             )
         },
@@ -80,6 +102,31 @@ export function readRslSettings(resource?: Uri): IRslClientSettings {
             ambiguousReferences: readSetting(
                 "diagnostics.ambiguousReferences",
                 true,
+                resource
+            ),
+            redundantImports: readSetting(
+                "diagnostics.redundantImports",
+                true,
+                resource
+            ),
+            unknownVariables: readSetting(
+                "diagnostics.unknownVariables",
+                "off",
+                resource
+            ),
+            unknownVariablesKnownGlobalsFile: readSetting(
+                "diagnostics.unknownVariablesKnownGlobalsFile",
+                "",
+                resource
+            ),
+            unknownVariablesAuditFile: readSetting(
+                "diagnostics.unknownVariablesAuditFile",
+                "",
+                resource
+            ),
+            unknownSpecialVariables: readSetting(
+                "diagnostics.unknownSpecialVariables",
+                "all",
                 resource
             ),
             maxProblems: readSetting(

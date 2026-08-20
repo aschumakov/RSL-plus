@@ -71,6 +71,27 @@ export function rankCompletionItemsForPrefix(
     return ranked;
 }
 
+/**
+ * Происхождение кандидата: файл и символ, если они известны.
+ *
+ * Заполнено не у всех — у встроенных имён и локальных переменных источника
+ * нет, — но у одноимённых кандидатов из разных модулей заполнено всегда:
+ * именно их и нужно упорядочить между собой.
+ */
+function completionOrigin(item: CompletionItem): string {
+    const data = item.data && typeof item.data === "object"
+        ? item.data as Record<string, unknown>
+        : {};
+    const uri = typeof data.uri === "string"
+        ? data.uri
+        : typeof data.rslAutoImportUri === "string"
+            ? data.rslAutoImportUri
+            : "";
+    const symbolId = typeof data.symbolId === "string" ? data.symbolId : "";
+
+    return uri + (symbolId ? "#" + symbolId : "");
+}
+
 export function completionLabelMatchesPrefix(
     label: string,
     prefix: string
@@ -117,10 +138,14 @@ function isSubsequence(needle: string, haystack: string): boolean {
 
 /**
  * Окончательный ключ сортировки: приоритет, собственный порядок элемента,
- * имя, вид и модуль.
+ * имя, вид, модуль и происхождение.
  *
  * Последние части нужны для устойчивости: без них два одноимённых члена из
  * разных модулей вставали в список в том порядке, в каком их успели собрать.
+ * Отображаемого модуля для этого мало — два файла с одним именем в разных
+ * каталогах показываются одинаково, и порядок между ними зависел от того, что
+ * успела прочитать фоновая индексация. Поэтому в конце ключа стоит то, что
+ * различает их всегда: путь файла и идентификатор символа.
  */
 function stableSortText(
     item: CompletionItem,
@@ -135,6 +160,7 @@ function stableSortText(
         own,
         normalizeIdentifier(label),
         item.kind ?? 0,
-        normalizeIdentifier(detail).slice(0, 40)
+        normalizeIdentifier(detail).slice(0, 40),
+        completionOrigin(item)
     ].join("_");
 }

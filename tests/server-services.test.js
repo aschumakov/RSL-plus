@@ -229,7 +229,9 @@ async function testProblemsDoNotWaitForConfigurationRequest() {
             },
             buildWorkspaceAsync(...args) {
                 return Promise.resolve(this.buildWorkspace(...args));
-            }
+            },
+            /* Координатор сообщает движку о закрытии файла. */
+            forget: () => undefined
         },
         {
             isParseBusy: () => false,
@@ -470,7 +472,9 @@ async function testOutlineIsReadyBeforeDiagnostics() {
             },
             buildWorkspaceAsync(...args) {
                 return Promise.resolve(this.buildWorkspace(...args));
-            }
+            },
+            /* Координатор сообщает движку о закрытии файла. */
+            forget: () => undefined
         },
         {
             isParseBusy: requestedUri =>

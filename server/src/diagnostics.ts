@@ -9,12 +9,10 @@ import {
 } from "vscode-languageserver";
 
 import { RslSymbol } from "./symbols/rslSymbol";
-import { LruCache } from "./core/lruCache";
 import {
-    collectRslUnitDiagnostics,
-    planRslUnitDiagnostics,
+    runRslUnitDiagnosticsWithoutCache,
     tokensOfRslUnits,
-    type IRslUnitDiagnosticsEntry
+    type RslUnitDiagnosticsCache
 } from "./diagnostics/unitDiagnosticsCache";
 import {
     BLOCK_START_KEYWORDS,
@@ -187,7 +185,14 @@ export interface IRslDiagnosticPlan {
     stages: readonly IRslNamedDiagnosticStage[];
     /** Не пора ли остановиться: лимит Problems исчерпан. */
     hasCapacity(): boolean;
-    finish(): Diagnostic[];
+    /**
+     * Итог расчёта; complete отвечает, дошли ли до конца.
+     *
+     * Отменённый расчёт и расчёт, упёршийся в лимит Problems, дают неполный
+     * ответ: показать его можно, а запоминать нельзя. Признак передаёт
+     * драйвер — только он знает, сам ли план дошёл до последнего этапа.
+     */
+    finish(complete: boolean): Diagnostic[];
 }
 
 /**
@@ -242,17 +247,6 @@ export type IRslDiagnosticStage = (
  * бюджете 8 мс это доли процента от порции, зато перерасход ограничен временем
  * обработки 64 элементов.
  */
-/**
- * Кэш локальных диагностик по единицам документа.
- *
- * Живёт по файлам: у каждого открытого документа своя запись, и её хватает
- * ровно на то, чтобы после правки не считать заново единицы, которые не
- * менялись. Число записей ограничено — открытых файлов не бывает много.
- */
-const unitDiagnosticsCache = new LruCache<string, IRslUnitDiagnosticsEntry>(
-    24
-);
-
 const BUDGET_CHECK_INTERVAL = 64;
 
 
@@ -456,10 +450,24 @@ export function buildLocalRslDiagnostics(
      * там больше сотни миллисекунд. Общий resolver сбрасывает кэши сам — по
      * ревизии индекса и версии модуля.
      */
-    sharedResolver?: RslScopeResolver
+    sharedResolver?: RslScopeResolver,
+    /*
+     * Кэш диагностик по единицам документа, если он есть.
+     *
+     * Кэш принадлежит движку и живёт вместе с открытыми документами. Без него
+     * файл считается целиком: у одиночного вызова владельца нет, и общий кэш
+     * на модуль делил бы состояние между несвязанными расчётами.
+     */
+    unitCache?: RslUnitDiagnosticsCache
 ): Diagnostic[] {
     return runDiagnosticPlan(
-        planLocalRslDiagnostics(module, index, settings, sharedResolver),
+        planLocalRslDiagnostics(
+            module,
+            index,
+            settings,
+            sharedResolver,
+            unitCache
+        ),
         isCancelled
     );
 }
@@ -480,10 +488,17 @@ export async function buildLocalRslDiagnosticsChunked(
     /* Длительность порций: по ней видно, какая проверка держит поток. */
     onStage?: RslDiagnosticStageObserver,
     /* См. buildLocalRslDiagnostics. */
-    sharedResolver?: RslScopeResolver
+    sharedResolver?: RslScopeResolver,
+    unitCache?: RslUnitDiagnosticsCache
 ): Promise<Diagnostic[]> {
     return runDiagnosticPlanChunked(
-        planLocalRslDiagnostics(module, index, settings, sharedResolver),
+        planLocalRslDiagnostics(
+            module,
+            index,
+            settings,
+            sharedResolver,
+            unitCache
+        ),
         isCancelled,
         slice,
         onStage
@@ -499,14 +514,14 @@ function runDiagnosticPlan(
 
         while (unfinished) {
             if (!plan.hasCapacity() || isCancelled?.()) {
-                return plan.finish();
+                return plan.finish(false);
             }
             /* Без паузы порции идут подряд: работа та же, что и одним куском. */
             unfinished = stage.run(isCancelled) === true;
         }
     }
 
-    return plan.finish();
+    return plan.finish(true);
 }
 
 async function runDiagnosticPlanChunked(
@@ -527,7 +542,7 @@ async function runDiagnosticPlanChunked(
             await slice.yieldIfNeeded();
 
             if (!plan.hasCapacity() || isCancelled?.()) {
-                return plan.finish();
+                return plan.finish(false);
             }
 
             const started = onStage ? performance.now() : 0;
@@ -539,14 +554,15 @@ async function runDiagnosticPlanChunked(
         }
     }
 
-    return plan.finish();
+    return plan.finish(true);
 }
 
 function planLocalRslDiagnostics(
     module: IIndexedModule,
     index: WorkspaceIndex,
     settings?: IRslDiagnosticSettings,
-    sharedResolver?: RslScopeResolver
+    sharedResolver?: RslScopeResolver,
+    unitCache?: RslUnitDiagnosticsCache
 ): IRslDiagnosticPlan {
     const options = normalizeDiagnosticSettings(settings);
 
@@ -607,15 +623,25 @@ function planLocalRslDiagnostics(
      * прежними — им нужен перенос смещений, а не пересчёт. Проверки,
      * смотрящие за пределы единицы, по-прежнему считаются целиком.
      */
-    const unitPlan = planRslUnitDiagnostics(
-        module,
-        unitDiagnosticsCache.get(module.uri)
-    );
+    const unitRun = unitCache
+        ? unitCache.begin(module, unitDiagnosticsFingerprint(options))
+        : runRslUnitDiagnosticsWithoutCache(module);
     /* Диагностики единиц собираются отдельно: их и запоминает кэш. */
     const unitResult: Diagnostic[] = [];
-    const unitTokens = (): readonly IRslToken[] => unitPlan.full
+    const unitTokens = (): readonly IRslToken[] => unitRun.full
         ? module.lex.tokens
-        : tokensOfRslUnits(module.lex.tokens, unitPlan.stale);
+        : tokensOfRslUnits(module.lex.tokens, unitRun.stale);
+    /*
+     * Сколько кэшируемых проверок дошло до конца.
+     *
+     * Запоминать результат можно, только если каждая из них прошла файл
+     * целиком: расчёт прерывается и отменой, и лимитом Problems, и оборванная
+     * проверка нашла не всё, что нашла бы.
+     */
+    let finishedUnitStages = 0;
+    const countUnitStage = (): void => {
+        finishedUnitStages++;
+    };
 
     /*
      * Этапы перечислены таблицей, а не цепочкой if.
@@ -639,7 +665,10 @@ function planLocalRslDiagnostics(
             createScanStage(
                 unitTokens,
                 token => addDocumentedLimitDiagnostic(module, token, unitResult),
-                () => addFileNameLimitDiagnostic(module, result)
+                () => {
+                    addFileNameLimitDiagnostic(module, result);
+                    countUnitStage();
+                }
             )
         ],
         [
@@ -647,7 +676,8 @@ function planLocalRslDiagnostics(
             options.structure,
             createScanStage(
                 unitTokens,
-                token => addUnterminatedTokenDiagnostic(module, token, unitResult)
+                token => addUnterminatedTokenDiagnostic(module, token, unitResult),
+                countUnitStage
             )
         ],
         [
@@ -655,7 +685,8 @@ function planLocalRslDiagnostics(
             options.structure,
             createScanStage(
                 unitTokens,
-                token => addUnrecognizedEscapeDiagnostic(module, token, unitResult)
+                token => addUnrecognizedEscapeDiagnostic(module, token, unitResult),
+                countUnitStage
             )
         ],
         [
@@ -867,7 +898,8 @@ function planLocalRslDiagnostics(
             options.deprecatedDeclarations,
             createScanStage(
                 unitTokens,
-                token => addDeprecatedDeclarationDiagnostic(module, token, unitResult)
+                token => addDeprecatedDeclarationDiagnostic(module, token, unitResult),
+                countUnitStage
             )
         ],
         [
@@ -875,7 +907,8 @@ function planLocalRslDiagnostics(
             options.debugBreak,
             createScanStage(
                 unitTokens,
-                token => addDebugBreakDiagnostic(module, token, unitResult)
+                token => addDebugBreakDiagnostic(module, token, unitResult),
+                countUnitStage
             )
         ],
         [
@@ -891,56 +924,32 @@ function planLocalRslDiagnostics(
         ]
     ];
 
+    const enabled = enabledStages(stages);
+    const expectedUnitStages = enabled.filter(stage =>
+        CACHEABLE_UNIT_STAGES.has(stage.name)
+    ).length;
+
     return {
-        stages: enabledStages(stages),
+        stages: enabled,
         hasCapacity,
-        finish: () => {
+        finish: (complete: boolean) => {
             /*
-             * Посчитанное по изменившимся единицам запоминается, а
-             * прежнее переносится: вместе это полный результат файла.
+             * Результат запоминается, только если расчёт дошёл до конца и все
+             * кэшируемые проверки прошли файл целиком. В остальных случаях
+             * прежняя запись остаётся нетронутой: неполный результат,
+             * запомненный как полный, «переиспользовался» бы на следующей
+             * правке — и находки, которые не искали, исчезали бы из Problems.
              */
-            const byUnit = collectRslUnitDiagnostics(
-                module,
-                unitPlan.units,
-                unitResult
-            );
-
-            /*
-             * Переносятся записи ТОЛЬКО переиспользованных единиц.
-             *
-             * У пересчитанной единицы новый результат полон, в том числе когда
-             * он пуст: правка могла убрать находку. Перенос прежних записей по
-             * признаку «сейчас ничего не нашлось» оставлял бы исправленное в
-             * кэше навсегда.
-             */
-            if (!unitPlan.full) {
-                const previous = unitDiagnosticsCache.get(module.uri);
-
-                for (const unit of unitPlan.keep) {
-                    if (byUnit.has(unit.id)) {
-                        continue;
-                    }
-
-                    const kept = previous?.byUnit.get(unit.id);
-
-                    if (kept) {
-                        byUnit.set(unit.id, kept);
-                    }
-                }
+            if (complete && finishedUnitStages === expectedUnitStages) {
+                unitRun.commit(unitResult);
+            } else {
+                unitRun.abort();
             }
-
-            unitDiagnosticsCache.set(module.uri, {
-                uri: module.uri,
-                version: module.version,
-                source: module.source,
-                units: unitPlan.units,
-                byUnit
-            });
 
             return deduplicateDiagnostics([
                 ...result,
                 ...unitResult,
-                ...unitPlan.reused
+                ...unitRun.reused
             ]).slice(0, options.maxProblems);
         }
     };
@@ -1129,6 +1138,40 @@ function emptyPlan(): IRslDiagnosticPlan {
         hasCapacity: () => false,
         finish: () => []
     };
+}
+
+/**
+ * Проверки, результат которых зависит ровно от текста своей единицы.
+ *
+ * Только они переиспользуются между правками, и только их завершение решает,
+ * можно ли запомнить результат.
+ */
+const CACHEABLE_UNIT_STAGES = new Set([
+    "limits",
+    "unterminated",
+    "escapes",
+    "deprecated",
+    "debugBreak"
+]);
+
+/**
+ * Отпечаток настроек кэшируемых проверок.
+ *
+ * В него входят ровно те настройки, от которых зависит результат единицы:
+ * включённость проверок, лимит Problems и диалект. При несовпадении прошлая
+ * запись не годится — считается весь файл.
+ */
+function unitDiagnosticsFingerprint(
+    options: ReturnType<typeof normalizeDiagnosticSettings>
+): string {
+    return [
+        options.enabled,
+        options.structure,
+        options.deprecatedDeclarations,
+        options.debugBreak,
+        options.dialect,
+        options.maxProblems
+    ].join("|");
 }
 
 /** Полный результат для unit-тестов и batch-клиентов. */

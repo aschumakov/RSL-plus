@@ -15,7 +15,10 @@ import {
 import type { RslSettingsService } from "../services/settingsService";
 import type { RslScopeResolver } from "../scopeResolver";
 import type { WorkspaceIndex } from "../workspaceIndex";
-import type { RslDiagnosticStageObserver } from "../diagnostics";
+import {
+    normalizeDiagnosticSettings,
+    type RslDiagnosticStageObserver
+} from "../diagnostics";
 import type { PerformanceLogger } from "../performanceLogger";
 import type { IRslSettings } from "../interfaces";
 
@@ -169,6 +172,7 @@ export class DiagnosticsCoordinator {
 
     close(uri: string): void {
         this.cancel(uri);
+        this.engine.forget(uri);
         this.localCache.delete(uri);
         this.workspaceCache.delete(uri);
         this.localKeys.delete(uri);
@@ -240,7 +244,7 @@ export class DiagnosticsCoordinator {
 
         const key = [
             state.module.version,
-            JSON.stringify(localSettingsKey(state.settings.diagnostics))
+            diagnosticsSettingsKey(state.settings)
         ].join(":");
         this.maxProblems.set(uri, state.settings.diagnostics?.maxProblems ?? 200);
 
@@ -332,7 +336,7 @@ export class DiagnosticsCoordinator {
         const key = [
             state.module.version,
             this.index.getImportClosureKey(uri),
-            JSON.stringify(workspaceSettingsKey(state.settings.diagnostics))
+            diagnosticsSettingsKey(state.settings)
         ].join(":");
         this.maxProblems.set(uri, state.settings.diagnostics?.maxProblems ?? 200);
 
@@ -589,27 +593,23 @@ export class DiagnosticsCoordinator {
     }
 }
 
-function localSettingsKey(settings: any): unknown {
-    const value = settings || {};
-    return {
-        enabled: value.enabled,
-        deprecatedDeclarations: value.deprecatedDeclarations,
-        structure: value.structure,
-        unusedVariables: value.unusedVariables,
-        debugBreak: value.debugBreak,
-        useBeforeDeclaration: value.useBeforeDeclaration,
-        maxProblems: value.maxProblems
-    };
-}
-
-function workspaceSettingsKey(settings: any): unknown {
-    const value = settings || {};
-    return {
-        enabled: value.enabled,
-        unusedImports: value.unusedImports,
-        ambiguousReferences: value.ambiguousReferences,
-        maxProblems: value.maxProblems
-    };
+/**
+ * Ключ настроек: весь нормализованный набор, а не выписанные вручную поля.
+ *
+ * Списки полей отставали от настроек. Появлялась проверка — её настройка в
+ * ключ не попадала, и переключение галочки не пересчитывало ничего: результат
+ * брался из кэша, посчитанного при прежнем значении. Нормализация уже
+ * приводит настройки к полному набору со значениями по умолчанию, поэтому
+ * достаточно взять её целиком. Лишний пересчёт при смене чужой настройки
+ * дешевле молча устаревшего ответа, а меняются настройки редко.
+ */
+function diagnosticsSettingsKey(settings: IRslSettings): string {
+    return JSON.stringify(
+        normalizeDiagnosticSettings({
+            ...(settings.diagnostics || {}),
+            dialect: settings.language?.dialect
+        })
+    );
 }
 
 function diagnosticItemKey(item: Diagnostic): string {

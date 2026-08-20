@@ -273,6 +273,23 @@ export class WorkspaceIndex {
     getImportedModules(uri: string): IIndexedModule[] {
         return this.importsEnabled ? this.getImportContext(uri).modules.slice() : [];
     }
+    /**
+     * Ключ замыкания БЕЗ самого документа.
+     *
+     * Отвечает на вопрос «узнал ли сервер что-то новое о других файлах».
+     * Обычный ключ включает и сам документ, поэтому меняется от того, что
+     * достроилась его собственная модель, — а это не новые сведения.
+     */
+    getImportedClosureKey(uri: string): string {
+        if (!this.importsEnabled) {
+            return "imports-disabled";
+        }
+
+        return this.getImportContext(uri).modules
+            .map(item => item.uri + "@" + item.version)
+            .sort()
+            .join("|");
+    }
     getImportClosureKey(uri: string): string {
         return this.importsEnabled
             ? this.getImportContext(uri).closureKey
@@ -292,6 +309,42 @@ export class WorkspaceIndex {
             normalizeName(name)
         ) || []).slice();
     }
+    /**
+     * Неподключённые символы, чьё имя начинается с prefix.
+     *
+     * Отдельно от findUnimportedSymbols: тот перебирает и копирует все символы
+     * проекта, а Auto Import спрашивают на каждую нажатую букву.
+     */
+    findUnimportedSymbolsByPrefix(
+        uri: string,
+        prefix: string,
+        limit: number
+    ): IIndexedSymbol[] {
+        const imported = new Set(
+            this.getImportedModules(uri).map(item => item.uri)
+        );
+        imported.add(uri);
+        const result: IIndexedSymbol[] = [];
+
+        /*
+         * Запрашивается с запасом: часть найденного отсеется как приватное или
+         * как уже подключённое, а вернуть надо ровно столько, сколько просили.
+         */
+        for (const item of this.symbols.findByPrefix(prefix, limit * 4)) {
+            if (item.symbol.isPrivate || imported.has(item.uri)) {
+                continue;
+            }
+
+            result.push(item);
+
+            if (result.length >= limit) {
+                break;
+            }
+        }
+
+        return result;
+    }
+
     findUnimportedSymbols(uri: string, name?: string): IIndexedSymbol[] {
         const imported = new Set(this.getImportedModules(uri).map(item => item.uri));
         imported.add(uri);

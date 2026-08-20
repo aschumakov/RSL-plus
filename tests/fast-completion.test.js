@@ -17,16 +17,30 @@
  */
 
 const assert = require("assert");
+
+/** Стенд над MAIN: общий для всех тестов Completion, см. harness. */
+function createRegistry({ source, others = {}, platform }) {
+    return createCompletionRegistry({
+        uri: MAIN,
+        source,
+        platform,
+        /* Документ на версию впереди модели: отвечает быстрый путь. */
+        modelReady: false,
+        settings: defaults,
+        workspace: Object.entries(others).map(([uri, text]) => ({
+            uri,
+            text
+        }))
+    });
+}
 const {
     CompletionItemKind
 } = require("../server/node_modules/vscode-languageserver");
 
 const {
-    RslLanguageFeatureRegistry
-} = require("../server/out/features/languageFeatureRegistry");
-const {
-    createFastDocumentSnapshot
-} = require("../server/out/services/fastDocumentSnapshot");
+    createCompletionRegistry
+} = require("./completion-harness");
+/* Один тест сверяет ответ полной модели напрямую, минуя обработчик. */
 const { RslScopeResolver } = require("../server/out/scopeResolver");
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
 const { getDefaults } = require("../server/out/defaults");
@@ -69,141 +83,8 @@ const defaults = {
 
 const MAIN = "file:///d:/fast/main.mac";
 
-function createDocument(uri, version, text) {
-    const lineStarts = [0];
 
-    for (let index = 0; index < text.length; index++) {
-        if (text[index] === "\n") {
-            lineStarts.push(index + 1);
-        }
-    }
 
-    return {
-        uri,
-        languageId: "rsl",
-        version,
-        get lineCount() {
-            return lineStarts.length;
-        },
-        getText: () => text,
-        positionAt(offset) {
-            const bounded = Math.max(0, Math.min(offset, text.length));
-            let line = 0;
-
-            while (
-                line + 1 < lineStarts.length &&
-                lineStarts[line + 1] <= bounded
-            ) {
-                line++;
-            }
-
-            return { line, character: bounded - lineStarts[line] };
-        },
-        offsetAt(position) {
-            const line = Math.max(
-                0,
-                Math.min(position.line, lineStarts.length - 1)
-            );
-
-            return Math.min(
-                text.length,
-                lineStarts[line] + Math.max(0, position.character)
-            );
-        }
-    };
-}
-
-function createConnection(handlers) {
-    const register = name => callback => {
-        handlers[name] = callback;
-    };
-
-    return {
-        onCompletion: register("completion"),
-        onCompletionResolve: register("completionResolve"),
-        onSignatureHelp: register("signatureHelp"),
-        onHover: register("hover"),
-        onDocumentHighlight: register("documentHighlight"),
-        onDefinition: register("definition"),
-        onReferences: register("references"),
-        onWorkspaceSymbol: register("workspaceSymbol"),
-        onCodeAction: register("codeAction"),
-        onSelectionRanges: register("selectionRanges"),
-        onExecuteCommand: register("executeCommand"),
-        onPrepareRename: register("prepareRename"),
-        onRenameRequest: register("rename"),
-        onRequest: (method, callback) => {
-            handlers[method] = callback;
-        },
-        onDocumentSymbol: register("documentSymbol"),
-        onFoldingRanges: register("foldingRanges"),
-        onDocumentFormatting: register("documentFormatting"),
-        onDocumentRangeFormatting: register("documentRangeFormatting"),
-        sendRequest: async () => undefined,
-        languages: {
-            callHierarchy: {
-                onPrepare: register("callHierarchyPrepare"),
-                onIncomingCalls: register("callHierarchyIncoming"),
-                onOutgoingCalls: register("callHierarchyOutgoing")
-            },
-            semanticTokens: {
-                on: register("semanticTokens"),
-                onDelta: register("semanticTokensDelta"),
-                onRange: register("semanticTokensRange"),
-                refresh: () => undefined
-            },
-            inlayHint: {
-                on: register("inlayHint"),
-                refresh: () => undefined
-            }
-        }
-    };
-}
-
-/**
- * Реестр, у которого модели текущей версии заведомо нет.
- *
- * Документ отдаётся версией 2, а в индексе лежит версия 1: именно это состояние
- * возникает сразу после правки, и именно в нём работает быстрый путь.
- */
-function createRegistry({ source, others = {}, platform }) {
-    const index = new WorkspaceIndex();
-    const uris = [MAIN, ...Object.keys(others)];
-    index.registerWorkspaceFiles(uris);
-    index.updateOpenModule(MAIN, source, 1);
-
-    for (const [uri, text] of Object.entries(others)) {
-        index.updateExternalModule(uri, text, 1);
-    }
-
-    const document = createDocument(MAIN, 2, source);
-    const handlers = {};
-
-    const registry = new RslLanguageFeatureRegistry({
-        connection: createConnection(handlers),
-        documents: {
-            get: uri => uri === MAIN ? document : undefined,
-            all: () => [document]
-        },
-        index,
-        resolver: new RslScopeResolver(index, getDefaults(), platform),
-        definitionProvider: {
-            findImportDefinition: async () => undefined,
-            findDynamicDefinition: async () => undefined,
-            createObjectLocationByUri: () => ({ uri: MAIN, range: null })
-        },
-        getFastDocumentSnapshot: () => createFastDocumentSnapshot(document),
-        /* Разбор идёт своим ходом и до конца запроса не успевает. */
-        ensureDocumentParsed: async () => undefined,
-        requestDocumentParse: () => undefined,
-        getSettings: () => defaults,
-        supportsRefresh: () => false,
-        log: () => undefined
-    });
-    registry.register();
-
-    return { handlers, index, document };
-}
 
 /** Список от обработчика: курсор ставится сразу после указанной точки. */
 async function completeAfterDot(registry, marker) {

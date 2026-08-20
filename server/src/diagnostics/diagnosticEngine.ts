@@ -23,6 +23,7 @@ import {
 } from "./unknownVariableDiagnostics";
 import type { RslDiagnosticStageObserver } from "../diagnostics";
 import type { IRslDiagnosticSettings } from "../interfaces";
+import { RslUnitDiagnosticsCache } from "./unitDiagnosticsCache";
 import { RslScopeResolver } from "../scopeResolver";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 
@@ -130,6 +131,14 @@ function auditRequest(context: IRslDiagnosticContext): {
 
 export class RslDiagnosticEngine {
     private rules: IRslDiagnosticRule[] = [];
+    /**
+     * Кэш диагностик по единицам документа.
+     *
+     * Принадлежит движку, а не модулю: он удерживает исходный текст открытых
+     * файлов, и его время жизни обязано совпадать со временем жизни сервера, а
+     * записи — уходить вместе с закрытыми документами.
+     */
+    private readonly unitCache = new RslUnitDiagnosticsCache();
 
     constructor(private options: IRslDiagnosticEngineOptions = {}) {
         this.register({
@@ -140,7 +149,8 @@ export class RslDiagnosticEngine {
                 context.index,
                 context.settings,
                 context.isCancelled,
-                context.resolver
+                context.resolver,
+                this.unitCache
             ),
             runChunked: (context, slice) => buildLocalRslDiagnosticsChunked(
                 context.module,
@@ -149,7 +159,8 @@ export class RslDiagnosticEngine {
                 context.isCancelled,
                 slice,
                 context.onStage,
-                context.resolver
+                context.resolver,
+                this.unitCache
             )
         });
         this.register({
@@ -283,6 +294,22 @@ export class RslDiagnosticEngine {
      * активного URI и отмены имеет смысл: до паузы соответствующие сообщения до
      * сервера просто не доходят.
      */
+    /**
+     * Документ закрыт: его текст и находки удерживать больше незачем.
+     *
+     * Кэш единиц хранит исходник целиком, и на крупных модулях это мегабайты
+     * на файл. Без явной очистки они жили бы до вытеснения по границе, то есть
+     * произвольно долго после закрытия вкладки.
+     */
+    forget(uri: string): void {
+        this.unitCache.forget(uri);
+    }
+
+    /** Сколько удерживает кэш единиц: для тестов и профиля. */
+    get unitCacheStats(): { entries: number; bytes: number } {
+        return { entries: this.unitCache.size, bytes: this.unitCache.bytes };
+    }
+
     buildLocalAsync(
         module: IIndexedModule,
         index: WorkspaceIndex,

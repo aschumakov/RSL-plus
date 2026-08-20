@@ -130,7 +130,7 @@ function applyTextEdit(document, edit) {
             "file:///workspace/main.mac",
             main
         );
-        const completion = buildKnownAutoImportCompletions(module, index)
+        const completion = buildKnownAutoImportCompletions(module, index).items
             .find(item => item.label === "Shared");
 
         assert.ok(completion);
@@ -140,7 +140,7 @@ function applyTextEdit(document, edit) {
             "Import library;\n"
         );
         assert.deepStrictEqual(
-            buildKnownAutoImportCompletions(module, index, "Sha")
+            buildKnownAutoImportCompletions(module, index, "Sha").items
                 .map(item => item.label),
             ["Shared"]
         );
