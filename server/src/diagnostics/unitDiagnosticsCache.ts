@@ -284,7 +284,9 @@ export class RslUnitDiagnosticsCache {
 
         this.forget(module.uri);
         this.evictOldest(bytes);
-        this.entries.set(module.uri, {
+
+        /* Вытесненное по числу записей тоже уходит из счёта занятого объёма. */
+        const evicted = this.entries.set(module.uri, {
             uri: module.uri,
             fingerprint,
             source: module.source,
@@ -292,6 +294,11 @@ export class RslUnitDiagnosticsCache {
             byUnit,
             bytes
         });
+
+        for (const [, entry] of evicted) {
+            this.usedBytes -= entry.bytes;
+        }
+
         this.usedBytes += bytes;
     }
 

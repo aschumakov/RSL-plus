@@ -13,6 +13,7 @@ const { TextDocument } = require(path.join(
 const { createSymbolTree } = require("./test-helpers");
 const {
     buildKnownAutoImportCompletions,
+    resolveAutoImportEdit,
     buildMissingImportActions
 } = require("../server/out/features/autoImportProvider");
 const {
@@ -134,11 +135,19 @@ function applyTextEdit(document, edit) {
             .find(item => item.label === "Shared");
 
         assert.ok(completion);
-        assert.strictEqual(completion.additionalTextEdits.length, 1);
-        assert.strictEqual(
-            completion.additionalTextEdits[0].newText,
-            "Import library;\n"
+        /*
+         * Правка Import в списке не считается: её строит resolve для той
+         * строки, которую выбрал пользователь. Здесь проверяется именно она.
+         */
+        assert.strictEqual(completion.additionalTextEdits, undefined);
+
+        const edit = resolveAutoImportEdit(
+            module,
+            index,
+            completion.data.rslAutoImportUri
         );
+        assert.ok(edit, "правка Import обязана строиться по выбранной строке");
+        assert.strictEqual(edit.newText, "Import library;\n");
         assert.deepStrictEqual(
             buildKnownAutoImportCompletions(module, index, "Sha").items
                 .map(item => item.label),

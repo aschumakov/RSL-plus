@@ -49,7 +49,26 @@ interface IAssignmentAlignment {
  * комментариев и квадратных SQL/текстовых блоков. Также сохраняются BOM,
  * исходный тип перевода строк и наличие финального EOL.
  */
-export function FormatCode(text: string, tabSize: number = 4): string {
+export interface IRslFormatOptions {
+    /**
+     * Отступ пробелами; false — табуляциями.
+     *
+     * Настройка редактора, и раньше она игнорировалась: файл с табуляциями
+     * после форматирования оказывался с пробелами. Выравнивание присваиваний
+     * при этом остаётся пробельным — оно считается по колонкам, и табуляция
+     * шириной в настройку редактора его бы разъехала.
+     */
+    insertSpaces?: boolean;
+}
+
+export function FormatCode(
+    text: string,
+    tabSize: number = 4,
+    options: IRslFormatOptions = {}
+): string {
+    const indentText = (level: number): string => options.insertSpaces === false
+        ? "\t".repeat(Math.max(0, level))
+        : " ".repeat(Math.max(0, level * tabSize));
     const source = text || "";
     const lex = lexRsl(source);
     const bom = lex.hasBom ? "\uFEFF" : "";
@@ -105,6 +124,7 @@ export function FormatCode(text: string, tabSize: number = 4): string {
             ? Math.max(indentLevel - 1, 0)
             : indentLevel;
 
+        let indentLevelForLine = lineIndentLevel;
         let indentColumn = lineIndentLevel * tabSize;
 
         if (parenthesisStack.length > 0) {
@@ -122,7 +142,11 @@ export function FormatCode(text: string, tabSize: number = 4): string {
             );
         }
 
-        formatted.push(" ".repeat(indentColumn) + normalizedLine);
+        formatted.push(
+            (indentColumn === indentLevelForLine * tabSize
+                ? indentText(indentLevelForLine)
+                : " ".repeat(indentColumn)) + normalizedLine
+        );
 
         /*
          * Строка лексируется один раз и БЕЗ отступа.

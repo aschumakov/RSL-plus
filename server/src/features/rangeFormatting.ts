@@ -10,15 +10,39 @@ import { FormatCode } from "../format";
 /**
  * Форматирует только полные строки, пересекающие выделение.
  *
- * Полный документ используется лишь как контекст вычисления отступов.
- * Единственный TextEdit затрагивает только выбранные строки.
+ * Форматирование идёт не от начала файла, а от начала того верхнеуровневого
+ * блока, в котором стоит выделение, и заканчивается началом следующего. В такой
+ * точке состояние форматтера известно и тривиально: нулевой отступ, пустой стек
+ * скобок, нет продолжения выражения и нет начатой группы выравнивания. Поэтому
+ * кусок текста между двумя такими точками форматируется отдельно, а результат
+ * для выбранных строк тот же, что при форматировании всего документа.
+ *
+ * Ради чего: прежде выделение из шести строк форматировалось вместе со всем
+ * документом — на модуле 705 КБ это 170 мс, и всё это время language server не
+ * отвечал ни на что другое.
+ *
+ * Границы блоков приходят снаружи — от того же разбиения на единицы документа,
+ * которым пользуется инкрементальная диагностика. Своего сканирования здесь нет
+ * намеренно: слово `macro` в начале строки встречается и внутри многострочного
+ * SQL-запроса, и такая «контрольная точка» снимала бы отступ у текста, который
+ * обязан остаться байт-в-байт.
  */
+export interface IRangeFormattingOptions {
+    /**
+     * Строки, с которых начинаются верхнеуровневые блоки документа.
+     *
+     * Отсутствуют, если модель этой версии ещё не готова: тогда форматируется
+     * весь документ — медленно, зато тем же текстом.
+     */
+    blockStartLines?: readonly number[];
+}
+
 export function formatRslDocumentRange(
     document: TextDocument,
-    params: DocumentRangeFormattingParams
+    params: DocumentRangeFormattingParams,
+    options: IRangeFormattingOptions = {}
 ): TextEdit[] {
     const source = document.getText();
-    const formatted = FormatCode(source, params.options.tabSize);
     const startLine = Math.max(0, params.range.start.line);
     const requestedEndLine = params.range.end.character === 0 &&
         params.range.end.line > startLine
@@ -31,20 +55,151 @@ export function formatRslDocumentRange(
             ? { line: endLine + 1, character: 0 }
             : document.positionAt(source.length)
     };
-    const formattedOffsets = lineRangeOffsets(
-        formatted,
-        startLine,
-        endLine
-    );
-    const newText = formatted.substring(
-        formattedOffsets.start,
-        formattedOffsets.end
-    );
     const oldText = document.getText(replacementRange);
+    const newText = formatLines(
+        document,
+        source,
+        startLine,
+        endLine,
+        params.options,
+        options
+    );
 
     return newText === oldText
         ? []
         : [TextEdit.replace(replacementRange, newText)];
+}
+
+/** Текст выбранных строк после форматирования. */
+function formatLines(
+    document: TextDocument,
+    source: string,
+    startLine: number,
+    endLine: number,
+    editor: { tabSize: number; insertSpaces: boolean },
+    options: IRangeFormattingOptions
+): string {
+    const tabSize = Math.max(1, editor.tabSize || 4);
+    const insertSpaces = editor.insertSpaces !== false;
+    const window = findWindow(
+        options.blockStartLines,
+        startLine,
+        endLine,
+        document
+    );
+
+    if (!window) {
+        const whole = FormatCode(source, tabSize, { insertSpaces });
+        const offsets = lineRangeOffsets(whole, startLine, endLine);
+
+        return whole.substring(offsets.start, offsets.end);
+    }
+
+    const sliceStart = document.offsetAt({ line: window.from, character: 0 });
+    const sliceEnd = window.to >= 0 && window.to < document.lineCount
+        ? document.offsetAt({ line: window.to, character: 0 })
+        : source.length;
+    const formatted = FormatCode(
+        source.slice(sliceStart, sliceEnd),
+        tabSize,
+        { insertSpaces }
+    );
+    /*
+     * Из отформатированного куска берутся ровно выбранные строки: их номера
+     * внутри куска сдвинуты на начало окна.
+     */
+    const offsets = lineRangeOffsets(
+        formatted,
+        startLine - window.from,
+        endLine - window.from
+    );
+
+    return formatted.substring(offsets.start, offsets.end);
+}
+
+/**
+ * Окно форматирования по границам блоков.
+ *
+ * undefined — границы неизвестны или выделение начинается выше первого блока:
+ * тогда куском обойтись нельзя.
+ */
+function findWindow(
+    blockStartLines: readonly number[] | undefined,
+    startLine: number,
+    endLine: number,
+    document: TextDocument
+): { from: number; to: number } | undefined {
+    if (!blockStartLines || blockStartLines.length === 0) {
+        return undefined;
+    }
+
+    let from = -1;
+    let nextBlock = -1;
+
+    for (const line of blockStartLines) {
+        if (line <= startLine) {
+            from = Math.max(from, line);
+            continue;
+        }
+
+        if (line > endLine && (nextBlock < 0 || line < nextBlock)) {
+            nextBlock = line;
+        }
+    }
+
+    if (from < 0) {
+        return undefined;
+    }
+
+    /*
+     * Хвост окна — до конца группы выравнивания, а не до конца блока.
+     *
+     * Ниже выделения форматтеру важно только одно: доиграть группу подряд
+     * идущих присваиваний, по которой считается ширина выравнивания. Она
+     * кончается пустой строкой или строкой без присваивания. Тянуть окно до
+     * конца блока значило бы форматировать десять тысяч строк ради шести — а
+     * такие процедуры в проверенном репозитории есть.
+     */
+    const alignmentEnd = findAlignmentEnd(document, endLine, nextBlock);
+
+    return {
+        from,
+        to: nextBlock < 0 ? alignmentEnd : Math.min(nextBlock, alignmentEnd)
+    };
+}
+
+/*
+ * Докуда тянуть хвост, если группа присваиваний не кончается.
+ *
+ * Ограничение страхует от вырожденного случая — сотен подряд идущих
+ * присваиваний: там окно всё равно закроется началом следующего блока.
+ */
+const MAX_ALIGNMENT_TAIL = 200;
+
+/** Первая строка после выделения, на которой группа выравнивания кончается. */
+function findAlignmentEnd(
+    document: TextDocument,
+    endLine: number,
+    nextBlock: number
+): number {
+    const limit = Math.min(
+        document.lineCount,
+        endLine + 1 + MAX_ALIGNMENT_TAIL
+    );
+
+    for (let line = endLine + 1; line < limit; line++) {
+        const text = document.getText({
+            start: { line, character: 0 },
+            end: { line: line + 1, character: 0 }
+        });
+
+        /* Пустая строка и строка без присваивания группу закрывают. */
+        if (text.trim() === "" || !/=/.test(text)) {
+            return line + 1;
+        }
+    }
+
+    return nextBlock < 0 ? -1 : nextBlock;
 }
 
 function lineRangeOffsets(
@@ -60,7 +215,7 @@ function lineRangeOffsets(
         starts.push(match.index + match[0].length);
     }
 
-    const safeStart = Math.min(startLine, starts.length - 1);
+    const safeStart = Math.max(0, Math.min(startLine, starts.length - 1));
     const start = starts[safeStart];
     const end = endLine + 1 < starts.length
         ? starts[endLine + 1]

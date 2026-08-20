@@ -325,16 +325,32 @@ export class WorkspaceIndex {
         );
         imported.add(uri);
         const result: IIndexedSymbol[] = [];
+        /*
+         * Повторные объявления одного имени в одном модуле — один кандидат.
+         *
+         * Отбор идёт здесь, а не у вызывающего: иначе число найденного и
+         * признак «нашлось больше, чем поместилось» считались бы по списку с
+         * повторами, и результат зависел бы от предела.
+         */
+        const seen = new Set<string>();
 
         /*
-         * Запрашивается с запасом: часть найденного отсеется как приватное или
-         * как уже подключённое, а вернуть надо ровно столько, сколько просили.
+         * Запрашивается с запасом: часть найденного отсеется как приватное,
+         * как уже подключённое или как повтор, а вернуть надо ровно столько,
+         * сколько просили.
          */
         for (const item of this.symbols.findByPrefix(prefix, limit * 4)) {
             if (item.symbol.isPrivate || imported.has(item.uri)) {
                 continue;
             }
 
+            const key = normalizeName(item.symbol.name) + " " + item.uri;
+
+            if (seen.has(key)) {
+                continue;
+            }
+
+            seen.add(key);
             result.push(item);
 
             if (result.length >= limit) {

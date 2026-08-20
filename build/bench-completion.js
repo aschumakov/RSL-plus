@@ -73,6 +73,7 @@ function createConnection(handlers) {
         onHover: register("hover"),
         onDocumentHighlight: register("documentHighlight"),
         onDefinition: register("definition"),
+        onTypeDefinition: register("typeDefinition"),
         onReferences: register("references"),
         onWorkspaceSymbol: register("workspaceSymbol"),
         onCodeAction: register("codeAction"),

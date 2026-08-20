@@ -25,6 +25,18 @@ import {
     requestIsStale
 } from "./requestHelpers";
 import { RslCompletionProvider } from "./completionProvider";
+import {
+    splitRslDocumentUnits
+} from "../analysis/documentUnits";
+import { positionAtOffset } from "../core/documentPosition";
+import {
+    buildRslFastHover,
+    buildRslFastSignatureHelp,
+    createRslInteractiveContext,
+    findRslFastDefinition,
+    findRslFastTypeDefinition,
+    type IRslInteractiveContext
+} from "./interactiveContext";
 import { RslDefinitionProvider } from "./definitionProvider";
 import { buildEnhancedRslCodeActions } from "./enhancedCodeActions";
 import { buildRslDocumentHighlights } from "./documentHighlights";
@@ -151,7 +163,10 @@ export class RslLanguageFeatureRegistry {
             environment,
             document => this.getRequestModule(document)
         );
-        this.presentationFeatures = new PresentationFeatureRegistry(environment);
+        this.presentationFeatures = new PresentationFeatureRegistry({
+            ...environment,
+            getBlockStartLines: document => this.blockStartLines(document)
+        });
         this.semanticTokensFeatures = new SemanticTokensFeatureRegistry({
             ...environment,
             /* Базовая подсветка берёт токены из быстрого снимка. */
@@ -188,11 +203,33 @@ export class RslLanguageFeatureRegistry {
             this.environment.noteInteractiveActivity?.();
             const version = document.version;
             /*
-             * Приходит только на «(» и «,» — то есть всегда по действию
-             * пользователя, а не потоком на каждую букву. Ждать здесь склейку
-             * правок значит показать подсказку параметров с опозданием ровно
-             * в тот момент, когда пользователь начал писать аргументы.
+             * Сначала — ответ по токенам текущей версии.
+             *
+             * Подсказка приходит на «(» и «,», то есть сразу после набора, и
+             * ждать разбор значило показать её с опозданием ровно в тот момент,
+             * когда пользователь начал писать аргументы. Вызов и номер
+             * аргумента считаются по токенам, а подпись берётся у символа.
              */
+            const fastContext = this.interactiveContext(
+                document,
+                document.offsetAt(params.position),
+                cancellationToken
+            );
+            const fastHelp = buildRslFastSignatureHelp(
+                fastContext,
+                index,
+                resolver
+            );
+
+            if (fastHelp) {
+                return fastHelp;
+            }
+
+            if (fastContext.module) {
+                /* Модель есть, а ответа нет: добавить его неоткуда. */
+                return null;
+            }
+
             await waitForParseBudget(
                 ensureDocumentParsed(document, "force"),
                 INTERACTIVE_PARSE_BUDGET_MS
@@ -227,6 +264,46 @@ export class RslLanguageFeatureRegistry {
 
             this.environment.noteInteractiveActivity?.();
             const version = document.version;
+            /*
+             * Ответ по готовому состоянию: токены текущей версии и компактный
+             * индекс. Разбор ожидается только тогда, когда этого не хватило.
+             */
+            const fast = this.interactiveContext(
+                document,
+                document.offsetAt(params.position),
+                cancellationToken
+            );
+
+            if (isBlockedToken(fast.token)) {
+                return null;
+            }
+
+            const fastSpecifier = getFormatSpecifierAt(
+                fast.tokens,
+                fast.offset
+            );
+
+            if (fastSpecifier) {
+                return {
+                    contents: {
+                        kind: "markdown",
+                        value:
+                            `**Спецификатор форматирования :${fastSpecifier.raw}**  \n` +
+                            describeFormatSpecifier(fastSpecifier.raw)
+                    },
+                    range: {
+                        start: document.positionAt(fastSpecifier.start),
+                        end: document.positionAt(fastSpecifier.end)
+                    }
+                };
+            }
+
+            const fastHover = buildRslFastHover(fast, index, resolver);
+
+            if (fastHover) {
+                return fastHover;
+            }
+
             await waitForParseBudget(
                 ensureDocumentParsed(document),
                 INTERACTIVE_PARSE_BUDGET_MS
@@ -293,6 +370,103 @@ export class RslLanguageFeatureRegistry {
             };
         });
 
+        /*
+         * Переход к типу: от переменной к её классу.
+         *
+         * Отдельный запрос LSP, и отвечает он по тому же быстрому контексту:
+         * тип уже посчитан индексом версии, а класс ищется там же, где его
+         * ищут подсказки.
+         */
+        connection.onTypeDefinition?.(async (
+            params: TextDocumentPositionParams,
+            cancellationToken: CancellationToken
+        ): Promise<Definition | null> => {
+            const document = documents.get(params.textDocument.uri);
+
+            if (!document) {
+                return null;
+            }
+
+            this.environment.noteInteractiveActivity?.();
+            const context = this.interactiveContext(
+                document,
+                document.offsetAt(params.position),
+                cancellationToken
+            );
+            const target = findRslFastTypeDefinition(
+                context,
+                this.environment.index,
+                resolver
+            );
+
+            if (target) {
+                return context.isStale() ? null : target;
+            }
+
+            /*
+             * Быстрый путь не нашёл: тип мог быть выведен из присваивания, а
+             * это знает только полная модель.
+             */
+            const version = document.version;
+            await ensureDocumentParsed(document);
+
+            if (requestIsStale(document, version, cancellationToken)) {
+                return null;
+            }
+
+            const full = this.interactiveContext(
+                document,
+                document.offsetAt(params.position),
+                cancellationToken
+            );
+            const model = full.module;
+
+            if (!model || full.token?.kind !== "identifier") {
+                return null;
+            }
+
+            const resolved = resolver.resolveAt(
+                document.uri,
+                model.symbolTree,
+                full.offset
+            );
+
+            if (!resolved) {
+                return null;
+            }
+
+            const typeName = resolver.effectiveTypeName(
+                document.uri,
+                model.symbolTree,
+                resolved.symbol,
+                full.offset
+            );
+            const typeSymbol = typeName
+                ? resolver.findFastClass(
+                    document.uri,
+                    typeName,
+                    full.fastIndex.imports
+                )
+                : undefined;
+
+            if (!typeSymbol || !typeSymbol.moduleUri) {
+                return null;
+            }
+
+            const range = this.environment.index.getDefinitionRange(
+                typeSymbol.moduleUri,
+                typeSymbol.symbol
+            );
+
+            return {
+                uri: typeSymbol.moduleUri,
+                range: range || {
+                    start: { line: 0, character: 0 },
+                    end: { line: 0, character: 0 }
+                }
+            };
+        });
+
         connection.onDocumentHighlight(async (
             params: DocumentHighlightParams,
             cancellationToken: CancellationToken
@@ -355,6 +529,33 @@ export class RslLanguageFeatureRegistry {
             try {
                 this.environment.noteInteractiveActivity?.();
                 const version = document.version;
+                /*
+                 * Переходы между файлами отвечаются по токенам и индексу
+                 * проекта: имя модуля в Import, имя процедуры в строке
+                 * ExecMacro, имя из подключённого модуля. Именно они и стоили
+                 * ожидания разбора — на модуле 550 КБ около 130 мс, то есть
+                 * Ctrl+Click «не работал» сразу после правки.
+                 */
+                const fast = this.interactiveContext(
+                    document,
+                    document.offsetAt(params.position),
+                    cancellationToken
+                );
+                const fastTarget = findRslFastDefinition(
+                    fast,
+                    this.environment.index
+                );
+
+                if (fastTarget) {
+                    if (fast.isStale()) {
+                        outcome = "cancelled";
+                        return null;
+                    }
+
+                    outcome = "fast";
+                    return fastTarget;
+                }
+
                 await ensureDocumentParsed(document);
                 if (requestIsStale(document, version, cancellationToken)) {
                     outcome = "cancelled";
@@ -904,9 +1105,13 @@ export class RslLanguageFeatureRegistry {
          * Модель готова, и дальше отвечает она. Прежде индекс освобождался
          * только при следующем Completion — то есть у файла, в который больше
          * не заходят, он оставался в памяти до вытеснения по счётчику.
+         *
+         * Сеанс Completion при этом НЕ выбрасывается: текст не изменился, а
+         * значит и список, который пользователь сейчас читает, обязан остаться
+         * тем же. Иначе список менялся сам собой ровно в тот момент, когда
+         * достроилась модель.
          */
         dropFastCompletionIndex(uri);
-        this.completionProvider.forget(uri);
     }
 
     /**
@@ -973,6 +1178,68 @@ export class RslLanguageFeatureRegistry {
             document.uri,
             document.version
         );
+    }
+
+    /**
+     * Контекст интерактивного запроса: то, что уже готово к этой версии.
+     *
+     * Один на все быстрые ответы — переход, Hover, подсказка параметров, —
+     * чтобы они не расходились в том, какие токены и какой индекс считают
+     * текущими.
+     */
+    private interactiveContext(
+        document: TextDocument,
+        offset: number,
+        cancellationToken?: CancellationToken
+    ): IRslInteractiveContext {
+        return createRslInteractiveContext(
+            {
+                index: this.environment.index,
+                resolver: this.environment.resolver,
+                getFastDocumentSnapshot: value =>
+                    this.environment.getFastDocumentSnapshot(value),
+                getCurrentModule: value => this.getRequestModule(value)
+            },
+            document,
+            offset,
+            () => cancellationToken?.isCancellationRequested === true
+        );
+    }
+
+    /**
+     * Строки верхнеуровневых блоков документа.
+     *
+     * Берутся у того же разбиения на единицы, которым пользуется
+     * инкрементальная диагностика: оно построено по дереву символов, проверено
+     * на репозитории и не принимает за объявление текст внутри SQL-блока.
+     * Пока модель этой версии не готова, границ нет — и форматирование
+     * выделения считает документ целиком.
+     */
+    private blockStartLines(
+        document: TextDocument
+    ): readonly number[] | undefined {
+        const module = this.getRequestModule(document);
+
+        if (!module) {
+            return undefined;
+        }
+
+        const lineStarts = module.lex.lineStarts;
+        const lines = new Set<number>();
+
+        for (const unit of splitRslDocumentUnits(
+            module.source,
+            module.lex.tokens,
+            module.symbolTree
+        )) {
+            if (unit.kind !== "macro" && unit.kind !== "class") {
+                continue;
+            }
+
+            lines.add(positionAtOffset(lineStarts, unit.start).line);
+        }
+
+        return [...lines].sort((left, right) => left - right);
     }
 
     private getPositionContext(

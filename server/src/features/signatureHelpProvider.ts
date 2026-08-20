@@ -22,7 +22,7 @@ export function buildRslSignatureHelp(
     resolver: RslScopeResolver,
     offset: number
 ): SignatureHelp | null {
-    const call = findCallContext(module.lex.tokens, offset);
+    const call = findRslCallContext(module.lex.tokens, offset);
 
     if (!call) {
         return null;
@@ -81,7 +81,13 @@ export function createSignatureInformation(
     };
 }
 
-function findCallContext(
+/**
+ * Вызов и номер аргумента по потоку токенов.
+ *
+ * Полной модели для этого не нужно, поэтому подсказка параметров умеет
+ * отвечать и до её готовности: см. buildRslFastSignatureHelp.
+ */
+export function findRslCallContext(
     allTokens: readonly IRslToken[],
     offset: number
 ): ICallContext | undefined {

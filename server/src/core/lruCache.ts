@@ -24,11 +24,20 @@ export class LruCache<K, V> {
         return value;
     }
 
-    set(key: K, value: V): void {
+    /**
+     * Кладёт значение и ВОЗВРАЩАЕТ вытесненное.
+     *
+     * Вытеснение по числу записей кэш делает сам, и молча: владелец, который
+     * вёл собственный счёт занятого объёма, об этом не узнавал — его счётчик
+     * оставался завышенным, и дальше он вытеснял полезные записи, считая себя
+     * переполненным. Поэтому вытесненные пары возвращаются наружу.
+     */
+    set(key: K, value: V): Array<[K, V]> {
         if (this.maxEntries === 0) {
-            return;
+            return [];
         }
 
+        const evicted: Array<[K, V]> = [];
         this.values.delete(key);
         this.values.set(key, value);
 
@@ -39,8 +48,15 @@ export class LruCache<K, V> {
                 break;
             }
 
+            const value = this.values.get(oldest.value);
             this.values.delete(oldest.value);
+
+            if (value !== undefined) {
+                evicted.push([oldest.value, value]);
+            }
         }
+
+        return evicted;
     }
 
     delete(key: K): void {

@@ -46,6 +46,10 @@ const tests = [
     "completion-protocol.test.js",
     "completion-differential.test.js",
     "completion-stability.test.js",
+    "interactive-fast-path.test.js",
+    "range-formatting.test.js",
+    "problems-lifecycle.test.js",
+    "quick-fixes-and-type-definition.test.js",
 ];
 
 let failed = false;

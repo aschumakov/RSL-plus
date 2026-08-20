@@ -1068,10 +1068,23 @@ async function testInteractiveFallbackDoesNotMixVersions() {
         handlers.signatureHelp(params, cancellation)
     ]);
 
+    /*
+     * Hover отвечает по СВОЕЙ версии текста, а не по модели прежней.
+     *
+     * Раньше ответа не было вовсе: обработчик ждал разбор, не дожидался и
+     * возвращал null. Теперь он отвечает по индексу текущей версии — и
+     * проверять надо именно это: диапазон обязан указывать на `value` версии 2,
+     * а не на сдвинувшееся место версии 1.
+     */
+    const valueLine = secondVersion.slice(
+        0,
+        secondVersion.indexOf("value = 1;")
+    ).split("\n").length - 1;
+    assert.ok(hover, "Hover обязан отвечать по текущей версии текста");
     assert.strictEqual(
-        hover,
-        null,
-        "Hover не должен отвечать по модели другой версии документа"
+        hover.range.start.line,
+        valueLine,
+        "диапазон Hover обязан указывать на позицию текущей версии"
     );
     /*
      * Список отдаётся полным и до готовности модели.

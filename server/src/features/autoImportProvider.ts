@@ -39,13 +39,12 @@ export interface IAutoImportSearchResult {
 /**
  * Completion с additionalTextEdits, не запускающий полный workspace scan.
  *
- * Порядок работы важен для скорости: сначала отбор по набранному, потом
- * упорядочивание, и только потом — правка Import для тех, кто в список попал.
- * Прежде правка строилась для КАЖДОГО совпавшего символа, а каждая правка
- * проходит по объявлениям Import файла и разрешает имя модуля. На проекте из
- * 10 000 символов, где набранное совпадает почти со всеми, один запрос стоил
- * около 585 мс — и повторялся на каждую нажатую букву, потому что список
- * Auto Import помечается неполным.
+ * Правка Import в списке НЕ считается вовсе: её строит completionItem/resolve
+ * для той строки, которую пользователь выбрал. Каждая правка проходит по
+ * объявлениям Import файла и разрешает имя модуля, а выбирают из списка одну
+ * строку из сотни. Прежде правка строилась для каждого совпавшего символа: на
+ * проекте из 10 000 символов один запрос стоил около 585 мс — и повторялся на
+ * каждую нажатую букву.
  *
  * Порядок при этом задаётся до конца — совпадение, имя, файл, символ, — а не
  * тем, в каком порядке проект успел проиндексироваться.
@@ -110,21 +109,20 @@ function buildAutoImportItems(
     limit: number
 ): IAutoImportSearchResult {
     const items: CompletionItem[] = [];
-    /* Правка Import одна на модуль: у соседних символов она совпадает. */
-    const edits = new Map<string, TextEdit | undefined>();
+    /* Имя модуля для Import одно на модуль: у соседних символов оно то же. */
+    const names = new Map<string, string>();
 
     for (const symbol of matched) {
         if (items.length >= limit) {
             return { items, truncated: true };
         }
 
-        if (!edits.has(symbol.uri)) {
-            edits.set(symbol.uri, buildImportEdit(module, index, symbol.uri));
+        if (!names.has(symbol.uri)) {
+            names.set(symbol.uri, importName(module, index, symbol.uri));
         }
 
-        const edit = edits.get(symbol.uri);
-
-        if (!edit) {
+        /* Модуль, имя которого не определить, подключить нечем. */
+        if (!names.get(symbol.uri)) {
             continue;
         }
 
@@ -135,14 +133,14 @@ function buildAutoImportItems(
                 source.detail || "",
                 `Auto Import: ${displayModule(symbol.uri)}`
             ].filter(value => !!value).join("\n"),
-            additionalTextEdits: [edit],
             sortText: `z_${String(source.label).toLowerCase()}`,
             /*
-             * Происхождение нужно и порядку, и разрешению документации: два
-             * одноимённых символа из разных файлов различаются только им.
+             * Происхождение нужно порядку, разрешению документации и правке
+             * Import: её строит resolve по этим же данным.
              */
             data: {
                 rslAutoImportUri: symbol.uri,
+                rslAutoImportFrom: module.uri,
                 uri: symbol.uri,
                 symbolId: symbol.symbolId
             }
@@ -150,6 +148,21 @@ function buildAutoImportItems(
     }
 
     return { items, truncated: false };
+}
+
+/**
+ * Правка Import для выбранной строки списка.
+ *
+ * Вызывается из completionItem/resolve: к этому моменту пользователь выбрал
+ * ровно один элемент, и стоит она столько же, сколько стоила бы для него в
+ * списке, — но один раз вместо ста восьмидесяти.
+ */
+export function resolveAutoImportEdit(
+    module: IIndexedModule,
+    index: WorkspaceIndex,
+    targetUri: string
+): TextEdit | undefined {
+    return buildImportEdit(module, index, targetUri);
 }
 
 /** Порядок кандидатов: имя, затем файл и символ — без опоры на индексацию. */

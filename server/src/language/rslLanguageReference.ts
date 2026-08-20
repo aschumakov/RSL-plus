@@ -532,3 +532,13 @@ function dedupe(values: readonly string[]): string[] {
 
     return result;
 }
+
+/**
+ * Текст, которым закрывается блок RSL.
+ *
+ * Один источник для всего, что вставляет код за пользователя: Quick Fix,
+ * шаблоны и Smart Enter на стороне клиента (см. client/src/rslBlockText.ts).
+ * Нижний регистр — принятый в репозитории стиль; уже написанное
+ * пользователем по регистру не меняется.
+ */
+export const RSL_BLOCK_END = "end;";

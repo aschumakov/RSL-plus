@@ -13,6 +13,7 @@ import { buildRslCodeActions } from "../codeActions";
 import { RslQuickFixRegistry } from "./quickFixRegistry";
 import type { IRslSyntaxNode } from "../syntaxParser";
 import type { IIndexedModule } from "../workspaceIndex";
+import { RSL_BLOCK_END } from "../language/rslLanguageReference";
 
 interface IDiagnosticData {
     start?: number;
@@ -44,6 +45,14 @@ quickFixRegistry.register(
     "string-literal-too-long",
     (module, diagnostic) => createSplitLongStringAction(module, diagnostic)
 );
+quickFixRegistry.register(
+    "missing-member-name",
+    (module, diagnostic) => createRemoveExtraDotAction(module, diagnostic)
+);
+quickFixRegistry.register(
+    "missing-end",
+    (module, diagnostic) => createCloseBlockAction(module, diagnostic)
+);
 quickFixRegistry.setFallback((module, diagnostic, params) =>
     buildRslCodeActions(module, {
         ...params,
@@ -59,6 +68,209 @@ export function buildEnhancedRslCodeActions(
     params: CodeActionParams
 ): CodeAction[] {
     return quickFixRegistry.build(module, params);
+}
+
+/**
+ * «Удалить лишнюю точку» для `obj..field`.
+ *
+ * Предлагается только когда последовательность однозначна: ровно две точки
+ * подряд между именами. Три точки или точка перед скобкой — это уже не
+ * опечатка одного символа, и угадывать замысел нельзя.
+ */
+function createRemoveExtraDotAction(
+    module: IIndexedModule,
+    diagnostic: Diagnostic
+): CodeAction | undefined {
+    const tokens = module.lex.tokens;
+    const offset = offsetOfPosition(module, diagnostic.range.start);
+    const index = tokens.findIndex(token =>
+        token.start <= offset && offset < token.end
+    );
+
+    if (index < 1) {
+        return undefined;
+    }
+
+    const dot = tokens[index];
+
+    if (dot.kind !== "symbol" || dot.raw !== ".") {
+        return undefined;
+    }
+
+    /*
+     * Диагностика указывает на первую точку пары, поэтому вторая ищется как
+     * следующий значимый токен. Ровно две точки — опечатка одного символа;
+     * три — уже нет, и угадывать замысел нельзя.
+     */
+    const next = nextSignificant(tokens, index);
+    const previous = previousSignificant(tokens, index);
+    const isDot = (at: number): boolean => at >= 0 &&
+        tokens[at].kind === "symbol" && tokens[at].raw === ".";
+
+    if (!isDot(next) && !isDot(previous)) {
+        return undefined;
+    }
+
+    /* Пара найдена: лишняя точка — вторая из них. */
+    const second = isDot(next) ? next : index;
+    const first = isDot(next) ? index : previous;
+    const beyond = nextSignificant(tokens, second);
+
+    if (isDot(beyond) || isDot(previousSignificant(tokens, first))) {
+        return undefined;
+    }
+
+    const extra = tokens[second];
+    const edit: TextEdit = TextEdit.del({
+        start: positionOfOffset(module, extra.start),
+        end: positionOfOffset(module, extra.end)
+    });
+
+    return {
+        title: "Удалить лишнюю точку",
+        kind: CodeActionKind.QuickFix,
+        diagnostics: [diagnostic],
+        isPreferred: true,
+        edit: {
+            changes: { [module.uri]: [edit] }
+        } as WorkspaceEdit
+    };
+}
+
+/*
+ * Слова, открывающие блок.
+ *
+ * Список тот же, что у проверки парности END: расходиться им нельзя, иначе
+ * исправление предлагалось бы там, где сама проверка блока не видит.
+ */
+const BLOCK_OPENERS = new Set([
+    "macro",
+    "class",
+    "if",
+    "while",
+    "for",
+    "with"
+]);
+
+/**
+ * «Добавить end;» для незакрытого блока.
+ *
+ * Предлагается ТОЛЬКО когда незакрыт ровно один блок: тогда и место вставки, и
+ * отступ однозначны. При двух незакрытых блоках закрывать наугад нельзя —
+ * получится код, который компилируется иначе, чем задумано.
+ */
+function createCloseBlockAction(
+    module: IIndexedModule,
+    diagnostic: Diagnostic
+): CodeAction | undefined {
+    const unclosed = findUnclosedBlocks(module);
+
+    if (unclosed.length !== 1) {
+        return undefined;
+    }
+
+    const source = module.source;
+    const opener = unclosed[0];
+    const lineStart = source.lastIndexOf("\n", Math.max(0, opener - 1)) + 1;
+    const indent = /^[ \t]*/.exec(source.slice(lineStart, opener))?.[0] || "";
+    const eol = module.lex.eol || "\n";
+    /* Вставка в конец текста: ниже незакрытого блока ничего нет по определению. */
+    const tail = source.replace(/\s+$/, "").length;
+    const position = positionOfOffset(module, tail);
+    const closing = eol + indent + RSL_BLOCK_END + eol;
+
+    return {
+        title: "Добавить " + RSL_BLOCK_END,
+        kind: CodeActionKind.QuickFix,
+        diagnostics: [diagnostic],
+        isPreferred: true,
+        edit: {
+            changes: {
+                [module.uri]: [TextEdit.insert(position, closing)]
+            }
+        } as WorkspaceEdit
+    };
+}
+
+/** Смещения открывающих слов, которым не хватило END. */
+function findUnclosedBlocks(module: IIndexedModule): number[] {
+    const stack: number[] = [];
+
+    for (const token of module.lex.tokens) {
+        if (token.kind !== "identifier") {
+            continue;
+        }
+
+        const word = token.value.toLowerCase();
+
+        if (BLOCK_OPENERS.has(word)) {
+            stack.push(token.start);
+            continue;
+        }
+
+        if (word === "end") {
+            stack.pop();
+        }
+    }
+
+    return stack;
+}
+
+function nextSignificant(
+    tokens: readonly { kind: string }[],
+    index: number
+): number {
+    for (let at = index + 1; at < tokens.length; at++) {
+        const kind = tokens[at].kind;
+
+        if (
+            kind !== "whitespace" && kind !== "newline" &&
+            kind !== "comment" && kind !== "bom"
+        ) {
+            return at;
+        }
+    }
+
+    return -1;
+}
+
+function previousSignificant(
+    tokens: readonly { kind: string }[],
+    index: number
+): number {
+    for (let at = index - 1; at >= 0; at--) {
+        const kind = tokens[at].kind;
+
+        if (
+            kind !== "whitespace" && kind !== "newline" &&
+            kind !== "comment" && kind !== "bom"
+        ) {
+            return at;
+        }
+    }
+
+    return -1;
+}
+
+function offsetOfPosition(
+    module: IIndexedModule,
+    position: Position
+): number {
+    const lineStarts = module.lex.lineStarts;
+    const line = Math.max(0, Math.min(position.line, lineStarts.length - 1));
+
+    return lineStarts[line] + position.character;
+}
+
+function positionOfOffset(module: IIndexedModule, offset: number): Position {
+    const lineStarts = module.lex.lineStarts;
+    let line = 0;
+
+    while (line + 1 < lineStarts.length && lineStarts[line + 1] <= offset) {
+        line++;
+    }
+
+    return Position.create(line, offset - lineStarts[line]);
 }
 
 function createSplitLongStringAction(

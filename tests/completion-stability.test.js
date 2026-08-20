@@ -17,6 +17,10 @@ const {
 const {
     rankCompletionItemsForPrefix
 } = require("../server/out/features/completionRanking");
+const { WorkspaceIndex } = require("../server/out/workspaceIndex");
+const {
+    buildKnownAutoImportCompletions
+} = require("../server/out/features/autoImportProvider");
 const {
     createCompletionRegistry,
     completeAfter,
@@ -256,6 +260,218 @@ test("разрешение описания работает через обра
         resolved.detail !== undefined || resolved.documentation !== undefined,
         "выбранный элемент обязан получить подпись или описание"
     );
+});
+
+/* --- Строковые контексты через обработчик --- */
+
+const STRING_SOURCE = [
+    "Import lib;",
+    "Macro Test()",
+    "  ExecMacro(\"Sha\");",
+    "  ExecMacroFile(\"li\");",
+    "  Var text = \"обычная строка\";",
+    "  /* обычный комментарий */",
+    "End;",
+    ""
+].join("\n");
+
+const STRING_WORKSPACE = [
+    {
+        uri: "file:///d:/stability/lib.mac",
+        text: "Macro Shared(value)\n  return value;\nEnd;\n"
+    }
+];
+
+function stringStand(modelReady) {
+    return createCompletionRegistry({
+        uri: MAIN,
+        source: STRING_SOURCE,
+        modelReady,
+        workspace: STRING_WORKSPACE
+    });
+}
+
+test("ExecMacro предлагает процедуры внутри строки", async () => {
+    const stand = stringStand(true);
+    const list = await completeAfter(stand, "  ExecMacro(\"Sha");
+    const labels = list.items.map(item => String(item.label));
+
+    assert.ok(
+        labels.includes("Shared"),
+        "в ExecMacro обязана предлагаться процедура: " + labels.join(", ")
+    );
+});
+
+test("ExecMacroFile предлагает файлы проекта внутри строки", async () => {
+    const stand = stringStand(true);
+    const list = await completeAfter(stand, "  ExecMacroFile(\"li");
+    const labels = list.items.map(item => String(item.label));
+
+    assert.ok(
+        labels.some(label => /lib/i.test(label)),
+        "в ExecMacroFile обязан предлагаться модуль: " + labels.join(", ")
+    );
+});
+
+test("в обычной строке и в комментарии подсказок нет", async () => {
+    const stand = stringStand(true);
+    const string = await completeAfter(stand, "  Var text = \"обыч");
+    const comment = await completeAfter(stand, "  /* обыч");
+
+    assert.strictEqual(string.items.length, 0, "обычная строка");
+    assert.strictEqual(comment.items.length, 0, "комментарий");
+});
+
+test("пустой ответ до готовности модели не запоминается", async () => {
+    const stand = stringStand(false);
+    const before = await completeAfter(stand, "  ExecMacro(\"Sha");
+
+    assert.strictEqual(
+        before.items.length,
+        0,
+        "до готовности модели контекстный список построить нечем"
+    );
+
+    /* Модель этой версии готова — сервер сообщает об этом реестру. */
+    stand.index.updateOpenModule(MAIN, STRING_SOURCE, 2);
+    stand.registry.notifyParsed(MAIN);
+    const after = await completeAfter(stand, "  ExecMacro(\"Sha");
+    const labels = after.items.map(item => String(item.label));
+
+    assert.ok(
+        labels.includes("Shared"),
+        "после готовности модели список обязан появиться: " +
+            labels.join(", ")
+    );
+});
+
+test("notifyParsed не меняет уже открытый список", async () => {
+    const stand = createCompletionRegistry({
+        uri: MAIN,
+        source: SOURCE,
+        modelReady: false,
+        workspace: WORKSPACE
+    });
+    const fast = await completeAfter(stand, "  counter");
+
+    /* Именно так сервер сообщает о готовности модели. */
+    stand.index.updateOpenModule(MAIN, SOURCE, 2);
+    stand.registry.notifyParsed(MAIN);
+    const afterNotify = await completeAfter(stand, "  counter");
+
+    assert.deepStrictEqual(
+        orderedLabels(afterNotify),
+        orderedLabels(fast),
+        "готовность модели не имеет права менять состав и порядок"
+    );
+});
+
+/* --- Счётчики кэшей --- */
+
+test("счётчик удерживаемых элементов совпадает с содержимым", () => {
+    const transport = new CompletionTransport({ sessions: 2 });
+    const build = session => transport.prepare(
+        Array.from({ length: 10 }, (_, at) => ({
+            label: session + "-" + at,
+            kind: 3,
+            detail: "d",
+            documentation: "описание"
+        })),
+        { sessionId: session }
+    );
+
+    const first = build("s1");
+    build("s2");
+    build("s3");
+
+    assert.strictEqual(
+        transport.retainedItems,
+        20,
+        "два списка по десять элементов — двадцать, а не тридцать"
+    );
+    assert.strictEqual(
+        transport.resolve(first.items[0]).documentation,
+        undefined,
+        "вытесненный список больше не разрешается"
+    );
+});
+
+/* --- Auto Import --- */
+
+/** Проект, где одно имя объявлено дважды в одном модуле. */
+function autoImportIndex(modules) {
+    const index = new WorkspaceIndex();
+    const uris = Object.keys(modules);
+    index.registerWorkspaceFiles([MAIN, ...uris]);
+
+    for (const uri of uris) {
+        index.updateExternalModule(uri, modules[uri], 1);
+    }
+
+    return {
+        index,
+        module: index.updateOpenModule(MAIN, "Macro Test()\nEnd;\n", 1)
+    };
+}
+
+test("повтор имени в одном модуле — один кандидат Auto Import", () => {
+    const twice = "Macro Shared()\nEnd;\nMacro Shared(value)\nEnd;\n";
+    const project = autoImportIndex({
+        "file:///d:/stability/twice.mac": twice
+    });
+
+    /*
+     * Предел проверяется на границе: раньше быстрый путь считал повторы за
+     * разных кандидатов, и от предела зависели и состав, и признак усечения.
+     */
+    for (const limit of [1, 2, 10]) {
+        const found = buildKnownAutoImportCompletions(
+            project.module,
+            project.index,
+            "Sha",
+            limit
+        );
+
+        assert.strictEqual(
+            found.items.length,
+            1,
+            "при пределе " + limit + " кандидат один"
+        );
+        assert.strictEqual(
+            found.truncated,
+            false,
+            "усечения не было: при пределе " + limit +
+                " уникальный кандидат один"
+        );
+    }
+});
+
+test("одноимённые из разных модулей усекаются честно", () => {
+    const project = autoImportIndex({
+        "file:///d:/stability/one.mac": "Macro Shared()\nEnd;\n",
+        "file:///d:/stability/two.mac": "Macro Shared()\nEnd;\n"
+    });
+    const limited = buildKnownAutoImportCompletions(
+        project.module,
+        project.index,
+        "Sha",
+        1
+    );
+    const whole = buildKnownAutoImportCompletions(
+        project.module,
+        project.index,
+        "Sha",
+        10
+    );
+
+    assert.strictEqual(limited.items.length, 1);
+    assert.strictEqual(
+        limited.truncated,
+        true,
+        "кандидатов больше, чем поместилось"
+    );
+    assert.strictEqual(whole.items.length, 2, "оба модуля предлагаются");
+    assert.strictEqual(whole.truncated, false);
 });
 
 (async () => {

@@ -552,6 +552,7 @@ connection.onInitialize((params: InitializeParams) => {
             documentHighlightProvider: true,
             selectionRangeProvider: true,
             definitionProvider: true,
+            typeDefinitionProvider: true,
             referencesProvider: true,
             renameProvider: { prepareProvider: true },
             workspaceSymbolProvider: true,

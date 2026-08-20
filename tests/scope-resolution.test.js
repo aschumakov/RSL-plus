@@ -13,6 +13,7 @@ const assert = require("assert");
 
 const {
     buildKnownAutoImportCompletions,
+    resolveAutoImportEdit,
     buildMissingImportActions
 } = require("../server/out/features/autoImportProvider");
 const {
@@ -930,12 +931,15 @@ async function main() {
         const offered = buildKnownAutoImportCompletions(module, index, "Hel").items;
         const candidate = offered.find(item => item.label === "Helper");
         assert.ok(candidate, "Auto Import обязан предложить класс проекта");
+        /* Правку строит resolve выбранной строки, а не сборка списка. */
+        const importEdit = resolveAutoImportEdit(
+            module,
+            index,
+            candidate.data.rslAutoImportUri
+        );
         assert.ok(
-            candidate.additionalTextEdits?.some(edit =>
-                /^Import\s+\S*helpers;/i.test(edit.newText)
-            ),
-            `Правка Import обязана быть в предложении: ${
-                JSON.stringify(candidate.additionalTextEdits)}`
+            importEdit && /^Import\s+\S*helpers;/i.test(importEdit.newText),
+            `Правка Import обязана строиться: ${JSON.stringify(importEdit)}`
         );
 
         /* И Quick Fix по неразрешённому имени — тоже через глобальный поиск. */

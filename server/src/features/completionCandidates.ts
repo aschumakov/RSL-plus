@@ -29,6 +29,17 @@ export interface IRslCompletionFacts {
     contextCandidates(): readonly CompletionItem[] | undefined;
 
     /**
+     * Позиция, где имён языка не предлагают: строка, комментарий, блок в
+     * квадратных скобках.
+     *
+     * Спрашивается ПОСЛЕ контекстного списка, а не до него: строка — это не
+     * всегда «не код». В `ExecMacro("Имя")` и `ExecMacroFile("файл")` внутри
+     * строки предлагаются имена процедур и модулей, и блокировка, стоявшая
+     * первой, эти подсказки отключала целиком.
+     */
+    blockedPosition(): boolean;
+
+    /**
      * Члены получателя перед точкой.
      *
      * undefined — либо обращения к члену здесь нет, либо тип получателя
@@ -54,6 +65,12 @@ export interface IRslCompletionFacts {
         items: readonly CompletionItem[];
         truncated: boolean;
     };
+
+    /**
+     * Ответ на заблокированной позиции приблизителен: этому источнику для
+     * контекстного списка не хватает модели.
+     */
+    readonly blockedNeedsModel?: boolean;
 }
 
 export interface IRslCompletionCandidates {
@@ -62,6 +79,14 @@ export interface IRslCompletionCandidates {
     candidates: readonly CompletionItem[];
     /** Список неполон: часть кандидатов поиска по проекту не поместилась. */
     incomplete: boolean;
+    /**
+     * Ответ приблизительный: этой позиции нужна модель, а её ещё нет.
+     *
+     * Такой ответ не запоминается сеансом: он и должен улучшиться, как только
+     * модель достроится, — в отличие от полного ответа, который обязан
+     * оставаться прежним, пока не изменился текст.
+     */
+    provisional: boolean;
 }
 
 /**
@@ -80,7 +105,26 @@ export function collectRslCompletionCandidates(
         return {
             source: facts.name + ":context",
             candidates: contextual,
-            incomplete: false
+            incomplete: false,
+            provisional: false
+        };
+    }
+
+    /*
+     * Контекстного списка нет — только теперь имеет смысл спросить, код ли
+     * это вообще.
+     */
+    if (facts.blockedPosition()) {
+        return {
+            source: facts.name + ":blocked",
+            candidates: [],
+            incomplete: false,
+            /*
+             * Быстрый путь не умеет строить контекстные списки внутри строк:
+             * им нужны объявления самого файла. Пустой ответ здесь —
+             * приблизительный, и запоминать его нельзя.
+             */
+            provisional: facts.blockedNeedsModel === true
         };
     }
 
@@ -90,7 +134,8 @@ export function collectRslCompletionCandidates(
         return {
             source: facts.name + ":members",
             candidates: deduplicateCompletionItems(members),
-            incomplete: false
+            incomplete: false,
+            provisional: false
         };
     }
 
@@ -103,7 +148,8 @@ export function collectRslCompletionCandidates(
             facts.ambientCandidates(),
             search.items
         ),
-        incomplete: search.truncated
+        incomplete: search.truncated,
+        provisional: false
     };
 }
 

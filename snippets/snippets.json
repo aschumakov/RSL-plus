@@ -20,7 +20,7 @@
          "\tVar result = null;",
          "\t$0",
          "\tReturn result;",
-         "End;"
+         "end;"
       ],
       "description": "private macro"
    },
@@ -58,7 +58,7 @@
       "body": [
          "While (${1:expr})",
          "\t$0",
-         "End;"
+         "end;"
       ],
       "description": "while"
    },
@@ -74,7 +74,7 @@
       "body": [
          "For (Var ${1:item}, ${2:itemlist})",
          "\t$0",
-         "End;"
+         "end;"
       ],
       "description": "For (Var item, itemlist)"
    },
@@ -83,7 +83,7 @@
       "body": [
          "For (Var i, ${1:begin}, ${2:end}, ${3:loop})",
          "\t$0",
-         "End;"
+         "end;"
       ],
       "description": "For (Var i, 0, 10, 1)"
    },
@@ -92,7 +92,7 @@
       "body": [
          "If (${1:cond})",
          "\t$0",
-         "End;"
+         "end;"
       ],
       "description": "if() End;"
    },
@@ -102,7 +102,7 @@
          "If (${1:cond})",
          "Elif (${2:elseCond})",
          "\t$0",
-         "End;"
+         "end;"
       ],
       "description": "if() elif End;"
    },
@@ -113,7 +113,7 @@
          "\t${2://true}",
          "Else",
          "\t${3://false}",
-         "End;"
+         "end;"
       ],
       "description": "if() elif End;"
    },

@@ -47,6 +47,15 @@ export interface IDiagnosticsCoordinatorOptions {
  * Двухфазная публикация Problems:
  * local не зависит от Import-графа, workspace обновляет результат вторым пакетом.
  */
+/*
+ * Срок межфайловой фазы, когда Import-граф уже полон.
+ *
+ * Ждать нечего: модули прочитаны, и проверки считаются по готовому индексу.
+ * Небольшая задержка остаётся только чтобы склеить несколько правок подряд —
+ * сам разбор к этому моменту уже отработал свою склейку.
+ */
+const READY_WORKSPACE_DELAY_MS = 60;
+
 export class DiagnosticsCoordinator {
     private localTimers = new Map<string, NodeJS.Timeout>();
     private workspaceTimers = new Map<string, NodeJS.Timeout>();
@@ -151,7 +160,10 @@ export class DiagnosticsCoordinator {
         const now = Date.now();
         const first = this.workspaceFirstScheduled.get(uri) ?? now;
         this.workspaceFirstScheduled.set(uri, first);
-        const requestedAt = now + Math.max(0, delay ?? this.workspaceDebounceMs);
+        const requestedAt = now + Math.max(
+            0,
+            delay ?? this.getWorkspaceDelay(uri)
+        );
         const deadline = first + this.workspaceMaxWaitMs;
         const actualDelay = Math.max(0, Math.min(requestedAt, deadline) - now);
 
@@ -249,8 +261,20 @@ export class DiagnosticsCoordinator {
         this.maxProblems.set(uri, state.settings.diagnostics?.maxProblems ?? 200);
 
         if (this.localKeys.get(uri) !== key || !this.localCache.has(uri)) {
-            /* Workspace-результат предыдущей версии не должен мигать вместе с новым local. */
-            this.workspaceCache.delete(uri);
+            /*
+             * Межфайловый результат остаётся показанным до нового.
+             *
+             * Прежде он удалялся здесь же: локальная фаза заканчивалась
+             * первой, публиковала свой список без него — и актуальная
+             * межфайловая ошибка исчезала из Problems на время, пока считалась
+             * межфайловая фаза, а потом появлялась снова. Пользователь читает
+             * это как «ошибка то есть, то нет».
+             *
+             * Устаревшим он от правки не становится: правка в одном месте
+             * файла не отменяет неиспользуемый Import в другом. Ключ
+             * межфайловой фазы всё равно не совпадёт, и она пересчитает его
+             * заново — просто не оставив дырки.
+             */
             this.workspaceKeys.delete(uri);
             this.staleWorkspace.add(uri);
             const started = Date.now();
@@ -488,6 +512,25 @@ export class DiagnosticsCoordinator {
         return result;
     }
 
+    /**
+     * Срок межфайловой фазы: короткий, когда ждать больше нечего.
+     *
+     * Длинная задержка нужна ровно для одного — не считать межфайловые
+     * проверки по недочитанному Import-графу, пока модули догружаются. Когда
+     * граф уже полон, ждать нечего: проверки по готовому индексу считаются
+     * сразу, и ошибка исчезает из Problems сразу за правкой, а не через
+     * секунду.
+     */
+    private getWorkspaceDelay(uri: string): number {
+        const state = this.options.resolver?.getImportContextState(uri);
+
+        if (state && state.completeness === "complete") {
+            return Math.min(this.workspaceDebounceMs, READY_WORKSPACE_DELAY_MS);
+        }
+
+        return this.workspaceDebounceMs;
+    }
+
     private getLocalDelay(uri: string): number {
         const length = this.index.getModule(uri)?.sourceLength || 0;
         return length >= 150000 ? this.largeLocalDebounceMs : this.localDebounceMs;
@@ -512,13 +555,24 @@ export class DiagnosticsCoordinator {
         }
     }
 
+    /**
+     * Публикация с версией документа.
+     *
+     * Версия нужна и клиенту, и самой дедупликации. Клиент по ней отбрасывает
+     * список, посчитанный для уже изменённого текста. А дедупликация без версии
+     * пропускала повторную публикацию того же по составу списка после правки —
+     * и у клиента оставалась его собственная, сдвинутая копия подчёркиваний.
+     */
     private sendIfChanged(uri: string, diagnostics: Diagnostic[]): void {
-        const signature = diagnosticSignature(diagnostics);
+        const version = this.documents.get(uri)?.version;
+        const signature = (version ?? "нет") + " " +
+            diagnosticSignature(diagnostics);
+
         if (this.publishedSignatures.get(uri) === signature) {
             return;
         }
         this.publishedSignatures.set(uri, signature);
-        this.connection.sendDiagnostics({ uri, diagnostics });
+        this.connection.sendDiagnostics({ uri, version, diagnostics });
     }
 
     private isActive(uri: string): boolean {

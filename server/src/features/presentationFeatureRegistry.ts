@@ -20,6 +20,15 @@ export interface IPresentationFeatureEnvironment {
     connection: Connection;
     documents: TextDocuments<TextDocument>;
     getFastDocumentSnapshot(document: TextDocument): IFastDocumentSnapshot;
+    /**
+     * Строки, с которых начинаются верхнеуровневые блоки документа.
+     *
+     * Нужны диапазонному форматированию: от такой строки его можно начать, не
+     * форматируя весь файл. undefined — модель этой версии ещё не готова.
+     */
+    getBlockStartLines?(
+        document: TextDocument
+    ): readonly number[] | undefined;
     noteInteractiveActivity?(): void;
     log(message: string): void;
     performance?: PerformanceLogger;
@@ -119,7 +128,15 @@ export class PresentationFeatureRegistry {
             const document = documents.get(params.textDocument.uri);
             if (!document) return [];
             try {
-                return formatRslDocumentRange(document, params);
+                /*
+                 * Токены версии уже посчитаны снимком: повторное лексирование
+                 * файла на 705 КБ стоило бы дороже самого форматирования.
+                 */
+                return formatRslDocumentRange(document, params, {
+                    blockStartLines: this.environment.getBlockStartLines
+                        ? this.environment.getBlockStartLines(document)
+                        : undefined
+                });
             } catch (error) {
                 this.environment.log(`Range formatting failed: ${document.uri}\n${errorText(error)}`);
                 return [];

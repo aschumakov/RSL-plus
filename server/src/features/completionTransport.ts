@@ -173,7 +173,11 @@ export class CompletionTransport {
             this.heldItems -= previous.items.size;
         }
 
-        this.sessions.set(session.id, session);
+        /* Вытесненное по числу списков тоже уходит из счёта. */
+        for (const [, evicted] of this.sessions.set(session.id, session)) {
+            this.heldItems -= evicted.items.size;
+        }
+
         this.heldItems += session.items.size;
         this.evictWhileOverLimit(session.id);
     }

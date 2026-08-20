@@ -27,7 +27,10 @@ import {
     getFastDocumentImports,
     type IFastDocumentSnapshot
 } from "../services/fastDocumentSnapshot";
-import { buildKnownAutoImportCompletions } from "./autoImportProvider";
+import {
+    buildKnownAutoImportCompletions,
+    resolveAutoImportEdit
+} from "./autoImportProvider";
 import {
     buildRslContextCompletions,
     buildRslImportContextCompletions
@@ -43,6 +46,7 @@ import {
 } from "./completionCandidates";
 import { CompletionTransport } from "./completionTransport";
 import {
+    completionSessionKey,
     CompletionSessionCache,
     type ICompletionSessionKey
 } from "./completionSession";
@@ -156,8 +160,52 @@ export class RslCompletionProvider {
         });
 
         connection.onCompletionResolve(item =>
-            this.completionTransport.resolve(item)
+            this.resolveItem(item)
         );
+    }
+
+    /**
+     * Выбранная строка списка: описание и, для Auto Import, правка Import.
+     *
+     * Правка строится здесь, а не при сборке списка: пользователь выбирает из
+     * списка одну строку, а построение правки проходит по объявлениям Import
+     * файла и разрешает имя модуля.
+     */
+    private resolveItem(item: CompletionItem): CompletionItem {
+        const resolved = this.completionTransport.resolve(item);
+        const data = resolved.data && typeof resolved.data === "object"
+            ? resolved.data as Record<string, unknown>
+            : {};
+        const targetUri = typeof data.rslAutoImportUri === "string"
+            ? data.rslAutoImportUri
+            : undefined;
+        const fromUri = typeof data.rslAutoImportFrom === "string"
+            ? data.rslAutoImportFrom
+            : undefined;
+
+        if (!targetUri || !fromUri || resolved.additionalTextEdits) {
+            return resolved;
+        }
+
+        const document = this.environment.documents.get(fromUri);
+        const module = document
+            ? this.getRequestModule(document) ||
+                this.environment.index.getModule(fromUri)
+            : this.environment.index.getModule(fromUri);
+
+        if (!module) {
+            return resolved;
+        }
+
+        const edit = resolveAutoImportEdit(
+            module,
+            this.environment.index,
+            targetUri
+        );
+
+        return edit
+            ? { ...resolved, additionalTextEdits: [edit] }
+            : resolved;
     }
 
     /** Текст изменился или файл закрыт: сеансы этой версии не годятся. */
@@ -399,22 +447,13 @@ export class RslCompletionProvider {
 
         const collectStartedMs = performance.now();
         /*
-         * Блокировка по лексике одна для обоих путей.
-         *
-         * Внутри строки, комментария и квадратного блока подсказок нет — это
-         * не код. Раньше проверка делалась только по готовой модели, и до её
-         * готовности быстрый путь предлагал имена посреди комментария, а потом
-         * список молча становился пустым.
+         * Блокировка по лексике одна для обоих путей, но она НЕ первая:
+         * сначала спрашивается контекстный список. Внутри строки подсказки
+         * бывают — имя процедуры в `ExecMacro("…")`, имя файла в
+         * `ExecMacroFile("…")`, — и проверка, стоявшая раньше контекста, их
+         * отключала. См. collectRslCompletionCandidates.
          */
         const blocked = isBlockedToken(tokenAtOffset(tokens, offset, true));
-
-        if (blocked) {
-            return {
-                list: { isIncomplete: false, items: [] },
-                fields: { blocked: true, items: 0, contextMs }
-            };
-        }
-
         const collected = collectRslCompletionCandidates(
             module
                 ? this.modelFacts(
@@ -422,29 +461,49 @@ export class RslCompletionProvider {
                     module,
                     offset,
                     prefix,
-                    sessionKey.receiver
+                    sessionKey.receiver,
+                    blocked
                 )
-                : this.fastFacts(document, snapshot!, offset)
+                : this.fastFacts(document, snapshot!, offset, blocked)
         );
 
-        const session = this.completionSessions.set(
-            sessionKey,
-            collected.candidates,
-            collected.incomplete,
-            sessionSource
-        );
+        /*
+         * Приблизительный ответ сеансом не запоминается.
+         *
+         * Внутри строки контекстный список умеет строить только модель: ему
+         * нужны объявления самого файла. Запомнить пустой ответ значило бы
+         * оставить список пустым и после того, как модель достроится, — до
+         * следующей правки текста.
+         */
+        const session = collected.provisional
+            ? undefined
+            : this.completionSessions.set(
+                sessionKey,
+                collected.candidates,
+                collected.incomplete,
+                sessionSource
+            );
+        const candidates = session ? session.candidates : collected.candidates;
+        const incomplete = session ? session.incomplete : collected.incomplete;
 
         return {
             list: this.completionTransport.prepare(
-                rankCompletionItemsForPrefix(session.candidates, prefix),
-                { incomplete: session.incomplete, sessionId: session.key }
+                rankCompletionItemsForPrefix(candidates, prefix),
+                {
+                    incomplete,
+                    sessionId: session
+                        ? session.key
+                        : completionSessionKey(sessionKey) + " предварительный"
+                }
             ),
             fields: {
                 source: collected.source,
                 cacheHit: false,
-                incomplete: session.incomplete,
-                candidates: session.candidates.length,
-                requests: session.requests,
+                blocked,
+                provisional: collected.provisional,
+                incomplete,
+                candidates: candidates.length,
+                requests: session ? session.requests : 1,
                 contextMs,
                 collectMs: performance.now() - collectStartedMs
             }
@@ -463,7 +522,8 @@ export class RslCompletionProvider {
         module: IIndexedModule,
         offset: number,
         prefix: string,
-        receiver: string
+        receiver: string,
+        blocked: boolean
     ): IRslCompletionFacts {
         const { index, resolver } = this.environment;
         const names = (): readonly CompletionItem[] => module.symbolTree
@@ -472,6 +532,8 @@ export class RslCompletionProvider {
 
         return {
             name: "model",
+            /* Модель знает и объявления файла: контекст ей доступен весь. */
+            blockedPosition: () => blocked,
             contextCandidates: () => buildRslContextCompletions(
                 module,
                 index,
@@ -501,12 +563,21 @@ export class RslCompletionProvider {
     private fastFacts(
         document: TextDocument,
         snapshot: IFastDocumentSnapshot,
-        offset: number
+        offset: number,
+        blocked: boolean
     ): IRslCompletionFacts {
         const fastIndex = getFastCompletionIndex(snapshot);
 
         return {
             name: "fast",
+            blockedPosition: () => blocked,
+            /*
+             * Внутри строки контекстный список этому источнику не построить:
+             * имена процедур для `ExecMacro` берутся из объявлений файла, а их
+             * даёт модель. Поэтому пустой ответ здесь помечается
+             * приблизительным и не запоминается сеансом.
+             */
+            blockedNeedsModel: true,
             /*
              * Имя модуля в Import считается по токенам, поэтому доступно и до
              * готовности модели: иначе в `Import ` предлагались бы обычные

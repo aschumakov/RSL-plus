@@ -1,3 +1,5 @@
+import { RSL_BLOCK_END } from "./rslBlockText";
+
 const RSL_NAME = String.raw`(?:\{[^}\r\n]+\}|[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё0-9_]*)`;
 /* Пустые скобки допустимы во время набора: диагностика отдельно подскажет,
  * что условие/заголовок нужно заполнить, а редактор уже создаст тело блока. */
@@ -40,13 +42,13 @@ export function buildRslSmartEnterSnippet(
      * VS Code автоматически добавляет отступ строки, в которой вставляется
      * многострочный snippet. Поэтому здесь нужны только относительные
      * отступы: повторное добавление отступа исходной строки сдвигало тело и
-     * End; вправо.
+     * закрытие вправо.
      */
     const body = `${context.eol}${context.indentUnit}$0`;
 
     return isEndLine(context.nextNonEmptyLine)
         ? body
-        : `${body}${context.eol}End;`;
+        : `${body}${context.eol}${RSL_BLOCK_END}`;
 }
 
 /**

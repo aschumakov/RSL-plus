@@ -1,6 +1,9 @@
 "use strict";
 
 const assert = require("assert");
+const {
+    RSL_BLOCK_END
+} = require("../client/out/rslBlockText");
 const extensionManifest = require("../package.json");
 const {
     buildRslSmartEnterSnippet,
@@ -67,7 +70,7 @@ for (const indentUnit of ["    ", "\t"]) {
 
     assert.strictEqual(
         snippet,
-        `\n${indentUnit}$0\nEnd;`,
+        `\n${indentUnit}$0\n${RSL_BLOCK_END}`,
         "в snippet допустим только шаг отступа, но не отступ исходной строки"
     );
 }
@@ -83,7 +86,7 @@ assert.strictEqual(
 
 /*
  * Блок целиком дают шаблоны — так это и делают другие расширения. Без них
- * выключенный перехват Enter означал бы, что End; писать руками.
+ * выключенный перехват Enter означал бы, что закрытие писать руками.
  */
 const snippets = require("../snippets/snippets.json");
 const withEnd = Object.values(snippets)
@@ -95,7 +98,7 @@ const withEnd = Object.values(snippets)
 for (const prefix of ["if", "while", "for", "macro"]) {
     assert.ok(
         withEnd.includes(prefix),
-        `шаблон ${prefix} обязан создавать блок вместе с End;`
+        `шаблон ${prefix} обязан создавать блок вместе с ${RSL_BLOCK_END}`
     );
 }
 
@@ -174,7 +177,7 @@ assert.strictEqual(
         indentUnit: "    ",
         eol: "\n"
     }),
-    "\n    $0\nEnd;"
+    `\n    $0\n${RSL_BLOCK_END}`
 );
 
 assert.strictEqual(
@@ -184,7 +187,7 @@ assert.strictEqual(
         indentUnit: "    ",
         eol: "\n"
     }),
-    "\n    $0\nEnd;"
+    `\n    $0\n${RSL_BLOCK_END}`
 );
 
 assert.strictEqual(
@@ -209,7 +212,7 @@ assert.strictEqual(
         indentUnit: "    ",
         eol: "\n"
     }),
-    "\n    $0\nEnd;"
+    `\n    $0\n${RSL_BLOCK_END}`
 );
 
 assert.strictEqual(
@@ -223,3 +226,35 @@ assert.strictEqual(
 );
 
 console.log("[OK] Smart Enter завершает только полные RSL-блоки");
+
+/*
+ * Регистр закрытия блока.
+ *
+ * Автоматически вставленный код обязан закрывать блок так же, как принято в
+ * репозитории, — в нижнем регистре, и одинаково во всех источниках. Проверка
+ * смотрит и на шаблоны: раньше `End;` возвращался именно через них.
+ */
+assert.strictEqual(RSL_BLOCK_END, "end;");
+
+for (const [name, item] of Object.entries(snippets)) {
+    const body = Array.isArray(item.body)
+        ? item.body.join("\n")
+        : String(item.body);
+
+    assert.ok(
+        !/\bEnd\s*;/.test(body),
+        `шаблон ${name} обязан закрывать блок как ${RSL_BLOCK_END}`
+    );
+}
+
+assert.ok(
+    buildRslSmartEnterSnippet({
+        beforeCursor: "Macro Test()",
+        afterCursor: "",
+        indentUnit: "    ",
+        eol: "\n"
+    }).endsWith(RSL_BLOCK_END),
+    "Smart Enter закрывает блок из общего источника"
+);
+
+console.log("[OK] закрытие блока вставляется в нижнем регистре");

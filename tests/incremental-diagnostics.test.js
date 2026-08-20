@@ -521,6 +521,56 @@ test("кэш ограничен по памяти, а не только по ч�
     assert.ok(cache.size < 6, "старые записи вытеснены: " + cache.size);
 });
 
+test("счёт объёма не расходится с содержимым при вытеснении", () => {
+    /*
+     * Кэш вытесняет и по числу записей, и по объёму. Раньше вытеснение по
+     * числу шло внутри LRU молча, и счётчик объёма оставался завышенным:
+     * кэш считал себя переполненным и выбрасывал полезные записи.
+     */
+    const cache = new RslUnitDiagnosticsCache({
+        maxEntries: 2,
+        maxBytes: 8 * 1024 * 1024
+    });
+
+    for (let file = 0; file < 4; file++) {
+        const uri = `file:///counted-${file}.mac`;
+        const index = new WorkspaceIndex();
+        index.registerWorkspaceFiles([uri]);
+        diagnose(index, uri, BASE, 1, cache);
+    }
+
+    assert.strictEqual(cache.size, 2, "записей не больше предела");
+
+    /* Объём двух записей: у всех файлов текст один и тот же. */
+    const single = new RslUnitDiagnosticsCache();
+    const index = new WorkspaceIndex();
+    index.registerWorkspaceFiles(["file:///single.mac"]);
+    diagnose(index, "file:///single.mac", BASE, 1, single);
+
+    assert.strictEqual(
+        cache.bytes,
+        single.bytes * 2,
+        "учтён объём ровно оставшихся записей: " + cache.bytes +
+            " против " + single.bytes * 2
+    );
+});
+
+test("замена записи не удваивает учтённый объём", () => {
+    const cache = new RslUnitDiagnosticsCache({ maxEntries: 1 });
+    const index = new WorkspaceIndex();
+    index.registerWorkspaceFiles([EDITED]);
+
+    diagnose(index, EDITED, BASE, 1, cache);
+    const first = cache.bytes;
+    diagnose(index, EDITED, BASE + "Macro Extra()\nEnd;\n", 2, cache);
+
+    assert.strictEqual(cache.size, 1);
+    assert.ok(
+        cache.bytes > 0 && cache.bytes < first * 2,
+        "учтена одна запись, а не обе: " + cache.bytes + " против " + first
+    );
+});
+
 (async () => {
     for (const item of asyncTests) {
         try {
