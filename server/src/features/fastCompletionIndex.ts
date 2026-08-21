@@ -72,6 +72,13 @@ export interface IFastClassInfo {
 export interface IFastSignature {
     name: string;
     /**
+     * Смещение имени в тексте.
+     *
+     * Им отвечает переход к процедуре этого файла, не дожидаясь
+     * разбора: место известно точно и относится к текущей версии.
+     */
+    nameStart: number;
+    /**
      * Смещение «(» в тексте; -1 — заголовок без скобок.
      *
      * Хранится смещение, а не разобранные параметры: списки параметров
@@ -224,6 +231,13 @@ export interface IFastNameLookup {
     /** Объявление найдено: внешнее одноимённое затенено и смотреть его нельзя. */
     declared: boolean;
     typeName: string;
+    /**
+     * Смещение объявления в тексте; -1 — объявления нет.
+     *
+     * По нему переход отвечает по локальному имени, не дожидаясь разбора:
+     * место известно точно, это то самое объявление, которое видно отсюда.
+     */
+    declarationStart: number;
 }
 
 /**
@@ -436,22 +450,30 @@ export function lookupFastName(
     const candidates = index.bindings.get(normalizeIdentifier(name));
 
     if (!candidates) {
-        return { declared: false, typeName: "" };
+        return { declared: false, typeName: "", declarationStart: -1 };
     }
 
     for (const scope of scopeChainAt(index, offset)) {
         const found = nearestBinding(candidates, scope, offset);
 
         if (found) {
-            return { declared: true, typeName: found.typeName };
+            return {
+                declared: true,
+                typeName: found.typeName,
+                declarationStart: found.start
+            };
         }
     }
 
     const moduleLevel = nearestBinding(candidates, -1, offset);
 
     return moduleLevel
-        ? { declared: true, typeName: moduleLevel.typeName }
-        : { declared: false, typeName: "" };
+        ? {
+            declared: true,
+            typeName: moduleLevel.typeName,
+            declarationStart: moduleLevel.start
+        }
+        : { declared: false, typeName: "", declarationStart: -1 };
 }
 
 /**
@@ -1025,12 +1047,18 @@ function openScope(
                 context.addBinding(name, typeName, start, isConstant, isPrivate);
             }
         );
-        rememberSignature(context, name, parent, tokens[index].start);
+        rememberSignature(
+            context,
+            name,
+            nameToken.start,
+            parent,
+            tokens[index].start
+        );
 
         return after;
     }
 
-    rememberSignature(context, name, parent, -1);
+    rememberSignature(context, name, nameToken.start, parent, -1);
 
     return index - 1;
 }
@@ -1039,6 +1067,7 @@ function openScope(
 function rememberSignature(
     context: IScopeContext,
     name: string,
+    nameStart: number,
     parent: number,
     parametersStart: number
 ): void {
@@ -1050,6 +1079,7 @@ function rememberSignature(
 
     const signature: IFastSignature = {
         name,
+        nameStart,
         parametersStart,
         scope: parent,
         isMethod: !!context.owner,

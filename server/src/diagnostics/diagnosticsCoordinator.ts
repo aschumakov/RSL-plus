@@ -89,6 +89,8 @@ export class DiagnosticsCoordinator {
     private workspaceCache = new Map<string, {
         source: string;
         version: number;
+        /** Условия расчёта: настройки, диалект и Import-замыкание. */
+        key: string;
         diagnostics: Diagnostic[];
     }>();
     private localKeys = new Map<string, string>();
@@ -163,6 +165,21 @@ export class DiagnosticsCoordinator {
     }
 
     scheduleLocal(uri: string, delay?: number): void {
+        /*
+         * Проверки выключены: список пустеет сразу, а не после того, как
+         * пересчёт дойдёт до этого файла. Заодно освобождается кэш —
+         * держать в нём находки, которые никому не покажут, незачем.
+         */
+        if (this.diagnosticsDisabled(uri)) {
+            this.cancel(uri);
+            this.localCache.delete(uri);
+            this.workspaceCache.delete(uri);
+            this.localKeys.delete(uri);
+            this.workspaceKeys.delete(uri);
+            this.sendIfChanged(uri, []);
+            return;
+        }
+
         this.staleLocal.add(uri);
         if (!this.isActive(uri)) {
             this.cancelLocal(uri);
@@ -399,11 +416,10 @@ export class DiagnosticsCoordinator {
             return;
         }
 
-        const key = [
-            state.module.version,
-            this.index.getImportClosureKey(uri),
-            diagnosticsSettingsKey(state.settings)
-        ].join(":");
+        const key = this.workspaceConditionKey(
+            uri,
+            state.module.version
+        );
         this.maxProblems.set(uri, state.settings.diagnostics?.maxProblems ?? 200);
 
         if (this.workspaceKeys.get(uri) !== key || !this.workspaceCache.has(uri)) {
@@ -450,6 +466,7 @@ export class DiagnosticsCoordinator {
             this.workspaceCache.set(uri, {
                 source: state.module.source,
                 version: state.module.version,
+                key,
                 diagnostics
             });
             this.workspaceKeys.set(uri, key);
@@ -613,11 +630,32 @@ export class DiagnosticsCoordinator {
             return [];
         }
 
-        const current = this.index.getModule(uri)?.source;
+        const module = this.index.getModule(uri);
 
-        return current === undefined || current === entry.source
+        if (!module) {
+            return entry.diagnostics;
+        }
+
+        /*
+         * Показывать можно только результат, посчитанный по этому тексту И
+         * при этих условиях. Настройки проверок, диалект и состав
+         * Import-замыкания меняют ответ так же, как правка: снятая галочка
+         * иначе оставляла бы `unused-import` висеть до следующего
+         * пересчёта.
+         */
+        return module.source === entry.source &&
+            this.workspaceConditionKey(uri, module.version) === entry.key
             ? entry.diagnostics
             : [];
+    }
+
+    /** Условия расчёта межфайловой фазы: версия, замыкание, настройки. */
+    private workspaceConditionKey(uri: string, version: number): string {
+        return [
+            version,
+            this.index.getImportClosureKey(uri),
+            diagnosticsSettingsKey(this.settings.getAvailable(uri))
+        ].join(":");
     }
 
     /** Есть ли межфайловый результат, посчитанный по прошлому тексту. */
@@ -659,6 +697,12 @@ export class DiagnosticsCoordinator {
             clearTimeout(timer);
             this.workspaceHolds.delete(uri);
         }
+    }
+
+    private diagnosticsDisabled(uri: string): boolean {
+        const settings = this.settings.getAvailable(uri);
+
+        return settings.diagnostics?.enabled === false;
     }
 
     private getOpenUris(): string[] {

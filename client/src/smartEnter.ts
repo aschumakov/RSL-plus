@@ -81,6 +81,9 @@ export interface IRslEnterTimings {
     record(sample: IRslEnterSample): void;
     /** Сводка для журнала; undefined — замеров ещё не было. */
     summary(): string | undefined;
+    /** Всего нажатий с начала работы: по нему решают, когда писать. */
+    total(): number;
+    /** Сколько замеров хранится сейчас: окно последних нажатий. */
     count(): number;
 }
 
@@ -96,6 +99,7 @@ export function createRslEnterTimings(
     limit: number = 200
 ): IRslEnterTimings {
     const samples: IRslEnterSample[] = [];
+    let total = 0;
 
     const percentile = (values: number[], share: number): number => {
         const sorted = [...values].sort((left, right) => left - right);
@@ -109,11 +113,15 @@ export function createRslEnterTimings(
 
     return {
         record(sample: IRslEnterSample): void {
+            total++;
             samples.push(sample);
 
             if (samples.length > limit) {
                 samples.shift();
             }
+        },
+        total(): number {
+            return total;
         },
         count(): number {
             return samples.length;
@@ -123,15 +131,17 @@ export function createRslEnterTimings(
                 return undefined;
             }
 
-            const total = samples.map(item => item.totalMs);
+            /* Имя отличается от счётчика нажатий: это времена. */
+            const durations = samples.map(item => item.totalMs);
             const edit = samples.map(item => item.editMs);
             const snippets = samples.filter(item => item.kind === "snippet");
 
-            return "Enter: нажатий " + samples.length +
+            return "Enter: нажатий " + total +
+                " (в замере " + samples.length + ")" +
                 ", завершено блоков " + snippets.length +
-                "; всё нажатие p50 " + percentile(total, 0.5).toFixed(1) +
-                " мс, p95 " + percentile(total, 0.95).toFixed(1) +
-                " мс, максимум " + Math.max(...total).toFixed(1) +
+                "; всё нажатие p50 " + percentile(durations, 0.5).toFixed(1) +
+                " мс, p95 " + percentile(durations, 0.95).toFixed(1) +
+                " мс, максимум " + Math.max(...durations).toFixed(1) +
                 " мс; правка документа p95 " +
                 percentile(edit, 0.95).toFixed(1) + " мс";
         }

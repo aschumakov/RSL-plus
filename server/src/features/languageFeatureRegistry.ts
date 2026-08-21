@@ -1,17 +1,12 @@
 import {
     CancellationToken,
     CodeActionKind,
-    CompletionItemKind,
     CodeActionParams,
     CodeActionTriggerKind,
     Definition,
-    DocumentHighlightParams,
-    ErrorCodes,
     ExecuteCommandParams,
     Hover,
     Range,
-    ReferenceParams,
-    ResponseError,
     SelectionRangeParams,
     TextDocumentPositionParams,
     type Connection,
@@ -22,7 +17,6 @@ import type { TextDocument } from "vscode-languageserver-textdocument";
 import { RslSymbol } from "../symbols/rslSymbol";
 import {
     errorText,
-    isBlockedToken,
     requestIsStale
 } from "./requestHelpers";
 import { RslCompletionProvider } from "./completionProvider";
@@ -31,17 +25,15 @@ import {
 } from "../analysis/documentUnits";
 import { positionAtOffset } from "../core/documentPosition";
 import {
-    buildRslFastHover,
-    buildRslFastSignatureHelp,
-    createRslInteractiveContext,
-    findRslFastDefinition,
-    findRslFastTypeDefinition,
-    type IRslInteractiveContext
-} from "./interactiveContext";
+    createRslInteractiveHandlers,
+    type IRslInteractiveHandlers
+} from "./interactiveHandlers";
+import {
+    createRslSymbolUsageHandlers,
+    type IRslSymbolUsageHandlers
+} from "./symbolUsageHandlers";
 import { RslDefinitionProvider } from "./definitionProvider";
 import { buildEnhancedRslCodeActions } from "./enhancedCodeActions";
-import { buildRslDocumentHighlights } from "./documentHighlights";
-import { buildRslHoverContent } from "./hoverFormatter";
 import {
     buildBlockNavigationActions,
     buildSelectionRanges,
@@ -51,16 +43,6 @@ import {
     resolveBlockNavigationPosition
 } from "./blockNavigation";
 import type { IRslSettings } from "../interfaces";
-import {
-    normalizeIdentifier,
-    tokenAtOffset,
-    type IRslToken
-} from "../lexer";
-import {
-    describeFormatSpecifier,
-    getFormatSpecifierAt
-} from "../parsing/outputFormParser";
-import { findRslReferencesInWorkspace } from "../analysis/references";
 import { ReferenceIndex } from "../analysis/referenceIndex";
 import type {
     IFastDocumentSnapshot
@@ -71,10 +53,7 @@ import {
 import type {
     ParseWaitMode
 } from "../services/documentAnalysisService";
-import {
-    RSL_BUILTIN_URI,
-    RslScopeResolver
-} from "../scopeResolver";
+import { RslScopeResolver } from "../scopeResolver";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 import type { PerformanceLogger } from "../performanceLogger";
 import {
@@ -83,7 +62,6 @@ import {
 import {
     RslCallHierarchyProvider
 } from "./callHierarchyProvider";
-import { buildRslSignatureHelp } from "./signatureHelpProvider";
 import { buildRslInlayHints } from "./inlayHintProvider";
 import { findRslWorkspaceSymbols } from "./workspaceSymbolProvider";
 import {
@@ -92,11 +70,6 @@ import {
 } from "./sourceCodeActions";
 import { PresentationFeatureRegistry } from "./presentationFeatureRegistry";
 import { SemanticTokensFeatureRegistry } from "./semanticTokensFeatureRegistry";
-import {
-    buildRslRenameEdit,
-    findRslRenameConflict,
-    prepareRslRename
-} from "./renameProvider";
 
 interface IRslCurrentBlockRangeParams {
     textDocument: { uri: string };
@@ -137,13 +110,6 @@ export interface IRslLanguageFeatureEnvironment {
     performance?: PerformanceLogger;
 }
 
-interface IPositionContext {
-    document: TextDocument;
-    tree: RslSymbol;
-    offset: number;
-    token?: IRslToken;
-    tokens: IRslToken[];
-}
 
 /** Регистрирует LSP provider-ы и владеет их versioned-кэшами. */
 export class RslLanguageFeatureRegistry {
@@ -151,6 +117,22 @@ export class RslLanguageFeatureRegistry {
     private referenceIndex: ReferenceIndex;
     private callHierarchyProvider: RslCallHierarchyProvider;
     private completionProvider: RslCompletionProvider;
+    /**
+     * Переход, переход к типу, Hover и подсказка параметров.
+     *
+     * Живут отдельно: у них общее правило «кто отвечает — индекс версии или
+     * модель», и держать его рядом с регистрацией всех остальных запросов
+     * значило повторять это правило в каждом обработчике по-своему.
+     */
+    private interactive: IRslInteractiveHandlers;
+    /**
+     * Подсветка вхождений, поиск ссылок и переименование.
+     *
+     * Живут вместе: всем трём нужна модель ровно той версии, для которой
+     * пришёл запрос, и ответ по отставшей модели у всех трёх не «немного
+     * устаревший», а прямо неверный.
+     */
+    private usages: IRslSymbolUsageHandlers;
     private presentationFeatures: PresentationFeatureRegistry;
     private semanticTokensFeatures: SemanticTokensFeatureRegistry;
     /** Файлы, которым отдали пустые подсказки: модель тогда не была готова. */
@@ -163,6 +145,34 @@ export class RslLanguageFeatureRegistry {
             index: environment.index,
             resolver: environment.resolver,
             referenceIndex: this.referenceIndex
+        });
+        this.usages = createRslSymbolUsageHandlers({
+            documents: environment.documents,
+            index: environment.index,
+            resolver: environment.resolver,
+            referenceIndex: this.referenceIndex,
+            ensureDocumentParsed: (document, mode) =>
+                environment.ensureDocumentParsed(document, mode),
+            noteInteractiveActivity: () =>
+                environment.noteInteractiveActivity?.()
+        });
+        this.interactive = createRslInteractiveHandlers({
+            documents: environment.documents,
+            index: environment.index,
+            resolver: environment.resolver,
+            definitionProvider: environment.definitionProvider,
+            getFastDocumentSnapshot: document =>
+                environment.getFastDocumentSnapshot(document),
+            getCurrentModule: document => this.getRequestModule(document),
+            ensureDocumentParsed: (document, mode) =>
+                environment.ensureDocumentParsed(document, mode),
+            ensureImportedSymbol: environment.ensureImportedSymbol
+                ? (fromUri, symbolName) =>
+                    environment.ensureImportedSymbol!(fromUri, symbolName)
+                : undefined,
+            noteInteractiveActivity: () =>
+                environment.noteInteractiveActivity?.(),
+            performance: environment.performance
         });
         this.completionProvider = new RslCompletionProvider(
             environment,
@@ -193,205 +203,19 @@ export class RslLanguageFeatureRegistry {
             documents,
             index,
             resolver,
-            definitionProvider,
             ensureDocumentParsed
         } = this.environment;
 
         this.completionProvider.register(connection);
 
-        connection.onSignatureHelp(async (params, cancellationToken) => {
-            const document = documents.get(params.textDocument.uri);
-            if (!document) {
-                return null;
-            }
+        connection.onSignatureHelp((params, cancellationToken) =>
+            this.interactive.signatureHelp(params, cancellationToken));
 
-            this.environment.noteInteractiveActivity?.();
-            const version = document.version;
-            /*
-             * Сначала — ответ по токенам текущей версии.
-             *
-             * Подсказка приходит на «(» и «,», то есть сразу после набора, и
-             * ждать разбор значило показать её с опозданием ровно в тот момент,
-             * когда пользователь начал писать аргументы. Вызов и номер
-             * аргумента считаются по токенам, а подпись берётся у символа.
-             */
-            const fastContext = this.interactiveContext(
-                document,
-                document.offsetAt(params.position),
-                cancellationToken
-            );
-            if (fastContext.module) {
-                /*
-                 * Модель этой версии готова — ждать нечего, а знает она
-                 * больше: тип из присваивания, объявленный тип
-                 * результата, документацию. Быстрый ответ нужен только
-                 * пока модель строится, и подменять им готовый значило
-                 * бы отдавать пользователю обеднённую подсказку.
-                 */
-                return buildRslSignatureHelp(
-                    fastContext.module,
-                    resolver,
-                    fastContext.offset
-                );
-            }
-
-            const fastHelp = buildRslFastSignatureHelp(
-                fastContext,
-                index,
-                resolver
-            );
-
-            if (fastHelp) {
-                return fastHelp;
-            }
-
-            await waitForParseBudget(
-                ensureDocumentParsed(document, "force"),
-                INTERACTIVE_PARSE_BUDGET_MS
-            );
-            if (requestIsStale(document, version, cancellationToken)) {
-                return null;
-            }
-            /*
-             * Signature Help ищет вызов по offset текущей позиции. На модели
-             * прошлой версии этот offset указывает в другой текст, поэтому
-             * подсказка была бы не устаревшей, а просто чужой.
-             */
-            const module = this.getRequestModule(document);
-            return module
-                ? buildRslSignatureHelp(
-                    module,
-                    resolver,
-                    document.offsetAt(params.position)
-                )
-                : null;
-        });
-
-        connection.onHover(async (
+        connection.onHover((
             params: TextDocumentPositionParams,
             cancellationToken: CancellationToken
-        ): Promise<Hover | null> => {
-            const document = documents.get(params.textDocument.uri);
-
-            if (!document) {
-                return null;
-            }
-
-            this.environment.noteInteractiveActivity?.();
-            const version = document.version;
-            /*
-             * Ответ по готовому состоянию: токены текущей версии и компактный
-             * индекс. Разбор ожидается только тогда, когда этого не хватило.
-             */
-            const fast = this.interactiveContext(
-                document,
-                document.offsetAt(params.position),
-                cancellationToken
-            );
-
-            if (isBlockedToken(fast.token)) {
-                return null;
-            }
-
-            const fastSpecifier = getFormatSpecifierAt(
-                fast.tokens,
-                fast.offset
-            );
-
-            if (fastSpecifier) {
-                return {
-                    contents: {
-                        kind: "markdown",
-                        value:
-                            `**Спецификатор форматирования :${fastSpecifier.raw}**  \n` +
-                            describeFormatSpecifier(fastSpecifier.raw)
-                    },
-                    range: {
-                        start: document.positionAt(fastSpecifier.start),
-                        end: document.positionAt(fastSpecifier.end)
-                    }
-                };
-            }
-
-            /*
-             * Быстрый Hover — ответ на время разбора. У готовой модели он
-             * богаче: объявление целиком, класс-контейнер, файл и строка,
-             * — и перехватывать её ответ значит показывать меньше того,
-             * что уже посчитано.
-             */
-            const fastHover = fast.module
-                ? undefined
-                : buildRslFastHover(fast, index, resolver);
-
-            if (fastHover) {
-                return fastHover;
-            }
-
-            await waitForParseBudget(
-                ensureDocumentParsed(document),
-                INTERACTIVE_PARSE_BUDGET_MS
-            );
-            if (requestIsStale(document, version, cancellationToken)) {
-                return null;
-            }
-            const context = this.getPositionContext(params);
-
-            if (!context || isBlockedToken(context.token)) {
-                return null;
-            }
-
-            const formatSpecifier = getFormatSpecifierAt(
-                context.tokens,
-                context.offset
-            );
-            if (formatSpecifier) {
-                return {
-                    contents: {
-                        kind: "markdown",
-                        value:
-                            `**Спецификатор форматирования :${formatSpecifier.raw}**  \n` +
-                            describeFormatSpecifier(formatSpecifier.raw)
-                    },
-                    range: {
-                        start: document.positionAt(formatSpecifier.start),
-                        end: document.positionAt(formatSpecifier.end)
-                    }
-                };
-            }
-
-            const resolved = resolver.resolveAt(
-                document.uri,
-                context.tree,
-                context.offset
-            );
-
-            if (!resolved) {
-                return null;
-            }
-
-            return {
-                contents: buildRslHoverContent(
-                    index,
-                    resolved.uri,
-                    resolved.symbol,
-                    /*
-                     * Тип из присваивания: у переменной без объявленного типа
-                     * подсказка иначе писала variant, хотя методы класса по
-                     * ней уже предлагались.
-                     */
-                    resolver.effectiveTypeName(
-                        document.uri,
-                        context.tree,
-                        resolved.symbol,
-                        context.offset
-                    )
-                ),
-                range: {
-                    start: document.positionAt(resolved.token.start),
-                    end: document.positionAt(resolved.token.end)
-                }
-            };
-        });
+        ): Promise<Hover | null> =>
+            this.interactive.hover(params, cancellationToken));
 
         /*
          * Переход к типу: от переменной к её классу.
@@ -400,376 +224,23 @@ export class RslLanguageFeatureRegistry {
          * тип уже посчитан индексом версии, а класс ищется там же, где его
          * ищут подсказки.
          */
-        connection.onTypeDefinition?.(async (
+        connection.onTypeDefinition?.((
             params: TextDocumentPositionParams,
             cancellationToken: CancellationToken
-        ): Promise<Definition | null> => {
-            const document = documents.get(params.textDocument.uri);
+        ): Promise<Definition | null> =>
+            this.interactive.typeDefinition(params, cancellationToken));
 
-            if (!document) {
-                return null;
-            }
+        connection.onDocumentHighlight((params, cancellationToken) =>
+            this.usages.documentHighlight(params, cancellationToken));
 
-            this.environment.noteInteractiveActivity?.();
-            const context = this.interactiveContext(
-                document,
-                document.offsetAt(params.position),
-                cancellationToken
-            );
-            /* Модель этой версии готова — отвечает она: см. Hover. */
-            const target = context.module
-                ? undefined
-                : findRslFastTypeDefinition(
-                    context,
-                    this.environment.index,
-                    resolver
-                );
-
-            if (target) {
-                return context.isStale() ? null : target;
-            }
-
-            /*
-             * Быстрый путь не нашёл: тип мог быть выведен из присваивания, а
-             * это знает только полная модель.
-             */
-            const version = document.version;
-            await ensureDocumentParsed(document);
-
-            if (requestIsStale(document, version, cancellationToken)) {
-                return null;
-            }
-
-            const full = this.interactiveContext(
-                document,
-                document.offsetAt(params.position),
-                cancellationToken
-            );
-            const model = full.module;
-
-            if (!model || full.token?.kind !== "identifier") {
-                return null;
-            }
-
-            const resolved = resolver.resolveAt(
-                document.uri,
-                model.symbolTree,
-                full.offset
-            );
-
-            if (!resolved) {
-                return null;
-            }
-
-            const typeName = resolver.effectiveTypeName(
-                document.uri,
-                model.symbolTree,
-                resolved.symbol,
-                full.offset
-            );
-            if (!typeName) {
-                return null;
-            }
-
-            /*
-             * Класс своего файла ищется в самой модели: справочник классов
-             * знает только подключённые модули и прикладной каталог, и
-             * переход к типу локального класса из-за этого не работал.
-             */
-            const wanted = normalizeIdentifier(typeName);
-            const ownClass = model.symbolTree.children.find(child =>
-                child.kind === CompletionItemKind.Class &&
-                normalizeIdentifier(child.name) === wanted
-            );
-            const found = ownClass
-                ? { moduleUri: document.uri, symbol: ownClass }
-                : resolver.findFastClass(
-                    document.uri,
-                    typeName,
-                    full.imports
-                );
-
-            if (!found || !found.moduleUri) {
-                return null;
-            }
-
-            const range = this.environment.index.getDefinitionRange(
-                found.moduleUri,
-                found.symbol
-            );
-
-            return {
-                uri: found.moduleUri,
-                range: range || {
-                    start: { line: 0, character: 0 },
-                    end: { line: 0, character: 0 }
-                }
-            };
-        });
-
-        connection.onDocumentHighlight(async (
-            params: DocumentHighlightParams,
-            cancellationToken: CancellationToken
-        ) => {
-            const document = documents.get(params.textDocument.uri);
-            if (!document) {
-                return [];
-            }
-
-            this.environment.noteInteractiveActivity?.();
-            const version = document.version;
-            /*
-             * Подсветка вхождений идёт за курсором, а он двигается на каждый
-             * набранный символ. Это фон, а не действие пользователя.
-             */
-            await ensureDocumentParsed(document, "scheduled");
-            if (requestIsStale(document, version, cancellationToken)) {
-                return [];
-            }
-            const context = this.getPositionContext(params);
-            /*
-             * Модель именно этой версии: проверка выше говорит лишь о том, что
-             * документ не изменился, а в индексе может лежать модель прежней
-             * версии, чей разбор для текущей ещё не завершён. Позиции в ней
-             * сдвинуты, и подсветка легла бы на чужие места.
-             */
-            const module = index.getCurrentModule(document.uri, version);
-            if (!context || !module || isBlockedToken(context.token)) {
-                return [];
-            }
-
-            return buildRslDocumentHighlights(
-                module,
-                index,
-                resolver,
-                context.offset
-            );
-        });
-
-        connection.onDefinition(async (
+        connection.onDefinition((
             params: TextDocumentPositionParams,
             cancellationToken: CancellationToken
-        ): Promise<Definition | null> => {
-            const document = documents.get(params.textDocument.uri);
+        ): Promise<Definition | null> =>
+            this.interactive.definition(params, cancellationToken));
 
-            if (!document) {
-                return null;
-            }
-
-            const performance = this.environment.performance;
-            const span = performance?.enabled
-                ? performance.start("definition.resolve", {
-                    uri: document.uri,
-                    version: document.version
-                })
-                : undefined;
-            let outcome = "none";
-            let loadedOnDemand = false;
-
-            try {
-                this.environment.noteInteractiveActivity?.();
-                const version = document.version;
-                /*
-                 * Переходы между файлами отвечаются по токенам и индексу
-                 * проекта: имя модуля в Import, имя процедуры в строке
-                 * ExecMacro, имя из подключённого модуля. Именно они и стоили
-                 * ожидания разбора — на модуле 550 КБ около 130 мс, то есть
-                 * Ctrl+Click «не работал» сразу после правки.
-                 */
-                const fast = this.interactiveContext(
-                    document,
-                    document.offsetAt(params.position),
-                    cancellationToken
-                );
-                /* Модель этой версии готова — отвечает она: см. Hover. */
-                const fastTarget = fast.module
-                    ? undefined
-                    : findRslFastDefinition(
-                        fast,
-                        this.environment.index
-                    );
-
-                if (fastTarget) {
-                    if (fast.isStale()) {
-                        outcome = "cancelled";
-                        return null;
-                    }
-
-                    outcome = "fast";
-                    return fastTarget;
-                }
-
-                await ensureDocumentParsed(document);
-                if (requestIsStale(document, version, cancellationToken)) {
-                    outcome = "cancelled";
-                    return null;
-                }
-                const context = this.getPositionContext(params);
-
-                if (!context || !context.token) {
-                    return null;
-                }
-
-                if (
-                    context.token.kind === "comment" ||
-                    context.token.kind === "square"
-                ) {
-                    return null;
-                }
-
-                /*
-                 * Поиск определения ходит по файлам и модулям, то есть между
-                 * его шагами документ может измениться. context со смещениями
-                 * снят до этих шагов, поэтому ответ, посчитанный по нему после
-                 * правки, указывал бы на сдвинувшееся место — переход уводил бы
-                 * не туда. Поэтому версия сверяется после каждого ожидания.
-                 */
-                const stale = () =>
-                    requestIsStale(document, version, cancellationToken);
-
-                const importedFile = await definitionProvider
-                    .findImportDefinition(context);
-
-                if (stale()) {
-                    outcome = "cancelled";
-                    return null;
-                }
-
-                if (importedFile) {
-                    outcome = "import";
-                    return importedFile;
-                }
-
-                if (context.token.kind === "string") {
-                    const dynamic = await definitionProvider
-                        .findDynamicDefinition(context);
-
-                    if (stale()) {
-                        outcome = "cancelled";
-                        return null;
-                    }
-
-                    if (dynamic) {
-                        outcome = "dynamic";
-                        return dynamic;
-                    }
-                }
-
-                if (isBlockedToken(context.token)) {
-                    return null;
-                }
-
-                let resolved = resolver.resolveAt(
-                    document.uri,
-                    context.tree,
-                    context.offset
-                );
-                const identifierToken = tokenAtOffset(
-                    context.tokens,
-                    context.offset,
-                    true
-                );
-
-                if (
-                    !resolved &&
-                    identifierToken?.kind === "identifier" &&
-                    this.environment.ensureImportedSymbol
-                ) {
-                    loadedOnDemand =
-                        await this.environment.ensureImportedSymbol(
-                            document.uri,
-                            identifierToken.value
-                        );
-
-                    if (stale()) {
-                        outcome = "cancelled";
-                        return null;
-                    }
-
-                    resolved = resolver.resolveAt(
-                        document.uri,
-                        context.tree,
-                        context.offset
-                    );
-                }
-
-                if (!resolved) {
-                    return null;
-                }
-
-                if (resolved.uri === RSL_BUILTIN_URI) {
-                    /*
-                     * У инициализатора базового класса объявления нет, но
-                     * осмысленная цель перехода есть — сам базовый класс.
-                     */
-                    const baseClass = resolver.resolveBaseInitializerClass(
-                        document.uri,
-                        context.tree,
-                        context.offset
-                    );
-
-                    if (baseClass && baseClass.uri !== RSL_BUILTIN_URI) {
-                        outcome = "baseInitializer";
-                        return definitionProvider.createObjectLocationByUri(
-                            baseClass.uri,
-                            baseClass.symbol
-                        );
-                    }
-
-                    outcome = "builtin";
-                    return null;
-                }
-
-                outcome = resolved.uri === document.uri
-                    ? "local"
-                    : "imported";
-                return definitionProvider.createObjectLocationByUri(
-                    resolved.uri,
-                    resolved.symbol
-                );
-            } finally {
-                if (span) {
-                    performance.end(span, {
-                        outcome,
-                        loadedOnDemand
-                    });
-                }
-            }
-        });
-
-        connection.onReferences(async (
-            params: ReferenceParams,
-            cancellationToken: CancellationToken
-        ) => {
-            const document = documents.get(params.textDocument.uri);
-
-            if (!document) {
-                return [];
-            }
-
-            this.environment.noteInteractiveActivity?.();
-            const version = document.version;
-            await ensureDocumentParsed(document);
-            if (requestIsStale(document, version, cancellationToken)) {
-                return [];
-            }
-            const context = this.getPositionContext(params);
-
-            if (!context || isBlockedToken(context.token)) {
-                return [];
-            }
-
-            /* ReferenceIndex отбирает файлы до точного transient parse. */
-            return findRslReferencesInWorkspace(
-                index,
-                resolver,
-                this.referenceIndex,
-                document.uri,
-                context.offset,
-                params.context.includeDeclaration,
-                () => cancellationToken.isCancellationRequested
-            );
-        });
+        connection.onReferences((params, cancellationToken) =>
+            this.usages.references(params, cancellationToken));
 
         connection.languages.inlayHint.on(async (
             params,
@@ -841,76 +312,11 @@ export class RslLanguageFeatureRegistry {
             return hints;
         });
 
-        connection.onPrepareRename?.(async (params, cancellationToken) => {
-            const document = documents.get(params.textDocument.uri);
-            if (!document) return null;
-            this.environment.noteInteractiveActivity?.();
-            const version = document.version;
-            await ensureDocumentParsed(document);
-            if (requestIsStale(document, version, cancellationToken)) {
-                return null;
-            }
-            const module = index.getCurrentModule(document.uri, version);
-            return module
-                ? prepareRslRename(
-                    module,
-                    resolver,
-                    document.offsetAt(params.position)
-                )
-                : null;
-        });
+        connection.onPrepareRename?.((params, cancellationToken) =>
+            this.usages.prepareRename(params, cancellationToken));
 
-        connection.onRenameRequest?.(async (params, cancellationToken) => {
-            const document = documents.get(params.textDocument.uri);
-            if (!document) return null;
-            this.environment.noteInteractiveActivity?.();
-            const version = document.version;
-            await ensureDocumentParsed(document);
-            if (requestIsStale(document, version, cancellationToken)) {
-                return null;
-            }
-            /*
-             * Rename правит текст по позициям модели, поэтому модель обязана
-             * быть ровно той версии, для которой запрос пришёл: иначе правки
-             * встанут по сдвинувшимся смещениям и испортят файл.
-             */
-            const module = index.getCurrentModule(document.uri, version);
-
-            if (!module) {
-                return null;
-            }
-
-            const offset = document.offsetAt(params.position);
-            /*
-             * Конфликт проверяется ДО правок и сообщается ошибкой запроса, а не
-             * пустым результатом: пустой результат редактор показывает как
-             * «переименовать нечего», и настоящая причина до пользователя не
-             * доходит.
-             */
-            const conflict = findRslRenameConflict(
-                module,
-                resolver,
-                offset,
-                params.newName
-            );
-
-            if (conflict) {
-                throw new ResponseError(
-                    ErrorCodes.InvalidRequest,
-                    conflict
-                );
-            }
-
-            return buildRslRenameEdit(
-                module,
-                index,
-                resolver,
-                this.referenceIndex,
-                offset,
-                params.newName,
-                () => cancellationToken.isCancellationRequested
-            );
-        });
+        connection.onRenameRequest?.((params, cancellationToken) =>
+            this.usages.rename(params, cancellationToken));
 
         connection.onCodeAction(async (
             params: CodeActionParams,
@@ -1224,32 +630,6 @@ export class RslLanguageFeatureRegistry {
     }
 
     /**
-     * Контекст интерактивного запроса: то, что уже готово к этой версии.
-     *
-     * Один на все быстрые ответы — переход, Hover, подсказка параметров, —
-     * чтобы они не расходились в том, какие токены и какой индекс считают
-     * текущими.
-     */
-    private interactiveContext(
-        document: TextDocument,
-        offset: number,
-        cancellationToken?: CancellationToken
-    ): IRslInteractiveContext {
-        return createRslInteractiveContext(
-            {
-                index: this.environment.index,
-                resolver: this.environment.resolver,
-                getFastDocumentSnapshot: value =>
-                    this.environment.getFastDocumentSnapshot(value),
-                getCurrentModule: value => this.getRequestModule(value)
-            },
-            document,
-            offset,
-            () => cancellationToken?.isCancellationRequested === true
-        );
-    }
-
-    /**
      * Строки верхнеуровневых блоков документа.
      *
      * Берутся у того же разбиения на единицы, которым пользуется
@@ -1285,31 +665,6 @@ export class RslLanguageFeatureRegistry {
         return [...lines].sort((left, right) => left - right);
     }
 
-    private getPositionContext(
-        params: TextDocumentPositionParams
-    ): IPositionContext | undefined {
-        const document = this.environment.documents.get(
-            params.textDocument.uri
-        );
-        const module = document
-            ? this.getRequestModule(document)
-            : undefined;
-        const tree = module?.symbolTree;
-
-        if (!document || !module || !tree) {
-            return undefined;
-        }
-
-        const offset = document.offsetAt(params.position);
-
-        return {
-            document,
-            tree,
-            offset,
-            token: tokenAtOffset(module.lex.tokens, offset, true),
-            tokens: module.lex.tokens
-        };
-    }
 }
 
 
@@ -1339,8 +694,6 @@ function isSourceActionRequest(params: CodeActionParams): boolean {
  * модель. Отвечать по модели предыдущей версии нельзя — см.
  * getRequestModule().
  */
-const INTERACTIVE_PARSE_BUDGET_MS = 200;
-
 /*
  * Как часто разрешено просить клиента перезапросить подсказки типов. Разбор
  * нескольких открытых файлов даёт такие события пачкой.
@@ -1362,31 +715,3 @@ const INLAY_REFRESH_COALESCE_MS = 300;
 
 
 
-function waitForParseBudget(
-    pending: Promise<unknown>,
-    budgetMs: number
-): Promise<void> {
-    return new Promise(resolve => {
-        let timer: NodeJS.Timeout | undefined;
-        let settled = false;
-        const finish = (): void => {
-            if (settled) {
-                return;
-            }
-            settled = true;
-            /*
-             * Таймер бюджета снимается при раннем завершении parse: иначе
-             * каждый интерактивный запрос удерживал бы event loop ещё на
-             * весь остаток бюджета.
-             */
-            if (timer) {
-                clearTimeout(timer);
-            }
-            resolve();
-        };
-        pending.then(finish, finish);
-        if (!settled) {
-            timer = setTimeout(finish, budgetMs);
-        }
-    });
-}

@@ -117,13 +117,19 @@ export const DEFAULT_DIAGNOSTIC_SETTINGS: Required<IRslDiagnosticSettings> = {
     useBeforeDeclaration: true,
     ambiguousReferences: true,
     /*
-     * Правило о необъявленных переменных выключено: см.
-     * unknownVariableDiagnostics. Лишний транзитивный Import — включено с
-     * severity Information: это подсказка, а не ошибка, и убирать такой Import
-     * или оставлять его страховкой решает автор кода.
+     * Необъявленные переменные проверяются в безопасном режиме: только имя
+     * слева от знака присваивания — так в RSL появляется переменная без VAR, и
+     * опечатка в её имени видна наверняка. Чтения имён не проверяются: имя
+     * может прийти оттуда, куда сервер не видит. Подробнее —
+     * unknownVariableDiagnostics.
+     *
+     * Лишний транзитивный Import — включено с severity Information: это
+     * подсказка, а не ошибка, и убирать такой Import или оставлять его
+     * страховкой решает автор кода.
      */
     redundantImports: true,
-    unknownVariables: "off",
+    unknownVariables: "safe",
+    unknownMembers: true,
     unknownSpecialVariables: "all",
     unknownVariablesKnownGlobalsFile: "",
     unknownVariablesAuditFile: "",
@@ -150,6 +156,7 @@ export function normalizeDiagnosticSettings(
         unknownVariables: normalizeUnknownVariablesMode(
             settings?.unknownVariables
         ),
+        unknownMembers: settings?.unknownMembers !== false,
         unknownSpecialVariables: normalizeSpecialVariablesMode(
             settings?.unknownSpecialVariables
         ),
@@ -1080,7 +1087,8 @@ function planWorkspaceRslDiagnostics(
         ],
         [
             "unknownVariables",
-            options.unknownVariables !== "off" &&
+            (options.unknownVariables !== "off" ||
+                options.unknownMembers) &&
                 !options.unknownVariablesAuditFile,
             isCancelled => {
                 result.push(...buildUnknownVariableDiagnostics(
@@ -1088,6 +1096,7 @@ function planWorkspaceRslDiagnostics(
                     resolver,
                     {
                         mode: options.unknownVariables,
+                        checkMembers: options.unknownMembers,
                         knownGlobalsFile:
                             options.unknownVariablesKnownGlobalsFile,
                         /*

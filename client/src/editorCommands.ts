@@ -11,7 +11,8 @@ import {
     SnippetString,
     SymbolInformation,
     SymbolKind,
-    window
+    window,
+    workspace
 } from "vscode";
 import type { LanguageClient } from "vscode-languageclient/node";
 
@@ -42,6 +43,8 @@ export function registerEditorCommands(
     environment: IEditorCommandEnvironment
 ): void {
     context.subscriptions.push(
+        /* Канал журнала Enter закрывается вместе с расширением. */
+        { dispose: () => disposeRslEnterLog() },
         commands.registerCommand("rsl.foldAllMacros", foldAllMacros),
         commands.registerCommand(
             "rsl.selectCurrentBlock",
@@ -68,10 +71,22 @@ export function registerEditorCommands(
 const enterTimings = createRslEnterTimings();
 let enterChannel: OutputChannel | undefined;
 
-/* Отклик, за которым нажатие уже заметно: о нём стоит сообщить сразу. */
+/* Отклик, за которым нажатие уже заметно. */
 const SLOW_ENTER_MS = 16;
-const ENTER_SUMMARY_EVERY = 25;
+const ENTER_SUMMARY_EVERY = 100;
+/* Не чаще одного сообщения о медленном нажатии в этот срок. */
+const SLOW_ENTER_REPORT_INTERVAL_MS = 2000;
 
+let lastSlowReportAt = 0;
+
+/**
+ * Замеры Enter в журнал.
+ *
+ * Сам учёт стоит наносекунды и идёт всегда — им отвечают на вопрос «а
+ * сколько на самом деле». Запись же включается только профилированием
+ * (rslPlus.performance.logFile): диагностический код не должен под
+ * нагрузкой добавлять к задержке ещё и вывод в канал.
+ */
 function reportEnter(
     kind: RslEnterKind,
     totalMs: number,
@@ -79,19 +94,25 @@ function reportEnter(
 ): void {
     enterTimings.record({ kind, totalMs, editMs });
 
-    const slow = totalMs >= SLOW_ENTER_MS;
-    const periodic = enterTimings.count() % ENTER_SUMMARY_EVERY === 0;
+    if (!enterLoggingEnabled()) {
+        return;
+    }
+
+    const now = performance.now();
+    const slow = totalMs >= SLOW_ENTER_MS &&
+        now - lastSlowReportAt >= SLOW_ENTER_REPORT_INTERVAL_MS;
+    /* Сводка — по общему счётчику, а не по заполненному окну замеров. */
+    const periodic = enterTimings.total() % ENTER_SUMMARY_EVERY === 0;
 
     if (!slow && !periodic) {
         return;
     }
 
-    if (!enterChannel) {
-        enterChannel = window.createOutputChannel("RSL: Enter");
-    }
+    const channel = ensureEnterChannel();
 
     if (slow) {
-        enterChannel.appendLine(
+        lastSlowReportAt = now;
+        channel.appendLine(
             "медленное нажатие: всё " + totalMs.toFixed(1) +
                 " мс, правка " + editMs.toFixed(1) + " мс, " + kind
         );
@@ -101,9 +122,29 @@ function reportEnter(
         const summary = enterTimings.summary();
 
         if (summary) {
-            enterChannel.appendLine(summary);
+            channel.appendLine(summary);
         }
     }
+}
+
+function enterLoggingEnabled(): boolean {
+    return !!workspace
+        .getConfiguration("rslPlus")
+        .get<string>("performance.logFile");
+}
+
+function ensureEnterChannel(): OutputChannel {
+    if (!enterChannel) {
+        enterChannel = window.createOutputChannel("RSL: Enter");
+    }
+
+    return enterChannel;
+}
+
+/** Канал закрывается вместе с расширением. */
+function disposeRslEnterLog(): void {
+    enterChannel?.dispose();
+    enterChannel = undefined;
 }
 
 async function smartEnter(): Promise<void> {

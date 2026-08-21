@@ -1610,6 +1610,14 @@ class Parser {
             }
         }
 
+        /*
+         * Заголовки MACRO и CLASS не проверяются.
+         *
+         * В проверенном репозитории «;» после подписи процедуры или после
+         * заголовка класса — устоявшийся стиль: 229 и 20 случаев на 800
+         * файлов против 67 у IF и WHILE. Предупреждать о стиле значит
+         * похоронить в шуме те находки, ради которых проверка и нужна.
+         */
         const body = this.parseStatementList(new Set(["onerror", "end"]));
         const children = [...parameters.nodes, ...body];
 
@@ -1711,6 +1719,7 @@ class Parser {
             children.push(condition);
         }
 
+        this.checkHeaderSemicolon("IF");
         appendAll(children, this.parseStatementList(
             new Set(["elif", "else", "end"])
         ));
@@ -1765,6 +1774,7 @@ class Parser {
         const keyword = this.take();
         const used = [keyword];
         const condition = this.parseRequiredCondition(used, "WHILE");
+        this.checkHeaderSemicolon("WHILE");
         const body = this.parseStatementList(new Set(["end"]));
         const endToken = this.expectWord("end", "Для WHILE не найден END");
 
@@ -1797,6 +1807,7 @@ class Parser {
             appendAll(headerChildren, this.parseForHeaderNodes(header));
         }
 
+        this.checkHeaderSemicolon("FOR");
         const body = this.parseStatementList(new Set(["end"]));
         const endToken = this.expectWord("end", "Для FOR не найден END");
 
@@ -1931,6 +1942,7 @@ class Parser {
             );
         }
 
+        this.checkHeaderSemicolon("WITH");
         const body = this.parseStatementList(new Set(["end"]));
         const endToken = this.expectWord("end", "Для WITH не найден END");
 
@@ -1986,6 +1998,12 @@ class Parser {
             }
         }
 
+        /*
+         * «;» после ONERROR(err) не проверяется: так этот обработчик и
+         * пишут — объявление переменной ошибки заканчивается точкой с
+         * запятой, а тело идёт ниже. В проверенном репозитории такая
+         * запись встречается постоянно.
+         */
         appendAll(children, this.parseStatementList(new Set(["end"])));
         return this.node(
             "OnErrorClause",
@@ -2172,16 +2190,20 @@ class Parser {
         }
 
         /*
-         * Выражение, оборванное словом-оператором, уже разобрано в режиме
-         * восстановления — про пропущенную ';' здесь молчим.
+         * Выражение, оборванное словом-оператором В ТОЙ ЖЕ СТРОКЕ, уже
+         * разобрано в режиме восстановления — про пропущенную ';' здесь
+         * молчим: `Public Var x;` иначе давало бы две жалобы на одно место,
+         * хотя настоящая ошибка тут одна — неизвестное имя Public.
          *
-         * Иначе `Public Var x;` давало бы две жалобы на одно место: настоящая
-         * ошибка тут одна — неизвестное имя Public. Раньше такая строка целиком
-         * уходила в одно выражение, и объявление x пропадало.
+         * А вот слово с НОВОЙ строки — это следующая инструкция, и точка с
+         * запятой перед ней пропущена по-настоящему. Прежде молчали и здесь:
+         * `sss = "ddfdf"` перед `if` и `MsgBox("1212")` перед `return`
+         * проходили без замечаний, потому что дальше стояло ключевое слово.
          */
         if (
             statement.kind === "ExpressionStatement" &&
-            STATEMENT_KEYWORDS.has(word)
+            STATEMENT_KEYWORDS.has(word) &&
+            this.continuesPreviousLine()
         ) {
             return;
         }
@@ -2609,6 +2631,60 @@ class Parser {
     private isVariableDeclaratorStart(): boolean {
         return this.current().kind === "identifier" &&
             !RESERVED.has(this.word());
+    }
+
+    /**
+     * «;» сразу за заголовком блока.
+     *
+     * Синтаксически это пустая инструкция, и язык её допускает: `if (cond);
+     * end;` — законная пустая ветка. Но когда за ней идёт код, запись почти
+     * всегда означает не то, что хотели: тело выполняется независимо от
+     * условия.
+     *
+     * Смотрим по токенам, а не по разобранному телу: в дереве остаются не все
+     * инструкции, и «тело пустое» по нему определить нельзя.
+     */
+    private checkHeaderSemicolon(keyword: string): void {
+        if (!this.isSymbol(";")) {
+            return;
+        }
+
+        const semicolon = this.current();
+        let at = this.index + 1;
+
+        /* Несколько «;» подряд — всё та же пустая инструкция. */
+        while (
+            at < this.tokens.length &&
+            this.tokens[at].kind === "symbol" &&
+            this.tokens[at].raw === ";"
+        ) {
+            at++;
+        }
+
+        const next = this.tokens[at];
+        const word = next && next.kind === "identifier"
+            ? normalizeIdentifier(next.value)
+            : "";
+
+        if (!next || BLOCK_BOUNDARIES.has(word)) {
+            /* Дальше END или ветвь: ветка действительно пустая. */
+            return;
+        }
+
+        this.warning(
+            "redundant-header-semicolon",
+            "Лишняя \";\" после заголовка " + keyword +
+                ": она задаёт пустую инструкцию, а тело блока идёт ниже",
+            semicolon
+        );
+    }
+
+    /** Текущий токен стоит в той же строке, что и предыдущий. */
+    private continuesPreviousLine(): boolean {
+        const previous = this.tokens[this.index - 1];
+
+        return previous !== undefined &&
+            previous.endLine === this.current().line;
     }
 
     private canStartStatement(): boolean {

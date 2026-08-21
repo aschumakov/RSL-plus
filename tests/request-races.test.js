@@ -231,13 +231,22 @@ function bumpVersion(state, nextText) {
 }
 
 const URI = "file:///d:/races/main.mac";
+/*
+ * `created` объявлено самим присваиванием — без VAR.
+ *
+ * Такое имя знает только полная модель: индексу версии оно неизвестно, и
+ * запрос по нему обязан дождаться разбора. Именно на нём и проверяется
+ * гонка версий — переход по имени процедуры отвечает сразу и ждать ему
+ * нечего.
+ */
 const SOURCE = [
     "Macro Target(value)",
     "  Var local = value;",
     "  return local;",
     "End;",
     "Macro Caller()",
-    "  Target(1);",
+    "  created = 1;",
+    "  Target(created);",
     "End;"
 ].join("\n");
 /* Правка добавляет строку в начало: все смещения ниже сдвигаются. */
@@ -265,7 +274,7 @@ const SAME_LENGTH = SOURCE.replace("Var local = value;", "Var lokal = value;");
                 {
                     textDocument: { uri: URI },
                     position: state.document.positionAt(
-                        SOURCE.indexOf("Target(1)")
+                        SOURCE.indexOf("Target(created)") + "Target(cre".length
                     )
                 },
                 { isCancellationRequested: false }
@@ -291,7 +300,7 @@ const SAME_LENGTH = SOURCE.replace("Var local = value;", "Var lokal = value;");
                 {
                     textDocument: { uri: URI },
                     position: state.document.positionAt(
-                        SOURCE.indexOf("Target(1)")
+                        SOURCE.indexOf("Target(created)")
                     )
                 },
                 { isCancellationRequested: false }

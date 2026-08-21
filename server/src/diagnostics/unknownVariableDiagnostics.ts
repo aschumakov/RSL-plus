@@ -19,6 +19,10 @@ import {
     isRslType
 } from "../language/rslLanguageReference";
 import { normalizeIdentifier, type IRslToken } from "../lexer";
+import {
+    createRslMemberChecker,
+    type IRslMemberFinding
+} from "./unknownMemberDiagnostics";
 import type { RslScopeResolver } from "../scopeResolver";
 import {
     isRslSpecialVariableReference
@@ -72,6 +76,13 @@ export interface IRslUnknownVariableOptions {
      * workspace: без него правило в strict неизбежно ругается на них.
      */
     knownGlobalsFile?: string;
+    /**
+     * Проверять состав полностью известных классов.
+     *
+     * Идёт тем же обходом токенов: имена после точки этот обход и так
+     * встречает, отдельного прохода по файлу не появляется.
+     */
+    checkMembers?: boolean;
 }
 
 /** Причина, по которой имя признано неразрешённым. */
@@ -81,6 +92,10 @@ export type RslUnknownVariableReason =
 
 export interface IRslUnknownVariableFinding {
     uri: string;
+    /** Член класса, которого у него нет; иначе — имя. */
+    kind?: "member";
+    /** Класс получателя: только у находок о членах. */
+    className?: string;
     name: string;
     start: number;
     end: number;
@@ -97,7 +112,18 @@ export interface IRslUnknownVariableFinding {
 export function normalizeUnknownVariablesMode(
     value: unknown
 ): RslUnknownVariablesMode {
-    return value === "safe" || value === "strict" ? value : "off";
+    if (value === "off" || value === "safe" || value === "strict") {
+        return value;
+    }
+
+    /*
+     * Значение по умолчанию — safe.
+     *
+     * Настройка может не дойти до сервера вовсе: старый клиент её не
+     * присылает. Тогда действует то же значение, что и в окне параметров, —
+     * иначе проверка была бы включена в интерфейсе и выключена на деле.
+     */
+    return "safe";
 }
 
 /**
@@ -157,7 +183,7 @@ function* unknownVariableSteps(
     resolver: RslScopeResolver,
     options: IRslUnknownVariableOptions
 ): Generator<void, IRslUnknownVariableFinding[], void> {
-    if (options.mode === "off") {
+    if (options.mode === "off" && !options.checkMembers) {
         return [];
     }
 
@@ -178,8 +204,16 @@ function* unknownVariableSteps(
      * где переменные вообще не объявляют, и предупреждать там не о чем.
      */
     const hasExplicitVar = hasExplicitVarDeclaration(tokens);
+    const checkNames = options.mode !== "off" && hasExplicitVar;
+    const members = options.checkMembers
+        ? createRslMemberChecker({
+            module,
+            resolver,
+            imports: module.imports
+        })
+        : undefined;
 
-    if (!hasExplicitVar) {
+    if (!checkNames && !members) {
         return [];
     }
 
@@ -225,12 +259,51 @@ function* unknownVariableSteps(
             importIndex++;
         }
 
+        if (token.kind !== "identifier" ||
+            isInsideImport(importRanges, importIndex, token)) {
+            continue;
+        }
+
+        const receiver = receiverBeforeDot(tokens, index);
+
+        if (receiver) {
+            /*
+             * Имя после точки — член объекта. Искать его среди объявлений
+             * файла бессмысленно, а проверить состав класса можно — но
+             * только когда класс известен целиком.
+             */
+            const found = members?.check(tokens, index, receiver);
+
+            if (found) {
+                result.push(memberFinding(module.uri, found, state));
+
+                if (result.length >= limit) {
+                    return result;
+                }
+            }
+
+            continue;
+        }
+
         if (
-            token.kind !== "identifier" ||
-            isInsideImport(importRanges, importIndex, token) ||
+            !checkNames ||
             !isExpressionIdentifier(tokens, index, declarationStarts) ||
             known.has(normalizeIdentifier(token.value))
         ) {
+            continue;
+        }
+
+        /*
+         * В safe проверяется только имя слева от «=» — переменная,
+         * созданная присваиванием.
+         *
+         * Всё остальное — вызовы, константы, имена, которые может
+         * подставить система, — слишком легко принять за ошибку: имя
+         * может прийти из модуля, о котором сервер знает не всё. Для
+         * полного набора неразрешённых имён есть strict.
+         */
+        if (options.mode === "safe" &&
+            !isAssignmentTarget(tokens, index)) {
             continue;
         }
 
@@ -297,9 +370,13 @@ export function buildUnknownVariableDiagnostics(
          * процедуры, и имя класса: `MissingProc()` — не переменная, а
          * компилятор на всё это отвечает «неопределенный идентификатор».
          */
-        message: `Идентификатор ${finding.name} не определён`,
+        message: finding.kind === "member"
+            ? `У класса ${finding.className} нет члена ${finding.name}`
+            : `Идентификатор ${finding.name} не определён`,
         source: "RSL parser",
-        code: "unknown-variable",
+        code: finding.kind === "member"
+            ? "unknown-member"
+            : "unknown-variable",
         data: {
             start: finding.start,
             end: finding.end,
@@ -367,6 +444,109 @@ function isExpressionIdentifier(
     }
 
     return true;
+}
+
+/**
+ * Имя слева от «=», начинающее инструкцию.
+ *
+ * Именно так в RSL появляется переменная без VAR: `sss = "ddfdf"`. От
+ * сравнения `==` отличается самим оператором, а от `a.b = 1` и
+ * `arr[i] = 1` — тем, что слева стоит одно имя.
+ */
+function isAssignmentTarget(
+    tokens: readonly IRslToken[],
+    index: number
+): boolean {
+    const next = nextCode(tokens, index);
+
+    if (!next || next.kind !== "symbol" || next.raw !== "=") {
+        return false;
+    }
+
+    const previous = previousCode(tokens, index);
+
+    if (!previous) {
+        return true;
+    }
+
+    if (previous.kind === "symbol") {
+        return previous.raw === ";";
+    }
+
+    if (previous.kind === "identifier" &&
+        isBlockBoundaryWord(previous.value)) {
+        return true;
+    }
+
+    /* Инструкция с новой строки: точка с запятой выше пропущена. */
+    return previous.endLine < tokens[index].line;
+}
+
+function isBlockBoundaryWord(value: string): boolean {
+    const word = normalizeIdentifier(value);
+
+    return word === "end" || word === "else" || word === "elif" ||
+        word === "onerror" || word === "then";
+}
+
+function nextCode(
+    tokens: readonly IRslToken[],
+    index: number
+): IRslToken | undefined {
+    for (let current = index + 1; current < tokens.length; current++) {
+        const token = tokens[current];
+
+        if (
+            token.kind !== "comment" &&
+            token.kind !== "whitespace" &&
+            token.kind !== "newline" &&
+            token.kind !== "bom"
+        ) {
+            return token;
+        }
+    }
+
+    return undefined;
+}
+
+/** Получатель перед точкой: имя, к члену которого обращаются. */
+function receiverBeforeDot(
+    tokens: readonly IRslToken[],
+    index: number
+): IRslToken | undefined {
+    const dot = previousCode(tokens, index);
+
+    if (!dot || dot.kind !== "symbol" || dot.raw !== ".") {
+        return undefined;
+    }
+
+    const dotIndex = tokens.indexOf(dot);
+    const receiver = dotIndex > 0
+        ? previousCode(tokens, dotIndex)
+        : undefined;
+
+    return receiver?.kind === "identifier" ? receiver : undefined;
+}
+
+function memberFinding(
+    uri: string,
+    found: IRslMemberFinding,
+    state: { completeness: RslImportContextCompleteness }
+): IRslUnknownVariableFinding {
+    return {
+        uri,
+        kind: "member",
+        className: found.className,
+        name: found.name,
+        start: found.start,
+        end: found.end,
+        line: found.line,
+        character: found.character,
+        scope: "",
+        hasExplicitVar: true,
+        importContext: state.completeness,
+        reason: "no-declaration"
+    };
 }
 
 function isDeclarationIntroducer(value: string): boolean {

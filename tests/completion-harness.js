@@ -115,6 +115,7 @@ function createCompletionRegistry(options) {
             : options.editedSource
     );
     const handlers = {};
+    let parses = 0;
     /* Снимок кэшируется по версии — так делает и сервер. */
     let snapshot;
     const registry = new RslLanguageFeatureRegistry({
@@ -141,7 +142,11 @@ function createCompletionRegistry(options) {
 
             return snapshot;
         },
-        ensureDocumentParsed: async () => undefined,
+        /* Счётчик обращений: по нему видно, ждал ли запрос разбор. */
+        ensureDocumentParsed: async () => {
+            parses++;
+            return undefined;
+        },
         requestDocumentParse: () => undefined,
         getSettings: () => options.settings || DEFAULT_SETTINGS,
         supportsRefresh: () => false,
@@ -157,6 +162,10 @@ function createCompletionRegistry(options) {
         registry,
         uri,
         source,
+        /** Сколько раз обработчик ждал разбор. */
+        get parses() {
+            return parses;
+        },
         /* Текст, который видит редактор: он же — текст запросов. */
         text: document.getText()
     };

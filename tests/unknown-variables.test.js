@@ -253,25 +253,64 @@ async function main() {
     /*
      * ─── Необъявленные переменные ──────────────────────────────────────────
      */
-    await test("правило выключено по умолчанию", () => {
+    await test("по умолчанию правило работает в безопасном режиме", () => {
+        /*
+         * Прежде правило было выключено: оно проверяло любые неразрешённые
+         * имена и слишком часто ошибалось. Теперь проверяется только имя
+         * слева от знака присваивания, и это можно включить по умолчанию.
+         */
         const source = [
             "Macro Test()",
             "  Var known;",
-            "  known = undeclared;",
+            "  undeclared = known;",
             "End;"
         ].join("\n");
         const context = open(source);
 
         assert.deepStrictEqual(
             names(buildRslDiagnostics(context.module, context.index)),
-            [],
-            "Без явного включения правило обязано молчать"
+            ["undeclared"],
+            "Без настроек действует то же значение, что и в окне параметров"
         );
         assert.deepStrictEqual(
             names(buildRslDiagnostics(context.module, context.index, {
                 unknownVariables: "off"
             })),
-            []
+            [],
+            "Выключенное правило обязано молчать"
+        );
+    });
+
+    await test("safe смотрит только на имя слева от «=»", () => {
+        /*
+         * Чтение неизвестного имени слишком часто оказывается не ошибкой:
+         * имя может прийти из модуля, о котором сервер знает не всё, или
+         * его подставляет система. Присваивание же создаёт переменную прямо
+         * здесь, и опечатка в её имени видна наверняка.
+         */
+        const context = open([
+            "Macro Test()",
+            "  Var known;",
+            "  known = SomeReadOnlyName;",
+            "  Typo = known;",
+            "End;"
+        ].join(String.fromCharCode(10)));
+
+        assert.deepStrictEqual(
+            names(buildUnknownVariableDiagnostics(
+                context.module,
+                context.resolver,
+                { mode: "safe" }
+            )),
+            ["Typo"]
+        );
+        assert.deepStrictEqual(
+            names(buildUnknownVariableDiagnostics(
+                context.module,
+                context.resolver,
+                { mode: "strict" }
+            )).sort(),
+            ["SomeReadOnlyName", "Typo"]
         );
     });
 
@@ -279,7 +318,7 @@ async function main() {
         const withVar = open([
             "Macro Test()",
             "  Var known;",
-            "  known = undeclared;",
+            "  undeclared = known;",
             "End;"
         ].join("\n"));
         assert.deepStrictEqual(
@@ -297,7 +336,7 @@ async function main() {
          */
         const withoutVar = open([
             "Macro Test()",
-            "  known = undeclared;",
+            "  undeclared = known;",
             "End;"
         ].join("\n"));
         assert.deepStrictEqual(
@@ -315,7 +354,7 @@ async function main() {
             "Import someRsmModule;",
             "Macro Test()",
             "  Var known;",
-            "  known = undeclared;",
+            "  undeclared = known;",
             "End;"
         ].join("\n");
         const context = open(source);
@@ -386,8 +425,8 @@ async function main() {
         const source = [
             "Macro Test()",
             "  Var known;",
-            "  known = GlobalRegistry;",
-            "  known = StillUnknown;",
+            "  GlobalRegistry = known;",
+            "  StillUnknown = known;",
             "End;"
         ].join("\n");
         const context = open(source);
@@ -427,7 +466,7 @@ async function main() {
         const source = [
             "Macro Test()",
             "  Var known;",
-            "  known = MissingProc();",
+            "  MissingProc = known;",
             "End;"
         ].join("\n");
         const context = open(source);
@@ -452,7 +491,7 @@ async function main() {
     await test("обход ограничен лимитом и прерывается отменой", () => {
         const lines = ["Macro Test()", "  Var known;"];
         for (let index = 0; index < 5000; index++) {
-            lines.push(`  known = unknown${index};`);
+            lines.push(`  unknown${index} = known;`);
         }
         lines.push("End;");
         const context = open(lines.join("\n"));
@@ -492,7 +531,7 @@ async function main() {
             "Class Holder",
             "  Macro Method()",
             "    Var known;",
-            "    known = undeclared;",
+            "    undeclared = known;",
             "  End;",
             "End;"
         ].join("\n");
@@ -520,7 +559,7 @@ async function main() {
         const source = [
             "Macro Test()",
             "  Var known;",
-            "  known = undeclared;",
+            "  undeclared = known;",
             "End;"
         ].join("\n");
         const context = open(source);
@@ -563,7 +602,7 @@ async function main() {
         assert.deepStrictEqual(lines[0], {
             file: lines[0].file,
             line: 3,
-            character: 11,
+            character: 3,
             name: "undeclared",
             scope: "Test",
             hasExplicitVar: true,

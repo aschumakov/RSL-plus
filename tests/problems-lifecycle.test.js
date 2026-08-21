@@ -63,11 +63,12 @@ function createStand(source) {
         all: () => [document]
     };
     const publications = [];
+    const settings = new RslSettingsService(SETTINGS);
     const coordinator = new DiagnosticsCoordinator(
         { sendDiagnostics: value => publications.push(value) },
         documents,
         index,
-        new RslSettingsService(SETTINGS),
+        settings,
         new RslDiagnosticEngine(),
         {
             isParseBusy: () => false,
@@ -83,6 +84,19 @@ function createStand(source) {
         publications,
         coordinator,
         index,
+        /** Настройки меняются так же, как из окна параметров. */
+        applySettings(next) {
+            settings.updateFromConfiguration({
+                rslPlus: {
+                    ...SETTINGS,
+                    ...next,
+                    diagnostics: {
+                        ...SETTINGS.diagnostics,
+                        ...(next.diagnostics || {})
+                    }
+                }
+            });
+        },
         get document() {
             return document;
         },
@@ -263,6 +277,63 @@ test("межфайловая ошибка не переносится на пр�
             "публикуется список именно для текущей версии"
         );
     }
+});
+
+test("снятая галочка проверок убирает межфайловую находку сразу", async () => {
+    /*
+     * Текст не менялся, поэтому прежний результат по нему формально
+     * подходит — но считался он при других настройках. Показывать его
+     * значит показывать проверку, которую пользователь только что выключил.
+     */
+    const stand = createStand(WITH_UNUSED_IMPORT);
+    stand.coordinator.scheduleLocal(MAIN, 0);
+    stand.coordinator.scheduleWorkspace(MAIN, 0);
+    await settle();
+
+    assert.ok(
+        codes(stand.publications[stand.publications.length - 1])
+            .includes("unused-import"),
+        "сначала находка обязана быть"
+    );
+
+    stand.applySettings({
+        diagnostics: { unusedImports: false }
+    });
+
+    /*
+     * Локальная фаза заканчивается первой — и уже она не имеет права взять
+     * межфайловый результат, посчитанный при прежних настройках.
+     */
+    stand.coordinator.scheduleLocal(MAIN, 0);
+    await settle(80);
+
+    assert.ok(
+        !codes(stand.publications[stand.publications.length - 1])
+            .includes("unused-import"),
+        "выключенная проверка не имеет права оставаться в списке"
+    );
+});
+
+test("выключенные проверки очищают список сразу", async () => {
+    const stand = createStand(WITH_LOCAL_ERROR);
+    stand.coordinator.scheduleLocal(MAIN, 0);
+    await settle();
+
+    assert.ok(
+        codes(stand.publications[stand.publications.length - 1]).length > 0,
+        "сначала ошибки обязаны быть"
+    );
+
+    stand.applySettings({ diagnostics: { enabled: false } });
+    stand.coordinator.scheduleLocal(MAIN, 0);
+
+    const last = stand.publications[stand.publications.length - 1];
+
+    assert.deepStrictEqual(
+        last.diagnostics,
+        [],
+        "список обязан опустеть без ожидания пересчёта"
+    );
 });
 
 test("публикация несёт версию документа", async () => {

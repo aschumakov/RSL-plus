@@ -92,10 +92,15 @@ test("If внутри Macro не закрывает её раньше време
     const index = indexOf(source);
 
     assert.deepStrictEqual(
-        lookupFastName(index, "y", source.indexOf("  y.") + 4),
+        declarationOf(lookupFastName(index, "y", source.indexOf("  y.") + 4)),
         { declared: true, typeName: "Ledger" }
     );
 });
+
+/** Объявление и его тип: место объявления проверяется отдельными тестами. */
+function declarationOf(lookup) {
+    return { declared: lookup.declared, typeName: lookup.typeName };
+}
 
 /* --- ключевые слова после точки ------------------------------------------- */
 
@@ -114,7 +119,7 @@ for (const field of ["End", "Var", "Class", "Import", "Private"]) {
         const index = indexOf(source);
 
         assert.deepStrictEqual(
-            lookupFastName(index, "x", source.indexOf("  x.") + 4),
+            declarationOf(lookupFastName(index, "x", source.indexOf("  x.") + 4)),
             { declared: true, typeName: "Ledger" }
         );
     });
@@ -276,7 +281,7 @@ test("ключевое слово после точки внутри Var не з
         2
     );
     assert.deepStrictEqual(
-        lookupFastName(index, "y", source.indexOf("  y.") + 4),
+        declarationOf(lookupFastName(index, "y", source.indexOf("  y.") + 4)),
         { declared: true, typeName: "Ledger" }
     );
 });

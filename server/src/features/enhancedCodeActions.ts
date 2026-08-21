@@ -46,6 +46,13 @@ quickFixRegistry.register(
     (module, diagnostic) => createSplitLongStringAction(module, diagnostic)
 );
 quickFixRegistry.register(
+    "redundant-header-semicolon",
+    (module, diagnostic) => createRemoveHeaderSemicolonAction(
+        module,
+        diagnostic
+    )
+);
+quickFixRegistry.register(
     "missing-member-name",
     (module, diagnostic) => createRemoveExtraDotAction(module, diagnostic)
 );
@@ -68,6 +75,44 @@ export function buildEnhancedRslCodeActions(
     params: CodeActionParams
 ): CodeAction[] {
     return quickFixRegistry.build(module, params);
+}
+
+/**
+ * «Удалить лишнюю ";"» после заголовка блока.
+ *
+ * Диагностика указывает ровно на эту точку с запятой, поэтому правка
+ * однозначна: убрать символ. Тело блока при этом начинает зависеть от
+ * условия — именно этого обычно и хотели.
+ */
+function createRemoveHeaderSemicolonAction(
+    module: IIndexedModule,
+    diagnostic: Diagnostic
+): CodeAction | undefined {
+    const tokens = module.lex.tokens;
+    const offset = offsetOfPosition(module, diagnostic.range.start);
+    const semicolon = tokens.find(token =>
+        token.start <= offset && offset < token.end
+    );
+
+    if (!semicolon || semicolon.kind !== "symbol" ||
+        semicolon.raw !== ";") {
+        return undefined;
+    }
+
+    const edit: TextEdit = TextEdit.del({
+        start: positionOfOffset(module, semicolon.start),
+        end: positionOfOffset(module, semicolon.end)
+    });
+
+    return {
+        title: "Удалить лишнюю \";\"",
+        kind: CodeActionKind.QuickFix,
+        diagnostics: [diagnostic],
+        isPreferred: true,
+        edit: {
+            changes: { [module.uri]: [edit] }
+        } as WorkspaceEdit
+    };
 }
 
 /**

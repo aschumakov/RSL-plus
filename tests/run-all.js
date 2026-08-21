@@ -48,6 +48,8 @@ const tests = [
     "completion-stability.test.js",
     "interactive-fast-path.test.js",
     "interactive-differential.test.js",
+    "interactive-resolution.test.js",
+    "class-member-diagnostics.test.js",
     "range-formatting.test.js",
     "problems-lifecycle.test.js",
     "quick-fixes-and-type-definition.test.js",

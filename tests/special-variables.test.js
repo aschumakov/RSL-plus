@@ -78,11 +78,11 @@ async function main() {
         const source = [
             "Macro Test()",
             "  Var known;",
-            "  known = undeclaredName;",
-            "  known = {curdate};",
-            "  known = {GROUP_MODE};",
-            "  known = {ФИЛИАЛ};",
-            "  known = {Название отчета};",
+            "  undeclaredName = known;",
+            "  {curdate} = known;",
+            "  {GROUP_MODE} = known;",
+            "  {ФИЛИАЛ} = known;",
+            "  {Название отчета} = known;",
             "End;"
         ].join("\n");
         const unknown = diagnose(source, { unknownVariables: "safe" })
