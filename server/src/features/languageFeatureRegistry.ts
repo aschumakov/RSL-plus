@@ -110,7 +110,6 @@ export interface IRslLanguageFeatureEnvironment {
     performance?: PerformanceLogger;
 }
 
-
 /** Регистрирует LSP provider-ы и владеет их versioned-кэшами. */
 export class RslLanguageFeatureRegistry {
     private registered = false;
@@ -601,14 +600,6 @@ export class RslLanguageFeatureRegistry {
         }
     }
 
-
-
-
-
-
-
-
-
     /**
      * Модуль ровно той версии, к которой относится запрос.
      *
@@ -667,7 +658,6 @@ export class RslLanguageFeatureRegistry {
 
 }
 
-
 function supportsRefactorActions(params: CodeActionParams): boolean {
     const only = params.context.only;
     return !only || only.length === 0 || only.some(kind =>
@@ -684,7 +674,6 @@ function isSourceActionRequest(params: CodeActionParams): boolean {
         String(kind) === RSL_FIX_ALL_KIND
     );
 }
-
 
 /*
  * Completion/Hover/Signature Help чувствительны к задержке сильнее, чем к
@@ -708,10 +697,3 @@ const INLAY_REFRESH_COALESCE_MS = 300;
  * Теперь готовая модель используется, а неготовая не ожидается вовсе — ответ
  * приблизительный и помечен isIncomplete.
  */
-
-
-
-
-
-
-

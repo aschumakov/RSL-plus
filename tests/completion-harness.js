@@ -116,6 +116,7 @@ function createCompletionRegistry(options) {
     );
     const handlers = {};
     let parses = 0;
+    let snapshotRequests = 0;
     /* Снимок кэшируется по версии — так делает и сервер. */
     let snapshot;
     const registry = new RslLanguageFeatureRegistry({
@@ -136,6 +137,8 @@ function createCompletionRegistry(options) {
             createObjectLocationByUri: () => ({ uri, range: null })
         },
         getFastDocumentSnapshot: () => {
+            snapshotRequests++;
+
             if (!snapshot) {
                 snapshot = createFastDocumentSnapshot(document);
             }
@@ -165,6 +168,15 @@ function createCompletionRegistry(options) {
         /** Сколько раз обработчик ждал разбор. */
         get parses() {
             return parses;
+        },
+        /**
+         * Сколько раз спрашивали снимок версии.
+         *
+         * По нему видно, строился ли индекс версии: при готовой модели
+         * ни то, ни другое обработчику не нужно.
+         */
+        get snapshotRequests() {
+            return snapshotRequests;
         },
         /* Текст, который видит редактор: он же — текст запросов. */
         text: document.getText()

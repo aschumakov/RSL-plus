@@ -19,6 +19,7 @@ import {
     isRslType
 } from "../language/rslLanguageReference";
 import { normalizeIdentifier, type IRslToken } from "../lexer";
+import type { IRslSyntaxNode } from "../syntaxParser";
 import {
     createRslMemberChecker,
     type IRslMemberFinding
@@ -32,14 +33,17 @@ import type { IIndexedModule } from "../workspaceIndex";
 /**
  * Необъявленные переменные.
  *
- * Правило по умолчанию ВЫКЛЮЧЕНО, и это не осторожность ради осторожности:
- * компилятор RSL разрешает имена ещё и из RSM, DLM, встроенных модулей и
- * собственного контекста сборки, которых в workspace нет вообще. Отсутствие
- * объявления в проекте не означает, что имени не существует.
+ * Компилятор RSL разрешает имена ещё и из RSM, DLM, встроенных модулей и
+ * собственного контекста сборки, которых в workspace нет вообще: отсутствие
+ * объявления в проекте само по себе не означает, что имени не существует.
+ * Поэтому режимов три, и по умолчанию работает средний.
  *
  *   off    — не проверять;
- *   safe   — только когда контекст доказуемо полон (см. условия ниже);
- *   strict — пользователь берёт неполный контекст на себя.
+ *   safe   — по умолчанию: только имя слева от «=», только при доказуемо
+ *            полном контексте и только там, где в этой же области есть
+ *            объявление VAR;
+ *   strict — все неразрешённые имена; пользователь берёт неполный контекст
+ *            на себя.
  *
  * Режим audit не публикует Problems, а собирает отчёт: на реальном репозитории
  * макросов правило надо сначала прогнать и посмотреть на ложные срабатывания, а
@@ -200,11 +204,17 @@ function* unknownVariableSteps(
 
     const tokens = module.syntax.tokens;
     /*
-     * Явный VAR в файле обязателен: файл без единого объявления написан в стиле,
-     * где переменные вообще не объявляют, и предупреждать там не о чем.
+     * Явное объявление VAR обязательно — и не где-нибудь в файле, а в той
+     * области, где стоит присваивание, или в объемлющей.
+     *
+     * Проверять по тексту токена нельзя: `obj.Var()` — обращение к члену
+     * с именем Var, а не объявление, и оно включало проверку целому файлу.
+     * По той же причине не годится и «где-то в файле есть VAR»: правило
+     * работает по умолчанию, и одна объявленная переменная в чужой Macro
+     * не должна включать проверку неявных переменных всюду.
      */
-    const hasExplicitVar = hasExplicitVarDeclaration(tokens);
-    const checkNames = options.mode !== "off" && hasExplicitVar;
+    const varScopes = collectRslVarScopes(module);
+    const checkNames = options.mode !== "off" && varScopes.length > 0;
     const members = options.checkMembers
         ? createRslMemberChecker({
             module,
@@ -288,7 +298,8 @@ function* unknownVariableSteps(
         if (
             !checkNames ||
             !isExpressionIdentifier(tokens, index, declarationStarts) ||
-            known.has(normalizeIdentifier(token.value))
+            known.has(normalizeIdentifier(token.value)) ||
+            !isInsideAnyRange(varScopes, token.start)
         ) {
             continue;
         }
@@ -319,7 +330,7 @@ function* unknownVariableSteps(
             line: token.line,
             character: token.character,
             scope: scopeNameAt(module, token.start),
-            hasExplicitVar,
+            hasExplicitVar: true,
             importContext: state.completeness,
             reason
         });
@@ -514,18 +525,42 @@ function receiverBeforeDot(
     tokens: readonly IRslToken[],
     index: number
 ): IRslToken | undefined {
-    const dot = previousCode(tokens, index);
+    /*
+     * Индексы, а не поиск токена в массиве.
+     *
+     * Прежде здесь стоял tokens.indexOf(dot) — просмотр от начала файла на
+     * КАЖДОЕ обращение через точку. На файле с восемью тысячами таких
+     * обращений проверка занимала 73 мс вместо 6, и платился этот счёт при
+     * каждом пересчёте Problems.
+     */
+    const dotIndex = previousCodeIndex(tokens, index);
+    const dot = dotIndex >= 0 ? tokens[dotIndex] : undefined;
 
     if (!dot || dot.kind !== "symbol" || dot.raw !== ".") {
         return undefined;
     }
 
-    const dotIndex = tokens.indexOf(dot);
-    const receiver = dotIndex > 0
-        ? previousCode(tokens, dotIndex)
+    /*
+     * Точка и имя обязаны стоять в одной строке.
+     *
+     * Незаконченное `obj.` в конце строки — обычное состояние текста при
+     * наборе, и следующая строка к этому обращению не относится: иначе
+     * `end`, `return` и любое имя ниже становились «членом класса», и
+     * появлялась ошибка вида «у класса T нет члена End».
+     */
+    if (dot.line !== tokens[index].line) {
+        return undefined;
+    }
+
+    const receiverIndex = previousCodeIndex(tokens, dotIndex);
+    const receiver = receiverIndex >= 0
+        ? tokens[receiverIndex]
         : undefined;
 
-    return receiver?.kind === "identifier" ? receiver : undefined;
+    return receiver?.kind === "identifier" &&
+        receiver.endLine === dot.line
+        ? receiver
+        : undefined;
 }
 
 function memberFinding(
@@ -560,6 +595,16 @@ function previousCode(
     tokens: readonly IRslToken[],
     index: number
 ): IRslToken | undefined {
+    const found = previousCodeIndex(tokens, index);
+
+    return found >= 0 ? tokens[found] : undefined;
+}
+
+/** Индекс предыдущего значащего токена; -1 — его нет. */
+function previousCodeIndex(
+    tokens: readonly IRslToken[],
+    index: number
+): number {
     for (let current = index - 1; current >= 0; current--) {
         const token = tokens[current];
 
@@ -569,17 +614,89 @@ function previousCode(
             token.kind !== "newline" &&
             token.kind !== "bom"
         ) {
-            return token;
+            return current;
         }
     }
 
-    return undefined;
+    return -1;
 }
 
-function hasExplicitVarDeclaration(tokens: readonly IRslToken[]): boolean {
-    return tokens.some(token =>
-        token.kind === "identifier" &&
-        normalizeIdentifier(token.value) === "var"
+/**
+ * Области, в которых есть настоящее объявление VAR.
+ *
+ * Считается по дереву разбора: только узел объявления переменной, а не
+ * слово «var» в тексте. Областью считается ближайшая Macro или Class, а для
+ * объявлений верхнего уровня — файл целиком: объявление модуля видно из
+ * любой его процедуры, а объявление в соседней процедуре — нет.
+ */
+function collectRslVarScopes(
+    module: IIndexedModule
+): readonly { start: number; end: number }[] {
+    const result: { start: number; end: number }[] = [];
+    const seen = new Set<number>();
+    const wholeFile = { start: 0, end: module.source.length };
+    const tokens = module.syntax.tokens;
+
+    const visit = (
+        node: IRslSyntaxNode,
+        scope: { start: number; end: number }
+    ): void => {
+        for (const child of node.children) {
+            if (
+                isRealVarDeclaration(child, tokens) &&
+                !seen.has(scope.start)
+            ) {
+                seen.add(scope.start);
+                result.push(scope);
+            }
+
+            visit(
+                child,
+                child.kind === "MacroDeclaration" ||
+                    child.kind === "ClassDeclaration"
+                    ? { start: child.start, end: child.end }
+                    : scope
+            );
+        }
+    };
+
+    visit(module.syntax.root, wholeFile);
+
+    return result;
+}
+
+/**
+ * Настоящее объявление VAR, а не восстановление разбора.
+ *
+ * `obj.Var()` — обращение к члену с именем Var, и терпимый к ошибкам
+ * разбор восстанавливается на нём узлом объявления без объявленных имён.
+ * Признаков два, и оба проверяются: у объявления есть хотя бы одно имя, и
+ * слово VAR не стоит после точки.
+ */
+function isRealVarDeclaration(
+    node: IRslSyntaxNode,
+    tokens: readonly IRslToken[]
+): boolean {
+    if (node.kind !== "VariableDeclaration" || node.name !== "var") {
+        return false;
+    }
+
+    if (node.children.length === 0) {
+        return false;
+    }
+
+    const at = tokens.findIndex(token => token.start === node.start);
+    const previous = at > 0 ? previousCode(tokens, at) : undefined;
+
+    return !(previous?.kind === "symbol" && previous.raw === ".");
+}
+
+function isInsideAnyRange(
+    ranges: readonly { start: number; end: number }[],
+    offset: number
+): boolean {
+    return ranges.some(range =>
+        range.start <= offset && offset <= range.end
     );
 }
 

@@ -164,6 +164,60 @@ test("проверку членов можно выключить", () => {
     );
 });
 
+test("проверка обращений через точку растёт линейно", () => {
+    /*
+     * Здесь был квадратичный рост: получатель перед точкой искался поиском
+     * токена от начала файла, и на восьми тысячах обращений проверка
+     * занимала 73 мс вместо шести. Правило теперь работает по индексам.
+     *
+     * Замер сравнительный: удвоение объектного кода не имеет права
+     * удорожать проверку больше чем в два с половиной раза.
+     */
+    const sample = count => {
+        const lines = [
+            "Class TLocal()",
+            "  Var Field;",
+            "End;",
+            "Macro Test()",
+            "  Var thing: TLocal = TLocal();",
+            "  Var total = 0;"
+        ];
+
+        for (let index = 0; index < count; index++) {
+            lines.push("  total = total + thing.Field;");
+        }
+
+        lines.push("  return total;", "End;", "");
+
+        return lines.join(String.fromCharCode(10));
+    };
+    const measure = count => {
+        const index = new WorkspaceIndex();
+        index.registerWorkspaceFiles([MAIN]);
+        const module = index.updateOpenModule(MAIN, sample(count), 1);
+        let best = Infinity;
+
+        for (let run = 0; run < 5; run++) {
+            const started = process.hrtime.bigint();
+            buildRslDiagnostics(module, index);
+            best = Math.min(
+                best,
+                Number(process.hrtime.bigint() - started) / 1e6
+            );
+        }
+
+        return best;
+    };
+    const small = measure(2000);
+    const large = measure(4000);
+
+    assert.ok(
+        large < small * 2.5 + 2,
+        "удвоение обращений: " + small.toFixed(1) + " -> " +
+            large.toFixed(1) + " мс"
+    );
+});
+
 /* --- Пропущенная «;» и лишняя «;» после заголовка --- */
 
 const SAMPLE = [
@@ -247,24 +301,32 @@ test("лишняя «;» после заголовка находится и у�
     assert.strictEqual(edits[0].newText, "");
 });
 
-test("«;» после заголовка процедуры не считается ошибкой", () => {
+test("«;» после заголовка процедуры и класса тоже отмечается", () => {
     /*
-     * В проверенном репозитории это устоявшийся стиль: 229 случаев после
-     * MACRO и 20 после CLASS на 800 файлов. Предупреждение о стиле утопило бы
-     * в шуме находки об IF, ради которых проверка и сделана.
+     * Синтаксис не зависит от того, как часто так пишут: в проверенном
+     * репозитории это 229 случаев после MACRO, 20 после CLASS и 15 после
+     * ONERROR — все они теперь видны в Problems, и у каждого есть
+     * исправление.
      */
-    const source = [
+    for (const header of [
         "macro Border(y, x);",
-        "  Var ok = 1;",
-        "  return ok;",
-        "end;",
-        ""
-    ].join(String.fromCharCode(10));
+        "class TBorder();"
+    ]) {
+        const source = [
+            header,
+            "  Var ok = 1;",
+            "  return ok;",
+            "end;",
+            ""
+        ].join(String.fromCharCode(10));
 
-    assert.deepStrictEqual(
-        codes(diagnose(source).diagnostics, "redundant-header-semicolon"),
-        []
-    );
+        assert.strictEqual(
+            codes(diagnose(source).diagnostics, "redundant-header-semicolon")
+                .length,
+            1,
+            header
+        );
+    }
 });
 
 test("пустая ветка с «;» предупреждения не даёт", () => {

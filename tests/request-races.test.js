@@ -122,7 +122,7 @@ function createDocument(uri, version, text) {
  * onParsed вызывается вместо реального разбора: тест решает, что произойдёт за
  * время ожидания — в частности, успеет ли документ измениться.
  */
-function createRegistry({ uri, source, onParsed, settings }) {
+function createRegistry({ uri, source, onParsed, onLocationRead, settings }) {
     const index = new WorkspaceIndex();
     index.registerWorkspaceFiles([uri]);
     const module = index.updateOpenModule(uri, source, 1);
@@ -191,7 +191,15 @@ function createRegistry({ uri, source, onParsed, settings }) {
         definitionProvider: {
             findImportDefinition: async () => undefined,
             findDynamicDefinition: async () => undefined,
-            createObjectLocationByUri: () => ({ uri, range: null })
+            /*
+             * Чтение файла назначения — ожидание, и за него документ может
+             * уйти вперёд: стенд воспроизводит именно это.
+             */
+            createObjectLocationByUri: async () => {
+                await onLocationRead?.(state);
+
+                return { uri, range: null };
+            }
         },
         getFastDocumentSnapshot: () => {
             calls.fastSnapshots++;
@@ -284,6 +292,38 @@ const SAME_LENGTH = SOURCE.replace("Var local = value;", "Var lokal = value;");
                 result,
                 null,
                 "Переход по смещениям прежней версии увёл бы курсор не туда"
+            );
+        }
+    );
+
+    await test(
+        "Definition не отвечает по версии, изменившейся при чтении файла",
+        async () => {
+            /*
+             * Место объявления читается из файла назначения — это ожидание.
+             * Если за него документ изменился, ответ по прежним смещениям
+             * открыл бы не то место.
+             */
+            const { handlers, state } = createRegistry({
+                uri: URI,
+                source: SOURCE,
+                onLocationRead: current => bumpVersion(current, CHANGED)
+            });
+
+            const result = await handlers.definition(
+                {
+                    textDocument: { uri: URI },
+                    position: state.document.positionAt(
+                        SOURCE.indexOf("Target(created)")
+                    )
+                },
+                { isCancellationRequested: false }
+            );
+
+            assert.strictEqual(
+                result,
+                null,
+                "переход по смещениям прежней версии уводил бы не туда"
             );
         }
     );

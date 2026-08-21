@@ -218,14 +218,6 @@ function resolveName(
         };
     }
 
-    const global = signatures.filter(item => item.scope === -1 &&
-        !item.isMethod);
-
-    if (global.length > 1) {
-        /* Два одноимённых объявления файла: выбирать между ними нельзя. */
-        return { kind: "ambiguous" };
-    }
-
     if (context.fastIndex.classes.has(key)) {
         /* Класс этого файла: место объявления знает индекс версии. */
         const info = findFastClass(context.fastIndex, token.value,
@@ -291,18 +283,38 @@ function visibleSignature(
         return undefined;
     }
 
+    /*
+     * Среди одноимённых в ОДНОЙ области побеждает последнее объявление:
+     * так же поступает полная модель, а расходиться с ней нельзя — ответ
+     * не имеет права зависеть от того, закончился ли разбор.
+     */
     for (const scope of scopeChainAt(context.fastIndex, context.offset)) {
-        const found = candidates.find(item => item.scope === scope);
+        const found = lastMatching(candidates, item =>
+            item.scope === scope
+        );
 
         if (found) {
             return found;
         }
     }
 
-    const global = candidates.filter(item => item.scope === -1 &&
-        !item.isMethod);
+    return lastMatching(candidates, item =>
+        item.scope === -1 && !item.isMethod
+    );
+}
 
-    return global.length === 1 ? global[0] : undefined;
+/** Последнее подходящее объявление: побеждает написанное ниже. */
+function lastMatching(
+    candidates: readonly IFastSignature[],
+    matches: (item: IFastSignature) => boolean
+): IFastSignature | undefined {
+    for (let at = candidates.length - 1; at >= 0; at--) {
+        if (matches(candidates[at])) {
+            return candidates[at];
+        }
+    }
+
+    return undefined;
 }
 
 /** Известна ли иерархия класса целиком: только тогда «члена нет» доказуемо. */
@@ -326,7 +338,6 @@ function classChainIsKnown(
      */
     return levels > 0 && !pending;
 }
-
 
 function isCallableSymbolKind(kind: CompletionItemKind | undefined): boolean {
     return kind === CompletionItemKind.Function ||

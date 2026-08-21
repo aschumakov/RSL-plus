@@ -341,27 +341,41 @@ export function createRslInteractiveHandlers(
                     }
                 }
 
-                const reference = resolveRslReference(
-                    context,
-                    environment.index,
-                    environment.resolver
-                );
-
-                if (isFinalOutcome(reference)) {
-                    outcomeName = reference.kind;
-                    return null;
-                }
-
-                if (reference.kind === "resolved") {
-                    const target = findRslReferenceDefinition(
+                /*
+                 * Индекс версии строится только пока модели нет.
+                 *
+                 * Он стоит около 50 мс на файле 584 КБ и 6,6 МиБ памяти, а
+                 * готовая модель отвечает на то же самое и знает больше.
+                 * Прежде первый переход после разбора строил индекс заново —
+                 * задержка появлялась как будто случайно, в зависимости от
+                 * того, что успело закончиться раньше.
+                 */
+                if (!context.module) {
+                    const reference = resolveRslReference(
                         context,
                         environment.index,
-                        reference.reference
+                        environment.resolver
                     );
 
-                    if (target) {
-                        outcomeName = originName(reference.reference);
-                        return context.isStale() ? null : target;
+                    if (isFinalOutcome(reference)) {
+                        outcomeName = reference.kind;
+                        return null;
+                    }
+
+                    if (reference.kind === "resolved") {
+                        const target = findRslReferenceDefinition(
+                            context,
+                            environment.index,
+                            reference.reference
+                        );
+
+                        if (target) {
+                            outcomeName = originName(
+                                reference.reference
+                            );
+
+                            return context.isStale() ? null : target;
+                        }
                     }
                 }
 
@@ -397,11 +411,14 @@ export function createRslInteractiveHandlers(
 
             const version = document.version;
             const context = contextAt(document, params, cancellationToken);
-            const outcome = resolveRslReference(
-                context,
-                environment.index,
-                environment.resolver
-            );
+            /* Индекс версии — только пока модели нет: см. переход. */
+            const outcome = context.module
+                ? { kind: "needs-model" as const }
+                : resolveRslReference(
+                    context,
+                    environment.index,
+                    environment.resolver
+                );
 
             if (isFinalOutcome(outcome)) {
                 return null;
@@ -689,23 +706,36 @@ async function modelDefinition(
         );
 
         if (baseClass && baseClass.uri !== RSL_BUILTIN_URI) {
-            return {
-                target: await definitionProvider.createObjectLocationByUri(
+            const base = await definitionProvider
+                .createObjectLocationByUri(
                     baseClass.uri,
                     baseClass.symbol
-                ),
-                outcome: "baseInitializer"
-            };
+                );
+
+            return stale()
+                ? { target: null, outcome: "cancelled" }
+                : { target: base, outcome: "baseInitializer" };
         }
 
         return { target: null, outcome: "builtin" };
     }
 
+    /*
+     * Место объявления читается из файла назначения, а это ожидание: за него
+     * документ мог уйти вперёд. Ответ по прежним смещениям открыл бы не то
+     * место, поэтому версия сверяется и здесь — последней проверкой.
+     */
+    const target = await definitionProvider.createObjectLocationByUri(
+        resolved.uri,
+        resolved.symbol
+    );
+
+    if (stale()) {
+        return { target: null, outcome: "cancelled" };
+    }
+
     return {
-        target: await definitionProvider.createObjectLocationByUri(
-            resolved.uri,
-            resolved.symbol
-        ),
+        target,
         outcome: resolved.uri === document.uri ? "local" : "imported"
     };
 }
@@ -741,4 +771,3 @@ function waitForParseBudget(
         pending.then(finish, finish);
     });
 }
-

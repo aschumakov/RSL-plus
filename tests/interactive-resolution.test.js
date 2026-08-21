@@ -373,14 +373,45 @@ test("доказанное отсутствие члена не заставля
         "разбор не нужен: отсутствие члена доказано"
     );
 
-    /* А вот получатель без известного типа — это как раз работа модели. */
+    /*
+     * Имя, объявленное в этом файле, тоже отвечается без разбора: место
+     * объявления знает индекс версии.
+     */
+    const own = stand(platform, false);
+
+    await request(own, "definition", "  Var a = Shar");
+
+    assert.strictEqual(own.parses, 0, "процедура своего файла");
+
+    /* А вот неизвестное имя — это как раз работа модели. */
     const needsModel = stand(platform, false);
 
-    await request(needsModel, "hover", "  Var a = Shar");
+    await request(needsModel, "hover", "  Var b = Twi");
 
-    assert.ok(
-        needsModel.parses >= 0,
-        "запрос по имени файла разбора не требует"
+    assert.strictEqual(
+        needsModel.parses,
+        0,
+        "неоднозначное имя тоже не требует разбора: выбирать нечего"
+    );
+});
+
+test("при готовой модели индекс версии не строится", async () => {
+    /*
+     * Индекс версии стоит около 50 мс на файле 584 КБ и 6,6 МиБ памяти.
+     * Пока модель этой версии готова, он не нужен вовсе: переход и
+     * переход к типу отвечают по ней. Прежде первый запрос после
+     * разбора строил индекс заново.
+     */
+    const platform = new PlatformModuleCatalog({ log: () => undefined });
+    const current = stand(platform, true);
+
+    await request(current, "definition", "  Var a = Shar");
+    await request(current, "typeDefinition", "  Var d = thin");
+
+    assert.strictEqual(
+        current.snapshotRequests,
+        0,
+        "снимок версии не понадобился ни разу"
     );
 });
 

@@ -406,7 +406,14 @@ async function measureMode(label, source, platform, options) {
     await platform.ensureIndexLoaded();
     await platform.ensureModules(["RsbFormsInter", "CommonInter"]);
 
-    const source = mainSource(Number(process.argv[2] || 2000));
+    /*
+ * Размер по умолчанию — как у крупного модуля репозитория.
+ *
+ * На 55 КБ ни построение индекса версии, ни разбор не видны: всё
+ * укладывается в единицы миллисекунд, и замер перестаёт отвечать на
+ * вопрос, ради которого он написан.
+ */
+const source = mainSource(Number(process.argv[2] || 20000));
 
     /* Те же файлы на диске: их ищет переход по имени модуля. */
     fs.writeFileSync(path.join(WORKSPACE, "lib.mac"), LIB_SOURCE, "utf8");

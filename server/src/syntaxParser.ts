@@ -1610,14 +1610,7 @@ class Parser {
             }
         }
 
-        /*
-         * Заголовки MACRO и CLASS не проверяются.
-         *
-         * В проверенном репозитории «;» после подписи процедуры или после
-         * заголовка класса — устоявшийся стиль: 229 и 20 случаев на 800
-         * файлов против 67 у IF и WHILE. Предупреждать о стиле значит
-         * похоронить в шуме те находки, ради которых проверка и нужна.
-         */
+        this.checkHeaderSemicolon("MACRO");
         const body = this.parseStatementList(new Set(["onerror", "end"]));
         const children = [...parameters.nodes, ...body];
 
@@ -1687,6 +1680,8 @@ class Parser {
         }
 
         const parameters = this.parseParameterList();
+        this.checkHeaderSemicolon("CLASS");
+
         const body = this.parseStatementList(new Set(["end"]));
         const endToken = this.expectWord("end", "Для CLASS не найден END");
 
@@ -1998,12 +1993,7 @@ class Parser {
             }
         }
 
-        /*
-         * «;» после ONERROR(err) не проверяется: так этот обработчик и
-         * пишут — объявление переменной ошибки заканчивается точкой с
-         * запятой, а тело идёт ниже. В проверенном репозитории такая
-         * запись встречается постоянно.
-         */
+        this.checkHeaderSemicolon("ONERROR");
         appendAll(children, this.parseStatementList(new Set(["end"])));
         return this.node(
             "OnErrorClause",

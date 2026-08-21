@@ -746,6 +746,102 @@ test("ONERROR проверяется по допустимой области и
     ));
 });
 
+/** Неиспользуемые параметры так, как их видит пользователь. */
+function unusedParameters(lines) {
+    const index = new WorkspaceIndex();
+    const uri = "file:///setparm.mac";
+    index.registerWorkspaceFiles([uri]);
+    const opened = index.updateOpenModule(
+        uri,
+        lines.join(String.fromCharCode(10)) + String.fromCharCode(10),
+        1
+    );
+    const engine = new RslDiagnosticEngine();
+
+    return [
+        ...engine.buildLocal(opened, index),
+        ...engine.buildWorkspace(opened, index)
+    ]
+        .filter(item => item.code === "unused-declaration")
+        .map(item => item.message)
+        .filter(message => /^Параметр /.test(message))
+        .map(message => message.replace("Параметр ", "").split(" ")[0]);
+}
+
+test("SetParm отмечает позиционный параметр использованным", () => {
+    /*
+     * `SetParm(2, res)` записывает значение в третий параметр вызова: имя
+     * параметра в тексте не встречается, но он — часть выходного контракта.
+     */
+    assert.deepStrictEqual(
+        unusedParameters([
+            "Macro Handler(pTypeClient, pClient, pResult)",
+            "  Var res = 1;",
+            "  SetParm(2, res);",
+            "End;"
+        ]),
+        ["pTypeClient", "pClient"],
+        "третий параметр отдан наружу, о нём предупреждать нельзя"
+    );
+});
+
+test("SetParm с вычисленным номером снимает проверку параметров", () => {
+    assert.deepStrictEqual(
+        unusedParameters([
+            "Macro Handler(pTypeClient, pClient, pResult)",
+            "  Var res = 1;",
+            "  Var at = 2;",
+            "  SetParm(at, res);",
+            "End;"
+        ]),
+        [],
+        "какой параметр заполняется — неизвестно, значит молчим обо всех"
+    );
+});
+
+test("своя SetParm и obj.SetParm на проверку не влияют", () => {
+    assert.deepStrictEqual(
+        unusedParameters([
+            "Macro SetParm(a, b)",
+            "  return a;",
+            "End;",
+            "Macro Handler(pTypeClient, pClient, pResult)",
+            "  Var res = 1;",
+            "  SetParm(2, res);",
+            "End;"
+        ]),
+        ["b", "pTypeClient", "pClient", "pResult"],
+        "встроенная SetParm тут перекрыта своей процедурой"
+    );
+    assert.deepStrictEqual(
+        unusedParameters([
+            "Macro Handler(pTypeClient, pClient, pResult)",
+            "  Var obj = 1;",
+            "  Var res = 2;",
+            "  obj.SetParm(2, res);",
+            "End;"
+        ]),
+        ["pTypeClient", "pClient", "pResult"],
+        "член объекта с тем же именем к параметрам отношения не имеет"
+    );
+});
+
+test("SetParm вложенной Macro не отмечает параметры внешней", () => {
+    assert.deepStrictEqual(
+        unusedParameters([
+            "Macro Outer(pOuterOne, pOuterTwo, pOuterThree)",
+            "  Macro Inner(pInner)",
+            "    Var res = 1;",
+            "    SetParm(0, res);",
+            "  End;",
+            "  return Inner(1);",
+            "End;"
+        ]),
+        ["pOuterOne", "pOuterTwo", "pOuterThree"],
+        "заполняется параметр вложенной процедуры, а не внешней"
+    );
+});
+
 test("Diagnostic engine подключает правила через реестр и применяет лимит", () => {
     const source = "Macro Test()\nEnd;";
     const index = new WorkspaceIndex();
