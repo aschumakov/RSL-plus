@@ -108,27 +108,12 @@ for (const [name, marker] of NAVIGATION) {
     });
 }
 
-test("переход одинаков до и после готовности модели", async () => {
-    const platform = new PlatformModuleCatalog({ log: () => undefined });
-    const fast = stand(platform, false);
-    const full = stand(platform, true);
-
-    for (const [, marker] of NAVIGATION) {
-        const before = await request(fast, "definition", marker);
-        const after = await request(full, "definition", marker);
-        const uriOf = value => {
-            const target = Array.isArray(value) ? value[0] : value;
-
-            return target ? target.uri : "нет ответа";
-        };
-
-        assert.strictEqual(
-            uriOf(before),
-            uriOf(after),
-            "быстрый и полный путь обязаны вести в один файл: " + marker
-        );
-    }
-});
+/*
+ * Сверка быстрого пути с готовой моделью живёт в interactive-differential:
+ * там настоящий провайдер определений и файлы на диске, без которых полный
+ * путь не отвечает на переход по имени модуля, и сравнивается весь результат
+ * целиком, а не только файл.
+ */
 
 /* --- Hover --- */
 

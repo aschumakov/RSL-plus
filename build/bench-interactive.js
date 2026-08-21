@@ -17,7 +17,10 @@
  *   node build/bench-interactive.js
  */
 
+const fs = require("fs");
+const os = require("os");
 const path = require("path");
+const { pathToFileURL } = require("url");
 
 const ROOT = path.resolve(__dirname, "..");
 const OUT = path.join(ROOT, "server", "out");
@@ -59,8 +62,18 @@ const SETTINGS = {
     editor: { completeBlocksOnEnter: false }
 };
 
-const MAIN = "file:///d:/bench/main.mac";
-const LIB = "file:///d:/bench/lib.mac";
+/*
+ * Файлы стенда лежат на диске.
+ *
+ * Переход по имени модуля в Import ищет файл в рабочей папке — как и в
+ * настоящем проекте. С выдуманными URI этот замер показывал бы «ответа
+ * нет» там, где у пользователя переход работает.
+ */
+const WORKSPACE = fs.mkdtempSync(
+    path.join(os.tmpdir(), "rsl-bench-")
+);
+const MAIN = pathToFileURL(path.join(WORKSPACE, "main.mac")).toString();
+const LIB = pathToFileURL(path.join(WORKSPACE, "lib.mac")).toString();
 
 const LIB_SOURCE = [
     "Macro Shared(value)",
@@ -394,6 +407,10 @@ async function measureMode(label, source, platform, options) {
     await platform.ensureModules(["RsbFormsInter", "CommonInter"]);
 
     const source = mainSource(Number(process.argv[2] || 2000));
+
+    /* Те же файлы на диске: их ищет переход по имени модуля. */
+    fs.writeFileSync(path.join(WORKSPACE, "lib.mac"), LIB_SOURCE, "utf8");
+    fs.writeFileSync(path.join(WORKSPACE, "main.mac"), source, "utf8");
     console.log("образец " + Math.round(source.length / 1024) + " КБ");
 
     /*
@@ -444,6 +461,7 @@ async function measureMode(label, source, platform, options) {
     await measureMode("под фоновым расчётом Problems:",
         source, platform, { stand: warm, target: 50 });
     await stop();
+    fs.rmSync(WORKSPACE, { recursive: true, force: true });
 })().catch(error => {
     console.error(error);
     process.exitCode = 1;

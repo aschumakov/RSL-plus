@@ -116,6 +116,15 @@ const WITH_UNUSED_IMPORT = [
     ""
 ].join("\n");
 
+const USES_IMPORT = [
+    "Import lib;",
+    "Macro Test()",
+    "  Var value = 1;",
+    "  value = Helper(value);",
+    "End;",
+    ""
+].join("\n");
+
 const WITH_LOCAL_ERROR = [
     "Import lib;",
     "Macro Test()",
@@ -175,6 +184,41 @@ test("локальная ошибка исчезает после правки",
             .includes("missing-member-name"),
         "после правки ошибки быть не должно"
     );
+});
+
+test("после появления вызова Import не остаётся неиспользуемым", async () => {
+    /*
+     * Ответ межфайловых проверок зависит от всего текста файла. Вызов,
+     * добавленный ниже, делает `unused-import` неверным, хотя диапазон
+     * находки не сдвинулся ни на символ: перенести её на новый текст —
+     * значит показать несуществующую ошибку.
+     */
+    const stand = createStand(WITH_UNUSED_IMPORT);
+    stand.coordinator.scheduleLocal(MAIN, 0);
+    stand.coordinator.scheduleWorkspace(MAIN, 0);
+    await settle();
+
+    assert.ok(
+        codes(stand.publications[stand.publications.length - 1])
+            .includes("unused-import"),
+        "сначала Import действительно не используется"
+    );
+
+    const before = stand.publications.length;
+    stand.change(USES_IMPORT);
+    stand.coordinator.scheduleLocal(MAIN, 0);
+    await settle();
+
+    const after = stand.publications.slice(before);
+    assert.ok(after.length > 0, "публикация после правки обязана быть");
+
+    for (const publication of after) {
+        assert.ok(
+            !codes(publication).includes("unused-import"),
+            "Import используется — находки о нём быть не может: " +
+                codes(publication).join(", ")
+        );
+    }
 });
 
 test("межфайловая ошибка не переносится на правленый текст", async () => {

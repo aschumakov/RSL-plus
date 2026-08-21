@@ -6,7 +6,8 @@ import type { RslSymbol } from "../symbols/rslSymbol";
 import {
     findFastClass,
     type IFastClassInfo,
-    type IFastCompletionIndex
+    type IFastCompletionIndex,
+    type IFastSignature
 } from "./fastCompletionIndex";
 import { buildRslFastOwnClassMembers } from "./fastCompletionProvider";
 
@@ -142,6 +143,16 @@ export interface IRslClassMember {
     typeName: string;
     /** Файл, где объявлен класс уровня; undefined — прикладной каталог. */
     moduleUri?: string;
+    /**
+     * Подпись метода класса ЭТОГО файла.
+     *
+     * У членов чужих модулей её заменяет symbol. Без неё подсказка
+     * параметров молчала на методах локального класса — и на открытых, и
+     * на приватных.
+     */
+    signature?: IFastSignature;
+    /** Член объявлен приватным. */
+    isPrivate?: boolean;
 }
 
 /**
@@ -163,11 +174,22 @@ export function findRslClassMember(
                 normalizeIdentifier(member.name) === wanted
             );
 
-            if (found) {
+            /*
+             * Приватный член виден только внутри своего класса. Снаружи
+             * поиск продолжается по базовым: там может быть открытый
+             * одноимённый, и именно он доступен через объект.
+             */
+            if (found && (!found.isPrivate || insideClass(level.info, options.offset))) {
                 return {
                     name: found.name,
                     typeName: found.typeName,
-                    moduleUri: options.uri
+                    moduleUri: options.uri,
+                    isPrivate: found.isPrivate,
+                    signature: ownMethodSignature(
+                        options.fastIndex,
+                        level.info,
+                        found.name
+                    )
                 };
             }
 
@@ -232,10 +254,19 @@ export function collectRslClassMembers(
 export function findRslClassDeclaration(
     className: string,
     options: IRslClassChainOptions
-): { moduleUri: string; symbol?: RslSymbol; start?: number } | undefined {
+): {
+    moduleUri: string;
+    symbol?: RslSymbol;
+    nameStart?: number;
+    nameEnd?: number;
+} | undefined {
     for (const level of walkRslClassChain(className, options)) {
         if (level.kind === "own") {
-            return { moduleUri: options.uri, start: level.info.start };
+            return {
+                moduleUri: options.uri,
+                nameStart: level.info.nameStart,
+                nameEnd: level.info.nameEnd
+            };
         }
 
         if (level.value.moduleUri) {
@@ -253,6 +284,33 @@ export function findRslClassDeclaration(
     }
 
     return undefined;
+}
+
+/** Стоит ли позиция запроса внутри тела класса. */
+function insideClass(
+    info: IFastClassInfo,
+    offset: number | undefined
+): boolean {
+    return offset !== undefined &&
+        offset >= info.start &&
+        offset <= info.end;
+}
+
+/** Подпись метода класса этого файла: по имени и по владельцу. */
+function ownMethodSignature(
+    fastIndex: IFastCompletionIndex | undefined,
+    info: IFastClassInfo,
+    memberName: string
+): IFastSignature | undefined {
+    if (!fastIndex) {
+        return undefined;
+    }
+
+    const candidates = fastIndex.signatures.get(
+        normalizeIdentifier(memberName)
+    );
+
+    return candidates?.find(item => item.ownerStart === info.start);
 }
 
 /** Открытые члены символа класса: приватные чужого модуля недоступны. */

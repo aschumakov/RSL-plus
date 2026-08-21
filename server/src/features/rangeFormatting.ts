@@ -164,8 +164,21 @@ function openBlocksBefore(
             return depth;
         }
 
+        if (token.kind === "newline") {
+            /*
+             * Перевод строки заканчивает обращение через точку.
+             *
+             * Иначе незавершённое `obj.` в конце строки делало
+             * следующий END «именем после точки», END не засчитывался,
+             * и кусок форматировался с чужого уровня отступа. Ровно
+             * эта ошибка уже была в быстрых подсказках.
+             */
+            previous = undefined;
+            continue;
+        }
+
         if (
-            token.kind === "whitespace" || token.kind === "newline" ||
+            token.kind === "whitespace" ||
             token.kind === "comment" || token.kind === "bom"
         ) {
             continue;

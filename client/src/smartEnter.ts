@@ -66,6 +66,78 @@ export function plainEnterIndent(
     return indent.slice(0, character);
 }
 
+/** Что именно сделал перехваченный Enter. */
+export type RslEnterKind = "snippet" | "plain";
+
+export interface IRslEnterSample {
+    kind: RslEnterKind;
+    /** Всё нажатие: от вызова команды до возврата. */
+    totalMs: number;
+    /** Только правка документа: insertSnippet или editor.edit. */
+    editMs: number;
+}
+
+export interface IRslEnterTimings {
+    record(sample: IRslEnterSample): void;
+    /** Сводка для журнала; undefined — замеров ещё не было. */
+    summary(): string | undefined;
+    count(): number;
+}
+
+/**
+ * Замеры перехваченного Enter.
+ *
+ * Нужны, чтобы отвечать на жалобу «курсор отстаёт» числами, а не
+ * догадками: видно и полное время нажатия, и отдельно правку документа.
+ * Обычный Enter при выключенной настройке до расширения не доходит
+ * вовсе, и здесь его нет — что само по себе ответ на часть вопроса.
+ */
+export function createRslEnterTimings(
+    limit: number = 200
+): IRslEnterTimings {
+    const samples: IRslEnterSample[] = [];
+
+    const percentile = (values: number[], share: number): number => {
+        const sorted = [...values].sort((left, right) => left - right);
+        const at = Math.min(
+            sorted.length - 1,
+            Math.floor(sorted.length * share)
+        );
+
+        return sorted[at];
+    };
+
+    return {
+        record(sample: IRslEnterSample): void {
+            samples.push(sample);
+
+            if (samples.length > limit) {
+                samples.shift();
+            }
+        },
+        count(): number {
+            return samples.length;
+        },
+        summary(): string | undefined {
+            if (samples.length === 0) {
+                return undefined;
+            }
+
+            const total = samples.map(item => item.totalMs);
+            const edit = samples.map(item => item.editMs);
+            const snippets = samples.filter(item => item.kind === "snippet");
+
+            return "Enter: нажатий " + samples.length +
+                ", завершено блоков " + snippets.length +
+                "; всё нажатие p50 " + percentile(total, 0.5).toFixed(1) +
+                " мс, p95 " + percentile(total, 0.95).toFixed(1) +
+                " мс, максимум " + Math.max(...total).toFixed(1) +
+                " мс; правка документа p95 " +
+                percentile(edit, 0.95).toFixed(1) + " мс";
+        }
+    };
+}
+
 export function isRslBlockHeader(value: string): boolean {
     const text = value.trim();
     return CONDITION_BLOCK.test(text) ||

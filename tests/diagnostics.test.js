@@ -46,6 +46,31 @@ function createModule(index, uri, source, open = true) {
         : index.updateExternalModule(uri, source, 1);
 }
 
+/*
+ * Обратный слеш в тексте строки — это просто символ.
+ *
+ * Предупреждение о «неизвестной escape-последовательности» строилось на
+ * догадке о закрытом наборе последовательностей, а в реальном коде
+ * репозитория такие строки — обычное дело: `\п` внутри русского
+ * текста означает ровно то, что написано.
+ */
+test("обратный слеш в строке не даёт Problems", () => {
+    const found = diagnosticsFor([
+        "Macro Test()",
+        '  Var text = "аресты*\\п*ретензии";',
+        '  Var path = "c:\\папка\\файл.txt";',
+        "  return text + path;",
+        "End;",
+        ""
+    ].join(String.fromCharCode(10)));
+
+    assert.deepStrictEqual(
+        found.map(item => item.code + ': ' + item.message),
+        [],
+        "в этом тексте ошибок нет"
+    );
+});
+
 function diagnosticsFor(source, setup, settings) {
     const index = new WorkspaceIndex();
     index.registerWorkspaceFiles(["file:///main.mac"]);

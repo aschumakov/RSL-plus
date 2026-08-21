@@ -4,8 +4,7 @@ const assert = require("assert");
 const path = require("path");
 const {
     lexRsl,
-    tokenAtOffset,
-    findUnrecognizedEscapes
+    tokenAtOffset
 } = require(path.join(
     __dirname,
     "..",
@@ -197,15 +196,6 @@ test("Денежная и шестнадцатеричная константа 
     );
 });
 
-test("Нераспознанная escape-последовательность обнаруживается", () => {
-    assert.deepStrictEqual(findUnrecognizedEscapes('"\\P"'), [1]);
-    assert.deepStrictEqual(findUnrecognizedEscapes('"\\n"'), []);
-    assert.deepStrictEqual(findUnrecognizedEscapes('"\\""'), []);
-    assert.deepStrictEqual(findUnrecognizedEscapes("\"\\'\""), []);
-    assert.deepStrictEqual(findUnrecognizedEscapes('"\\x41"'), []);
-    assert.deepStrictEqual(findUnrecognizedEscapes('"\\xZZ"'), [1]);
-    assert.deepStrictEqual(findUnrecognizedEscapes('"no escapes"'), []);
-});
 
 /* --- точечный relex больших файлов ---------------------------------- */
 

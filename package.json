@@ -377,7 +377,8 @@
       "perf-report": "node build/perf-report.js",
       "bench:completion": "npm run compile && node build/bench-completion.js",
       "bench:interactive": "npm run compile && node build/bench-interactive.js",
-      "bench:problems": "npm run compile && node build/bench-problems.js"
+      "bench:problems": "npm run compile && node build/bench-problems.js",
+      "bench:fast-index": "npm run compile && node --expose-gc build/bench-fast-index.js"
    },
    "devDependencies": {
       "@types/node": "22.16.5",

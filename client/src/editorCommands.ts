@@ -4,6 +4,7 @@ import {
     EndOfLine,
     env,
     ExtensionContext,
+    type OutputChannel,
     Position,
     Range,
     Selection,
@@ -16,8 +17,10 @@ import type { LanguageClient } from "vscode-languageclient/node";
 
 import {
     buildRslSmartEnterSnippet,
+    createRslEnterTimings,
     isRslBlockHeader,
-    plainEnterIndent
+    plainEnterIndent,
+    type RslEnterKind
 } from "./smartEnter";
 
 const SMART_ENTER_LOOKAHEAD_LINES = 128;
@@ -56,7 +59,55 @@ export function registerEditorCommands(
     );
 }
 
+/*
+ * Журнал замеров Enter.
+ *
+ * Заводится при первом перехваченном нажатии: у тех, кто оставил
+ * настройку выключенной, Enter сюда не приходит, и канал не появляется.
+ */
+const enterTimings = createRslEnterTimings();
+let enterChannel: OutputChannel | undefined;
+
+/* Отклик, за которым нажатие уже заметно: о нём стоит сообщить сразу. */
+const SLOW_ENTER_MS = 16;
+const ENTER_SUMMARY_EVERY = 25;
+
+function reportEnter(
+    kind: RslEnterKind,
+    totalMs: number,
+    editMs: number
+): void {
+    enterTimings.record({ kind, totalMs, editMs });
+
+    const slow = totalMs >= SLOW_ENTER_MS;
+    const periodic = enterTimings.count() % ENTER_SUMMARY_EVERY === 0;
+
+    if (!slow && !periodic) {
+        return;
+    }
+
+    if (!enterChannel) {
+        enterChannel = window.createOutputChannel("RSL: Enter");
+    }
+
+    if (slow) {
+        enterChannel.appendLine(
+            "медленное нажатие: всё " + totalMs.toFixed(1) +
+                " мс, правка " + editMs.toFixed(1) + " мс, " + kind
+        );
+    }
+
+    if (periodic) {
+        const summary = enterTimings.summary();
+
+        if (summary) {
+            enterChannel.appendLine(summary);
+        }
+    }
+}
+
 async function smartEnter(): Promise<void> {
+    const started = performance.now();
     const editor = window.activeTextEditor;
     if (!editor || editor.document.languageId !== "rsl") {
         return;
@@ -74,7 +125,9 @@ async function smartEnter(): Promise<void> {
     const selection = editor.selection;
 
     if (!selection.isEmpty || editor.selections.length !== 1) {
-        await defaultEnter(editor);
+        const editMs = await defaultEnter(editor);
+
+        reportEnter("plain", performance.now() - started, editMs);
         return;
     }
 
@@ -90,7 +143,9 @@ async function smartEnter(): Promise<void> {
         afterCursor.trim().length > 0 ||
         !isRslBlockHeader(beforeCursor)
     ) {
-        await defaultEnter(editor);
+        const editMs = await defaultEnter(editor);
+
+        reportEnter("plain", performance.now() - started, editMs);
         return;
     }
     const tabSize = typeof editor.options.tabSize === "number"
@@ -109,14 +164,24 @@ async function smartEnter(): Promise<void> {
     });
 
     if (!snippet) {
-        await defaultEnter(editor);
+        const editMs = await defaultEnter(editor);
+
+        reportEnter("plain", performance.now() - started, editMs);
         return;
     }
+
+    const editStarted = performance.now();
 
     await editor.insertSnippet(
         new SnippetString(snippet),
         new Range(position, line.range.end),
         { undoStopBefore: true, undoStopAfter: true }
+    );
+
+    reportEnter(
+        "snippet",
+        performance.now() - started,
+        performance.now() - editStarted
     );
 }
 
@@ -149,7 +214,7 @@ function findNextNonEmptyLine(
  */
 async function defaultEnter(
     editor: NonNullable<typeof window.activeTextEditor>
-): Promise<void> {
+): Promise<number> {
     const eol = editor.document.eol === EndOfLine.CRLF ? "\r\n" : "\n";
     const position = editor.selection.active;
     const indent = plainEnterIndent(
@@ -157,13 +222,18 @@ async function defaultEnter(
         position.character
     );
 
+    const editStarted = performance.now();
+
     await editor.edit(
         builder => builder.insert(position, `${eol}${indent}`),
         { undoStopBefore: true, undoStopAfter: false }
     );
 
+    const editMs = performance.now() - editStarted;
     const landing = new Position(position.line + 1, indent.length);
     editor.selection = new Selection(landing, landing);
+
+    return editMs;
 }
 
 async function foldAllMacros(): Promise<void> {

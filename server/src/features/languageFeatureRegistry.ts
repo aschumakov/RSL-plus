@@ -1,6 +1,7 @@
 import {
     CancellationToken,
     CodeActionKind,
+    CompletionItemKind,
     CodeActionParams,
     CodeActionTriggerKind,
     Definition,
@@ -50,7 +51,11 @@ import {
     resolveBlockNavigationPosition
 } from "./blockNavigation";
 import type { IRslSettings } from "../interfaces";
-import { tokenAtOffset, type IRslToken } from "../lexer";
+import {
+    normalizeIdentifier,
+    tokenAtOffset,
+    type IRslToken
+} from "../lexer";
 import {
     describeFormatSpecifier,
     getFormatSpecifierAt
@@ -215,6 +220,21 @@ export class RslLanguageFeatureRegistry {
                 document.offsetAt(params.position),
                 cancellationToken
             );
+            if (fastContext.module) {
+                /*
+                 * Модель этой версии готова — ждать нечего, а знает она
+                 * больше: тип из присваивания, объявленный тип
+                 * результата, документацию. Быстрый ответ нужен только
+                 * пока модель строится, и подменять им готовый значило
+                 * бы отдавать пользователю обеднённую подсказку.
+                 */
+                return buildRslSignatureHelp(
+                    fastContext.module,
+                    resolver,
+                    fastContext.offset
+                );
+            }
+
             const fastHelp = buildRslFastSignatureHelp(
                 fastContext,
                 index,
@@ -223,20 +243,6 @@ export class RslLanguageFeatureRegistry {
 
             if (fastHelp) {
                 return fastHelp;
-            }
-
-            if (fastContext.module) {
-                /*
-                 * Модель этой же версии уже есть — ждать нечего, а знает
-                 * она больше: тип переменной, выведенный из присваивания,
-                 * быстрому индексу недоступен. Раньше здесь возвращался
-                 * null, и подсказка по такому вызову пропадала совсем.
-                 */
-                return buildRslSignatureHelp(
-                    fastContext.module,
-                    resolver,
-                    fastContext.offset
-                );
             }
 
             await waitForParseBudget(
@@ -307,7 +313,15 @@ export class RslLanguageFeatureRegistry {
                 };
             }
 
-            const fastHover = buildRslFastHover(fast, index, resolver);
+            /*
+             * Быстрый Hover — ответ на время разбора. У готовой модели он
+             * богаче: объявление целиком, класс-контейнер, файл и строка,
+             * — и перехватывать её ответ значит показывать меньше того,
+             * что уже посчитано.
+             */
+            const fastHover = fast.module
+                ? undefined
+                : buildRslFastHover(fast, index, resolver);
 
             if (fastHover) {
                 return fastHover;
@@ -402,11 +416,14 @@ export class RslLanguageFeatureRegistry {
                 document.offsetAt(params.position),
                 cancellationToken
             );
-            const target = findRslFastTypeDefinition(
-                context,
-                this.environment.index,
-                resolver
-            );
+            /* Модель этой версии готова — отвечает она: см. Hover. */
+            const target = context.module
+                ? undefined
+                : findRslFastTypeDefinition(
+                    context,
+                    this.environment.index,
+                    resolver
+                );
 
             if (target) {
                 return context.isStale() ? null : target;
@@ -450,25 +467,39 @@ export class RslLanguageFeatureRegistry {
                 resolved.symbol,
                 full.offset
             );
-            const typeSymbol = typeName
-                ? resolver.findFastClass(
+            if (!typeName) {
+                return null;
+            }
+
+            /*
+             * Класс своего файла ищется в самой модели: справочник классов
+             * знает только подключённые модули и прикладной каталог, и
+             * переход к типу локального класса из-за этого не работал.
+             */
+            const wanted = normalizeIdentifier(typeName);
+            const ownClass = model.symbolTree.children.find(child =>
+                child.kind === CompletionItemKind.Class &&
+                normalizeIdentifier(child.name) === wanted
+            );
+            const found = ownClass
+                ? { moduleUri: document.uri, symbol: ownClass }
+                : resolver.findFastClass(
                     document.uri,
                     typeName,
-                    full.fastIndex.imports
-                )
-                : undefined;
+                    full.imports
+                );
 
-            if (!typeSymbol || !typeSymbol.moduleUri) {
+            if (!found || !found.moduleUri) {
                 return null;
             }
 
             const range = this.environment.index.getDefinitionRange(
-                typeSymbol.moduleUri,
-                typeSymbol.symbol
+                found.moduleUri,
+                found.symbol
             );
 
             return {
-                uri: typeSymbol.moduleUri,
+                uri: found.moduleUri,
                 range: range || {
                     start: { line: 0, character: 0 },
                     end: { line: 0, character: 0 }
@@ -550,10 +581,13 @@ export class RslLanguageFeatureRegistry {
                     document.offsetAt(params.position),
                     cancellationToken
                 );
-                const fastTarget = findRslFastDefinition(
-                    fast,
-                    this.environment.index
-                );
+                /* Модель этой версии готова — отвечает она: см. Hover. */
+                const fastTarget = fast.module
+                    ? undefined
+                    : findRslFastDefinition(
+                        fast,
+                        this.environment.index
+                    );
 
                 if (fastTarget) {
                     if (fast.isStale()) {

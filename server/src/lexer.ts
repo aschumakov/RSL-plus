@@ -1104,69 +1104,6 @@ function advanceCharacter(position: IPosition, _value: string): void {
     position.character++;
 }
 
-/*
- * Список распознаваемых escape здесь должен совпадать с decodeRslString
- * ниже — эта функция находит то, что decodeRslString тихо проглатывает
- * (экранирующий слеш убирается, символ остаётся без диагностики).
- */
-export function findUnrecognizedEscapes(raw: string): number[] {
-    if (raw.length < 2) {
-        return [];
-    }
-
-    const quote = raw.charAt(0);
-    const end = raw.charAt(raw.length - 1) === quote
-        ? raw.length - 1
-        : raw.length;
-    const body = raw.substring(1, end);
-
-    if (body.indexOf("\\") < 0) {
-        return [];
-    }
-
-    const offsets: number[] = [];
-
-    for (let index = 0; index < body.length; index++) {
-        const current = body.charAt(index);
-
-        if (current !== "\\" || index + 1 >= body.length) {
-            continue;
-        }
-
-        const escaped = body.charAt(index + 1);
-
-        switch (escaped) {
-            case "n":
-            case "r":
-            case "t":
-            case "f":
-            case "\\":
-            case "\"":
-            case "'":
-                index++;
-                break;
-            case "x":
-            case "X": {
-                const hex = body.substring(index + 2, index + 4);
-
-                if (/^[0-9a-f]{2}$/i.test(hex)) {
-                    index += 3;
-                } else {
-                    offsets.push(index + 1);
-                    index++;
-                }
-                break;
-            }
-            default:
-                offsets.push(index + 1);
-                index++;
-                break;
-        }
-    }
-
-    return offsets;
-}
-
 function decodeRslString(raw: string): string {
     if (raw.length < 2) {
         return raw;

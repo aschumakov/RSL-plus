@@ -56,17 +56,35 @@ export interface IDiagnosticsCoordinatorOptions {
  */
 const READY_WORKSPACE_DELAY_MS = 60;
 
+/*
+ * Сколько локальная фаза ждёт межфайловую, прежде чем опубликовать своё.
+ *
+ * Ждать приходится потому, что межфайловые находки после правки нельзя ни
+ * показать, ни молча убрать. Показать — значит соврать: `unused-import`
+ * зависит от всего текста файла, и добавленный ниже вызов делает находку
+ * неверной, хотя её диапазон не сдвинулся. Убрать — значит мигнуть
+ * подчёркиванием и вернуть его через мгновение.
+ *
+ * Поэтому публикация правленого текста ждёт пересчёта — но не дольше этого
+ * срока: если межфайловая фаза не успела, список выходит без её находок.
+ */
+const WORKSPACE_HOLD_MS = 300;
+
 export class DiagnosticsCoordinator {
     private localTimers = new Map<string, NodeJS.Timeout>();
     private workspaceTimers = new Map<string, NodeJS.Timeout>();
     private workspaceFirstScheduled = new Map<string, number>();
+    /** Отложенные публикации, ждущие межфайловую фазу. */
+    private workspaceHolds = new Map<string, NodeJS.Timeout>();
     private localCache = new Map<string, Diagnostic[]>();
     /**
      * Межфайловый результат вместе с текстом, по которому он посчитан.
      *
-     * Текст нужен, чтобы после правки отличить находки, чьи позиции ещё верны,
-     * от тех, что сдвинулись. Публиковать вторые с номером новой версии
-     * нельзя: подчёркивание указывало бы на другой текст.
+     * Текст нужен, чтобы понять, относится ли результат к тому, что сейчас в
+     * редакторе. Ответ межфайловых проверок зависит от всего текста файла:
+     * `unused-import` перестаёт быть верным от вызова, добавленного в любом
+     * месте ниже. Поэтому правленому тексту достаётся не часть прежних
+     * находок, а пересчёт.
      */
     private workspaceCache = new Map<string, {
         source: string;
@@ -191,6 +209,8 @@ export class DiagnosticsCoordinator {
         this.cancelLocal(uri);
         this.cancelWorkspaceTimer(uri);
         this.workspaceFirstScheduled.delete(uri);
+        /* Отложенная публикация тоже отменяется: ждать больше нечего. */
+        this.releaseHold(uri);
     }
 
     close(uri: string): void {
@@ -342,7 +362,18 @@ export class DiagnosticsCoordinator {
         }
 
         this.staleLocal.delete(uri);
-        await this.publishWhenStillActive(uri);
+
+        if (this.workspaceResultIsStale(uri)) {
+            /*
+             * Межфайловые находки прошлого текста показывать нельзя, а
+             * публиковать список без них — значит погасить подчёркивание и
+             * зажечь его снова. Публикация ждёт пересчёта.
+             */
+            this.holdForWorkspace(uri);
+        } else {
+            await this.publishWhenStillActive(uri);
+        }
+
         if (state.settings.imports.enabled) {
             this.options.onImports(uri, state.module.imports);
         }
@@ -427,6 +458,7 @@ export class DiagnosticsCoordinator {
 
         this.workspaceFirstScheduled.delete(uri);
         this.staleWorkspace.delete(uri);
+        this.releaseHold(uri);
         await this.publishWhenStillActive(uri);
     }
 
@@ -563,14 +595,14 @@ export class DiagnosticsCoordinator {
     /**
      * Межфайловые находки, которые можно показать вместе с текущим текстом.
      *
-     * Пока текст тот же — все. После правки остаются те, что лежат ЦЕЛИКОМ до
-     * места правки: их позиции от правки ниже не двигаются, и это проверяется,
-     * а не предполагается. Остальные не показываются до пересчёта: исчезнуть на
-     * мгновение — меньшее зло, чем подчёркивание не на своём месте.
+     * Только посчитанные по этому самому тексту. Перенос «по неизменившемуся
+     * началу файла» сохранял бы диапазон, но не смысл: `unused-import`,
+     * `redundant-import` и проверки необъявленных имён смотрят на весь файл,
+     * и добавленный ниже вызов делает прежнюю находку неверной, ничего в её
+     * диапазоне не сдвинув.
      *
-     * Так закрывается и мерцание, и ложная диагностика: правка в теле процедуры
-     * не убирает неиспользуемый Import в первой строке файла, а правка в самом
-     * Import не оставляет старое подчёркивание висеть на новом тексте.
+     * Мерцание при этом закрывается не переносом, а ожиданием: см.
+     * holdForWorkspace.
      */
     private transferableWorkspaceDiagnostics(
         uri: string
@@ -581,19 +613,52 @@ export class DiagnosticsCoordinator {
             return [];
         }
 
-        const module = this.index.getModule(uri);
-        const current = module?.source;
+        const current = this.index.getModule(uri)?.source;
 
-        if (current === undefined || current === entry.source) {
-            return entry.diagnostics;
+        return current === undefined || current === entry.source
+            ? entry.diagnostics
+            : [];
+    }
+
+    /** Есть ли межфайловый результат, посчитанный по прошлому тексту. */
+    private workspaceResultIsStale(uri: string): boolean {
+        const entry = this.workspaceCache.get(uri);
+        const current = this.index.getModule(uri)?.source;
+
+        return entry !== undefined &&
+            current !== undefined &&
+            current !== entry.source &&
+            entry.diagnostics.length > 0;
+    }
+
+    /**
+     * Отложить публикацию до пересчёта межфайловой фазы.
+     *
+     * Пересчёт запускается немедленно, а не по обычной задержке: его и ждут.
+     * Если он не успел за отведённый срок — был отменён, файл покинут, поток
+     * занят — список выходит без межфайловых находок: лучше их отсутствие,
+     * чем неверная подсказка.
+     */
+    private holdForWorkspace(uri: string): void {
+        this.scheduleWorkspace(uri, 0);
+
+        if (this.workspaceHolds.has(uri)) {
+            return;
         }
 
-        const unchanged = commonPrefixLength(entry.source, current);
-        const lineStarts = module.lex.lineStarts;
+        this.workspaceHolds.set(uri, setTimeout(() => {
+            this.workspaceHolds.delete(uri);
+            this.publishCombined(uri);
+        }, WORKSPACE_HOLD_MS));
+    }
 
-        return entry.diagnostics.filter(item =>
-            offsetOfPosition(lineStarts, item.range.end) <= unchanged
-        );
+    private releaseHold(uri: string): void {
+        const timer = this.workspaceHolds.get(uri);
+
+        if (timer) {
+            clearTimeout(timer);
+            this.workspaceHolds.delete(uri);
+        }
     }
 
     private getOpenUris(): string[] {
@@ -715,27 +780,6 @@ function diagnosticsSettingsKey(settings: IRslSettings): string {
             dialect: settings.language?.dialect
         })
     );
-}
-
-/** Длина совпадающего начала двух текстов. */
-function commonPrefixLength(left: string, right: string): number {
-    const limit = Math.min(left.length, right.length);
-    let index = 0;
-
-    while (index < limit && left.charCodeAt(index) === right.charCodeAt(index)) {
-        index++;
-    }
-
-    return index;
-}
-
-function offsetOfPosition(
-    lineStarts: readonly number[],
-    position: { line: number; character: number }
-): number {
-    const line = Math.max(0, Math.min(position.line, lineStarts.length - 1));
-
-    return lineStarts[line] + position.character;
 }
 
 function diagnosticItemKey(item: Diagnostic): string {

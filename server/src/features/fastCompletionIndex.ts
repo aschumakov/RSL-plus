@@ -49,6 +49,14 @@ export interface IFastClassMember {
 export interface IFastClassInfo {
     start: number;
     end: number;
+    /**
+     * Имя класса в тексте.
+     *
+     * Им отвечает переход к типу: выделяется имя, а не слово CLASS, —
+     * ровно так же, как это делает готовая модель.
+     */
+    nameStart: number;
+    nameEnd: number;
     /** Имя базового класса; пусто, если базы нет. */
     baseName: string;
     members: IFastClassMember[];
@@ -63,12 +71,152 @@ export interface IFastClassInfo {
  */
 export interface IFastSignature {
     name: string;
-    /** Параметры как они написаны: имя и, если указан, тип. */
-    parameters: string[];
+    /**
+     * Смещение «(» в тексте; -1 — заголовок без скобок.
+     *
+     * Хранится смещение, а не разобранные параметры: списки параметров
+     * всех процедур файла — это тысячи строк, которые нужны от силы
+     * одной. На файле 599 КБ с десятью тысячами процедур их копии
+     * стоили 3,5 МиБ памяти индекса и треть времени его построения.
+     * Разбираются они по требованию — по тем же токенам.
+     */
+    parametersStart: number;
     /** Индекс области; -1 — процедура верхнего уровня модуля. */
     scope: number;
     /** Метод класса: снаружи вызывается только через объект. */
     isMethod: boolean;
+    /**
+     * Начало класса-владельца.
+     *
+     * Им подпись связывается с конкретным методом конкретного класса:
+     * одноимённые методы разных классов файла иначе неразличимы.
+     */
+    ownerStart?: number;
+}
+
+/** Параметры и тип результата подписи: разбираются по требованию. */
+export function readRslFastSignature(
+    index: IFastCompletionIndex,
+    signature: IFastSignature
+): { parameters: string[]; returnType: string } {
+    const openIndex = tokenIndexAtOffset(
+        index.tokens,
+        signature.parametersStart
+    );
+
+    if (openIndex < 0) {
+        return { parameters: [], returnType: "" };
+    }
+
+    const parameters: string[] = [];
+    const tokens = index.tokens;
+    let depth = 0;
+    let current = "";
+    let at = openIndex;
+
+    const take = (): void => {
+        const value = current.trim().replace(/\s+/g, " ");
+        current = "";
+
+        if (value) {
+            parameters.push(value);
+        }
+    };
+
+    /*
+     * Параметр берётся тем же текстом, каким написан: подпись обязана
+     * совпадать с той, что покажет готовая модель, вплоть до пробела
+     * после двоеточия.
+     */
+    for (; at < tokens.length; at++) {
+        const token = tokens[at];
+
+        if (token.kind === "symbol") {
+            if (token.raw === "(") {
+                depth++;
+
+                if (depth === 1) {
+                    continue;
+                }
+            } else if (token.raw === ")") {
+                depth--;
+
+                if (depth === 0) {
+                    take();
+                    break;
+                }
+            } else if (token.raw === "," && depth === 1) {
+                take();
+                continue;
+            }
+        }
+
+        if (depth >= 1 && token.kind !== "comment") {
+            current += token.raw;
+        }
+    }
+
+    return {
+        parameters,
+        returnType: readReturnType(tokens, at)
+    };
+}
+
+/** Тип результата за списком параметров: `Macro Foo(x): Integer`. */
+function readReturnType(
+    tokens: readonly IRslToken[],
+    closingIndex: number
+): string {
+    let index = closingIndex + 1;
+
+    while (index < tokens.length && isTrivia(tokens[index])) {
+        index++;
+    }
+
+    const token = tokens[index];
+
+    if (!token || token.kind !== "symbol" || token.raw !== ":") {
+        return "";
+    }
+
+    return writtenTypeName(tokens, index);
+}
+
+function isTrivia(token: IRslToken): boolean {
+    return token.kind === "whitespace" ||
+        token.kind === "newline" ||
+        token.kind === "comment" ||
+        token.kind === "bom";
+}
+
+/** Индекс токена, начинающегося ровно в этом смещении. */
+function tokenIndexAtOffset(
+    tokens: readonly IRslToken[],
+    offset: number
+): number {
+    if (offset < 0) {
+        return -1;
+    }
+
+    let low = 0;
+    let high = tokens.length - 1;
+
+    while (low <= high) {
+        const middle = (low + high) >>> 1;
+        const start = tokens[middle].start;
+
+        if (start === offset) {
+            return middle;
+        }
+
+        if (start < offset) {
+            low = middle + 1;
+        } else {
+            high = middle - 1;
+        }
+    }
+
+    return -1;
 }
 
 /** Что известно об имени в этой точке. */
@@ -175,12 +323,19 @@ function indexWeight(index: IFastCompletionIndex): number {
         methods += list.length;
     }
 
+    let signatures = 0;
+
+    for (const list of index.signatures.values()) {
+        signatures += list.length;
+    }
+
     return index.scopes.length +
         index.globalItems.length +
         index.imports.length +
         members +
         scoped +
-        methods;
+        methods +
+        signatures;
 }
 
 /** Индекс этой версии; строится при первом обращении. */
@@ -733,8 +888,6 @@ function openScope(
     word: string,
     context: IScopeContext
 ): number {
-    /* Параметры процедуры запоминаются по ходу чтения списка. */
-    const parameters: string[] = [];
     const { scopes, blocks, classes, globalItems } = context;
     /* Родитель — ближайшая настоящая область: IF и WHILE её не создают. */
     let parent = -1;
@@ -795,6 +948,8 @@ function openScope(
         const info: IFastClassInfo = {
             start,
             end: start,
+            nameStart: nameToken.start,
+            nameEnd: nameToken.end,
             baseName,
             members: []
         };
@@ -867,16 +1022,15 @@ function openScope(
             tokens,
             index,
             (name, typeName, start, isConstant, isPrivate) => {
-                parameters.push(typeName ? name + ":" + typeName : name);
                 context.addBinding(name, typeName, start, isConstant, isPrivate);
             }
         );
-        rememberSignature(context, name, parent, parameters);
+        rememberSignature(context, name, parent, tokens[index].start);
 
         return after;
     }
 
-    rememberSignature(context, name, parent, parameters);
+    rememberSignature(context, name, parent, -1);
 
     return index - 1;
 }
@@ -886,7 +1040,7 @@ function rememberSignature(
     context: IScopeContext,
     name: string,
     parent: number,
-    parameters: readonly string[]
+    parametersStart: number
 ): void {
     const key = normalizeIdentifier(name);
 
@@ -896,9 +1050,10 @@ function rememberSignature(
 
     const signature: IFastSignature = {
         name,
-        parameters: [...parameters],
+        parametersStart,
         scope: parent,
-        isMethod: !!context.owner
+        isMethod: !!context.owner,
+        ownerStart: context.owner?.start
     };
     const list = context.signatures.get(key);
 
@@ -989,18 +1144,38 @@ function writtenTypeName(
     tokens: readonly IRslToken[],
     colonIndex: number
 ): string {
-    let index = colonIndex + 1;
+    /*
+     * Пробелы и переводы строк между двоеточием и типом пропускаются:
+     * `Var a : TFile` и `Macro Foo(x: String)` объявляют тип ровно так же,
+     * как без пробела, а прежде такой тип просто терялся — Hover писал
+     * variant, а подсказка параметров не показывала тип аргумента.
+     */
+    let index = nextSignificantIndex(tokens, colonIndex + 1);
 
     if (
         tokens[index] &&
         tokens[index].kind === "symbol" &&
         tokens[index].raw === "@"
     ) {
-        index++;
+        index = nextSignificantIndex(tokens, index + 1);
     }
 
     const written = tokens[index];
     return written && written.kind === "identifier" ? written.value : "";
+}
+
+/** Индекс первого значащего токена начиная с указанного. */
+function nextSignificantIndex(
+    tokens: readonly IRslToken[],
+    from: number
+): number {
+    let index = from;
+
+    while (index < tokens.length && isTrivia(tokens[index])) {
+        index++;
+    }
+
+    return index;
 }
 
 /** Объявление вида Var a: TFile, b = TStringList(); до точки с запятой. */
@@ -1025,11 +1200,12 @@ function readDeclarationList(
             return index - 1;
         }
 
-        const after = tokens[index + 1];
+        const colon = nextSignificantIndex(tokens, index + 1);
+        const after = tokens[colon];
         let typeName = "";
 
         if (after && after.kind === "symbol" && after.raw === ":") {
-            typeName = writtenTypeName(tokens, index + 1);
+            typeName = writtenTypeName(tokens, colon);
         } else if (after && after.kind === "symbol" && after.raw === "=") {
             typeName = initializerTypeName(tokens, index + 2);
         }
@@ -1130,11 +1306,12 @@ function readParameterList(
             continue;
         }
 
-        const after = tokens[index + 1];
+        const colon = nextSignificantIndex(tokens, index + 1);
+        const after = tokens[colon];
         let typeName = "";
 
         if (after && after.kind === "symbol" && after.raw === ":") {
-            typeName = writtenTypeName(tokens, index + 1);
+            typeName = writtenTypeName(tokens, colon);
         }
 
         add(token.value, typeName, token.start, false, false);

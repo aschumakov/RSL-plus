@@ -294,9 +294,196 @@ test("выделение после незакрытого блока форма
     assert.ok(target > 0);
     assert.strictEqual(
         formatRange(source, target, target + 3),
-        wholeDocumentLines(source, target, target + 3)
+        wholeDocumentLines(source, target, target + 3),
+        "текст ответа обязан совпасть с полным форматированием"
+    );
+
+    /*
+     * И этого мало: ответ обязан остаться быстрым. Если точка в конце
+     * строки «съедает» следующий END, счёт блоков не сходится и файл
+     * форматируется целиком — текст тот же, а цена как у всего документа.
+     */
+    const withDot = growing(true);
+    const withoutDot = growing(false);
+
+    assert.ok(
+        withDot < withoutDot * 4 + 3,
+        "незавершённая точка не должна возвращать к полному форматированию: " +
+            withDot.toFixed(2) + " против " + withoutDot.toFixed(2) + " мс"
     );
 });
+
+/** Время ответа на большом файле: с незавершённой точкой и без неё. */
+function growing(withUnfinishedDot) {
+    const lines = [];
+
+    for (let index = 0; index < 3000; index++) {
+        lines.push("Macro Filler" + index + "()");
+
+        lines.push("  Var x" + index + "=" + index + ";");
+
+        /* Точка последней строкой тела: следующий токен — как раз END. */
+        if (withUnfinishedDot && index === 0) {
+            lines.push("  obj.");
+        }
+
+        lines.push("End;", "");
+    }
+
+    lines.push(
+        "Macro Target()",
+        "        Var first=1;",
+        "  If (first>0)",
+        "      Var second   =2;",
+        "  End;",
+        "End;",
+        ""
+    );
+
+    const source = lines.join(String.fromCharCode(10));
+    const target = source
+        .split(String.fromCharCode(10))
+        .indexOf("        Var first=1;");
+    const document = TextDocument.create(
+        "file:///format.mac",
+        "rsl",
+        1,
+        source
+    );
+    const params = {
+        textDocument: { uri: document.uri },
+        range: {
+            start: { line: target, character: 0 },
+            end: { line: target + 4, character: 0 }
+        },
+        options: { tabSize: 4, insertSpaces: true }
+    };
+    const options = {
+        blockStartLines: blockStartLines(source),
+        tokens: lexRsl(source).tokens
+    };
+    let best = Infinity;
+
+    for (let run = 0; run < 7; run++) {
+        const started = process.hrtime.bigint();
+        formatRslDocumentRange(document, params, options);
+        best = Math.min(
+            best,
+            Number(process.hrtime.bigint() - started) / 1e6
+        );
+    }
+
+    return best;
+}
+
+test("незавершённое обращение через точку не меняет ответ", () => {
+    /*
+     * Так выглядит текст в момент набора: точка есть, имени члена ещё нет.
+     * Проверка границ блока не имеет права принять следующий END за имя
+     * после точки — иначе кусок считается с чужого уровня отступа.
+     */
+    const source = [
+        "Macro First()",
+        "  Var obj = 1;",
+        "  obj.",
+        "End;",
+        "",
+        "Macro Target()",
+        "        Var first=1;",
+        "  If (first>0)",
+        "      Var second   =2;",
+        "  End;",
+        "End;",
+        ""
+    ].join(String.fromCharCode(10));
+    const target = source
+        .split(String.fromCharCode(10))
+        .indexOf("        Var first=1;");
+
+    assert.ok(target > 0);
+    assert.strictEqual(
+        formatRange(source, target, target + 3),
+        wholeDocumentLines(source, target, target + 3),
+        "текст ответа обязан совпасть с полным форматированием"
+    );
+
+    /*
+     * И этого мало: ответ обязан остаться быстрым. Если точка в конце
+     * строки «съедает» следующий END, счёт блоков не сходится и файл
+     * форматируется целиком — текст тот же, а цена как у всего документа.
+     */
+    const withDot = growing(true);
+    const withoutDot = growing(false);
+
+    assert.ok(
+        withDot < withoutDot * 4 + 3,
+        "незавершённая точка не должна возвращать к полному форматированию: " +
+            withDot.toFixed(2) + " против " + withoutDot.toFixed(2) + " мс"
+    );
+});
+
+/** Время ответа на большом файле: с незавершённой точкой и без неё. */
+function growing(withUnfinishedDot) {
+    const lines = [];
+
+    for (let index = 0; index < 300; index++) {
+        lines.push("Macro Filler" + index + "()");
+
+        lines.push("  Var x" + index + "=" + index + ";");
+
+        /* Точка последней строкой тела: следующий токен — как раз END. */
+        if (withUnfinishedDot && index === 0) {
+            lines.push("  obj.");
+        }
+
+        lines.push("End;", "");
+    }
+
+    lines.push(
+        "Macro Target()",
+        "        Var first=1;",
+        "  If (first>0)",
+        "      Var second   =2;",
+        "  End;",
+        "End;",
+        ""
+    );
+
+    const source = lines.join(String.fromCharCode(10));
+    const target = source
+        .split(String.fromCharCode(10))
+        .indexOf("        Var first=1;");
+    const document = TextDocument.create(
+        "file:///format.mac",
+        "rsl",
+        1,
+        source
+    );
+    const params = {
+        textDocument: { uri: document.uri },
+        range: {
+            start: { line: target, character: 0 },
+            end: { line: target + 4, character: 0 }
+        },
+        options: { tabSize: 4, insertSpaces: true }
+    };
+    const options = {
+        blockStartLines: blockStartLines(source),
+        tokens: lexRsl(source).tokens
+    };
+    let best = Infinity;
+
+    for (let run = 0; run < 7; run++) {
+        const started = process.hrtime.bigint();
+        formatRslDocumentRange(document, params, options);
+        best = Math.min(
+            best,
+            Number(process.hrtime.bigint() - started) / 1e6
+        );
+    }
+
+    return best;
+}
 
 test("табуляции и размер отступа берутся у редактора", () => {
     const source = sample(0);

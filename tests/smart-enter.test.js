@@ -6,6 +6,7 @@ const {
 } = require("../client/out/rslBlockText");
 const extensionManifest = require("../package.json");
 const {
+    createRslEnterTimings,
     buildRslSmartEnterSnippet,
     isRslBlockHeader,
     plainEnterIndent
@@ -258,3 +259,35 @@ assert.ok(
 );
 
 console.log("[OK] закрытие блока вставляется в нижнем регистре");
+
+/* Сводка замеров Enter: этот файл проверяет утверждениями, без раннера. */
+/*
+ * Сводка — ответ на жалобу «курсор отстаёт»: по ней видно и полное
+ * время нажатия, и отдельно правку документа.
+ */
+const timings = createRslEnterTimings(3);
+
+assert.strictEqual(timings.summary(), undefined);
+
+timings.record({ kind: "plain", totalMs: 1, editMs: 0.5 });
+timings.record({ kind: "snippet", totalMs: 20, editMs: 18 });
+timings.record({ kind: "plain", totalMs: 3, editMs: 1 });
+
+const summary = timings.summary();
+
+assert.ok(/нажатий 3/.test(summary), summary);
+assert.ok(/завершено блоков 1/.test(summary), summary);
+assert.ok(/максимум 20.0 мс/.test(summary), summary);
+
+/* Хранится только последнее окно: старые нажатия вытесняются. */
+timings.record({ kind: "plain", totalMs: 2, editMs: 1 });
+timings.record({ kind: "plain", totalMs: 2, editMs: 1 });
+timings.record({ kind: "plain", totalMs: 2, editMs: 1 });
+
+assert.strictEqual(timings.count(), 3);
+assert.ok(
+    !/максимум 20.0 мс/.test(timings.summary()),
+    "давние нажатия не держатся вечно: " + timings.summary()
+);
+
+console.log("[OK] сводка замеров Enter");

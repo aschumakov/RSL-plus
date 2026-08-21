@@ -27,6 +27,7 @@ import {
     getFastCompletionIndex,
     lookupFastName,
     scopeChainAt,
+    readRslFastSignature,
     type IFastCompletionIndex,
     type IFastSignature
 } from "./fastCompletionIndex";
@@ -220,10 +221,12 @@ export function findRslFastTypeDefinition(
         return undefined;
     }
 
-    if (declaration.start !== undefined) {
+    if (declaration.nameStart !== undefined) {
         return Location.create(declaration.moduleUri, {
-            start: context.document.positionAt(declaration.start),
-            end: context.document.positionAt(declaration.start)
+            start: context.document.positionAt(declaration.nameStart),
+            end: context.document.positionAt(
+                declaration.nameEnd ?? declaration.nameStart
+            )
         });
     }
 
@@ -252,6 +255,16 @@ export function buildRslFastHover(
         end: context.document.positionAt(context.token.end)
     };
     const member = findFastMember(context, resolver);
+
+    if (!member && receiverBefore(context.tokens, context.token)) {
+        /*
+         * Обращение через точку: отвечать можно только о члене класса.
+         * Прежде поиск продолжался по объявлениям файла, и `thing.Secret`
+         * описывался приватным полем класса, до которого снаружи
+         * добраться нельзя.
+         */
+        return undefined;
+    }
 
     if (member) {
         return member.symbol
@@ -370,20 +383,26 @@ function findCallSignature(
     }
 
     /*
+     * Метод класса ЭТОГО файла: подпись лежит в индексе версии и связана с
+     * классом по началу его объявления. Прежде подсказка молчала на любом
+     * методе локального класса — и на открытом, и на приватном изнутри.
+     */
+    if (member?.signature) {
+        return fastSignatureInformation(context, member.signature);
+    }
+
+    /*
      * Процедура ЭТОГО файла: подпись берётся из индекса версии, а не из
      * модели — модель отстаёт на правку.
      */
     const own = findOwnSignature(context, callee);
 
     if (own) {
-        return {
-            label: own.name + "(" + own.parameters.join(", ") + ")",
-            parameters: own.parameters.map(label => ({ label }))
-        };
+        return fastSignatureInformation(context, own);
     }
 
     if (member) {
-        /* Член класса этого файла: параметров индекс версии не хранит. */
+        /* Член класса нашёлся, а подписи у него нет: это поле, не метод. */
         return undefined;
     }
 
@@ -395,6 +414,30 @@ function findCallSignature(
     );
 
     return imported ? createSignatureInformation(imported.symbol) : undefined;
+}
+
+/**
+ * Подпись по записи индекса версии.
+ *
+ * Параметры и тип результата разбираются здесь, а не при построении
+ * индекса: нужны они одному запросу из тысяч, а храниться пришлось бы для
+ * всех процедур файла.
+ */
+function fastSignatureInformation(
+    context: IRslInteractiveContext,
+    signature: IFastSignature
+): SignatureInformation {
+    const parsed = readRslFastSignature(context.fastIndex, signature);
+    const returnType = parsed.returnType &&
+        normalizeIdentifier(parsed.returnType) !== "variant"
+        ? ": " + parsed.returnType
+        : "";
+
+    return {
+        label: signature.name + "(" + parsed.parameters.join(", ") + ")" +
+            returnType,
+        parameters: parsed.parameters.map(label => ({ label }))
+    };
 }
 
 /** Подпись процедуры этого файла, видимой в точке запроса. */
@@ -411,13 +454,14 @@ function findOwnSignature(
     }
 
     /*
-     * Одноимённые процедуры разных областей: берётся видимая отсюда, начиная с
-     * самой внутренней. Метод класса снаружи по имени не вызывают.
+     * Одноимённые процедуры разных областей: берётся видимая отсюда,
+     * начиная с самой внутренней. Метод попадает сюда только если
+     * область его класса есть в цепочке, то есть запрос идёт изнутри
+     * этого класса, — а там метод вызывают по имени, и подсказка на нём
+     * прежде молчала.
      */
     for (const scope of scopeChainAt(context.fastIndex, context.offset)) {
-        const found = candidates.find(item =>
-            item.scope === scope && !item.isMethod
-        );
+        const found = candidates.find(item => item.scope === scope);
 
         if (found) {
             return found;

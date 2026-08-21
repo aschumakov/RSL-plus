@@ -117,6 +117,37 @@
       ],
       "description": "if() elif End;"
    },
+   "class": {
+      "prefix": "class",
+      "body": [
+         "Class ${1:TName} ()",
+         "\tVar ${2:field};",
+         "\t$0",
+         "end;"
+      ],
+      "description": "Класс: объявление с телом и end;"
+   },
+
+   "class_child": {
+      "prefix": "classex",
+      "body": [
+         "Class (${1:TBase}) ${2:TName} ()",
+         "\t$0",
+         "end;"
+      ],
+      "description": "Класс-наследник: Class (База) Имя ()"
+   },
+
+   "with": {
+      "prefix": "with",
+      "body": [
+         "With (${1:expr})",
+         "\t$0",
+         "end;"
+      ],
+      "description": "Блок With с завершением end;"
+   },
+
    "note": {
       "prefix": "note",
       "body": [

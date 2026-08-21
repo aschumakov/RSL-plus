@@ -55,7 +55,6 @@ import {
 import {
     cachedSignificantTokens,
     createSignificantTokenFilter,
-    findUnrecognizedEscapes,
     IRslToken,
     normalizeIdentifier,
     normalizeReferenceIdentifier,
@@ -680,15 +679,7 @@ function planLocalRslDiagnostics(
                 countUnitStage
             )
         ],
-        [
-            "escapes",
-            options.structure,
-            createScanStage(
-                unitTokens,
-                token => addUnrecognizedEscapeDiagnostic(module, token, unitResult),
-                countUnitStage
-            )
-        ],
+
         [
             "brackets",
             options.structure,
@@ -1149,7 +1140,6 @@ function emptyPlan(): IRslDiagnosticPlan {
 const CACHEABLE_UNIT_STAGES = new Set([
     "limits",
     "unterminated",
-    "escapes",
     "deprecated",
     "debugBreak"
 ]);
@@ -1807,28 +1797,6 @@ function addDebugBreakDiagnostic(
     ));
 }
 
-function addUnrecognizedEscapeDiagnostic(
-    module: IIndexedModule,
-    token: IRslToken,
-    result: Diagnostic[]
-): void {
-    if (token.kind !== "string") {
-        return;
-    }
-
-    for (const offset of findUnrecognizedEscapes(token.raw)) {
-        const start = token.start + offset;
-        result.push(createOffsetDiagnostic(
-            module,
-            start,
-            start + 2,
-            DiagnosticSeverity.Warning,
-            "Неизвестная escape-последовательность; " +
-                "допустимы \\n \\r \\t \\f \\xHH \\XHH \\\\",
-            "unknown-escape-sequence"
-        ));
-    }
-}
 
 function addUnterminatedTokenDiagnostic(
     _module: IIndexedModule,
