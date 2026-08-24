@@ -921,6 +921,40 @@ test("одноимённая процедура из модуля не счит�
     );
 });
 
+test("метод класса с именем SetParm не считается встроенным", () => {
+    /*
+     * Внутри класса имя разрешается в его собственный метод, а он к
+     * параметрам вызова отношения не имеет: подавлять предупреждения нельзя.
+     */
+    assert.deepStrictEqual(
+        unusedParameters([
+            "Class TWorker()",
+            "  Macro SetParm(num, value)",
+            "    return num;",
+            "  End;",
+            "  Macro Handler(p0, p1, p2)",
+            "    Var value = 1;",
+            "    SetParm(2, value);",
+            "  End;",
+            "End;"
+        ]).filter(name => /^p/.test(name)),
+        ["p0", "p1", "p2"]
+    );
+
+    /* Без своего метода в том же классе работает встроенная. */
+    assert.deepStrictEqual(
+        unusedParameters([
+            "Class TWorker()",
+            "  Macro Handler(p0, p1, p2)",
+            "    Var value = 1;",
+            "    SetParm(2, value);",
+            "  End;",
+            "End;"
+        ]),
+        ["p0", "p1"]
+    );
+});
+
 test("много процедур с SetParm — рост линейный", () => {
     const sample = count => {
         const lines = [];
