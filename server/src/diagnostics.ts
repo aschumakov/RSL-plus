@@ -2156,7 +2156,41 @@ function collectSetParmContracts(
         return { contracts, positions };
     }
 
-    for (const call of calls) {
+    /*
+     * Вызовы и области сопоставляются одним проходом.
+     *
+     * Оба списка отсортированы по началу, поэтому достаточно двигать один
+     * указатель по областям и держать стек открытых: вершина стека и есть
+     * ближайшая объемлющая процедура. Поиск на каждый вызов — даже
+     * двоичный — оборачивался обратным обходом всех предыдущих процедур,
+     * когда вызов стоит вне процедуры или между ними: на файле с
+     * шестнадцатью тысячами верхнеуровневых вызовов это 652 мс вместо 227.
+     */
+    const sortedCalls = [...calls].sort((left, right) =>
+        left.start - right.start
+    );
+    const open: IParameterScope[] = [];
+    let scopeIndex = 0;
+
+    for (const call of sortedCalls) {
+        while (
+            scopeIndex < scopes.length &&
+            scopes[scopeIndex].start <= call.start
+        ) {
+            open.push(scopes[scopeIndex]);
+            scopeIndex++;
+        }
+
+        while (open.length > 0 && open[open.length - 1].end < call.start) {
+            open.pop();
+        }
+
+        const owner = open[open.length - 1];
+
+        if (!owner) {
+            continue;
+        }
+
         const resolved = resolver.resolveAt(
             module.uri,
             module.symbolTree,
@@ -2165,12 +2199,6 @@ function collectSetParmContracts(
 
         /* Не встроенная SetParm — не наш случай. */
         if (!resolved || resolved.uri !== RSL_BUILTIN_URI) {
-            continue;
-        }
-
-        const owner = innermostScopeAt(scopes, call.start);
-
-        if (!owner) {
             continue;
         }
 
@@ -2290,40 +2318,6 @@ function collectParameterScopes(
             parameters
         }))
         .sort((left, right) => left.start - right.start);
-}
-
-/**
- * Ближайшая объемлющая процедура.
- *
- * Именно ближайшая: SetParm во вложенной процедуре заполняет её параметр,
- * а не параметр внешней. Поиск двоичный — перебор всех процедур файла на
- * каждый вызов давал квадратичный рост.
- */
-function innermostScopeAt(
-    scopes: readonly IParameterScope[],
-    offset: number
-): IParameterScope | undefined {
-    let low = 0;
-    let high = scopes.length;
-
-    while (low < high) {
-        const middle = (low + high) >>> 1;
-
-        if (scopes[middle].start <= offset) {
-            low = middle + 1;
-        } else {
-            high = middle;
-        }
-    }
-
-    /* Вложенные диапазоны идут подряд: назад до содержащего. */
-    for (let at = low - 1; at >= 0; at--) {
-        if (offset <= scopes[at].end) {
-            return scopes[at];
-        }
-    }
-
-    return undefined;
 }
 
 type ISetParmArgument =

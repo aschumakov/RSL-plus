@@ -41,7 +41,8 @@ const {
     createFastDocumentSnapshot
 } = require(path.join(OUT, "services", "fastDocumentSnapshot"));
 const {
-    dropFastCompletionIndex
+    dropFastCompletionIndex,
+    getFastCompletionIndex
 } = require(path.join(OUT, "features", "fastCompletionIndex"));
 const {
     buildLocalRslDiagnosticsChunked
@@ -369,6 +370,86 @@ const CASES = [
     }
 ];
 
+function collectGarbage() {
+    if (global.gc) {
+        global.gc();
+    }
+}
+
+/** Лучшее время из нескольких прогонов с уборкой памяти между ними. */
+function best(action, runs = 5) {
+    let result = Number.POSITIVE_INFINITY;
+
+    for (let run = 0; run < runs; run++) {
+        collectGarbage();
+        const started = process.hrtime.bigint();
+        action();
+        result = Math.min(
+            result,
+            Number(process.hrtime.bigint() - started) / 1e6
+        );
+    }
+
+    return result;
+}
+
+/**
+ * Из чего складывается первый запрос в файле.
+ *
+ * Без этой разбивки холодные числа ничего не объясняют: в них смешаны
+ * построение снимка версии, построение индекса версии, первый разбор и сам
+ * ответ. Пользователю первые три достаются один раз на версию текста, и
+ * знать надо каждое по отдельности.
+ */
+function reportBreakdown(source, platform) {
+    console.log("из чего складывается холодный запрос:");
+
+    const document = TextDocument.create(MAIN, "rsl", 1, source);
+    const snapshotMs = best(() => {
+        dropFastCompletionIndex(MAIN);
+        createFastDocumentSnapshot(document);
+    });
+    const snapshot = createFastDocumentSnapshot(document);
+    const indexMs = best(() => {
+        dropFastCompletionIndex(MAIN);
+        getFastCompletionIndex(snapshot);
+    });
+    const parseMs = best(() => {
+        const index = new WorkspaceIndex();
+        index.registerWorkspaceFiles([MAIN, LIB]);
+        index.updateOpenModule(MAIN, source, 1);
+    }, 3);
+    const resolveMs = best(() => {
+        const index = new WorkspaceIndex();
+        index.registerWorkspaceFiles([MAIN, LIB]);
+        index.updateExternalModule(LIB, LIB_SOURCE, 1);
+        const module = index.updateOpenModule(MAIN, source, 1);
+        const resolver = new RslScopeResolver(index, getDefaults(), platform);
+
+        resolver.resolveAt(
+            MAIN,
+            module.symbolTree,
+            offsetAfter(source, "  Var value = Shar")
+        );
+    }, 3);
+
+    for (const [name, value] of [
+        ["снимок версии", snapshotMs],
+        ["индекс версии", indexMs],
+        ["разбор файла", parseMs],
+        ["первое разрешение имени по модели", resolveMs]
+    ]) {
+        console.log(
+            "  " + name.padEnd(34) + value.toFixed(1).padStart(7) + " мс"
+        );
+    }
+
+    console.log(
+        "  уборка памяти между замерами: " +
+            (global.gc ? "включена" : "НЕТ, запустите с --expose-gc")
+    );
+}
+
 async function measureMode(label, source, platform, options) {
     console.log(label);
 
@@ -387,6 +468,17 @@ async function measureMode(label, source, platform, options) {
              * Холодный режим — это каждый раз новое состояние: свой стенд,
              * своя модель, свой индекс версии.
              */
+            if (options.coldStand) {
+                /*
+                 * Память собирается перед каждым холодным прогоном, если
+                 * это разрешено (--expose-gc): стенд создаёт по снимку и
+                 * модели на прогон, и без уборки в результат попадает
+                 * чужой мусор. Именно из-за него холодные числа гуляли
+                 * в разы от прогона к прогону.
+                 */
+                collectGarbage();
+            }
+
             const stand = options.coldStand
                 ? options.coldStand()
                 : options.stand;
@@ -424,6 +516,8 @@ const source = mainSource(Number(process.argv[2] || 20000));
      * Первый запрос в файле: снимок версии ещё не построен. У сервера так
      * бывает один раз — снимок делает анализ документа на правке.
      */
+    reportBreakdown(source, platform);
+
     await measureMode("первый запрос в файле (снимок ещё не построен):",
         source, platform, {
             target: 150,

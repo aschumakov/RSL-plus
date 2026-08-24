@@ -382,9 +382,10 @@
       "test:architecture": "npm run compile && node tests/server-services.test.js && node tests/scope-index.test.js && node tests/workspace-resolution.test.js",
       "perf-report": "node build/perf-report.js",
       "bench:completion": "npm run compile && node build/bench-completion.js",
-      "bench:interactive": "npm run compile && node build/bench-interactive.js",
+      "bench:interactive": "npm run compile && node --expose-gc build/bench-interactive.js",
       "bench:problems": "npm run compile && node build/bench-problems.js",
-      "bench:fast-index": "npm run compile && node --expose-gc build/bench-fast-index.js"
+      "bench:fast-index": "npm run compile && node --expose-gc build/bench-fast-index.js",
+      "bench:diagnostics": "npm run compile && node --expose-gc --max-old-space-size=6144 build/bench-diagnostics-scale.js"
    },
    "devDependencies": {
       "@types/node": "22.16.5",

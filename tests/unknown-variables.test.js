@@ -281,6 +281,37 @@ async function main() {
         );
     });
 
+    await test("strict проверяет и файл без объявлений", () => {
+        /*
+         * Условие про объявленный VAR — правило safe. Режим strict обещан как
+         * «все неразрешённые имена», и файл без единого VAR он тоже проверяет:
+         * пользователь выбрал этот режим сознательно.
+         */
+        const context = open([
+            "Macro Test()",
+            "    typo = Missing;",
+            "End;"
+        ].join(String.fromCharCode(10)));
+
+        assert.deepStrictEqual(
+            names(buildUnknownVariableDiagnostics(
+                context.module,
+                context.resolver,
+                { mode: "strict" }
+            )).sort(),
+            ["Missing", "typo"]
+        );
+        assert.deepStrictEqual(
+            names(buildUnknownVariableDiagnostics(
+                context.module,
+                context.resolver,
+                { mode: "safe" }
+            )),
+            [],
+            "safe без объявления VAR по-прежнему молчит"
+        );
+    });
+
     await test("safe смотрит только на имя слева от «=»", () => {
         /*
          * Чтение неизвестного имени слишком часто оказывается не ошибкой:

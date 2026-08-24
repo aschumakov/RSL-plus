@@ -955,6 +955,70 @@ test("метод класса с именем SetParm не считается в
     );
 });
 
+test("SetParm вне процедуры ничьих параметров не отмечает", () => {
+    /*
+     * Вызов стоит между процедурами: заполнять параметры ему нечего. Прежде
+     * такой вызов заставлял обходить назад все процедуры файла — на файле с
+     * шестнадцатью тысячами вызовов это давало квадратичный рост.
+     */
+    assert.deepStrictEqual(
+        unusedParameters([
+            "Macro Handler(p0, p1, p2)",
+            "  Var value = 1;",
+            "  return value;",
+            "End;",
+            "SetParm(2, 1);"
+        ]),
+        ["p0", "p1", "p2"]
+    );
+});
+
+test("много вызовов SetParm вне процедур — рост линейный", () => {
+    const sample = count => {
+        const lines = [];
+
+        for (let index = 0; index < count; index++) {
+            lines.push(
+                "Macro Proc" + index + "(p0, p1, p2)",
+                "  Var value = 1;",
+                "  return value;",
+                "End;",
+                "SetParm(1, " + index + ");",
+                ""
+            );
+        }
+
+        return lines.join(String.fromCharCode(10));
+    };
+    const measure = count => {
+        const index = new WorkspaceIndex();
+        const uri = "file:///setparm-top.mac";
+        index.registerWorkspaceFiles([uri]);
+        const opened = index.updateOpenModule(uri, sample(count), 1);
+        const engine = new RslDiagnosticEngine();
+        let best = Infinity;
+
+        for (let run = 0; run < 3; run++) {
+            const started = process.hrtime.bigint();
+            engine.buildLocal(opened, index);
+            best = Math.min(
+                best,
+                Number(process.hrtime.bigint() - started) / 1e6
+            );
+        }
+
+        return best;
+    };
+    const small = measure(1000);
+    const large = measure(2000);
+
+    assert.ok(
+        large < small * 2.5 + 2,
+        "удвоение вызовов вне процедур: " + small.toFixed(1) + " -> " +
+            large.toFixed(1) + " мс"
+    );
+});
+
 test("много процедур с SetParm — рост линейный", () => {
     const sample = count => {
         const lines = [];

@@ -213,8 +213,18 @@ function* unknownVariableSteps(
      * работает по умолчанию, и одна объявленная переменная в чужой Macro
      * не должна включать проверку неявных переменных всюду.
      */
-    const varScopes = collectRslVarScopes(module);
-    const checkNames = options.mode !== "off" && varScopes.length > 0;
+    /*
+     * Условие про объявленный VAR — правило safe, а не всей проверки.
+     *
+     * strict обещан как «все неразрешённые имена», и файл без единого VAR он
+     * обязан проверять тоже: пользователь выбрал этот режим сознательно.
+     */
+    const requiresDeclaration = options.mode === "safe";
+    const varScopes = requiresDeclaration
+        ? collectRslVarScopes(module)
+        : [];
+    const checkNames = options.mode === "strict" ||
+        (requiresDeclaration && varScopes.length > 0);
     const members = options.checkMembers
         ? createRslMemberChecker({
             module,
@@ -316,7 +326,7 @@ function* unknownVariableSteps(
 
         if (
             !checkNames ||
-            !declaredNearby ||
+            (requiresDeclaration && !declaredNearby) ||
             !isExpressionIdentifier(tokens, index, declarationStarts) ||
             known.has(normalizeIdentifier(token.value))
         ) {
