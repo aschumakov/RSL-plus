@@ -218,6 +218,95 @@ test("проверка обращений через точку растёт л�
     );
 });
 
+test("объявление модуля после первой процедуры тоже включает проверку", () => {
+    /*
+     * Первая Macro начинается с нулевого смещения — как и область файла. По
+     * одному началу они склеивались в одну область, и объявление модуля
+     * терялось вместе с проверкой.
+     */
+    const source = [
+        "Macro First()",
+        "    Var foo;",
+        "    return foo;",
+        "End;",
+        "Var global;",
+        "Typo = 1;",
+        ""
+    ].join(String.fromCharCode(10));
+
+    assert.deepStrictEqual(
+        codes(diagnose(source).diagnostics, "unknown-variable"),
+        ["Идентификатор Typo не определён"]
+    );
+});
+
+test("много областей с Var — рост линейный", () => {
+    /*
+     * Прежде каждый идентификатор сверялся со всеми областями, где есть Var:
+     * на четырёх тысячах процедур проверка занимала 451 мс.
+     */
+    const sample = count => {
+        const lines = [];
+
+        for (let index = 0; index < count; index++) {
+            lines.push(
+                "Macro Proc" + index + "(argument)",
+                "  Var local" + index + " = argument;",
+                "  implicit" + index + " = local" + index + ";",
+                "  return implicit" + index + ";",
+                "End;",
+                ""
+            );
+        }
+
+        return lines.join(String.fromCharCode(10));
+    };
+    const measure = count => {
+        const index = new WorkspaceIndex();
+        index.registerWorkspaceFiles([MAIN]);
+        const module = index.updateOpenModule(MAIN, sample(count), 1);
+        let best = Infinity;
+
+        for (let run = 0; run < 5; run++) {
+            const started = process.hrtime.bigint();
+            buildRslDiagnostics(module, index);
+            best = Math.min(
+                best,
+                Number(process.hrtime.bigint() - started) / 1e6
+            );
+        }
+
+        return best;
+    };
+    const small = measure(1000);
+    const large = measure(2000);
+
+    assert.ok(
+        large < small * 2.5 + 2,
+        "удвоение областей: " + small.toFixed(1) + " -> " +
+            large.toFixed(1) + " мс"
+    );
+});
+
+test("непустой OnError с «;» отмечается", () => {
+    const source = [
+        "Macro Test()",
+        "  Var ok = 1;",
+        "  return ok;",
+        "onerror(err);",
+        "  msgbox(err.Description);",
+        "end;",
+        ""
+    ].join(String.fromCharCode(10));
+
+    assert.strictEqual(
+        codes(diagnose(source).diagnostics, "redundant-header-semicolon")
+            .length,
+        1,
+        "у ONERROR тоже есть заголовок"
+    );
+});
+
 /* --- Пропущенная «;» и лишняя «;» после заголовка --- */
 
 const SAMPLE = [

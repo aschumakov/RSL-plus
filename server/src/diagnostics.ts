@@ -23,7 +23,11 @@ import {
     isRslSystemConstant,
     isRslType
 } from "./language/rslLanguageReference";
-import { getScopeChain, RslScopeResolver } from "./scopeResolver";
+import {
+    getScopeChain,
+    RSL_BUILTIN_URI,
+    RslScopeResolver
+} from "./scopeResolver";
 import {
     GetDynamicMacroReferencesFromTokens,
     GetImportDefinitionTargetsFromTokens,
@@ -2104,6 +2108,375 @@ function createEndScanner(
     return { step, finish };
 }
 
+/**
+ * Что процедура отдаёт наружу через SetParm.
+ *
+ * `SetParm(2, значение)` записывает значение в третий параметр вызова.
+ * Проверяется именно ВСТРОЕННАЯ SetParm: одноимённая процедура файла,
+ * импортированная процедура и метод класса к параметрам отношения не
+ * имеют, и разрешает имя общий resolver, а не совпадение текста.
+ *
+ * Вхождения берутся из готового индекса имён — отдельного прохода по
+ * файлу не появляется, — а объемлющая процедура ищется двоичным поиском
+ * по отсортированным диапазонам.
+ */
+interface ISetParmContract {
+    /** Позиции параметров, которые заполняет SetParm. */
+    positions: Set<number>;
+    /**
+     * Номер параметра посчитан во время исполнения.
+     *
+     * Какой именно заполняется — неизвестно, поэтому по параметрам этой
+     * процедуры не предупреждаем вовсе.
+     */
+    any: boolean;
+}
+
+interface ISetParmScopes {
+    contracts: Map<RslSymbol, ISetParmContract>;
+    positions: Map<RslSymbol, number>;
+}
+
+function collectSetParmContracts(
+    module: IIndexedModule,
+    resolver: RslScopeResolver,
+    facts: ILocalDiagnosticFacts
+): ISetParmScopes {
+    const positions = collectParameterPositions(facts);
+    const calls = facts.identifierIndex.get("setparm") || [];
+    const contracts = new Map<RslSymbol, ISetParmContract>();
+
+    if (calls.length === 0) {
+        return { contracts, positions };
+    }
+
+    const scopes = collectParameterScopes(facts);
+
+    if (scopes.length === 0) {
+        return { contracts, positions };
+    }
+
+    for (const call of calls) {
+        const resolved = resolver.resolveAt(
+            module.uri,
+            module.symbolTree,
+            call.start
+        );
+
+        /* Не встроенная SetParm — не наш случай. */
+        if (!resolved || resolved.uri !== RSL_BUILTIN_URI) {
+            continue;
+        }
+
+        const owner = innermostScopeAt(scopes, call.start);
+
+        if (!owner) {
+            continue;
+        }
+
+        const argument = readSetParmIndex(
+            module.lex.tokens,
+            call.start,
+            owner.parameters.length
+        );
+
+        if (argument.kind === "none") {
+            continue;
+        }
+
+        const contract = contracts.get(owner.scope) ||
+            { positions: new Set<number>(), any: false };
+
+        if (argument.kind === "any") {
+            contract.any = true;
+        } else {
+            contract.positions.add(argument.position);
+        }
+
+        contracts.set(owner.scope, contract);
+    }
+
+    return { contracts, positions };
+}
+
+function isFilledBySetParm(
+    setParm: ISetParmScopes,
+    declaration: IDeclarationInfo
+): boolean {
+    const contract = setParm.contracts.get(declaration.scope);
+
+    if (!contract) {
+        return false;
+    }
+
+    if (contract.any) {
+        return true;
+    }
+
+    const position = setParm.positions.get(declaration.symbol);
+
+    return position !== undefined && contract.positions.has(position);
+}
+
+/** Номер параметра в списке своей процедуры. */
+function collectParameterPositions(
+    facts: ILocalDiagnosticFacts
+): Map<RslSymbol, number> {
+    const byScope = new Map<RslSymbol, IDeclarationInfo[]>();
+
+    for (const declaration of facts.declarations) {
+        if (!declaration.parameter) {
+            continue;
+        }
+
+        const list = byScope.get(declaration.scope);
+
+        if (list) {
+            list.push(declaration);
+        } else {
+            byScope.set(declaration.scope, [declaration]);
+        }
+    }
+
+    const result = new Map<RslSymbol, number>();
+
+    for (const list of byScope.values()) {
+        list
+            .slice()
+            .sort((left, right) =>
+                left.symbol.selectionRange.start -
+                    right.symbol.selectionRange.start
+            )
+            .forEach((declaration, position) => {
+                result.set(declaration.symbol, position);
+            });
+    }
+
+    return result;
+}
+
+interface IParameterScope {
+    scope: RslSymbol;
+    start: number;
+    end: number;
+    parameters: readonly IDeclarationInfo[];
+}
+
+/** Процедуры с параметрами, отсортированные по началу. */
+function collectParameterScopes(
+    facts: ILocalDiagnosticFacts
+): readonly IParameterScope[] {
+    const byScope = new Map<RslSymbol, IDeclarationInfo[]>();
+
+    for (const declaration of facts.declarations) {
+        if (!declaration.parameter) {
+            continue;
+        }
+
+        const list = byScope.get(declaration.scope);
+
+        if (list) {
+            list.push(declaration);
+        } else {
+            byScope.set(declaration.scope, [declaration]);
+        }
+    }
+
+    return [...byScope.entries()]
+        .map(([scope, parameters]) => ({
+            scope,
+            start: scope.range.start,
+            end: scope.range.end,
+            parameters
+        }))
+        .sort((left, right) => left.start - right.start);
+}
+
+/**
+ * Ближайшая объемлющая процедура.
+ *
+ * Именно ближайшая: SetParm во вложенной процедуре заполняет её параметр,
+ * а не параметр внешней. Поиск двоичный — перебор всех процедур файла на
+ * каждый вызов давал квадратичный рост.
+ */
+function innermostScopeAt(
+    scopes: readonly IParameterScope[],
+    offset: number
+): IParameterScope | undefined {
+    let low = 0;
+    let high = scopes.length;
+
+    while (low < high) {
+        const middle = (low + high) >>> 1;
+
+        if (scopes[middle].start <= offset) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+
+    /* Вложенные диапазоны идут подряд: назад до содержащего. */
+    for (let at = low - 1; at >= 0; at--) {
+        if (offset <= scopes[at].end) {
+            return scopes[at];
+        }
+    }
+
+    return undefined;
+}
+
+type ISetParmArgument =
+    | { kind: "none" }
+    | { kind: "any" }
+    | { kind: "position"; position: number };
+
+/**
+ * Первый аргумент SetParm: номер параметра.
+ *
+ * Один целый литерал и запятая — этот параметр. Полноценное выражение и
+ * запятая — номер известен только во время исполнения. Пустой,
+ * незавершённый, отрицательный вызов и номер за пределами списка
+ * параметров не подавляют ничего: неполный текст не имеет права снимать
+ * диагностику.
+ */
+function readSetParmIndex(
+    tokens: IRslToken[],
+    nameStart: number,
+    parameterCount: number
+): ISetParmArgument {
+    let index = tokenIndexAt(tokens, nameStart);
+
+    if (index < 0) {
+        return { kind: "none" };
+    }
+
+    index = nextCodeTokenIndex(tokens, index);
+
+    if (
+        index < 0 ||
+        tokens[index].kind !== "symbol" ||
+        tokens[index].raw !== "("
+    ) {
+        return { kind: "none" };
+    }
+
+    const argument: IRslToken[] = [];
+    let depth = 0;
+
+    for (let at = index; at < tokens.length; at++) {
+        const token = tokens[at];
+
+        if (token.kind === "symbol") {
+            if (token.raw === "(") {
+                depth++;
+
+                if (depth === 1) {
+                    continue;
+                }
+            } else if (token.raw === ")") {
+                depth--;
+
+                if (depth === 0) {
+                    /* Запятой не было: второго аргумента нет. */
+                    return { kind: "none" };
+                }
+            } else if (token.raw === ";") {
+                /* Вызов не закрыт: текст ещё набирают. */
+                return { kind: "none" };
+            } else if (token.raw === "," && depth === 1) {
+                return classifySetParmArgument(argument, parameterCount);
+            }
+        }
+
+        if (depth >= 1 && isCodeToken(token)) {
+            argument.push(token);
+        }
+    }
+
+    return { kind: "none" };
+}
+
+function classifySetParmArgument(
+    argument: readonly IRslToken[],
+    parameterCount: number
+): ISetParmArgument {
+    if (argument.length === 0) {
+        return { kind: "none" };
+    }
+
+    /*
+     * Знак и число — это тоже литерал, а не выражение: `SetParm(-1, ...)`
+     * номером параметра быть не может, и подавлять по нему нечего.
+     */
+    const signed = argument.length === 2 &&
+        argument[0].kind === "symbol" &&
+        (argument[0].raw === "-" || argument[0].raw === "+") &&
+        argument[1].kind === "number";
+
+    if (argument.length > 1 && !signed) {
+        /* Выражение: номер станет известен только при исполнении. */
+        return { kind: "any" };
+    }
+
+    const only = argument[argument.length - 1];
+
+    if (only.kind !== "number") {
+        return { kind: "any" };
+    }
+
+    const sign = signed && argument[0].raw === "-" ? -1 : 1;
+    const position = sign * Number(only.value);
+
+    return Number.isInteger(position) &&
+        position >= 0 &&
+        position < parameterCount
+        ? { kind: "position", position }
+        : { kind: "none" };
+}
+
+function tokenIndexAt(tokens: IRslToken[], offset: number): number {
+    let low = 0;
+    let high = tokens.length - 1;
+
+    while (low <= high) {
+        const middle = (low + high) >>> 1;
+        const start = tokens[middle].start;
+
+        if (start === offset) {
+            return middle;
+        }
+
+        if (start < offset) {
+            low = middle + 1;
+        } else {
+            high = middle - 1;
+        }
+    }
+
+    return -1;
+}
+
+function nextCodeTokenIndex(
+    tokens: IRslToken[],
+    index: number
+): number {
+    for (let at = index + 1; at < tokens.length; at++) {
+        if (isCodeToken(tokens[at])) {
+            return at;
+        }
+    }
+
+    return -1;
+}
+
+function isCodeToken(token: IRslToken): boolean {
+    return token.kind !== "whitespace" &&
+        token.kind !== "newline" &&
+        token.kind !== "comment" &&
+        token.kind !== "bom";
+}
+
 function addUnusedDeclarationDiagnostics(
     module: IIndexedModule,
     resolver: RslScopeResolver,
@@ -2111,6 +2484,8 @@ function addUnusedDeclarationDiagnostics(
     result: Diagnostic[],
     maxProblems: number
 ): void {
+    const setParm = collectSetParmContracts(module, resolver, facts);
+
     for (const declaration of facts.declarations) {
         if (result.length >= maxProblems) {
             break;
@@ -2118,6 +2493,18 @@ function addUnusedDeclarationDiagnostics(
 
         const symbol = declaration.symbol;
         const scope = declaration.scope;
+
+        /*
+         * Параметр, который процедура заполняет через SetParm, — часть её
+         * выходного контракта: имя в тексте не встречается, а значение
+         * возвращается вызывающему.
+         */
+        if (
+            declaration.parameter &&
+            isFilledBySetParm(setParm, declaration)
+        ) {
+            continue;
+        }
         const isLocal = scope.kind === CompletionItemKind.Function ||
             scope.kind === CompletionItemKind.Method;
         const isPrivateModuleDeclaration =

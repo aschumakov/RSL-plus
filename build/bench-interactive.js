@@ -377,20 +377,20 @@ async function measureMode(label, source, platform, options) {
         const times = [];
         let answered = false;
 
-        const repeats = options.once ? 1 : REQUESTS;
-
-        for (let request = 0; request < repeats; request++) {
+        /*
+         * Число прогонов одинаково у всех режимов: перцентиль по одному
+         * замеру перцентилем не является, а именно в холодных режимах
+         * разброс и интересен.
+         */
+        for (let request = 0; request < REQUESTS; request++) {
             /*
-             * Холодный режим — это каждый раз новая правка: и модель, и
-             * быстрый индекс версии строятся заново.
+             * Холодный режим — это каждый раз новое состояние: свой стенд,
+             * своя модель, свой индекс версии.
              */
-            const stand = options.freshStand
-                ? createStand(source, { platform, modelReady: false })
+            const stand = options.coldStand
+                ? options.coldStand()
                 : options.stand;
 
-            if (options.freshStand) {
-                dropFastCompletionIndex(MAIN);
-            }
 
             const answer = await ask(stand, item.handler, offset, item.extra);
             times.push(answer.ms);
@@ -425,7 +425,17 @@ const source = mainSource(Number(process.argv[2] || 20000));
      * бывает один раз — снимок делает анализ документа на правке.
      */
     await measureMode("первый запрос в файле (снимок ещё не построен):",
-        source, platform, { freshStand: true, target: 150 });
+        source, platform, {
+            target: 150,
+            coldStand: () => {
+                dropFastCompletionIndex(MAIN);
+
+                return createStand(source, {
+                    platform,
+                    modelReady: false
+                });
+            }
+        });
 
     /*
      * Обычный случай сразу после правки: снимок версии готов, модель этой
@@ -458,11 +468,20 @@ const source = mainSource(Number(process.argv[2] || 20000));
      * Отдельный режим потому, что кэши сеанса на этом событии
      * сбрасываются, и цена первого запроса — это цена их построения.
      */
-    const parsed = createStand(source, { platform, modelReady: true });
-    parsed.registry.notifyParsed(MAIN);
-
     await measureMode("первый запрос после notifyParsed:",
-        source, platform, { stand: parsed, target: 50, once: true });
+        source, platform, {
+            target: 50,
+            coldStand: () => {
+                dropFastCompletionIndex(MAIN);
+                const fresh = createStand(source, {
+                    platform,
+                    modelReady: true
+                });
+                fresh.registry.notifyParsed(MAIN);
+
+                return fresh;
+            }
+        });
 
     const stop = startBackground(warm.index, MAIN);
     await measureMode("под фоновым расчётом Problems:",

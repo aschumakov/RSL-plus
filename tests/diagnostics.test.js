@@ -842,6 +842,130 @@ test("SetParm вложенной Macro не отмечает параметры 
     );
 });
 
+test("SetParm с выражением, пустым и неверным номером", () => {
+    const handler = body => [
+        "Macro Handler(p0, p1, p2)",
+        "  Var value = 1;",
+        ...body,
+        "End;"
+    ];
+
+    /* Выражение: какой параметр заполняется — станет ясно при исполнении. */
+    assert.deepStrictEqual(
+        unusedParameters(handler([
+            "  Var at = 0;",
+            "  SetParm(2 + at, value);"
+        ])),
+        []
+    );
+
+    /*
+     * Пустой, незавершённый, отрицательный и слишком большой номер ничего не
+     * подавляют: по неполному тексту диагностику снимать нельзя.
+     */
+    for (const call of [
+        "  SetParm();",
+        "  SetParm(, value);",
+        "  SetParm(-1, value);",
+        "  SetParm(9, value);",
+        "  SetParm(2"
+    ]) {
+        assert.deepStrictEqual(
+            unusedParameters(handler([call])),
+            ["p0", "p1", "p2"],
+            call.trim()
+        );
+    }
+});
+
+test("одноимённая процедура из модуля не считается SetParm", () => {
+    const index = new WorkspaceIndex();
+    const uri = "file:///setparm-import.mac";
+    const lib = "file:///setparm-lib.mac";
+    index.registerWorkspaceFiles([uri, lib]);
+    index.updateExternalModule(
+        lib,
+        [
+            "Macro SetParm(num, value)",
+            "  return num;",
+            "End;",
+            ""
+        ].join(String.fromCharCode(10)),
+        1
+    );
+    const opened = index.updateOpenModule(
+        uri,
+        [
+            "Import setparm-lib;",
+            "Macro Handler(p0, p1, p2)",
+            "  Var value = 1;",
+            "  SetParm(2, value);",
+            "End;",
+            ""
+        ].join(String.fromCharCode(10)),
+        1
+    );
+    const engine = new RslDiagnosticEngine();
+    const found = [
+        ...engine.buildLocal(opened, index),
+        ...engine.buildWorkspace(opened, index)
+    ]
+        .filter(item => item.code === "unused-declaration")
+        .map(item => item.message)
+        .filter(message => /^Параметр /.test(message));
+
+    assert.strictEqual(
+        found.length,
+        3,
+        "вызвана процедура модуля, а не встроенная: " + found.join("; ")
+    );
+});
+
+test("много процедур с SetParm — рост линейный", () => {
+    const sample = count => {
+        const lines = [];
+
+        for (let index = 0; index < count; index++) {
+            lines.push(
+                "Macro Proc" + index + "(p0, p1, p2)",
+                "  Var value = 1;",
+                "  SetParm(2, value);",
+                "End;",
+                ""
+            );
+        }
+
+        return lines.join(String.fromCharCode(10));
+    };
+    const measure = count => {
+        const index = new WorkspaceIndex();
+        const uri = "file:///setparm-many.mac";
+        index.registerWorkspaceFiles([uri]);
+        const opened = index.updateOpenModule(uri, sample(count), 1);
+        const engine = new RslDiagnosticEngine();
+        let best = Infinity;
+
+        for (let run = 0; run < 3; run++) {
+            const started = process.hrtime.bigint();
+            engine.buildLocal(opened, index);
+            best = Math.min(
+                best,
+                Number(process.hrtime.bigint() - started) / 1e6
+            );
+        }
+
+        return best;
+    };
+    const small = measure(1000);
+    const large = measure(2000);
+
+    assert.ok(
+        large < small * 2.5 + 2,
+        "удвоение процедур: " + small.toFixed(1) + " -> " +
+            large.toFixed(1) + " мс"
+    );
+});
+
 test("Diagnostic engine подключает правила через реестр и применяет лимит", () => {
     const source = "Macro Test()\nEnd;";
     const index = new WorkspaceIndex();

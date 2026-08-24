@@ -249,6 +249,15 @@ function* unknownVariableSteps(
      * десятка на каждое имя.
      */
     let importIndex = 0;
+    /*
+     * Курсор по областям с VAR.
+     *
+     * Диапазоны отсортированы и склеены, токены идут по возрастанию —
+     * значит достаточно двигать один указатель вперёд. Перебор всех
+     * диапазонов на каждый идентификатор давал квадратичный рост: на файле
+     * с четырьмя тысячами процедур проверка занимала 451 мс.
+     */
+    let varIndex = 0;
 
     for (let index = 0; index < tokens.length; index++) {
         if (index % CANCEL_CHECK_INTERVAL === 0 && index > 0) {
@@ -295,11 +304,21 @@ function* unknownVariableSteps(
             continue;
         }
 
+        while (
+            varIndex < varScopes.length &&
+            varScopes[varIndex].end < token.start
+        ) {
+            varIndex++;
+        }
+
+        const declaredNearby = varIndex < varScopes.length &&
+            varScopes[varIndex].start <= token.start;
+
         if (
             !checkNames ||
+            !declaredNearby ||
             !isExpressionIdentifier(tokens, index, declarationStarts) ||
-            known.has(normalizeIdentifier(token.value)) ||
-            !isInsideAnyRange(varScopes, token.start)
+            known.has(normalizeIdentifier(token.value))
         ) {
             continue;
         }
@@ -624,18 +643,24 @@ function previousCodeIndex(
 /**
  * Области, в которых есть настоящее объявление VAR.
  *
- * Считается по дереву разбора: только узел объявления переменной, а не
- * слово «var» в тексте. Областью считается ближайшая Macro или Class, а для
- * объявлений верхнего уровня — файл целиком: объявление модуля видно из
- * любой его процедуры, а объявление в соседней процедуре — нет.
+ * Считается по дереву разбора: только узел объявления переменной, а не слово
+ * «var» в тексте. Областью считается ближайшая Macro или Class, а для
+ * объявлений верхнего уровня — файл целиком: объявление модуля видно из любой
+ * его процедуры, а объявление в соседней процедуре — нет.
+ *
+ * Диапазоны отдаются отсортированными и склеенными: по ним потом двигается
+ * один курсор. Границы сравниваются целиком — по началу И концу: область файла
+ * и первая процедура файла могут начинаться с одного и того же нуля, и по
+ * одному началу они склеивались в одну.
  */
 function collectRslVarScopes(
     module: IIndexedModule
 ): readonly { start: number; end: number }[] {
-    const result: { start: number; end: number }[] = [];
-    const seen = new Set<number>();
+    const candidates: {
+        declarationStart: number;
+        scope: { start: number; end: number };
+    }[] = [];
     const wholeFile = { start: 0, end: module.source.length };
-    const tokens = module.syntax.tokens;
 
     const visit = (
         node: IRslSyntaxNode,
@@ -643,11 +668,14 @@ function collectRslVarScopes(
     ): void => {
         for (const child of node.children) {
             if (
-                isRealVarDeclaration(child, tokens) &&
-                !seen.has(scope.start)
+                child.kind === "VariableDeclaration" &&
+                child.name === "var" &&
+                child.children.length > 0
             ) {
-                seen.add(scope.start);
-                result.push(scope);
+                candidates.push({
+                    declarationStart: child.start,
+                    scope
+                });
             }
 
             visit(
@@ -662,42 +690,83 @@ function collectRslVarScopes(
 
     visit(module.syntax.root, wholeFile);
 
+    if (candidates.length === 0) {
+        return [];
+    }
+
+    const afterDot = collectOffsetsAfterDot(module.syntax.tokens);
+    const ranges: { start: number; end: number }[] = [];
+    const seen = new Set<string>();
+
+    for (const candidate of candidates) {
+        /*
+         * `obj.Var()` — обращение к члену с именем Var, и терпимый к ошибкам
+         * разбор восстанавливается на нём узлом объявления. Объявлением это не
+         * считается.
+         */
+        if (afterDot.has(candidate.declarationStart)) {
+            continue;
+        }
+
+        const key = candidate.scope.start + ":" + candidate.scope.end;
+
+        if (seen.has(key)) {
+            continue;
+        }
+
+        seen.add(key);
+        ranges.push(candidate.scope);
+    }
+
+    return mergeRanges(ranges);
+}
+
+/** Смещения имён, стоящих сразу после точки: один проход по токенам. */
+function collectOffsetsAfterDot(
+    tokens: readonly IRslToken[]
+): ReadonlySet<number> {
+    const result = new Set<number>();
+    let afterDot = false;
+
+    for (const token of tokens) {
+        if (
+            token.kind === "whitespace" || token.kind === "comment" ||
+            token.kind === "bom"
+        ) {
+            continue;
+        }
+
+        if (afterDot) {
+            result.add(token.start);
+        }
+
+        afterDot = token.kind === "symbol" && token.raw === ".";
+    }
+
     return result;
 }
 
-/**
- * Настоящее объявление VAR, а не восстановление разбора.
- *
- * `obj.Var()` — обращение к члену с именем Var, и терпимый к ошибкам
- * разбор восстанавливается на нём узлом объявления без объявленных имён.
- * Признаков два, и оба проверяются: у объявления есть хотя бы одно имя, и
- * слово VAR не стоит после точки.
- */
-function isRealVarDeclaration(
-    node: IRslSyntaxNode,
-    tokens: readonly IRslToken[]
-): boolean {
-    if (node.kind !== "VariableDeclaration" || node.name !== "var") {
-        return false;
-    }
-
-    if (node.children.length === 0) {
-        return false;
-    }
-
-    const at = tokens.findIndex(token => token.start === node.start);
-    const previous = at > 0 ? previousCode(tokens, at) : undefined;
-
-    return !(previous?.kind === "symbol" && previous.raw === ".");
-}
-
-function isInsideAnyRange(
-    ranges: readonly { start: number; end: number }[],
-    offset: number
-): boolean {
-    return ranges.some(range =>
-        range.start <= offset && offset <= range.end
+/** Диапазоны по возрастанию, пересекающиеся склеены. */
+function mergeRanges(
+    ranges: readonly { start: number; end: number }[]
+): readonly { start: number; end: number }[] {
+    const sorted = [...ranges].sort((left, right) =>
+        left.start - right.start || left.end - right.end
     );
+    const result: { start: number; end: number }[] = [];
+
+    for (const range of sorted) {
+        const last = result[result.length - 1];
+
+        if (last && range.start <= last.end) {
+            last.end = Math.max(last.end, range.end);
+            continue;
+        }
+
+        result.push({ start: range.start, end: range.end });
+    }
+
+    return result;
 }
 
 /**
