@@ -50,7 +50,7 @@
          "name": "keyword.control.rsl"
       },
       {
-         "match": "(?i)\\b(v_dbffile|v_decimal|v_doublel|v_integer|v_memaddr|v_numeric|v_txtfile|v_double|v_genobj|v_moneyl|v_string|v_array|v_money|v_struc|v_undef|v_bool|v_date|v_dttm|v_file|v_proc|v_time|v_r2m)\\b",
+         "match": "(?i)\\b(v_dbffile|v_decimal|v_doublel|v_integer|v_memaddr|v_numeric|v_txtfile|v_double|v_genobj|v_moneyl|v_string|v_array|v_money|v_struc|v_undef|v_aref|v_bool|v_date|v_dref|v_dttm|v_file|v_fref|v_proc|v_sref|v_time|v_tref|v_r2m)\\b",
          "name": "storage.type.rsl"
       },
       {

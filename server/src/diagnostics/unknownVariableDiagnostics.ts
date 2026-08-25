@@ -13,35 +13,34 @@ import {
     createWorkSlice,
     type IRslWorkSlice
 } from "../core/timeSlice";
-import {
-    isRslKeyword,
-    isRslSystemConstant,
-    isRslType
-} from "../language/rslLanguageReference";
 import { normalizeIdentifier, type IRslToken } from "../lexer";
-import type { IRslSyntaxNode } from "../syntaxParser";
+import {
+    collectRslDeclarationStarts,
+    collectRslImportRanges,
+    isInsideRslImport,
+    isRslExpressionIdentifier,
+    previousRslCodeIndex,
+    rslScopeNameAt
+} from "./nameCheckScopes";
 import {
     createRslMemberChecker,
     type IRslMemberFinding
 } from "./unknownMemberDiagnostics";
 import type { RslScopeResolver } from "../scopeResolver";
-import {
-    isRslSpecialVariableReference
-} from "../systemSpecialVariables";
 import type { IIndexedModule } from "../workspaceIndex";
 
 /**
- * Необъявленные переменные.
+ * Неразрешённые идентификаторы: всё, чему в файле не нашлось объявления.
  *
  * Компилятор RSL разрешает имена ещё и из RSM, DLM, встроенных модулей и
  * собственного контекста сборки, которых в workspace нет вообще: отсутствие
  * объявления в проекте само по себе не означает, что имени не существует.
- * Поэтому режимов три, и по умолчанию работает средний.
+ * Поэтому проверка идёт в межфайловой фазе и включается сознательно.
  *
  *   off    — не проверять;
- *   safe   — по умолчанию: только имя слева от «=», только при доказуемо
- *            полном контексте и только там, где в этой же области есть
- *            объявление VAR;
+ *   safe   — по умолчанию: этой проверки нет вовсе, работает соседняя, про
+ *            необъявленную переменную слева от «=» (см.
+ *            undeclaredAssignmentDiagnostics);
  *   strict — все неразрешённые имена; пользователь берёт неполный контекст
  *            на себя.
  *
@@ -84,7 +83,8 @@ export interface IRslUnknownVariableOptions {
      * Проверять состав полностью известных классов.
      *
      * Идёт тем же обходом токенов: имена после точки этот обход и так
-     * встречает, отдельного прохода по файлу не появляется.
+     * встречает, отдельного прохода по файлу не появляется. Настройка своя
+     * (unknownMembers), поэтому проверка членов работает и при mode = safe.
      */
     checkMembers?: boolean;
 }
@@ -131,7 +131,7 @@ export function normalizeUnknownVariablesMode(
 }
 
 /**
- * Кандидаты на «необъявленную переменную» — без публикации.
+ * Кандидаты на «неразрешённое имя» — без публикации.
  *
  * Один и тот же обход используют и диагностика, и audit-отчёт: иначе отчёт
  * описывал бы не то правило, которое потом включат.
@@ -187,44 +187,13 @@ function* unknownVariableSteps(
     resolver: RslScopeResolver,
     options: IRslUnknownVariableOptions
 ): Generator<void, IRslUnknownVariableFinding[], void> {
-    if (options.mode === "off" && !options.checkMembers) {
-        return [];
-    }
-
-    const state = resolver.getImportContextState(module.uri);
-
     /*
-     * Условие полноты контекста. В safe оно обязательно: пока не видно всех
-     * транзитивных .mac и всего состава прикладных модулей, «не нашли» и «нет» —
-     * разные утверждения, и вторым из них пугать пользователя нельзя.
-     */
-    if (options.mode === "safe" && !isFullyKnownImportContext(state)) {
-        return [];
-    }
-
-    const tokens = module.syntax.tokens;
-    /*
-     * Явное объявление VAR обязательно — и не где-нибудь в файле, а в той
-     * области, где стоит присваивание, или в объемлющей.
+     * Имена проверяет только strict.
      *
-     * Проверять по тексту токена нельзя: `obj.Var()` — обращение к члену
-     * с именем Var, а не объявление, и оно включало проверку целому файлу.
-     * По той же причине не годится и «где-то в файле есть VAR»: правило
-     * работает по умолчанию, и одна объявленная переменная в чужой Macro
-     * не должна включать проверку неявных переменных всюду.
+     * safe — это другая проверка, «переменная не объявлена в текущей области»:
+     * она смотрит одни цели присваивания и живёт в локальной фазе.
      */
-    /*
-     * Условие про объявленный VAR — правило safe, а не всей проверки.
-     *
-     * strict обещан как «все неразрешённые имена», и файл без единого VAR он
-     * обязан проверять тоже: пользователь выбрал этот режим сознательно.
-     */
-    const requiresDeclaration = options.mode === "safe";
-    const varScopes = requiresDeclaration
-        ? collectRslVarScopes(module)
-        : [];
-    const checkNames = options.mode === "strict" ||
-        (requiresDeclaration && varScopes.length > 0);
+    const checkNames = options.mode === "strict";
     const members = options.checkMembers
         ? createRslMemberChecker({
             module,
@@ -237,9 +206,11 @@ function* unknownVariableSteps(
         return [];
     }
 
+    const state = resolver.getImportContextState(module.uri);
+    const tokens = module.syntax.tokens;
     const known = readKnownGlobals(options.knownGlobalsFile);
-    const declarationStarts = collectDeclarationStarts(module);
-    const importRanges = collectImportRanges(module);
+    const declarationStarts = collectRslDeclarationStarts(module);
+    const importRanges = collectRslImportRanges(module);
     const result: IRslUnknownVariableFinding[] = [];
     const reason: RslUnknownVariableReason = isFullyKnownImportContext(state)
         ? "no-declaration"
@@ -259,15 +230,6 @@ function* unknownVariableSteps(
      * десятка на каждое имя.
      */
     let importIndex = 0;
-    /*
-     * Курсор по областям с VAR.
-     *
-     * Диапазоны отсортированы и склеены, токены идут по возрастанию —
-     * значит достаточно двигать один указатель вперёд. Перебор всех
-     * диапазонов на каждый идентификатор давал квадратичный рост: на файле
-     * с четырьмя тысячами процедур проверка занимала 451 мс.
-     */
-    let varIndex = 0;
 
     for (let index = 0; index < tokens.length; index++) {
         if (index % CANCEL_CHECK_INTERVAL === 0 && index > 0) {
@@ -289,7 +251,7 @@ function* unknownVariableSteps(
         }
 
         if (token.kind !== "identifier" ||
-            isInsideImport(importRanges, importIndex, token)) {
+            isInsideRslImport(importRanges, importIndex, token)) {
             continue;
         }
 
@@ -314,36 +276,11 @@ function* unknownVariableSteps(
             continue;
         }
 
-        while (
-            varIndex < varScopes.length &&
-            varScopes[varIndex].end < token.start
-        ) {
-            varIndex++;
-        }
-
-        const declaredNearby = varIndex < varScopes.length &&
-            varScopes[varIndex].start <= token.start;
-
         if (
             !checkNames ||
-            (requiresDeclaration && !declaredNearby) ||
-            !isExpressionIdentifier(tokens, index, declarationStarts) ||
+            !isRslExpressionIdentifier(tokens, index, declarationStarts) ||
             known.has(normalizeIdentifier(token.value))
         ) {
-            continue;
-        }
-
-        /*
-         * В safe проверяется только имя слева от «=» — переменная,
-         * созданная присваиванием.
-         *
-         * Всё остальное — вызовы, константы, имена, которые может
-         * подставить система, — слишком легко принять за ошибку: имя
-         * может прийти из модуля, о котором сервер знает не всё. Для
-         * полного набора неразрешённых имён есть strict.
-         */
-        if (options.mode === "safe" &&
-            !isAssignmentTarget(tokens, index)) {
             continue;
         }
 
@@ -358,7 +295,7 @@ function* unknownVariableSteps(
             end: token.end,
             line: token.line,
             character: token.character,
-            scope: scopeNameAt(module, token.start),
+            scope: rslScopeNameAt(module, token.start),
             hasExplicitVar: true,
             importContext: state.completeness,
             reason
@@ -380,16 +317,6 @@ function* unknownVariableSteps(
  */
 const CANCEL_CHECK_INTERVAL = 1000;
 
-/** Попадает ли токен в диапазон Import, на котором стоит указатель. */
-function isInsideImport(
-    ranges: readonly { start: number; end: number }[],
-    index: number,
-    token: IRslToken
-): boolean {
-    const range = ranges[index];
-    return !!range && range.start <= token.start && token.end <= range.end;
-}
-
 export function buildUnknownVariableDiagnostics(
     module: IIndexedModule,
     resolver: RslScopeResolver,
@@ -405,10 +332,10 @@ export function buildUnknownVariableDiagnostics(
             }
         },
         /*
-         * Формулировка компилятора, а не своя. Проверка называется
-         * «необъявленные переменные», но неизвестным может оказаться и вызов
-         * процедуры, и имя класса: `MissingProc()` — не переменная, а
-         * компилятор на всё это отвечает «неопределенный идентификатор».
+         * Формулировка компилятора, а не своя. Неизвестным здесь может
+         * оказаться и вызов процедуры, и имя класса: `MissingProc()` — не
+         * переменная, а компилятор на всё это отвечает «неопределенный
+         * идентификатор».
          */
         message: finding.kind === "member"
             ? `У класса ${finding.className} нет члена ${finding.name}`
@@ -425,130 +352,6 @@ export function buildUnknownVariableDiagnostics(
     }));
 }
 
-/**
- * Идентификатор в позиции выражения.
- *
- * Исключается всё, что выражением не является: имя объявления, тип после ':',
- * имя после точки, имя внутри Import, ключевое слово, системная константа и
- * общесистемная спецпеременная.
- */
-function isExpressionIdentifier(
-    tokens: readonly IRslToken[],
-    index: number,
-    declarationStarts: ReadonlySet<number>
-): boolean {
-    const token = tokens[index];
-    const word = normalizeIdentifier(token.value);
-
-    /*
-     * Спецпеременная — любое имя в фигурных скобках, и объявлять её в макросе
-     * не требуется: значение подставляет система. Прежде исключение делалось
-     * только для двадцати восьми общесистемных, поэтому {GROUP_MODE} из
-     * SbCrdInter и заведённая банком {Филиал} объявлялись «необъявленными».
-     */
-    if (
-        isRslKeyword(word) ||
-        isRslType(word) ||
-        isRslSystemConstant(word) ||
-        isRslSpecialVariableReference(token.raw)
-    ) {
-        return false;
-    }
-
-    /* Имя объявления: сам VAR его и объявляет. */
-    if (declarationStarts.has(token.start)) {
-        return false;
-    }
-
-    const previous = previousCode(tokens, index);
-
-    /* Имя после точки — поле или метод; состав объекта нам неизвестен. */
-    if (previous?.kind === "symbol" && previous.raw === ".") {
-        return false;
-    }
-
-    /*
-     * Имя после ':' — тип, а не переменная. Ссылочный параметр `@name`
-     * переменной как раз является, поэтому '@' здесь не отсекается.
-     */
-    if (previous?.kind === "symbol" && previous.raw === ":") {
-        return false;
-    }
-
-    /* Имя сразу за ключевым словом объявления: объявление, а не выражение. */
-    if (
-        previous?.kind === "identifier" &&
-        isDeclarationIntroducer(previous.value)
-    ) {
-        return false;
-    }
-
-    return true;
-}
-
-/**
- * Имя слева от «=», начинающее инструкцию.
- *
- * Именно так в RSL появляется переменная без VAR: `sss = "ddfdf"`. От
- * сравнения `==` отличается самим оператором, а от `a.b = 1` и
- * `arr[i] = 1` — тем, что слева стоит одно имя.
- */
-function isAssignmentTarget(
-    tokens: readonly IRslToken[],
-    index: number
-): boolean {
-    const next = nextCode(tokens, index);
-
-    if (!next || next.kind !== "symbol" || next.raw !== "=") {
-        return false;
-    }
-
-    const previous = previousCode(tokens, index);
-
-    if (!previous) {
-        return true;
-    }
-
-    if (previous.kind === "symbol") {
-        return previous.raw === ";";
-    }
-
-    if (previous.kind === "identifier" &&
-        isBlockBoundaryWord(previous.value)) {
-        return true;
-    }
-
-    /* Инструкция с новой строки: точка с запятой выше пропущена. */
-    return previous.endLine < tokens[index].line;
-}
-
-function isBlockBoundaryWord(value: string): boolean {
-    const word = normalizeIdentifier(value);
-
-    return word === "end" || word === "else" || word === "elif" ||
-        word === "onerror" || word === "then";
-}
-
-function nextCode(
-    tokens: readonly IRslToken[],
-    index: number
-): IRslToken | undefined {
-    for (let current = index + 1; current < tokens.length; current++) {
-        const token = tokens[current];
-
-        if (
-            token.kind !== "comment" &&
-            token.kind !== "whitespace" &&
-            token.kind !== "newline" &&
-            token.kind !== "bom"
-        ) {
-            return token;
-        }
-    }
-
-    return undefined;
-}
-
 /** Получатель перед точкой: имя, к члену которого обращаются. */
 function receiverBeforeDot(
     tokens: readonly IRslToken[],
@@ -562,7 +365,7 @@ function receiverBeforeDot(
      * обращений проверка занимала 73 мс вместо 6, и платился этот счёт при
      * каждом пересчёте Problems.
      */
-    const dotIndex = previousCodeIndex(tokens, index);
+    const dotIndex = previousRslCodeIndex(tokens, index);
     const dot = dotIndex >= 0 ? tokens[dotIndex] : undefined;
 
     if (!dot || dot.kind !== "symbol" || dot.raw !== ".") {
@@ -581,7 +384,7 @@ function receiverBeforeDot(
         return undefined;
     }
 
-    const receiverIndex = previousCodeIndex(tokens, dotIndex);
+    const receiverIndex = previousRslCodeIndex(tokens, dotIndex);
     const receiver = receiverIndex >= 0
         ? tokens[receiverIndex]
         : undefined;
@@ -611,221 +414,6 @@ function memberFinding(
         importContext: state.completeness,
         reason: "no-declaration"
     };
-}
-
-function isDeclarationIntroducer(value: string): boolean {
-    const word = normalizeIdentifier(value);
-    return word === "var" || word === "const" || word === "array" ||
-        word === "file" || word === "record" || word === "macro" ||
-        word === "class";
-}
-
-function previousCode(
-    tokens: readonly IRslToken[],
-    index: number
-): IRslToken | undefined {
-    const found = previousCodeIndex(tokens, index);
-
-    return found >= 0 ? tokens[found] : undefined;
-}
-
-/** Индекс предыдущего значащего токена; -1 — его нет. */
-function previousCodeIndex(
-    tokens: readonly IRslToken[],
-    index: number
-): number {
-    for (let current = index - 1; current >= 0; current--) {
-        const token = tokens[current];
-
-        if (
-            token.kind !== "comment" &&
-            token.kind !== "whitespace" &&
-            token.kind !== "newline" &&
-            token.kind !== "bom"
-        ) {
-            return current;
-        }
-    }
-
-    return -1;
-}
-
-/**
- * Области, в которых есть настоящее объявление VAR.
- *
- * Считается по дереву разбора: только узел объявления переменной, а не слово
- * «var» в тексте. Областью считается ближайшая Macro или Class, а для
- * объявлений верхнего уровня — файл целиком: объявление модуля видно из любой
- * его процедуры, а объявление в соседней процедуре — нет.
- *
- * Диапазоны отдаются отсортированными и склеенными: по ним потом двигается
- * один курсор. Границы сравниваются целиком — по началу И концу: область файла
- * и первая процедура файла могут начинаться с одного и того же нуля, и по
- * одному началу они склеивались в одну.
- */
-function collectRslVarScopes(
-    module: IIndexedModule
-): readonly { start: number; end: number }[] {
-    const candidates: {
-        declarationStart: number;
-        scope: { start: number; end: number };
-    }[] = [];
-    const wholeFile = { start: 0, end: module.source.length };
-
-    const visit = (
-        node: IRslSyntaxNode,
-        scope: { start: number; end: number }
-    ): void => {
-        for (const child of node.children) {
-            if (
-                child.kind === "VariableDeclaration" &&
-                child.name === "var" &&
-                child.children.length > 0
-            ) {
-                candidates.push({
-                    declarationStart: child.start,
-                    scope
-                });
-            }
-
-            visit(
-                child,
-                child.kind === "MacroDeclaration" ||
-                    child.kind === "ClassDeclaration"
-                    ? { start: child.start, end: child.end }
-                    : scope
-            );
-        }
-    };
-
-    visit(module.syntax.root, wholeFile);
-
-    if (candidates.length === 0) {
-        return [];
-    }
-
-    const afterDot = collectOffsetsAfterDot(module.syntax.tokens);
-    const ranges: { start: number; end: number }[] = [];
-    const seen = new Set<string>();
-
-    for (const candidate of candidates) {
-        /*
-         * `obj.Var()` — обращение к члену с именем Var, и терпимый к ошибкам
-         * разбор восстанавливается на нём узлом объявления. Объявлением это не
-         * считается.
-         */
-        if (afterDot.has(candidate.declarationStart)) {
-            continue;
-        }
-
-        const key = candidate.scope.start + ":" + candidate.scope.end;
-
-        if (seen.has(key)) {
-            continue;
-        }
-
-        seen.add(key);
-        ranges.push(candidate.scope);
-    }
-
-    return mergeRanges(ranges);
-}
-
-/** Смещения имён, стоящих сразу после точки: один проход по токенам. */
-function collectOffsetsAfterDot(
-    tokens: readonly IRslToken[]
-): ReadonlySet<number> {
-    const result = new Set<number>();
-    let afterDot = false;
-
-    for (const token of tokens) {
-        if (
-            token.kind === "whitespace" || token.kind === "comment" ||
-            token.kind === "bom"
-        ) {
-            continue;
-        }
-
-        if (afterDot) {
-            result.add(token.start);
-        }
-
-        afterDot = token.kind === "symbol" && token.raw === ".";
-    }
-
-    return result;
-}
-
-/** Диапазоны по возрастанию, пересекающиеся склеены. */
-function mergeRanges(
-    ranges: readonly { start: number; end: number }[]
-): readonly { start: number; end: number }[] {
-    const sorted = [...ranges].sort((left, right) =>
-        left.start - right.start || left.end - right.end
-    );
-    const result: { start: number; end: number }[] = [];
-
-    for (const range of sorted) {
-        const last = result[result.length - 1];
-
-        if (last && range.start <= last.end) {
-            last.end = Math.max(last.end, range.end);
-            continue;
-        }
-
-        result.push({ start: range.start, end: range.end });
-    }
-
-    return result;
-}
-
-/**
- * Начала имён всех объявлений документа.
- *
- * Только selectionRange: там и стоит имя. range у Macro начинается на ключевом
- * слове, и добавлять его значило бы глушить проверку по случайному совпадению
- * позиций.
- */
-function collectDeclarationStarts(
-    module: IIndexedModule
-): ReadonlySet<number> {
-    const result = new Set<number>();
-    const walk = (symbol: IIndexedModule["symbolTree"]): void => {
-        for (const child of symbol.children) {
-            result.add(child.selectionRange.start);
-            walk(child);
-        }
-    };
-
-    walk(module.symbolTree);
-    return result;
-}
-
-function collectImportRanges(
-    module: IIndexedModule
-): readonly { start: number; end: number }[] {
-    return module.syntax.root.children
-        .filter(node => node.kind === "ImportDeclaration")
-        .map(node => ({ start: node.start, end: node.end }));
-}
-
-function scopeNameAt(module: IIndexedModule, offset: number): string {
-    let name = "";
-    let current = module.symbolTree;
-
-    for (;;) {
-        const nested = current.children.find(child =>
-            child.isContainer &&
-            child.range.start <= offset &&
-            offset <= child.range.end
-        );
-
-        if (!nested) {
-            return name;
-        }
-        name = name ? `${name}.${nested.name}` : nested.name;
-        current = nested;
-    }
 }
 
 /*

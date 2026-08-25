@@ -4,7 +4,9 @@
  * Пополнение каталога прикладных модулей из справки.
  *
  * Состав модуля разложен по страницам трёх видов: классы, процедуры и группы
- * констант. Какому модулю принадлежит страница, известно из оглавления справки
+ * констант. Константы встречаются и вне своей группы — перечисленными в
+ * описании метода или процедуры, которая их принимает; такие тоже собираются
+ * (см. parseInlineConstants). Какому модулю принадлежит страница, известно из оглавления справки
  * — по имени файла это не определяется: страницы `wldinter_*` описывают
  * WIdInter, `calendar_ret_*` — Календарь, `total_mac_*` — total.
  *
@@ -524,9 +526,14 @@ function constantSummary(value) {
     }
 
     const capitalised = text.charAt(0).toUpperCase() + text.slice(1);
-    const closed = /[.!?]$/u.test(capitalised)
-        ? capitalised
-        : capitalised + ".";
+    /*
+     * Пункт перечисления кончается точкой с запятой — «Исполнение платежа;»
+     * — и без этого описание закрывалось второй точкой: «платежа;.».
+     */
+    const trimmed = capitalised.replace(/[;,]$/u, "");
+    const closed = /[.!?]$/u.test(trimmed)
+        ? trimmed
+        : trimmed + ".";
 
     return closed.length > 200 ? closed.slice(0, 197) + "..." : closed;
 }
@@ -570,6 +577,97 @@ function parseConstants(text) {
     }
 
     return result;
+}
+
+/*
+ * Перечисление констант внутри описания класса или процедуры.
+ *
+ * Раздел констант — не единственное место, где они описаны: направление
+ * параметра RSDBP_*, статус проводки ACCTRN_STATUS_*, вид округления BU_*
+ * перечислены прямо в описании метода или процедуры, которая их принимает.
+ * Такие страницы разбирались только как класс или процедура, и константы
+ * с них в каталог не попадали — написанное по документации RSDBP_OUT
+ * оказывалось в Problems незнакомым именем.
+ *
+ * Признак перечисления — фраза, которая его открывает: «задается одной из
+ * следующих констант», «возможные значения параметра». Без неё такой же по
+ * виду список — это параметры метода, а не константы.
+ */
+const CONSTANT_CUE = /констант|возможные значения/iu;
+
+/*
+ * Имя в перечислении: только ПРОПИСНЫЕ_С_ПОДЧЁРКИВАНИЕМ.
+ *
+ * Строчные и смешанные имена в тех же списках — это параметры метода
+ * (`ErrCode – выходной параметр`), и принимать их за константы значило бы
+ * звать в подсказке имена, которых в языке нет.
+ */
+const INLINE_CONSTANT_NAME = /^[A-ZА-ЯЁ][A-ZА-ЯЁ0-9]*(?:_[A-ZА-ЯЁ0-9]+)+$/u;
+
+/*
+ * Сколько строк после фразы просматривается.
+ *
+ * Перечисление прерывается примерами и примечаниями — у RSDBP_* между
+ * RSDBP_IN_OUT и RSDBP_RETVAL лежат два примера кода, — поэтому пункты
+ * ищутся в окне, а не до первой непохожей строки.
+ */
+const INLINE_WINDOW = 24;
+
+function parseInlineConstants(text) {
+    const lines = text.split("\n")
+        .map(line => line.trim())
+        .filter(Boolean);
+    const result = new Map();
+
+    for (let index = 0; index < lines.length; index++) {
+        if (!CONSTANT_CUE.test(lines[index])) {
+            continue;
+        }
+
+        const to = Math.min(index + INLINE_WINDOW, lines.length);
+        /*
+         * Конец непрерывного перечисления сразу за фразой.
+         *
+         * Пункт принимается либо как элемент списка (`·ИМЯ – …`), либо когда
+         * он продолжает перечисление, начатое строкой после фразы. Иначе в
+         * константы попадает свойство класса: у BoBankPaymentParm фраза о
+         * константах стоит выше списка свойств, и `VO_FIID – идентификатор
+         * валюты операции` внешне ничем не отличается от константы.
+         */
+        let runEnd = index;
+
+        for (let at = index + 1; at < to; at++) {
+            const bulleted = /^[·•]/u.test(lines[at]);
+            const line = lines[at].replace(/^[·•]\s*/u, "");
+            const found = CONSTANT_LINE.exec(line);
+
+            if (!found || !INLINE_CONSTANT_NAME.test(found[1])) {
+                continue;
+            }
+
+            if (!bulleted && at !== runEnd + 1) {
+                continue;
+            }
+
+            runEnd = at;
+
+            const previous = result.get(found[1].toLowerCase());
+            const description = constantSummary(found[3]);
+
+            if (previous && previous.description.length >= description.length) {
+                continue;
+            }
+
+            result.set(found[1].toLowerCase(), {
+                name: found[1],
+                value: (found[2] || "").trim(),
+                typeName: "",
+                description
+            });
+        }
+    }
+
+    return [...result.values()];
 }
 
 /*
@@ -835,6 +933,25 @@ function main() {
     };
 
     /*
+     * Константы из перечисления на странице.
+     *
+     * Уже описанные в стандартной библиотеке пропускаются: RSDVAL_* и
+     * RSDBP_* принадлежат языку, и в модуле они затенили бы описание,
+     * которое видно и без Import.
+     */
+    const addInlineConstants = (moduleName, file) => {
+        const inline = parseInlineConstants(toText(decodeCp1251(
+            fs.readFileSync(file)
+        ))).filter(item =>
+            !STANDARD_CLASSES.has(item.name.toLowerCase())
+        );
+
+        if (inline.length > 0) {
+            addition(moduleName).constants.push(...inline);
+        }
+    };
+
+    /*
      * Топики классов из двух источников: имена файлов `<модуль>_class_<класс>`
      * и разделы оглавления. Второе шире — там есть классы на страницах с
      * произвольным именем, — но первое даёт продолжения `_pr_N`, которые в
@@ -862,6 +979,19 @@ function main() {
 
         if (parsed && parsed.members.length > 0) {
             addition(moduleName).classes.push(parsed);
+        }
+
+        /*
+         * Страницы классов в общий обход ниже не попадают, а константы
+         * методов описаны именно там: RSDVAL_* у курсора, ACCTRN_STATUS_*
+         * у пакета проводок.
+         */
+        for (const page of [entry.main, ...(entry.continuations || [])]) {
+            if (!page) {
+                continue;
+            }
+
+            addInlineConstants(moduleName, path.join(chmDirectory, page));
         }
     }
 
@@ -894,6 +1024,8 @@ function main() {
             addition(moduleName).constants.push(...parseConstants(text));
             continue;
         }
+
+        addInlineConstants(moduleName, path.join(chmDirectory, page));
 
         const procedure = parseProcedure(text);
 
@@ -1091,7 +1223,17 @@ function main() {
         entry.classes = body.classes.length;
         entry.procedures = body.procedures.length;
         entry.constants = body.constants.length;
-        entry.variables = body.variables.length;
+
+        /*
+         * Спецпеременные в индексе — только там, где они есть.
+         * Так он и был устроен: у 66 модулей из 69 поля нет вовсе, и
+         * `"variables": 0` добавляло бы строку ни о чём.
+         */
+        if (body.variables.length > 0) {
+            entry.variables = body.variables.length;
+        } else {
+            delete entry.variables;
+        }
         fs.writeFileSync(file, JSON.stringify(body), "utf8");
     }
 
@@ -1134,6 +1276,7 @@ module.exports = {
     moduleKeyOf,
     parseProcedure,
     parseConstants,
+    parseInlineConstants,
     parseSpecialVariables
 };
 

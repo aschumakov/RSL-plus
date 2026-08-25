@@ -20,6 +20,10 @@ const {
     collectUnknownVariables
 } = require("../server/out/diagnostics/unknownVariableDiagnostics");
 const {
+    buildRslUndeclaredAssignmentDiagnostics,
+    collectRslUndeclaredAssignments
+} = require("../server/out/diagnostics/undeclaredAssignmentDiagnostics");
+const {
     UnknownVariableAudit
 } = require("../server/out/diagnostics/unknownVariableAudit");
 const {
@@ -59,6 +63,13 @@ function open(source, files = [MAIN], platformModules) {
 function names(diagnostics) {
     return diagnostics
         .filter(item => item.code === "unknown-variable")
+        .map(item => String(item.data.name));
+}
+
+/** Имена из находок проверки «переменная не объявлена». */
+function undeclared(diagnostics) {
+    return diagnostics
+        .filter(item => item.code === "undeclared-variable")
         .map(item => String(item.data.name));
 }
 
@@ -253,39 +264,454 @@ async function main() {
     /*
      * ─── Необъявленные переменные ──────────────────────────────────────────
      */
-    await test("по умолчанию правило работает в безопасном режиме", () => {
-        /*
-         * Прежде правило было выключено: оно проверяло любые неразрешённые
-         * имена и слишком часто ошибалось. Теперь проверяется только имя
-         * слева от знака присваивания, и это можно включить по умолчанию.
-         */
+    /*
+     * ─── Необъявленная переменная (safe) ───────────────────────────────
+     *
+     * Отдельная проверка, а не режим соседней: вопрос у неё местный —
+     * объявлена ли переменная в этой области, — и ответ на него не зависит
+     * от того, прочитаны ли импортированные модули.
+     */
+    await test("по умолчанию проверяется необъявленная переменная", () => {
         const source = [
             "Macro Test()",
             "  Var known;",
             "  undeclared = known;",
             "End;"
-        ].join("\n");
+        ].join(String.fromCharCode(10));
         const context = open(source);
 
         assert.deepStrictEqual(
-            names(buildRslDiagnostics(context.module, context.index)),
+            undeclared(buildRslDiagnostics(context.module, context.index)),
             ["undeclared"],
             "Без настроек действует то же значение, что и в окне параметров"
         );
         assert.deepStrictEqual(
-            names(buildRslDiagnostics(context.module, context.index, {
+            buildRslDiagnostics(context.module, context.index, {
                 unknownVariables: "off"
-            })),
+            }).filter(item => item.code === "undeclared-variable"),
             [],
             "Выключенное правило обязано молчать"
         );
     });
 
+    /*
+     * Главное отличие от прежнего поведения.
+     *
+     * Один неизвестный RSM- или DLM-модуль выключал проверку целиком, хотя
+     * к вопросу «объявлена ли эта переменная в процедуре» он отношения не
+     * имеет: снаружи приходят процедуры, классы и константы, а не VAR
+     * чужой процедуры.
+     */
+    await test("непрочитанный Import не выключает проверку", () => {
+        const context = open([
+            "Import someRsmModule;",
+            "Macro Test(argument)",
+            "    Var result, value;",
+            "",
+            "    parm = argument;",
+            "End;"
+        ].join(String.fromCharCode(10)));
+
+        assert.strictEqual(
+            context.resolver.getImportContextState(MAIN).completeness,
+            "opaque"
+        );
+        assert.deepStrictEqual(
+            undeclared(buildRslUndeclaredAssignmentDiagnostics(
+                context.module,
+                context.resolver
+            )),
+            ["parm"]
+        );
+    });
+
+    await test("проверяется только простая цель присваивания", () => {
+        /*
+         * Чтение неизвестного имени слишком часто оказывается не ошибкой:
+         * это может быть константа или имя из модуля, о котором сервер
+         * знает не всё. Присваивание же создаёт переменную прямо здесь.
+         */
+        const context = open([
+            "Macro Test()",
+            "  Var known, typed: Holder;",
+            "  known = SomeReadOnlyName;",
+            "  SomeMacro();",
+            "  known = SomeClass();",
+            "  typed.Field = known;",
+            "  Typo = known;",
+            "End;"
+        ].join(String.fromCharCode(10)));
+
+        assert.deepStrictEqual(
+            undeclared(buildRslUndeclaredAssignmentDiagnostics(
+                context.module,
+                context.resolver
+            )),
+            ["Typo"],
+            "Вызов, конструктор, чтение и обращение к члену — не эта проверка"
+        );
+    });
+
+    await test("параметр, VAR объемлющей области и переменная модуля", () => {
+        const context = open([
+            "Var moduleLevel;",
+            "Macro Test(argument)",
+            "  Var local;",
+            "  argument = 1;",
+            "  local = 2;",
+            "  moduleLevel = 3;",
+            "End;"
+        ].join(String.fromCharCode(10)));
+
+        assert.deepStrictEqual(
+            undeclared(buildRslUndeclaredAssignmentDiagnostics(
+                context.module,
+                context.resolver
+            )),
+            []
+        );
+    });
+
+    /*
+     * Поле родительского класса разрешением имени по позиции не находится:
+     * из тела метода оно доступно по короткому имени, а областью видимости
+     * считается сам класс. Иерархия обходится отдельно.
+     */
+    await test("поле своего и родительского класса объявлением считаются", () => {
+        const context = open([
+            "Class Base",
+            "  Var baseField;",
+            "End;",
+            "Class(Base) Child",
+            "  Var ownField;",
+            "  Macro Method()",
+            "    Var helper;",
+            "    ownField = 1;",
+            "    baseField = 2;",
+            "    helper = 3;",
+            "    strayField = 4;",
+            "  End;",
+            "End;"
+        ].join(String.fromCharCode(10)));
+
+        assert.deepStrictEqual(
+            undeclared(buildRslUndeclaredAssignmentDiagnostics(
+                context.module,
+                context.resolver
+            )),
+            ["strayField"]
+        );
+    });
+
+    /*
+     * Процедура, класс и константа объявлением ПЕРЕМЕННОЙ не являются, но и
+     * сообщения о них здесь быть не должно: пока их только читают, имя
+     * вполне может прийти извне проекта.
+     */
+    await test("неизвестные процедура, класс и константа не проверяются", () => {
+        const context = open([
+            "Macro Test()",
+            "  Var value;",
+            "  value = UnknownProc();",
+            "  value = UnknownClass();",
+            "  value = UNKNOWN_CONSTANT;",
+            "End;"
+        ].join(String.fromCharCode(10)));
+
+        assert.deepStrictEqual(
+            undeclared(buildRslUndeclaredAssignmentDiagnostics(
+                context.module,
+                context.resolver
+            )),
+            []
+        );
+    });
+
+    /*
+     * Процедура, класс и константа с таким именем — не объявление
+     * переменной: присваивание им и создаёт ту самую необъявленную
+     * переменную. Исключение — константа: о ней уже сказано ошибкой
+     * assignment-to-constant, и второе сообщение о том же месте лишнее.
+     */
+    await test("процедура с таким именем объявлением не считается", () => {
+        const context = open([
+            "Const LIMIT = 10;",
+            "Macro Target()",
+            "  return 1;",
+            "End;",
+            "Macro Test()",
+            "  Var value;",
+            "  Target = value;",
+            "  LIMIT = value;",
+            "End;"
+        ].join(String.fromCharCode(10)));
+
+        assert.deepStrictEqual(
+            undeclared(buildRslUndeclaredAssignmentDiagnostics(
+                context.module,
+                context.resolver
+            )),
+            ["Target"]
+        );
+        assert.deepStrictEqual(
+            buildRslDiagnostics(context.module, context.index)
+                .filter(item => item.code === "assignment-to-constant")
+                .map(item => item.message),
+            ["Константе LIMIT нельзя присваивать новое значение"],
+            "О присваивании константе говорит своя ошибка, и только она"
+        );
+    });
+
+    /*
+     * База из модуля, которого в проекте нет.
+     *
+     * Состав такого класса неизвестен, и поле вполне может быть объявлено
+     * в нём. Утверждать обратное не на чем, поэтому проверка молчит.
+     */
+    await test("нечитаемый базовый класс снимает проверку полей", () => {
+        const context = open([
+            "Import someRsmModule;",
+            "Class(UnknownBase) Child",
+            "  Var ownField;",
+            "  Macro Method()",
+            "    Var helper;",
+            "    inheritedMaybe = 1;",
+            "    ownField = 2;",
+            "  End;",
+            "End;"
+        ].join(String.fromCharCode(10)));
+
+        assert.deepStrictEqual(
+            undeclared(buildRslUndeclaredAssignmentDiagnostics(
+                context.module,
+                context.resolver
+            )),
+            []
+        );
+    });
+
+    await test("процедура без единого VAR не проверяется", () => {
+        const withVar = open([
+            "Macro Test()",
+            "  Var known;",
+            "  undeclared = known;",
+            "End;"
+        ].join(String.fromCharCode(10)));
+        assert.deepStrictEqual(
+            undeclared(buildRslUndeclaredAssignmentDiagnostics(
+                withVar.module,
+                withVar.resolver
+            )),
+            ["undeclared"]
+        );
+
+        /*
+         * Файл без единого VAR написан в стиле, где переменные не
+         * объявляют: отличить опечатку от намеренной неявной переменной
+         * там нечем.
+         */
+        const withoutVar = open([
+            "Macro Test()",
+            "  undeclared = known;",
+            "End;"
+        ].join(String.fromCharCode(10)));
+        assert.deepStrictEqual(
+            undeclared(buildRslUndeclaredAssignmentDiagnostics(
+                withoutVar.module,
+                withoutVar.resolver
+            )),
+            []
+        );
+    });
+
+    await test("объявление убирает сообщение сразу", () => {
+        const index = new WorkspaceIndex();
+        index.registerWorkspaceFiles([MAIN]);
+        const before = index.updateOpenModule(MAIN, [
+            "Macro Test()",
+            "  Var known;",
+            "  parm = known;",
+            "End;"
+        ].join(String.fromCharCode(10)), 1);
+
+        assert.deepStrictEqual(
+            undeclared(buildRslDiagnostics(before, index)),
+            ["parm"]
+        );
+
+        const after = index.updateOpenModule(MAIN, [
+            "Macro Test()",
+            "  Var known, parm;",
+            "  parm = known;",
+            "End;"
+        ].join(String.fromCharCode(10)), 2);
+
+        assert.deepStrictEqual(
+            undeclared(buildRslDiagnostics(after, index)),
+            []
+        );
+    });
+
+    await test("внешний список известных имён снимает предупреждение", () => {
+        const context = open([
+            "Macro Test()",
+            "  Var known;",
+            "  GlobalRegistry = known;",
+            "  StillUnknown = known;",
+            "End;"
+        ].join(String.fromCharCode(10)));
+        const file = temporaryFile(
+            "# известные имена окружения\nGlobalRegistry\n\n"
+        );
+
+        assert.deepStrictEqual(
+            undeclared(buildRslUndeclaredAssignmentDiagnostics(
+                context.module,
+                context.resolver,
+                { knownGlobalsFile: file }
+            )),
+            ["StillUnknown"]
+        );
+
+        /* Отсутствующий файл не должен ни ронять сервер, ни менять правило. */
+        assert.deepStrictEqual(
+            undeclared(buildRslUndeclaredAssignmentDiagnostics(
+                context.module,
+                context.resolver,
+                {
+                    knownGlobalsFile: path.join(path.dirname(file), "no.txt")
+                }
+            )).sort(),
+            ["GlobalRegistry", "StillUnknown"]
+        );
+    });
+
+    await test("сообщение говорит про область, а не про существование", () => {
+        /*
+         * Утверждать, что имени нет вовсе, нельзя: компилятор берёт имена и
+         * из RSM, и из DLM. Нарушено другое — принятый в самой процедуре
+         * способ объявлять переменные.
+         */
+        const context = open([
+            "Macro Test()",
+            "  Var known;",
+            "  parm = known;",
+            "End;"
+        ].join(String.fromCharCode(10)));
+
+        assert.deepStrictEqual(
+            buildRslUndeclaredAssignmentDiagnostics(
+                context.module,
+                context.resolver
+            ).map(item => ({ message: item.message, code: item.code })),
+            [{
+                message: "Переменная parm не объявлена в текущей области",
+                code: "undeclared-variable"
+            }]
+        );
+    });
+
+    /*
+     * Обход не имеет права быть ни бесконечным, ни неотменяемым.
+     *
+     * Раньше он проходил весь файл и копил все находки, а лишнее
+     * отбрасывалось уже после: на 692 КБ с 30 тысячами неизвестных имён это
+     * пять секунд работы, из которой в Problems попадали первые двести.
+     */
+    await test("обход ограничен лимитом и прерывается отменой", () => {
+        const lines = ["Macro Test()", "  Var known;"];
+        for (let index = 0; index < 5000; index++) {
+            lines.push(`  unknown${index} = known;`);
+        }
+        lines.push("End;");
+        const context = open(lines.join(String.fromCharCode(10)));
+        const collect = options => collectRslUndeclaredAssignments(
+            context.module,
+            context.resolver,
+            options
+        );
+
+        assert.strictEqual(collect({}).length, 5000, "Без лимита — все");
+        assert.strictEqual(collect({ limit: 200 }).length, 200);
+        assert.strictEqual(collect({ limit: 0 }).length, 0);
+
+        /*
+         * Отмена проверяется раз в тысячу токенов, поэтому обход
+         * прекращается почти сразу, а не на последнем имени.
+         */
+        const cancelled = collect({ isCancelled: () => true });
+        assert.ok(
+            cancelled.length > 0 && cancelled.length < 1000,
+            `Обход обязан прекратиться на первой же проверке: ${
+                cancelled.length}`
+        );
+
+        /* Через настройки лимит берётся из maxProblems. */
+        assert.strictEqual(
+            undeclared(buildRslDiagnostics(context.module, context.index, {
+                maxProblems: 25
+            })).length,
+            25
+        );
+    });
+
+    /*
+     * Рост от числа присваиваний — линейный.
+     *
+     * Три предыдущих дефекта подряд были квадратичностями, и каждая
+     * становилась видна только на крупном файле. Порог взят с запасом:
+     * квадратичность на учетверении дала бы около шестнадцати.
+     */
+    await test("рост от числа присваиваний линейный", () => {
+        const build = count => {
+            const lines = ["Macro Test()", "  Var known;"];
+
+            for (let index = 0; index < count; index++) {
+                lines.push(`  unknown${index} = known;`);
+            }
+
+            lines.push("End;");
+
+            return lines.join(String.fromCharCode(10));
+        };
+        const measure = count => {
+            const context = open(build(count));
+            let best = Infinity;
+
+            for (let run = 0; run < 3; run++) {
+                const started = process.hrtime.bigint();
+                collectRslUndeclaredAssignments(
+                    context.module,
+                    context.resolver
+                );
+                best = Math.min(
+                    best,
+                    Number(process.hrtime.bigint() - started) / 1e6
+                );
+            }
+
+            return best;
+        };
+
+        const small = measure(2000);
+        const large = measure(8000);
+        const ratio = large / Math.max(small, 0.5);
+
+        assert.ok(
+            ratio < 8,
+            `Учетверение размера дало рост ×${ratio.toFixed(1)}: ` +
+                `${small.toFixed(1)} мс -> ${large.toFixed(1)} мс`
+        );
+    });
+
+    /*
+     * ─── Неразрешённые имена (strict) ─────────────────────────────────
+     */
     await test("strict проверяет и файл без объявлений", () => {
         /*
-         * Условие про объявленный VAR — правило safe. Режим strict обещан как
-         * «все неразрешённые имена», и файл без единого VAR он тоже проверяет:
-         * пользователь выбрал этот режим сознательно.
+         * Требование объявленного VAR — правило соседней проверки. Режим
+         * strict обещан как «все неразрешённые имена», и файл без единого
+         * VAR он тоже проверяет: пользователь выбрал его сознательно.
          */
         const context = open([
             "Macro Test()",
@@ -301,107 +727,20 @@ async function main() {
             )).sort(),
             ["Missing", "typo"]
         );
-        assert.deepStrictEqual(
-            names(buildUnknownVariableDiagnostics(
-                context.module,
-                context.resolver,
-                { mode: "safe" }
-            )),
-            [],
-            "safe без объявления VAR по-прежнему молчит"
-        );
     });
 
-    await test("safe смотрит только на имя слева от «=»", () => {
-        /*
-         * Чтение неизвестного имени слишком часто оказывается не ошибкой:
-         * имя может прийти из модуля, о котором сервер знает не всё, или
-         * его подставляет система. Присваивание же создаёт переменную прямо
-         * здесь, и опечатка в её имени видна наверняка.
-         */
+    await test("strict проверяет и неполный контекст", () => {
         const context = open([
-            "Macro Test()",
-            "  Var known;",
-            "  known = SomeReadOnlyName;",
-            "  Typo = known;",
-            "End;"
-        ].join(String.fromCharCode(10)));
-
-        assert.deepStrictEqual(
-            names(buildUnknownVariableDiagnostics(
-                context.module,
-                context.resolver,
-                { mode: "safe" }
-            )),
-            ["Typo"]
-        );
-        assert.deepStrictEqual(
-            names(buildUnknownVariableDiagnostics(
-                context.module,
-                context.resolver,
-                { mode: "strict" }
-            )).sort(),
-            ["SomeReadOnlyName", "Typo"]
-        );
-    });
-
-    await test("safe предупреждает только при явном VAR в файле", () => {
-        const withVar = open([
-            "Macro Test()",
-            "  Var known;",
-            "  undeclared = known;",
-            "End;"
-        ].join("\n"));
-        assert.deepStrictEqual(
-            names(buildUnknownVariableDiagnostics(
-                withVar.module,
-                withVar.resolver,
-                { mode: "safe" }
-            )),
-            ["undeclared"]
-        );
-
-        /*
-         * Файл без единого VAR написан в стиле, где переменные не объявляют:
-         * предупреждать там значит подчёркивать весь файл.
-         */
-        const withoutVar = open([
-            "Macro Test()",
-            "  undeclared = known;",
-            "End;"
-        ].join("\n"));
-        assert.deepStrictEqual(
-            names(buildUnknownVariableDiagnostics(
-                withoutVar.module,
-                withoutVar.resolver,
-                { mode: "safe" }
-            )),
-            []
-        );
-    });
-
-    await test("safe молчит при неполном контексте, strict — нет", () => {
-        const source = [
             "Import someRsmModule;",
             "Macro Test()",
             "  Var known;",
             "  undeclared = known;",
             "End;"
-        ].join("\n");
-        const context = open(source);
+        ].join(String.fromCharCode(10)));
 
         assert.strictEqual(
             context.resolver.getImportContextState(MAIN).completeness,
             "opaque"
-        );
-        assert.deepStrictEqual(
-            names(buildUnknownVariableDiagnostics(
-                context.module,
-                context.resolver,
-                { mode: "safe" }
-            )),
-            [],
-            "Символ может прийти из модуля, которого в workspace нет"
         );
 
         const strict = collectUnknownVariables(
@@ -409,6 +748,7 @@ async function main() {
             context.resolver,
             { mode: "strict" }
         );
+
         assert.deepStrictEqual(
             strict.map(item => item.name),
             ["undeclared"],
@@ -416,6 +756,53 @@ async function main() {
         );
         assert.strictEqual(strict[0].reason, "incomplete-context");
         assert.strictEqual(strict[0].importContext, "opaque");
+    });
+
+    await test("сообщение strict соответствует ошибке компилятора", () => {
+        /*
+         * Неизвестным здесь может оказаться и вызов процедуры: MissingProc
+         * переменной не является, а компилятор на всё это отвечает
+         * «неопределенный идентификатор».
+         */
+        const context = open([
+            "Macro Test()",
+            "  Var known;",
+            "  known = MissingProc();",
+            "End;"
+        ].join(String.fromCharCode(10)));
+
+        assert.deepStrictEqual(
+            buildUnknownVariableDiagnostics(
+                context.module,
+                context.resolver,
+                { mode: "strict" }
+            ).map(item => item.message),
+            ["Идентификатор MissingProc не определён"]
+        );
+    });
+
+    await test("находка содержит всё, что нужно для решения", () => {
+        const context = open([
+            "Class Holder",
+            "  Macro Method()",
+            "    Var known;",
+            "    undeclared = known;",
+            "  End;",
+            "End;"
+        ].join(String.fromCharCode(10)));
+        const [finding] = collectRslUndeclaredAssignments(
+            context.module,
+            context.resolver
+        );
+
+        assert.ok(finding, "Находка обязана быть");
+        assert.strictEqual(finding.name, "undeclared");
+        assert.strictEqual(finding.uri, MAIN);
+        assert.strictEqual(finding.line, 3);
+        assert.strictEqual(finding.scope, "Holder.Method");
+        assert.strictEqual(finding.hasExplicitVar, true);
+        assert.strictEqual(finding.importContext, "complete");
+        assert.strictEqual(finding.reason, "no-declaration");
     });
 
     await test("объявления, типы, Import и имена после точки не считаются", () => {
@@ -434,7 +821,7 @@ async function main() {
             "  Var when = {curdate};",
             "  Var kind = V_INTEGER;",
             "End;"
-        ].join("\n");
+        ].join(String.fromCharCode(10));
         const context = open(source, [MAIN, "file:///someLibrary.mac"]);
         context.index.updateExternalModule(
             "file:///someLibrary.mac",
@@ -450,137 +837,6 @@ async function main() {
             "Ни объявление, ни тип, ни Import, ни поле, ни спецпеременная, " +
                 "ни системная константа не являются необъявленной переменной"
         );
-    });
-
-    await test("внешний список известных имён снимает предупреждение", () => {
-        const source = [
-            "Macro Test()",
-            "  Var known;",
-            "  GlobalRegistry = known;",
-            "  StillUnknown = known;",
-            "End;"
-        ].join("\n");
-        const context = open(source);
-        const file = temporaryFile(
-            "# известные имена окружения\nGlobalRegistry\n\n"
-        );
-
-        assert.deepStrictEqual(
-            names(buildUnknownVariableDiagnostics(
-                context.module,
-                context.resolver,
-                { mode: "safe", knownGlobalsFile: file }
-            )),
-            ["StillUnknown"]
-        );
-
-        /* Отсутствующий файл не должен ни ронять сервер, ни менять правило. */
-        assert.deepStrictEqual(
-            names(buildUnknownVariableDiagnostics(
-                context.module,
-                context.resolver,
-                {
-                    mode: "safe",
-                    knownGlobalsFile: path.join(path.dirname(file), "no.txt")
-                }
-            )).sort(),
-            ["GlobalRegistry", "StillUnknown"]
-        );
-    });
-
-    await test("сообщение соответствует ошибке компилятора", () => {
-        /*
-         * Проверка называется «необъявленные переменные», но неизвестным может
-         * оказаться и вызов процедуры: MissingProc переменной не является, а
-         * компилятор на всё это отвечает «неопределенный идентификатор».
-         */
-        const source = [
-            "Macro Test()",
-            "  Var known;",
-            "  MissingProc = known;",
-            "End;"
-        ].join("\n");
-        const context = open(source);
-
-        assert.deepStrictEqual(
-            buildUnknownVariableDiagnostics(
-                context.module,
-                context.resolver,
-                { mode: "safe" }
-            ).map(item => item.message),
-            ["Идентификатор MissingProc не определён"]
-        );
-    });
-
-    /*
-     * Обход не имеет права быть ни бесконечным, ни неотменяемым.
-     *
-     * Раньше он проходил весь файл и копил все находки, а лишнее отбрасывалось
-     * уже после: на 692 КБ с 30 тысячами неизвестных имён это пять секунд
-     * работы, из которой в Problems попадали первые двести.
-     */
-    await test("обход ограничен лимитом и прерывается отменой", () => {
-        const lines = ["Macro Test()", "  Var known;"];
-        for (let index = 0; index < 5000; index++) {
-            lines.push(`  unknown${index} = known;`);
-        }
-        lines.push("End;");
-        const context = open(lines.join("\n"));
-        const collect = options => collectUnknownVariables(
-            context.module,
-            context.resolver,
-            { mode: "safe", ...options }
-        );
-
-        assert.strictEqual(collect({}).length, 5000, "Без лимита — все");
-        assert.strictEqual(collect({ limit: 200 }).length, 200);
-        assert.strictEqual(collect({ limit: 0 }).length, 0);
-
-        /*
-         * Отмена проверяется раз в тысячу токенов, поэтому обход прекращается
-         * почти сразу, а не на последнем имени.
-         */
-        const cancelled = collect({ isCancelled: () => true });
-        assert.ok(
-            cancelled.length > 0 && cancelled.length < 1000,
-            `Обход обязан прекратиться на первой же проверке: ${
-                cancelled.length}`
-        );
-
-        /* Через настройки лимит берётся из maxProblems. */
-        assert.strictEqual(
-            buildRslDiagnostics(context.module, context.index, {
-                unknownVariables: "safe",
-                maxProblems: 25
-            }).filter(item => item.code === "unknown-variable").length,
-            25
-        );
-    });
-
-    await test("находка содержит всё, что нужно для решения", () => {
-        const source = [
-            "Class Holder",
-            "  Macro Method()",
-            "    Var known;",
-            "    undeclared = known;",
-            "  End;",
-            "End;"
-        ].join("\n");
-        const context = open(source);
-        const [finding] = collectUnknownVariables(
-            context.module,
-            context.resolver,
-            { mode: "safe" }
-        );
-
-        assert.ok(finding, "Находка обязана быть");
-        assert.strictEqual(finding.name, "undeclared");
-        assert.strictEqual(finding.uri, MAIN);
-        assert.strictEqual(finding.line, 3);
-        assert.strictEqual(finding.scope, "Holder.Method");
-        assert.strictEqual(finding.hasExplicitVar, true);
-        assert.strictEqual(finding.importContext, "complete");
-        assert.strictEqual(finding.reason, "no-declaration");
     });
 
     /*
@@ -835,6 +1091,61 @@ async function main() {
         assert.ok(
             !codes.includes("duplicate-declaration"),
             "Символы из разных модулей повторным объявлением не являются"
+        );
+    });
+
+    /*
+     * Константы классов Rsd описаны в справке внутри описаний методов, а
+     * не в разделе констант, и каталог их не знал: написанное по
+     * документации `cmd.AddParam("p", RSDBP_OUT, V_INTEGER)` строгий
+     * режим считал обращением к неопределённому идентификатору.
+     */
+    await test("константы Rsd из справки известны строгому режиму", () => {
+        const context = open([
+            "Macro Test()",
+            "  Var con = RsdConnection();",
+            "  Var cmd = RsdCommand(con, 'call p(?)', RsdCmdStoreProc);",
+            "  cmd.AddParam('result', RSDBP_OUT, V_INTEGER);",
+            "  cmd.Param(0).Direction = RSDBP_IN_OUT;",
+            "  Var rs = cmd.Execute();",
+            "  rs.CursorLocation = RSDVAL_CLIENT;",
+            "  rs.CursorType = RSDVAL_DYNAMIC;",
+            "  rs.AddUserCmdParam('p', 'f', RSDRVER_OLDVAL);",
+            "  rs.Move(1, RELATIVE);",
+            "  return rs;",
+            "End;"
+        ].join(String.fromCharCode(10)));
+
+        assert.deepStrictEqual(
+            collectUnknownVariables(
+                context.module,
+                context.resolver,
+                { mode: "strict" }
+            ).map(finding => finding.name),
+            []
+        );
+    });
+
+    /*
+     * Коды ссылочных типов на странице VALTYPE не перечислены, но
+     * руководство требует ими пользоваться: «параметр должен иметь тип,
+     * соответствующий коду V_SREF или V_FREF».
+     */
+    await test("коды ссылочных типов известны строгому режиму", () => {
+        const context = open([
+            "Macro Test(buffer)",
+            "  if (ValType(buffer) == V_SREF) return V_FREF;",
+            "  return V_AREF + V_TREF + V_DREF;",
+            "End;"
+        ].join(String.fromCharCode(10)));
+
+        assert.deepStrictEqual(
+            collectUnknownVariables(
+                context.module,
+                context.resolver,
+                { mode: "strict" }
+            ).map(finding => finding.name),
+            []
         );
     });
 

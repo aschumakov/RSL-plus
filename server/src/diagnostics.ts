@@ -39,6 +39,13 @@ import {
     IRslDiagnosticSettings
 } from "./interfaces";
 import {
+    checkRslUndeclaredAssignment,
+    createRslAssignmentCheckFacts,
+    createUndeclaredAssignmentDiagnostic,
+    isRslUndeclaredAssignmentCandidate,
+    type IRslAssignmentCheckFacts
+} from "./diagnostics/undeclaredAssignmentDiagnostics";
+import {
     buildUnknownVariableDiagnostics,
     normalizeUnknownVariablesMode
 } from "./diagnostics/unknownVariableDiagnostics";
@@ -923,6 +930,26 @@ function planLocalRslDiagnostics(
                 result,
                 options.maxProblems
             )
+        ],
+        /*
+         * Необъявленная переменная слева от «=».
+         *
+         * Локальная фаза, а не межфайловая: вопрос о том, объявлена ли
+         * переменная В ЭТОЙ области, решается по самому файлу, и ждать
+         * загрузки импортов ради него незачем. Раньше эта проверка была
+         * режимом проверки неразрешённых имён и выключалась целиком,
+         * стоило файлу сослаться на неизвестный RSM- или DLM-модуль.
+         */
+        [
+            "undeclaredAssignments",
+            options.unknownVariables === "safe" &&
+                !options.unknownVariablesAuditFile,
+            createUndeclaredAssignmentStage(
+                module,
+                getResolver,
+                options,
+                result
+            )
         ]
     ];
 
@@ -1091,7 +1118,7 @@ function planWorkspaceRslDiagnostics(
         ],
         [
             "unknownVariables",
-            (options.unknownVariables !== "off" ||
+            (options.unknownVariables === "strict" ||
                 options.unknownMembers) &&
                 !options.unknownVariablesAuditFile,
             isCancelled => {
@@ -1385,6 +1412,55 @@ function createConstantAssignmentStage(
             declarationStarts = starts;
 
             return true;
+        }
+    );
+}
+
+/**
+ * Этап проверки необъявленных переменных.
+ *
+ * Возобновляемый обход с отбором кандидатов до резолвера: целей
+ * присваивания в файле на порядок меньше, чем идентификаторов, и
+ * разрешение имени платится только за них.
+ */
+function createUndeclaredAssignmentStage(
+    module: IIndexedModule,
+    getResolver: () => RslScopeResolver,
+    options: Required<IRslDiagnosticSettings>,
+    result: Diagnostic[]
+): IRslDiagnosticStage {
+    let facts: IRslAssignmentCheckFacts | undefined;
+
+    return createResolverScanStage(
+        () => module.syntax.tokens,
+        (tokens, index) => !!facts &&
+            isRslUndeclaredAssignmentCandidate(tokens, index, facts),
+        (tokens, index) => {
+            if (result.length >= options.maxProblems) {
+                return;
+            }
+
+            const finding = checkRslUndeclaredAssignment(
+                module,
+                getResolver(),
+                tokens[index],
+                facts
+            );
+
+            if (finding) {
+                result.push(
+                    createUndeclaredAssignmentDiagnostic(finding)
+                );
+            }
+        },
+        () => {
+            facts = createRslAssignmentCheckFacts(
+                module,
+                options.unknownVariablesKnownGlobalsFile
+            );
+
+            /* Ни одного VAR в файле — проверять нечего. */
+            return facts.varScopes.length > 0;
         }
     );
 }

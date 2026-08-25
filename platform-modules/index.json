@@ -11,7 +11,7 @@
    "file": "bankinter.json",
    "classes": 30,
    "procedures": 244,
-   "constants": 376,
+   "constants": 377,
    "dependencies": [
     "AcquirerObjects",
     "PaymInter"
@@ -121,7 +121,7 @@
    "file": "fminter.json",
    "classes": 2,
    "procedures": 20,
-   "constants": 76
+   "constants": 77
   },
   "FXInter": {
    "file": "fxinter.json",
@@ -190,7 +190,7 @@
    "file": "mesinter.json",
    "classes": 4,
    "procedures": 18,
-   "constants": 153
+   "constants": 160
   },
   "MmarkInter": {
    "file": "mmarkinter.json",
@@ -214,7 +214,7 @@
    "file": "payminter.json",
    "classes": 47,
    "procedures": 168,
-   "constants": 660,
+   "constants": 686,
    "dependencies": [
     "BankInter"
    ]
@@ -223,7 +223,7 @@
    "file": "pcrateinter.json",
    "classes": 0,
    "procedures": 2,
-   "constants": 0
+   "constants": 12
   },
   "PercInter": {
    "file": "percinter.json",
@@ -235,7 +235,7 @@
    "file": "procent.json",
    "classes": 1,
    "procedures": 13,
-   "constants": 20
+   "constants": 34
   },
   "procentbuh": {
    "file": "procentbuh.json",
@@ -253,7 +253,7 @@
    "file": "psinter.json",
    "classes": 11,
    "procedures": 32,
-   "constants": 167,
+   "constants": 170,
    "dependencies": [
     "PaymInter"
    ]
@@ -375,7 +375,7 @@
    "file": "spinter.json",
    "classes": 0,
    "procedures": 52,
-   "constants": 286
+   "constants": 295
   },
   "total": {
    "file": "total.json",
@@ -399,7 +399,7 @@
    "file": "vsinter.json",
    "classes": 0,
    "procedures": 26,
-   "constants": 45
+   "constants": 53
   },
   "WIdInter": {
    "file": "widinter.json",

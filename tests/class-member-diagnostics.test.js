@@ -235,8 +235,8 @@ test("объявление модуля после первой процедур
     ].join(String.fromCharCode(10));
 
     assert.deepStrictEqual(
-        codes(diagnose(source).diagnostics, "unknown-variable"),
-        ["Идентификатор Typo не определён"]
+        codes(diagnose(source).diagnostics, "undeclared-variable"),
+        ["Переменная Typo не объявлена в текущей области"]
     );
 });
 

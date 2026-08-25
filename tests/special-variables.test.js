@@ -86,7 +86,7 @@ async function main() {
             "End;"
         ].join("\n");
         const unknown = diagnose(source, { unknownVariables: "safe" })
-            .filter(item => item.code === "unknown-variable")
+            .filter(item => item.code === "undeclared-variable")
             .map(item => String(item.data.name));
 
         /*

@@ -1001,7 +1001,12 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
     classDef("RsdCommand", "SQL-запрос к источнику данных.", [
         property("Connection", "RsdConnection", "Соединение команды."),
         property("CmdText", "String", "Текст команды."),
-        property("CursorType", "Integer", "Тип курсора набора данных."),
+        property(
+            "CursorType",
+            "Integer",
+            "Тип курсора набора данных: RSDVAL_STATIC, RSDVAL_DYNAMIC, " +
+                "RSDVAL_FORVARD_ONLY или RSDVAL_KEYSET_DRIVEN."
+        ),
         property("BlockSize", "Integer", "Число записей за одно обращение."),
         property("NullConversion", "Bool", "Преобразовывать спецзначения в NULL."),
         property("ParamCount", "Integer", "Количество параметров команды."),
@@ -1017,7 +1022,8 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
             "AddParam",
             "(name: String, [dir: Integer], [val], [len: Integer])",
             "RsdParameter",
-            "Добавляет в команду именованный параметр."
+            "Добавляет именованный параметр; направление dir задают " +
+                "константы RSDBP_*."
         ),
         method(
             "DeleteParam",
@@ -1035,8 +1041,18 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
     ]),
     classDef("RsdRecordset", "Набор записей результата SQL-запроса.", [
         property("Command", "RsdCommand", "Команда, породившая набор."),
-        property("CursorLocation", "Integer", "Местоположение курсора."),
-        property("CursorType", "Integer", "Тип курсора."),
+        property(
+            "CursorLocation",
+            "Integer",
+            "Местоположение курсора: RSDVAL_SERVER, RSDVAL_CLIENT или " +
+                "RSDVAL_CLIENT_IF_NEEDED."
+        ),
+        property(
+            "CursorType",
+            "Integer",
+            "Тип курсора: RSDVAL_STATIC, RSDVAL_DYNAMIC, " +
+                "RSDVAL_FORVARD_ONLY или RSDVAL_KEYSET_DRIVEN."
+        ),
         property("BOF", "Bool", "Позиция до первой записи."),
         property("EOF", "Bool", "Позиция после последней записи."),
         property("BookMark", "Variant", "Закладка текущей записи."),
@@ -1061,7 +1077,7 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
             "Move",
             "(numRec, moveDirect)",
             "Bool",
-            "Переходит к записи по смещению или закладке."
+            "Переходит по смещению или закладке: RELATIVE, ABSOLUTE, BOOKMARK."
         ),
         method("AddNew", "()", "Bool", "Вставляет новую запись."),
         method("Edit", "()", "Bool", "Начинает редактирование текущей записи."),
@@ -1072,7 +1088,8 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
             "AddUserCmdParam",
             "(nameParm: String, nameField: String, versionValue: Integer)",
             "Bool",
-            "Добавляет параметр пользовательской команде набора."
+            "Добавляет параметр команде набора; версия значения задаётся " +
+                "RSDRVER_*."
         )
     ]),
     classDef("RsdError", "SQL-ошибка при работе с базой данных.", [
@@ -1099,9 +1116,14 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
         )
     ]),
     classDef("RsdParameter", "Именованный параметр SQL-запроса.", [
-        property("Name", "String", "Наименование параметра."),
-        property("Direction", "Integer", "Входящий, исходящий или возвращаемый."),
-        property("Type", "Integer", "Тип параметра."),
+        property("Name", "String", "Наименование параметра (только чтение)."),
+        property(
+            "Direction",
+            "Integer",
+            "Характеристика параметра: RSDBP_IN, RSDBP_OUT, " +
+                "RSDBP_IN_OUT или RSDBP_RETVAL."
+        ),
+        property("Type", "Integer", "Тип параметра (только чтение)."),
         property("Value", "Variant", "Значение параметра."),
         method(
             "SetSelfAlloc",
@@ -1651,13 +1673,109 @@ const MESSAGE_BOX_CONSTANTS: readonly IRslBuiltinDefinition[] = [
     constant("IND_ERROR", "Код ошибки выполнения процедуры MsgBoxEx.")
 ];
 
+/**
+ * Константы работы с источником данных ODBC (классы Rsd*).
+ *
+ * В справке они описаны не в разделе констант, а внутри описаний классов —
+ * направление параметра у AddParam и свойства Direction, вид содержимого
+ * cmdText, местоположение и тип курсора, версия значения у AddUserCmdParam,
+ * направление перехода у Move. Каталог их не знал, и написанное по
+ * документации RSDBP_OUT попадало в Problems как необъявленное имя.
+ */
+const RSD_CONSTANTS: readonly IRslBuiltinDefinition[] = [
+    constant(
+        "RSDBP_IN",
+        "Входящий параметр: характеристика параметра команды RsdCommand."
+    ),
+    constant(
+        "RSDBP_OUT",
+        "Параметр может использоваться для возвращения значения. В параметре " +
+            "val метода AddParam при этом задаётся тип возвращаемого " +
+            "значения — одна из констант V_*."
+    ),
+    constant(
+        "RSDBP_IN_OUT",
+        "Параметр может использоваться и как входящий, и для возвращения " +
+            "значения. Максимальная длина возвращаемой строки — 74 символа, " +
+            "если в параметре val не указана строка большей длины."
+    ),
+    constant(
+        "RSDBP_RETVAL",
+        "Параметр используется для возвращения значения хранимой процедуры, " +
+            "указанной в SQL-запросе."
+    ),
+    constant(
+        "RsdCmdText",
+        "В параметре cmdText передаётся текст SQL-запроса."
+    ),
+    constant(
+        "RsdCmdTable",
+        "В параметре cmdText передаётся имя таблицы базы данных."
+    ),
+    constant(
+        "RsdCmdStoreProc",
+        "В параметре cmdText передаётся имя хранимой процедуры."
+    ),
+    constant("RSDVAL_SERVER", "Курсор создаётся на сервере."),
+    constant(
+        "RSDVAL_CLIENT",
+        "Курсор создаётся в памяти клиентского приложения."
+    ),
+    constant(
+        "RSDVAL_CLIENT_IF_NEEDED",
+        "Если сервер поддерживает серверные курсоры, курсор создаётся на " +
+            "сервере, иначе — в памяти клиентского приложения."
+    ),
+    constant(
+        "RSDVAL_STATIC",
+        "Статический курсор: данные, полученные при выполнении команды, " +
+            "загружаются в область памяти целиком."
+    ),
+    constant(
+        "RSDVAL_DYNAMIC",
+        "Динамический курсор: данные загружаются постранично, размер " +
+            "страницы задаёт свойство BlockSize. Рекомендуется при работе с " +
+            "большими объёмами данных."
+    ),
+    constant(
+        "RSDVAL_FORVARD_ONLY",
+        "Курсор удерживает только одну запись и поддерживает перемещение " +
+            "вперёд по набору данных: для простого чтения без изменений."
+    ),
+    constant(
+        "RSDVAL_KEYSET_DRIVEN",
+        "Разновидность динамического курсора MS SQL-сервера: сохраняет ключ " +
+            "набора данных и перемещается по нему динамически."
+    ),
+    constant("RSDRVER_OLDVAL", "Версия записи до изменения."),
+    constant("RSDRVER_NEWVAL", "Версия записи после изменения."),
+    constant(
+        "RSDRVER_CHANGE",
+        "Версия изменённой записи; используется только для свойства " +
+            "UpdateCommand."
+    ),
+    constant(
+        "RELATIVE",
+        "Переход на numRec элементов относительно текущего элемента набора."
+    ),
+    constant(
+        "ABSOLUTE",
+        "Переход на numRec элементов относительно начала набора данных."
+    ),
+    constant(
+        "BOOKMARK",
+        "Переход к закладке, заданной в параметре numRec."
+    )
+];
+
 export const RSL_STANDARD_LIBRARY: readonly IRslBuiltinDefinition[] =
     Object.freeze([
         ...CLASS_DEFINITIONS,
         ...PROCEDURE_DEFINITIONS,
         ...DIALOG_MESSAGE_CONSTANTS,
         ...DIALOG_RESULT_CONSTANTS,
-        ...MESSAGE_BOX_CONSTANTS
+        ...MESSAGE_BOX_CONSTANTS,
+        ...RSD_CONSTANTS
     ]);
 
 /**

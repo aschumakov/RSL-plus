@@ -12,6 +12,10 @@ import {
     createWorkSlice,
     type IRslWorkSlice
 } from "../core/timeSlice";
+import {
+    collectRslUndeclaredAssignments,
+    collectRslUndeclaredAssignmentsChunked
+} from "./undeclaredAssignmentDiagnostics";
 import { buildImportResolutionDiagnostics } from "./importResolutionDiagnostics";
 import { buildCyclicImportDiagnostics } from "./cyclicImportDiagnostics";
 import {
@@ -95,6 +99,10 @@ export interface IRslDiagnosticEngineOptions {
  *
  * Общее для синхронного и порционного вариантов правила: решение «запускать
  * или нет» обязано быть одним, иначе режимы разойдутся.
+ *
+ * Режим выбирает и проверку: safe отчитывается о необъявленных переменных
+ * слева от «=», strict — обо всех неразрешённых именах. Отчёт обязан
+ * описывать то самое правило, которое потом включат.
  */
 function auditRequest(context: IRslDiagnosticContext): {
     auditFile: string;
@@ -196,11 +204,17 @@ export class RslDiagnosticEngine {
 
                 audit(
                     request.auditFile,
-                    collectUnknownVariables(
-                        request.module,
-                        request.resolver,
-                        request.options
-                    )
+                    request.options.mode === "safe"
+                        ? collectRslUndeclaredAssignments(
+                            request.module,
+                            request.resolver,
+                            request.options
+                        )
+                        : collectUnknownVariables(
+                            request.module,
+                            request.resolver,
+                            request.options
+                        )
                 );
                 /* Audit не публикует Problems — в этом и смысл режима. */
                 return [];
@@ -215,12 +229,19 @@ export class RslDiagnosticEngine {
 
                 audit(
                     request.auditFile,
-                    await collectUnknownVariablesChunked(
-                        request.module,
-                        request.resolver,
-                        request.options,
-                        slice
-                    )
+                    request.options.mode === "safe"
+                        ? await collectRslUndeclaredAssignmentsChunked(
+                            request.module,
+                            request.resolver,
+                            request.options,
+                            slice
+                        )
+                        : await collectUnknownVariablesChunked(
+                            request.module,
+                            request.resolver,
+                            request.options,
+                            slice
+                        )
                 );
                 return [];
             }
