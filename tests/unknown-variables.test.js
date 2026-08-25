@@ -15,6 +15,7 @@ const { buildRslDiagnostics } = require("../server/out/diagnostics");
 const {
     RslDiagnosticEngine
 } = require("../server/out/diagnostics/diagnosticEngine");
+const { getDefaults } = require("../server/out/defaults");
 const {
     buildUnknownVariableDiagnostics,
     collectUnknownVariables
@@ -64,6 +65,11 @@ function names(diagnostics) {
     return diagnostics
         .filter(item => item.code === "unknown-variable")
         .map(item => String(item.data.name));
+}
+
+/** Движок диагностик стенда: обе фазы одного файла. */
+function engineOf(_context) {
+    return new RslDiagnosticEngine();
 }
 
 /** Имена из находок проверки «переменная не объявлена». */
@@ -552,6 +558,213 @@ async function main() {
         );
     });
 
+    /*
+     * strict обязан находить всё, что находит safe.
+     *
+     * Прежде локальная проверка работала только в safe, и строгий режим
+     * ТЕРЯЛ находки: `Target = value` он разрешал как процедуру и молчал.
+     * При этом на одном присваивании не должно быть двух сообщений: точнее
+     * отвечает undeclared-variable, оно и остаётся.
+     */
+    await test("strict находит всё, что находит safe, и без дублей", () => {
+        const context = open([
+            "Macro Target()",
+            "  return 1;",
+            "End;",
+            "Macro Test()",
+            "  Var known;",
+            "  known = SomeReadName;",
+            "  Target = known;",
+            "  Typo = known;",
+            "End;"
+        ].join(String.fromCharCode(10)));
+        const both = mode => [
+            ...engineOf(context).buildLocal(
+                context.module,
+                context.index,
+                { unknownVariables: mode }
+            ),
+            ...engineOf(context).buildWorkspace(
+                context.module,
+                context.index,
+                { unknownVariables: mode }
+            )
+        ];
+        const safe = both("safe");
+        const strict = both("strict");
+
+        assert.deepStrictEqual(
+            undeclared(safe).sort(),
+            ["Target", "Typo"]
+        );
+        assert.deepStrictEqual(
+            undeclared(strict).sort(),
+            ["Target", "Typo"],
+            "Всё, что нашёл safe, обязано найтись и в strict"
+        );
+        assert.deepStrictEqual(
+            names(strict),
+            ["SomeReadName"],
+            "Чтение — добавка strict; о присваивании он молчит, о нём уже сказано"
+        );
+    });
+
+    /*
+     * Присваивание после закрывающей скобки условия.
+     *
+     * Прежде цель присваивания определялась по предыдущему значащему токену
+     * ДО проверки перевода строки: у `if (known == 1)` этот токен — «)», и
+     * ни тело на следующей строке, ни однострочный вариант проверку не
+     * проходили.
+     */
+    await test("присваивание после if, while и скобки строкой выше", () => {
+        const context = open([
+            "Macro Test()",
+            "  Var known;",
+            "  if (known == 1)",
+            "    FirstTypo = known;",
+            "  end;",
+            "  while (known)",
+            "    SecondTypo = known;",
+            "  end;",
+            "  if (known) then ThirdTypo = known; end;",
+            "End;"
+        ].join(String.fromCharCode(10)));
+
+        assert.deepStrictEqual(
+            undeclared(buildRslUndeclaredAssignmentDiagnostics(
+                context.module,
+                context.resolver
+            )),
+            ["FirstTypo", "SecondTypo", "ThirdTypo"]
+        );
+    });
+
+    await test("присваивание первой командой при VAR ниже", () => {
+        const context = open([
+            "Macro Test()",
+            "  parm = 1;",
+            "  Var value;",
+            "  value = parm;",
+            "End;"
+        ].join(String.fromCharCode(10)));
+
+        assert.deepStrictEqual(
+            undeclared(buildRslUndeclaredAssignmentDiagnostics(
+                context.module,
+                context.resolver
+            )),
+            ["parm"]
+        );
+    });
+
+    /*
+     * `x = 1; Var x;` — вопрос порядка, а не объявления.
+     *
+     * Объявление в области есть, и о том, что оно ниже использования,
+     * говорит своя проверка. Два сообщения об одной строке — шум.
+     */
+    await test("VAR ниже присваивания оставляет проверку порядка", () => {
+        const context = open([
+            "Macro Test()",
+            "  x = 1;",
+            "  Var x;",
+            "  return x;",
+            "End;"
+        ].join(String.fromCharCode(10)));
+        const engine = engineOf(context);
+        const all = [
+            ...engine.buildLocal(context.module, context.index),
+            ...engine.buildWorkspace(context.module, context.index)
+        ];
+
+        assert.deepStrictEqual(undeclared(all), []);
+        assert.deepStrictEqual(
+            all.filter(item => item.code === "use-before-declaration")
+                .map(item => item.message),
+            ["Переменная x используется до объявления"]
+        );
+    });
+
+    /*
+     * `for (i = 0; …)` объявляет i не хуже, чем VAR: так пишут, и компилятор
+     * это принимает. Прежде проверка сообщала о третьем выражении заголовка
+     * — `i = i + 1`, — молча пропуская первое, где переменная появляется.
+     */
+    await test("заголовок for вводит переменную цикла", () => {
+        const context = open([
+            "Macro Test()",
+            "  Var total = 0;",
+            "  for (i = 0; i < 3; i = i + 1)",
+            "    total = total + i;",
+            "  end;",
+            "End;"
+        ].join(String.fromCharCode(10)));
+        const engine = engineOf(context);
+
+        for (const mode of ["safe", "strict"]) {
+            const all = [
+                ...engine.buildLocal(context.module, context.index, {
+                    unknownVariables: mode
+                }),
+                ...engine.buildWorkspace(context.module, context.index, {
+                    unknownVariables: mode
+                })
+            ];
+
+            assert.deepStrictEqual(
+                undeclared(all).concat(names(all)),
+                [],
+                "Режим " + mode + " не имеет права ругаться на i"
+            );
+        }
+    });
+
+    /*
+     * Результат не имеет права зависеть от момента загрузки Import.
+     *
+     * Переменную объявляет импортированный модуль. Пока он не прочитан,
+     * находка не публикуется: иначе ошибка появлялась бы на время загрузки
+     * и оставалась до следующей правки файла.
+     */
+    await test("непрочитанный Import откладывает находку, а не создаёт её", () => {
+        const index = new WorkspaceIndex();
+        const lib = "file:///lib.mac";
+        index.registerWorkspaceFiles([MAIN, lib]);
+        const module = index.updateOpenModule(MAIN, [
+            "Import lib;",
+            "Macro Test()",
+            "  Var known;",
+            "  shared = known;",
+            "End;"
+        ].join(String.fromCharCode(10)), 1);
+        const resolver = new RslScopeResolver(index, getDefaults());
+        const findings = () => undeclared(
+            buildRslUndeclaredAssignmentDiagnostics(module, resolver)
+        );
+
+        assert.strictEqual(
+            resolver.getImportContextState(MAIN).completeness,
+            "loading"
+        );
+        assert.deepStrictEqual(
+            findings(),
+            [],
+            "Пока модуль читается, ошибку показывать не на чем"
+        );
+
+        index.updateExternalModule(lib, "Var shared;" + String.fromCharCode(10), 1);
+        assert.deepStrictEqual(
+            findings(),
+            [],
+            "Прочитанный модуль объявляет переменную"
+        );
+
+        /* Переменную из модуля убрали — ошибка появляется. */
+        index.updateExternalModule(lib, "Var renamed;" + String.fromCharCode(10), 2);
+        assert.deepStrictEqual(findings(), ["shared"]);
+    });
+
     await test("внешний список известных имён снимает предупреждение", () => {
         const context = open([
             "Macro Test()",
@@ -734,7 +947,7 @@ async function main() {
             "Import someRsmModule;",
             "Macro Test()",
             "  Var known;",
-            "  undeclared = known;",
+            "  known = SomeReadName;",
             "End;"
         ].join(String.fromCharCode(10)));
 
@@ -751,7 +964,7 @@ async function main() {
 
         assert.deepStrictEqual(
             strict.map(item => item.name),
-            ["undeclared"],
+            ["SomeReadName"],
             "strict — явный выбор пользователя проверять неполный контекст"
         );
         assert.strictEqual(strict[0].reason, "incomplete-context");

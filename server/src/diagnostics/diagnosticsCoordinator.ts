@@ -44,8 +44,16 @@ export interface IDiagnosticsCoordinatorOptions {
 }
 
 /**
- * Двухфазная публикация Problems:
- * local не зависит от Import-графа, workspace обновляет результат вторым пакетом.
+ * Двухфазная публикация Problems: local считается по самому файлу,
+ * workspace обновляет результат вторым пакетом.
+ *
+ * «По самому файлу» не значит «независимо от импортов». Проверка
+ * необъявленной переменной признаёт объявлением и переменную
+ * импортированного модуля, поэтому состояние Import-контекста входит в
+ * ключ локальной фазы: пока модуль читается, находки не публикуются, а
+ * после чтения ключ меняется и файл пересчитывается. Без этого ложная
+ * ошибка держалась до следующей правки, и результат зависел от того,
+ * успел ли модуль загрузиться.
  */
 /*
  * Срок межфайловой фазы, когда Import-граф уже полон.
@@ -304,6 +312,7 @@ export class DiagnosticsCoordinator {
 
         const key = [
             state.module.version,
+            this.importContextKey(uri),
             diagnosticsSettingsKey(state.settings)
         ].join(":");
         this.maxProblems.set(uri, state.settings.diagnostics?.maxProblems ?? 200);
@@ -656,6 +665,19 @@ export class DiagnosticsCoordinator {
             this.index.getImportClosureKey(uri),
             diagnosticsSettingsKey(this.settings.getAvailable(uri))
         ].join(":");
+    }
+
+    /**
+     * Состояние импортов файла одной строкой.
+     *
+     * Замыкание .mac плюс ревизия каталога прикладных модулей: состав
+     * модуля читается отдельно от файлов проекта, и без ревизии его
+     * появление ключ не меняло бы.
+     */
+    private importContextKey(uri: string): string {
+        return this.options.resolver
+            ? this.options.resolver.getImportContextKey(uri)
+            : this.index.getImportClosureKey(uri);
     }
 
     /** Есть ли межфайловый результат, посчитанный по прошлому тексту. */

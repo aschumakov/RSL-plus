@@ -208,7 +208,10 @@ export class RslDiagnosticEngine {
                         ? collectRslUndeclaredAssignments(
                             request.module,
                             request.resolver,
-                            request.options
+                            {
+                                ...request.options,
+                                includePending: true
+                            }
                         )
                         : collectUnknownVariables(
                             request.module,
@@ -233,7 +236,10 @@ export class RslDiagnosticEngine {
                         ? await collectRslUndeclaredAssignmentsChunked(
                             request.module,
                             request.resolver,
-                            request.options,
+                            {
+                                ...request.options,
+                                includePending: true
+                            },
                             slice
                         )
                         : await collectUnknownVariablesChunked(

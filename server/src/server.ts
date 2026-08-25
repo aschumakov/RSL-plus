@@ -251,10 +251,12 @@ const documentAnalysis = new DocumentAnalysisService(
         /*
          * Разбор своего файла запускает обе волны: локальные ошибки сразу,
          * межфайловые — отложенно, но обязательно для той же версии.
-         * Загрузка чужого модуля (onModuleLoaded выше) запускает только
-         * вторую волну зависимых файлов: их собственный текст не менялся,
-         * пересчитывать локальные ошибки было бы лишней работой и лишним
-         * поводом для мерцания Problems.
+         *
+         * Загрузка чужого модуля тоже задевает обе: проверка необъявленной
+         * переменной признаёт объявлением и переменную импортированного
+         * модуля. Лишней работы это не создаёт — ключ локальной фазы
+         * включает состояние импортов, и без его изменения расчёт не
+         * повторяется (см. refreshOpenDependents).
          */
         onParsed: (module, wasKnown) => {
             diagnosticsCoordinator.scheduleLocal(module.uri, 0);
@@ -685,9 +687,10 @@ async function handleWatchedFileChange(
         await moduleLoader.reload(uri);
     }
 
-    dependents.forEach(dependentUri =>
-        diagnosticsCoordinator.scheduleWorkspace(dependentUri, 650)
-    );
+    dependents.forEach(dependentUri => {
+        diagnosticsCoordinator.scheduleLocal(dependentUri, 650);
+        diagnosticsCoordinator.scheduleWorkspace(dependentUri, 650);
+    });
 }
 
 /**
@@ -701,9 +704,15 @@ function refreshOpenDependents(uri: string): void {
     const openDependents = workspaceIndex.getDependents(uri)
         .filter(dependentUri => !!documents.get(dependentUri));
 
-    openDependents.forEach(dependentUri =>
-        diagnosticsCoordinator.scheduleWorkspace(dependentUri, 650)
-    );
+    openDependents.forEach(dependentUri => {
+        /*
+         * Локальная фаза — тоже: объявление переменной могло приехать
+         * вместе с прочитанным модулем, и до этого вызова ложная ошибка
+         * держалась до следующей правки активного файла.
+         */
+        diagnosticsCoordinator.scheduleLocal(dependentUri, 650);
+        diagnosticsCoordinator.scheduleWorkspace(dependentUri, 650);
+    });
 
     if (openDependents.length > 0) {
         /*
@@ -750,6 +759,8 @@ async function preparePlatformModules(uris: readonly string[]): Promise<void> {
 
     for (const uri of uris) {
         if (documents.get(uri)) {
+            /* Состав прикладного модуля меняет ответ обеих фаз. */
+            diagnosticsCoordinator.scheduleLocal(uri, 0);
             diagnosticsCoordinator.scheduleWorkspace(uri, 0);
         }
     }

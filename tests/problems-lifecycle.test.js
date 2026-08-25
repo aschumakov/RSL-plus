@@ -49,11 +49,19 @@ const SETTINGS = {
     diagnostics: {}
 };
 
-/** Координатор с настоящим движком; разбор выполняется сразу. */
-function createStand(source) {
+/**
+ * Координатор с настоящим движком; разбор выполняется сразу.
+ *
+ * readLib: false оставляет lib.mac непрочитанным — так выглядит файл
+ * сразу после открытия, пока Import-замыкание ещё грузится.
+ */
+function createStand(source, options = {}) {
     const index = new WorkspaceIndex();
     index.registerWorkspaceFiles([MAIN, LIB]);
-    index.updateExternalModule(LIB, LIB_SOURCE, 1);
+
+    if (options.readLib !== false) {
+        index.updateExternalModule(LIB, LIB_SOURCE, 1);
+    }
 
     let document = TextDocument.create(MAIN, "rsl", 1, source);
     index.updateOpenModule(MAIN, source, 1);
@@ -333,6 +341,71 @@ test("выключенные проверки очищают список сра
         last.diagnostics,
         [],
         "список обязан опустеть без ожидания пересчёта"
+    );
+});
+
+/*
+ * Объявление приезжает из импортированного модуля — без правки файла.
+ *
+ * Проверка необъявленной переменной идёт в локальной фазе, а переменную
+ * может объявлять и импортированный модуль. Пока модуль не прочитан,
+ * находка не публикуется; когда он прочитан или изменился, локальная фаза
+ * пересчитывается — её ключ включает состояние импортов. Прежде результат
+ * зависел от момента загрузки и держался до следующей правки файла.
+ */
+test("объявление из импортированного модуля доходит без правки файла", async () => {
+    const source = [
+        "Import lib;",
+        "Macro Test()",
+        "  Var known = 1;",
+        "  shared = known;",
+        "End;",
+        ""
+    ].join(String.fromCharCode(10));
+    const stand = createStand(source, { readLib: false });
+    const undeclared = () => {
+        const last = stand.publications[stand.publications.length - 1];
+
+        return (last?.diagnostics || [])
+            .filter(item => item.code === "undeclared-variable")
+            .map(item => String(item.data.name));
+    };
+
+    stand.coordinator.scheduleLocal(MAIN, 0);
+    await settle();
+    assert.deepStrictEqual(
+        undeclared(),
+        [],
+        "Пока lib.mac не прочитан, ошибку показывать не на чем"
+    );
+
+    /* Модуль прочитан и объявляет переменную: правки файла не было. */
+    stand.index.updateExternalModule(
+        LIB,
+        "Var shared;" + String.fromCharCode(10),
+        1
+    );
+    stand.coordinator.scheduleLocal(MAIN, 0);
+    await settle();
+    assert.deepStrictEqual(undeclared(), []);
+
+    /* Переменную из модуля убрали — ошибка появляется сама. */
+    stand.index.updateExternalModule(
+        LIB,
+        "Var renamed;" + String.fromCharCode(10),
+        2
+    );
+    stand.coordinator.scheduleLocal(MAIN, 0);
+    await settle();
+    assert.deepStrictEqual(
+        undeclared(),
+        ["shared"],
+        "Изменение импортированного модуля обязано дойти без правки файла"
+    );
+    assert.strictEqual(
+        stand.document.version,
+        1,
+        "Файл при этом не менялся"
     );
 });
 

@@ -13,16 +13,18 @@ import type { IRslFastClass, RslScopeResolver } from "../scopeResolver";
 import type { RslSymbol } from "../symbols/rslSymbol";
 import type { IIndexedModule } from "../workspaceIndex";
 import {
-    collectRslDeclarationStarts,
-    collectRslVarScopes,
+    createRslAssignmentCheckFacts,
+    enclosingRslClassScope,
     isInsideVarScope,
+    isRslDeclaredVariableName,
     isRslExpressionIdentifier,
     isRslSimpleAssignmentTarget,
-    type IRslOffsetRange
+    isRslVariableSymbol,
+    rslScopePathAt,
+    type IRslAssignmentCheckFacts
 } from "./nameCheckScopes";
-import {
-    readKnownGlobals,
-    type IRslUnknownVariableFinding
+import type {
+    IRslUnknownVariableFinding
 } from "./unknownVariableDiagnostics";
 
 /**
@@ -33,15 +35,22 @@ import {
  *
  * Здесь вопрос местный: в процедуре объявляют переменные через VAR, а вот это
  * имя слева от «=» не объявлено ни параметром, ни VAR, ни полем класса, ни
- * переменной модуля. Ответ на него не зависит от того, прочитаны ли
- * импортированные модули: снаружи может прийти процедура, класс или константа,
- * но не объявление местной переменной. Поэтому проверка идёт в локальной фазе
- * и не ждёт Import-контекст — раньше один неизвестный RSM-модуль выключал её
- * целиком.
+ * переменной модуля. Отвечает на него сам файл, поэтому проверка идёт в
+ * локальной фазе и работает в обоих режимах — и в safe, и в strict: strict
+ * обязан находить всё, что находит safe, и добавлять к этому остальные
+ * неразрешённые имена.
  *
  * Читающее обращение (`value = CONSTANT`), вызов, конструктор, обращение к
  * члену и тип не проверяются: там имя вполне может прийти извне проекта. Это
  * вопрос другой проверки — strict.
+ *
+ * Одно исключение из «локальности»: переменную может объявлять и
+ * импортированный модуль. Пока его чтение не закончено, находка не публикуется
+ * — иначе результат зависел бы от того, успел ли загрузиться модуль к моменту
+ * расчёта. Когда чтение заканчивается, Import-контекст меняется, ключ
+ * локальной фазы вместе с ним, и файл пересчитывается (см.
+ * DiagnosticsCoordinator). Модуль, которого в проекте нет вовсе — RSM, DLM,
+ * встроенный, — ожиданием не считается: ждать там нечего.
  */
 
 export interface IRslUndeclaredAssignmentOptions {
@@ -49,49 +58,14 @@ export interface IRslUndeclaredAssignmentOptions {
     limit?: number;
     /** Файл со списком имён, приходящих извне проекта. */
     knownGlobalsFile?: string;
+    /**
+     * Отдавать находки и при незаконченном чтении импортов.
+     *
+     * Нужно audit-отчёту: он и существует, чтобы увидеть полную картину, а
+     * причина у каждой находки указана (`incomplete-context`).
+     */
+    includePending?: boolean;
     isCancelled?(): boolean;
-}
-
-/**
- * Область файла: где начинается, где кончается и что в ней объявлено.
- *
- * Имена объявленных переменных лежат множеством, вложенные области —
- * отсортированным массивом. Обход детей перебором стоил бы столько же, сколько
- * их в области, а у модуля с четырьмя тысячами процедур это четыре тысячи
- * сравнений на КАЖДУЮ цель присваивания.
- */
-interface IRslScopeNode {
-    symbol: RslSymbol;
-    start: number;
-    end: number;
-    name: string;
-    variables: ReadonlySet<string>;
-    children: readonly IRslScopeNode[];
-}
-
-/**
- * Факты файла, общие для всех целей присваивания.
- *
- * Считаются один раз: обход дерева ради областей с VAR и обход объявлений — по
- * несколько миллисекунд на большом файле, а целей присваивания в нём тысячи.
- */
-export interface IRslAssignmentCheckFacts {
-    varScopes: readonly IRslOffsetRange[];
-    declarationStarts: ReadonlySet<number>;
-    knownGlobals: ReadonlySet<string>;
-    scopes: IRslScopeNode;
-}
-
-export function createRslAssignmentCheckFacts(
-    module: IIndexedModule,
-    knownGlobalsFile?: string
-): IRslAssignmentCheckFacts {
-    return {
-        varScopes: collectRslVarScopes(module),
-        declarationStarts: collectRslDeclarationStarts(module),
-        knownGlobals: readKnownGlobals(knownGlobalsFile),
-        scopes: buildScopeNode(module.symbolTree, "")
-    };
 }
 
 /**
@@ -100,6 +74,9 @@ export function createRslAssignmentCheckFacts(
  * Только простая цель присваивания в области, где переменные объявляют. Если
  * в области нет ни одного VAR, отличить опечатку от намеренно созданной
  * неявной переменной нечем, и проверка молчит.
+ *
+ * Заголовок for пропускается: там присваивание — принятый способ ввести
+ * переменную цикла, и сообщать о нём значило бы ругаться на `for (i = 0; …)`.
  */
 export function isRslUndeclaredAssignmentCandidate(
     tokens: readonly IRslToken[],
@@ -112,6 +89,7 @@ export function isRslUndeclaredAssignmentCandidate(
         facts.varScopes.length > 0 &&
         isRslSimpleAssignmentTarget(tokens, index) &&
         isInsideVarScope(facts.varScopes, token.start) &&
+        !isInsideVarScope(facts.forHeaders, token.start) &&
         !facts.knownGlobals.has(normalizeIdentifier(token.value)) &&
         isRslExpressionIdentifier(tokens, index, facts.declarationStarts);
 }
@@ -132,17 +110,16 @@ export function checkRslUndeclaredAssignment(
     facts: IRslAssignmentCheckFacts
 ): IRslUnknownVariableFinding | undefined {
     const name = normalizeIdentifier(token.value);
-    const chain = scopeChainAt(facts.scopes, token.start);
 
-    if (chain.some(scope => scope.variables.has(name))) {
+    if (isRslDeclaredVariableName(facts, token.start, name)) {
         return undefined;
     }
 
-    const enclosingClass = lastClassOf(chain);
+    const enclosingClass = enclosingRslClassScope(facts, token.start);
 
     if (
         enclosingClass &&
-        hasInheritedField(module, resolver, enclosingClass.symbol, name)
+        hasInheritedField(module, resolver, enclosingClass, name)
     ) {
         return undefined;
     }
@@ -153,7 +130,7 @@ export function checkRslUndeclaredAssignment(
         token.start
     );
 
-    if (resolved && isVariableSymbol(resolved.symbol)) {
+    if (resolved && isRslVariableSymbol(resolved.symbol)) {
         return undefined;
     }
 
@@ -172,12 +149,37 @@ export function checkRslUndeclaredAssignment(
         end: token.end,
         line: token.line,
         character: token.character,
-        scope: chain.length > 0 ? chain[chain.length - 1].name : "",
+        scope: rslScopePathAt(facts, token.start),
         hasExplicitVar: true,
         importContext:
             resolver.getImportContextState(module.uri).completeness,
-        reason: "no-declaration"
+        reason: hasPendingRslImports(resolver, module.uri)
+            ? "incomplete-context"
+            : "no-declaration"
     };
+}
+
+/**
+ * Ждём ли мы ещё чтения импортированного модуля.
+ *
+ * Ждать имеет смысл только то, что действительно прочитают: файл проекта в
+ * очереди индексации и прикладной модуль, чей состав ещё не загружен. Import
+ * модуля RSM или DLM в этот список не попадает — его не прочитают никогда, и
+ * молчать из-за него значило бы не проверять вообще.
+ *
+ * Спрашивают из двух мест — из этапа конвейера диагностик и из своего
+ * обхода, — поэтому правило вынесено и экспортировано. Пока оно жило
+ * внутри обхода, конвейер его не знал: в Problems находка появлялась и
+ * при непрочитанном модуле.
+ */
+export function hasPendingRslImports(
+    resolver: RslScopeResolver,
+    uri: string
+): boolean {
+    const state = resolver.getImportContextState(uri);
+
+    return state.pending.length > 0 ||
+        state.pendingPlatformModules.length > 0;
 }
 
 export function collectRslUndeclaredAssignments(
@@ -269,6 +271,20 @@ function* undeclaredAssignmentSteps(
         return [];
     }
 
+    /*
+     * Чтение импортов не закончено — публиковать нечего.
+     *
+     * Переменная может быть объявлена в модуле, который вот-вот прочитают, и
+     * показать её ошибкой сейчас значит показать ошибку, зависящую от момента
+     * загрузки. Пересчёт после загрузки обеспечен ключом локальной фазы.
+     */
+    if (
+        !options.includePending &&
+        hasPendingRslImports(resolver, module.uri)
+    ) {
+        return [];
+    }
+
     const facts = createRslAssignmentCheckFacts(
         module,
         options.knownGlobalsFile
@@ -316,106 +332,6 @@ function* undeclaredAssignmentSteps(
 }
 
 /**
- * Дерево областей файла с именами объявленных в них переменных.
- *
- * path — имя области так, как его показывает находка: `Holder.Method`. У
- * модуля имени нет, поэтому его дети начинают путь с себя.
- */
-function buildScopeNode(symbol: RslSymbol, path: string): IRslScopeNode {
-    const variables = new Set<string>();
-    const children: IRslScopeNode[] = [];
-
-    for (const child of symbol.children) {
-        if (isVariableSymbol(child)) {
-            variables.add(normalizeIdentifier(child.name));
-        }
-
-        if (child.isContainer) {
-            children.push(buildScopeNode(
-                child,
-                path ? `${path}.${child.name}` : child.name
-            ));
-        }
-    }
-
-    children.sort((left, right) => left.start - right.start);
-
-    return {
-        symbol,
-        start: symbol.range.start,
-        end: symbol.range.end,
-        name: path,
-        variables,
-        children
-    };
-}
-
-/**
- * Цепочка областей от модуля до самой внутренней, содержащей смещение.
- *
- * Спуск двоичным поиском: у модуля с тысячами процедур перебор детей стоил бы
- * столько же, сколько процедур, и проверка становилась квадратичной — на 646 КБ
- * это 5,9 секунды вместо 0,2.
- */
-function scopeChainAt(
-    root: IRslScopeNode,
-    offset: number
-): readonly IRslScopeNode[] {
-    const chain: IRslScopeNode[] = [root];
-    let current = root;
-
-    for (;;) {
-        const next = childAt(current.children, offset);
-
-        if (!next) {
-            return chain;
-        }
-
-        chain.push(next);
-        current = next;
-    }
-}
-
-function childAt(
-    children: readonly IRslScopeNode[],
-    offset: number
-): IRslScopeNode | undefined {
-    let low = 0;
-    let high = children.length - 1;
-
-    while (low <= high) {
-        const middle = (low + high) >> 1;
-        const child = children[middle];
-
-        if (offset < child.start) {
-            high = middle - 1;
-            continue;
-        }
-
-        if (offset > child.end) {
-            low = middle + 1;
-            continue;
-        }
-
-        return child;
-    }
-
-    return undefined;
-}
-
-function lastClassOf(
-    chain: readonly IRslScopeNode[]
-): IRslScopeNode | undefined {
-    for (let index = chain.length - 1; index >= 0; index--) {
-        if (chain[index].symbol.kind === CompletionItemKind.Class) {
-            return chain[index];
-        }
-    }
-
-    return undefined;
-}
-
-/**
  * Поле, унаследованное от родительского класса.
  *
  * Нечитаемая база — молчание, а не предупреждение: класс из модуля, которого
@@ -441,7 +357,7 @@ function hasInheritedField(
 
         if (
             current.symbol.children.some(child =>
-                isVariableSymbol(child) &&
+                isRslVariableSymbol(child) &&
                 normalizeIdentifier(child.name) === name
             )
         ) {
@@ -468,10 +384,4 @@ function hasInheritedField(
     }
 
     return false;
-}
-
-function isVariableSymbol(symbol: { kind: CompletionItemKind }): boolean {
-    return symbol.kind === CompletionItemKind.Variable ||
-        symbol.kind === CompletionItemKind.Property ||
-        symbol.kind === CompletionItemKind.Field;
 }

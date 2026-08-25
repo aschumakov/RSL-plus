@@ -39,11 +39,14 @@ import {
     IRslDiagnosticSettings
 } from "./interfaces";
 import {
-    checkRslUndeclaredAssignment,
     createRslAssignmentCheckFacts,
-    createUndeclaredAssignmentDiagnostic,
-    isRslUndeclaredAssignmentCandidate,
     type IRslAssignmentCheckFacts
+} from "./diagnostics/nameCheckScopes";
+import {
+    checkRslUndeclaredAssignment,
+    createUndeclaredAssignmentDiagnostic,
+    hasPendingRslImports,
+    isRslUndeclaredAssignmentCandidate
 } from "./diagnostics/undeclaredAssignmentDiagnostics";
 import {
     buildUnknownVariableDiagnostics,
@@ -935,14 +938,19 @@ function planLocalRslDiagnostics(
          * Необъявленная переменная слева от «=».
          *
          * Локальная фаза, а не межфайловая: вопрос о том, объявлена ли
-         * переменная В ЭТОЙ области, решается по самому файлу, и ждать
-         * загрузки импортов ради него незачем. Раньше эта проверка была
-         * режимом проверки неразрешённых имён и выключалась целиком,
-         * стоило файлу сослаться на неизвестный RSM- или DLM-модуль.
+         * переменная В ЭТОЙ области, решается по самому файлу. Раньше
+         * эта проверка была режимом проверки неразрешённых имён и
+         * выключалась целиком, стоило файлу сослаться на неизвестный
+         * RSM- или DLM-модуль.
+         *
+         * Работает в обоих режимах: strict обязан находить всё, что
+         * находит safe. Иначе строгий режим ТЕРЯЛ находки — `Target =
+         * value` он разрешал как процедуру и молчал, тогда как safe
+         * сообщал о необъявленной переменной.
          */
         [
             "undeclaredAssignments",
-            options.unknownVariables === "safe" &&
+            options.unknownVariables !== "off" &&
                 !options.unknownVariablesAuditFile,
             createUndeclaredAssignmentStage(
                 module,
@@ -1454,6 +1462,16 @@ function createUndeclaredAssignmentStage(
             }
         },
         () => {
+            /*
+             * Чтение импортированного модуля не закончено: переменную
+             * может объявлять он. Публиковать сейчас — значит показать
+             * ошибку, зависящую от момента загрузки; пересчёт после
+             * загрузки обеспечен ключом локальной фазы.
+             */
+            if (hasPendingRslImports(getResolver(), module.uri)) {
+                return false;
+            }
+
             facts = createRslAssignmentCheckFacts(
                 module,
                 options.unknownVariablesKnownGlobalsFile

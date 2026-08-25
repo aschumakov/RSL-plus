@@ -1,5 +1,3 @@
-import * as fs from "fs";
-
 import {
     Diagnostic,
     DiagnosticSeverity
@@ -17,11 +15,19 @@ import { normalizeIdentifier, type IRslToken } from "../lexer";
 import {
     collectRslDeclarationStarts,
     collectRslImportRanges,
+    createRslAssignmentCheckFacts,
     isInsideRslImport,
+    isInsideVarScope,
+    isRslDeclaredVariableName,
     isRslExpressionIdentifier,
+    isRslSimpleAssignmentTarget,
     previousRslCodeIndex,
+    readKnownGlobals,
     rslScopeNameAt
 } from "./nameCheckScopes";
+
+/* Реэкспорт: список известных имён читают и другие проверки. */
+export { readKnownGlobals };
 import {
     createRslMemberChecker,
     type IRslMemberFinding
@@ -208,6 +214,17 @@ function* unknownVariableSteps(
 
     const state = resolver.getImportContextState(module.uri);
     const tokens = module.syntax.tokens;
+    /*
+     * Области с VAR — чтобы не сказать об одном присваивании дважды.
+     *
+     * Простая цель присваивания в такой области принадлежит проверке
+     * «переменная не объявлена»: она отвечает точнее — называет
+     * нарушенное правило области, а не отсутствие идентификатора. Обе
+     * работают в strict, поэтому здесь такие имена пропускаются.
+     */
+    const facts = checkNames
+        ? createRslAssignmentCheckFacts(module, options.knownGlobalsFile)
+        : undefined;
     const known = readKnownGlobals(options.knownGlobalsFile);
     const declarationStarts = collectRslDeclarationStarts(module);
     const importRanges = collectRslImportRanges(module);
@@ -282,6 +299,29 @@ function* unknownVariableSteps(
             known.has(normalizeIdentifier(token.value))
         ) {
             continue;
+        }
+
+        if (facts) {
+            /*
+             * Объявление есть в самом файле — сообщать не о чем.
+             *
+             * Разрешение имени по позиции этого не покрывает: VAR ниже
+             * использования и переменная заголовка `for (i = 0; …)` им не
+             * находятся, а объявлениями являются. О порядке говорит
+             * проверка «использование выше объявления».
+             */
+            if (isRslDeclaredVariableName(facts, token.start, token.value)) {
+                continue;
+            }
+
+            /* Простая цель присваивания — дело точной проверки. */
+            if (
+                facts.varScopes.length > 0 &&
+                isInsideVarScope(facts.varScopes, token.start) &&
+                isRslSimpleAssignmentTarget(tokens, index)
+            ) {
+                continue;
+            }
         }
 
         if (resolver.resolveAt(module.uri, module.symbolTree, token.start)) {
@@ -414,59 +454,4 @@ function memberFinding(
         importContext: state.completeness,
         reason: "no-declaration"
     };
-}
-
-/*
- * Список известных имён кэшируется по пути и времени правки: он читается на
- * каждую проверку файла, а меняется вручную и редко.
- */
-interface IKnownGlobalsCacheEntry {
-    modifiedMs: number;
-    size: number;
-    names: ReadonlySet<string>;
-}
-
-const knownGlobalsCache = new Map<string, IKnownGlobalsCacheEntry>();
-const EMPTY_NAMES: ReadonlySet<string> = new Set<string>();
-
-export function readKnownGlobals(filePath?: string): ReadonlySet<string> {
-    if (!filePath) {
-        return EMPTY_NAMES;
-    }
-
-    try {
-        const stats = fs.statSync(filePath);
-        const cached = knownGlobalsCache.get(filePath);
-
-        if (
-            cached &&
-            cached.modifiedMs === stats.mtimeMs &&
-            cached.size === stats.size
-        ) {
-            return cached.names;
-        }
-
-        const names = new Set<string>();
-
-        for (const line of fs.readFileSync(filePath, "utf8").split(/\r?\n/)) {
-            const value = line.replace(/#.*$/, "").trim();
-
-            if (value) {
-                names.add(normalizeIdentifier(value));
-            }
-        }
-
-        knownGlobalsCache.set(filePath, {
-            modifiedMs: stats.mtimeMs,
-            size: stats.size,
-            names
-        });
-        return names;
-    } catch (_error) {
-        /*
-         * Нечитаемый файл списка не должен ни ронять сервер, ни превращаться в
-         * поток ложных предупреждений: считаем, что список пуст.
-         */
-        return EMPTY_NAMES;
-    }
 }
