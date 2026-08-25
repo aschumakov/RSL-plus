@@ -409,6 +409,17 @@ export class WorkspaceIndex {
         return this.modules.get(uri)?.definitionRanges?.get(symbol);
     }
     getDependents(uri: string): string[] { return this.imports.dependents(uri); }
+    /**
+     * Все файлы, чьё Import-замыкание содержит uri, — транзитивно.
+     *
+     * getDependents отвечает только про прямую зависимость: в цепочке
+     * `main -> middle -> lib` изменение lib даёт middle и ничего про main,
+     * хотя замыкание main изменилось. Индекс этот обход и так делает для
+     * своих сбросов; наружу он нужен диагностикам.
+     */
+    getAffectedUris(uri: string): string[] {
+        return [...this.collectAffectedUris(uri)];
+    }
     getImportNameForUri(uri: string): string { return this.files.importName(uri); }
 
     setImportsEnabled(enabled: boolean): void {

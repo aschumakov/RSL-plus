@@ -310,11 +310,7 @@ export class DiagnosticsCoordinator {
             return;
         }
 
-        const key = [
-            state.module.version,
-            this.importContextKey(uri),
-            diagnosticsSettingsKey(state.settings)
-        ].join(":");
+        const key = this.localConditionKey(uri, state);
         this.maxProblems.set(uri, state.settings.diagnostics?.maxProblems ?? 200);
 
         if (this.localKeys.get(uri) !== key || !this.localCache.has(uri)) {
@@ -343,9 +339,11 @@ export class DiagnosticsCoordinator {
                     chars: state.module.sourceLength
                 })
                 : undefined;
+            const importKey = this.importContextKey(uri);
             const isCancelled = this.cancelWhenLeftBehind(
                 uri,
-                state.module.version
+                state.module.version,
+                importKey
             );
             const stages = this.watchStages(span !== undefined);
             const diagnostics = await this.engine.buildLocalAsync(
@@ -374,6 +372,18 @@ export class DiagnosticsCoordinator {
                 if (state.settings.imports.enabled) {
                     this.options.onImports(uri, state.module.imports);
                 }
+
+                /*
+                 * Отмена из-за дочитанных импортов — единственная, у которой
+                 * нет своего повода вернуться: файл не менялся и не покинут.
+                 * Ставим расчёт заново сами, иначе Problems остались бы от
+                 * прошлого состояния графа модулей до следующей правки.
+                 */
+                if (this.importContextKey(uri) !== importKey) {
+                    this.staleLocal.add(uri);
+                    this.scheduleLocal(uri, 0);
+                }
+
                 return;
             }
             if (span) {
@@ -382,6 +392,17 @@ export class DiagnosticsCoordinator {
                     ...stages.fields()
                 });
             }
+            /*
+             * Условия проверяются ещё раз перед записью: между началом и
+             * концом порционной работы импорты могли дочитаться, и тогда
+             * этот результат посчитан по прошлому состоянию.
+             */
+            if (this.localConditionKey(uri, state) !== key) {
+                this.staleLocal.add(uri);
+                this.scheduleLocal(uri, 0);
+                return;
+            }
+
             this.localCache.set(uri, diagnostics);
             this.localKeys.set(uri, key);
             this.logSlow("local", uri, state.module.version, started);
@@ -504,19 +525,24 @@ export class DiagnosticsCoordinator {
     /**
      * Условие «расчёт больше не нужен» для этапов диагностики.
      *
-     * Две причины: пользователь ушёл в другой файл либо документ изменился —
-     * в обоих случаях результат публиковать не будут, и доводить расчёт до
-     * конца значит занимать основной поток впустую.
+     * Причин три: пользователь ушёл в другой файл, документ изменился
+     * либо во время порционного расчёта дочитались импорты (importKey).
+     * В последнем случае результат посчитан по промежуточному состоянию:
+     * опубликовать его — значит показать ошибку, которой в готовом графе
+     * модулей уже нет, и убрать её только следующим расчётом.
      *
      * Проверка обязана быть дешёвой: она вызывается между каждыми двумя
-     * этапами.
+     * этапами. Ключ импортов — строка из ревизий, и она кэширована.
      */
     private cancelWhenLeftBehind(
         uri: string,
-        version: number
+        version: number,
+        importKey?: string
     ): () => boolean {
         return () => !this.isActive(uri) ||
-            this.documents.get(uri)?.version !== version;
+            this.documents.get(uri)?.version !== version ||
+            (importKey !== undefined &&
+                this.importContextKey(uri) !== importKey);
     }
 
     private async publishWhenStillActive(uri: string): Promise<void> {
@@ -664,6 +690,18 @@ export class DiagnosticsCoordinator {
             version,
             this.index.getImportClosureKey(uri),
             diagnosticsSettingsKey(this.settings.getAvailable(uri))
+        ].join(":");
+    }
+
+    /** Условия расчёта локальной фазы: версия, импорты, настройки. */
+    private localConditionKey(
+        uri: string,
+        state: { module: { version: number }; settings: IRslSettings }
+    ): string {
+        return [
+            state.module.version,
+            this.importContextKey(uri),
+            diagnosticsSettingsKey(state.settings)
         ].join(":");
     }
 

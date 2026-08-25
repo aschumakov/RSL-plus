@@ -100,9 +100,11 @@ export interface IRslDiagnosticEngineOptions {
  * Общее для синхронного и порционного вариантов правила: решение «запускать
  * или нет» обязано быть одним, иначе режимы разойдутся.
  *
- * Режим выбирает и проверку: safe отчитывается о необъявленных переменных
- * слева от «=», strict — обо всех неразрешённых именах. Отчёт обязан
- * описывать то самое правило, которое потом включат.
+ * Режим выбирает состав отчёта так же, как состав Problems: необъявленные
+ * переменные слева от «=» входят в оба режима, strict добавляет к ним
+ * остальные неразрешённые имена. Пока отчёт strict собирался одним вторым
+ * обходом, он занижал число ошибок: тот обход намеренно пропускает простые
+ * цели присваивания, полагаясь на первую проверку.
  */
 function auditRequest(context: IRslDiagnosticContext): {
     auditFile: string;
@@ -202,23 +204,20 @@ export class RslDiagnosticEngine {
                     return [];
                 }
 
-                audit(
-                    request.auditFile,
-                    request.options.mode === "safe"
-                        ? collectRslUndeclaredAssignments(
-                            request.module,
-                            request.resolver,
-                            {
-                                ...request.options,
-                                includePending: true
-                            }
-                        )
-                        : collectUnknownVariables(
+                audit(request.auditFile, [
+                    ...collectRslUndeclaredAssignments(
+                        request.module,
+                        request.resolver,
+                        { ...request.options, includePending: true }
+                    ),
+                    ...(request.options.mode === "strict"
+                        ? collectUnknownVariables(
                             request.module,
                             request.resolver,
                             request.options
                         )
-                );
+                        : [])
+                ]);
                 /* Audit не публикует Problems — в этом и смысл режима. */
                 return [];
             },
@@ -230,25 +229,22 @@ export class RslDiagnosticEngine {
                     return [];
                 }
 
-                audit(
-                    request.auditFile,
-                    request.options.mode === "safe"
-                        ? await collectRslUndeclaredAssignmentsChunked(
-                            request.module,
-                            request.resolver,
-                            {
-                                ...request.options,
-                                includePending: true
-                            },
-                            slice
-                        )
-                        : await collectUnknownVariablesChunked(
+                audit(request.auditFile, [
+                    ...await collectRslUndeclaredAssignmentsChunked(
+                        request.module,
+                        request.resolver,
+                        { ...request.options, includePending: true },
+                        slice
+                    ),
+                    ...(request.options.mode === "strict"
+                        ? await collectUnknownVariablesChunked(
                             request.module,
                             request.resolver,
                             request.options,
                             slice
                         )
-                );
+                        : [])
+                ]);
                 return [];
             }
         });

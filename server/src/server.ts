@@ -669,7 +669,9 @@ async function handleWatchedFileChange(
 
     referenceIndex.invalidate(uri);
     definitionProvider.invalidateUri(uri);
-    const dependents = workspaceIndex.getDependents(uri);
+    /* Транзитивно: см. refreshOpenDependents. */
+    const dependents = workspaceIndex.getAffectedUris(uri)
+        .filter(dependentUri => dependentUri !== uri);
 
     if (type === FileChangeType.Deleted) {
         moduleLoader.remove(uri);
@@ -701,7 +703,15 @@ async function handleWatchedFileChange(
  * перекраситься — известный внешний символ выглядит иначе, чем неизвестный.
  */
 function refreshOpenDependents(uri: string): void {
-    const openDependents = workspaceIndex.getDependents(uri)
+    /*
+     * Транзитивно, а не только прямые зависимые.
+     *
+     * В цепочке `main -> middle -> lib` загрузка lib даёт прямым
+     * зависимым только middle. Если middle не открыт, активный main не
+     * пересчитывался вовсе — хотя его Import-замыкание изменилось.
+     */
+    const openDependents = workspaceIndex.getAffectedUris(uri)
+        .filter(dependentUri => dependentUri !== uri)
         .filter(dependentUri => !!documents.get(dependentUri));
 
     openDependents.forEach(dependentUri => {

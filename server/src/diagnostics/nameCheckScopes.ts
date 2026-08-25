@@ -370,7 +370,7 @@ function isBlockBoundaryWord(value: string): boolean {
     const word = normalizeIdentifier(value);
 
     return word === "end" || word === "else" || word === "elif" ||
-        word === "onerror" || word === "then" || word === "do";
+        word === "onerror";
 }
 
 function nextRslCode(
@@ -451,8 +451,14 @@ export interface IRslAssignmentCheckFacts {
     declarationStarts: ReadonlySet<number>;
     knownGlobals: ReadonlySet<string>;
     scopes: IRslScopeNode;
-    /** Заголовки for: `for (i = 0; …)` — там имя вводят присваиванием. */
-    forHeaders: readonly IRslOffsetRange[];
+    /**
+     * Инициализаторы циклов: `for (i = 0; …)` — до первой «;».
+     *
+     * Только там присваивание вводит переменную цикла. Условие и шаг —
+     * обычный код: пока объявлением считался весь заголовок, опечатка в
+     * `for (i = 0; typo < 3; typo = typo + 1)` скрывалась целиком.
+     */
+    forInitializers: readonly IRslOffsetRange[];
 }
 
 export function createRslAssignmentCheckFacts(
@@ -460,16 +466,23 @@ export function createRslAssignmentCheckFacts(
     knownGlobalsFile?: string
 ): IRslAssignmentCheckFacts {
     const scopes = buildScopeNode(module.symbolTree, "");
-    const forHeaders = collectForHeaders(module);
+    const loops = collectRslForLoops(module);
 
-    addForHeaderVariables(module, scopes, forHeaders);
+    for (const variable of loops.variables) {
+        const chain = scopeChainAt(scopes, variable.start);
+        const scope = chain[chain.length - 1];
+
+        if (scope) {
+            scope.variables.add(variable.name);
+        }
+    }
 
     return {
         varScopes: collectRslVarScopes(module),
         declarationStarts: collectRslDeclarationStarts(module),
         knownGlobals: readKnownGlobals(knownGlobalsFile),
         scopes,
-        forHeaders
+        forInitializers: loops.initializers
     };
 }
 
@@ -504,24 +517,121 @@ function buildScopeNode(symbol: RslSymbol, path: string): IRslScopeNode {
 }
 
 /**
- * Заголовки циклов for: от `for` до закрывающей скобки.
+ * Инициализаторы циклов for и введённые в них переменные.
  *
- * Нужны дважды: имя, введённое в заголовке присваиванием, объявлением
- * считается, а сам заголовок из проверки исключается.
+ * Один проход по потоку токенов на весь файл. Прежде диапазон каждого
+ * заголовка искался просмотром токенов ОТ НАЧАЛА ФАЙЛА, и на файле с
+ * циклами это снова стало квадратичным: 2,3 мс на 250 циклах и 84 мс на
+ * двух тысячах — учетверение времени на каждое удвоение.
+ *
+ * Переменной цикла считается только имя из инициализатора — до первой «;»
+ * внутри скобок. Условие и шаг проверяются как обычный код.
  */
-function collectForHeaders(
-    module: IIndexedModule
-): readonly IRslOffsetRange[] {
-    const result: IRslOffsetRange[] = [];
+export function collectRslForLoops(module: IIndexedModule): {
+    initializers: readonly IRslOffsetRange[];
+    variables: readonly { start: number; name: string }[];
+} {
+    const starts = collectForStatementStarts(module.syntax.root);
+
+    if (starts.length === 0) {
+        return { initializers: [], variables: [] };
+    }
+
     const tokens = module.syntax.tokens;
+    const initializers: IRslOffsetRange[] = [];
+    const variables: { start: number; name: string }[] = [];
+    /* Открытый заголовок: ждём его скобок. Вложенных заголовков не бывает. */
+    let open: {
+        depth: number;
+        from: number;
+        inInitializer: boolean;
+    } | undefined;
+    let next = 0;
+
+    for (let index = 0; index < tokens.length; index++) {
+        const token = tokens[index];
+
+        while (next < starts.length && starts[next] <= token.start) {
+            /* Дошли до ключевого слова FOR: его скобки — следующие. */
+            open = { depth: 0, from: -1, inInitializer: false };
+            next++;
+        }
+
+        if (!open) {
+            continue;
+        }
+
+        if (token.kind === "symbol") {
+            if (token.raw === "(") {
+                open.depth++;
+
+                if (open.depth === 1) {
+                    open.from = token.end;
+                    open.inInitializer = true;
+                }
+
+                continue;
+            }
+
+            if (token.raw === ";" && open.depth === 1 && open.inInitializer) {
+                initializers.push({ start: open.from, end: token.start });
+                open.inInitializer = false;
+                continue;
+            }
+
+            if (token.raw === ")") {
+                open.depth--;
+
+                if (open.depth <= 0) {
+                    /* Заголовок без «;»: инициализатор — всё, что в скобках. */
+                    if (open.inInitializer && open.from >= 0) {
+                        initializers.push({
+                            start: open.from,
+                            end: token.start
+                        });
+                    }
+
+                    open = undefined;
+                }
+
+                continue;
+            }
+
+            continue;
+        }
+
+        if (
+            token.kind !== "identifier" ||
+            !open.inInitializer ||
+            open.depth !== 1
+        ) {
+            continue;
+        }
+
+        /* Токены синтаксического потока идут без пробелов и комментариев. */
+        const following = tokens[index + 1];
+
+        if (following && following.kind === "symbol" &&
+            following.raw === "=") {
+            variables.push({
+                start: token.start,
+                name: normalizeIdentifier(token.value)
+            });
+        }
+    }
+
+    initializers.sort((left, right) => left.start - right.start);
+
+    return { initializers, variables };
+}
+
+/** Смещения ключевых слов FOR по возрастанию: один обход дерева. */
+function collectForStatementStarts(root: IRslSyntaxNode): number[] {
+    const result: number[] = [];
 
     const visit = (node: IRslSyntaxNode): void => {
         if (node.kind === "ForStatement") {
-            const header = headerRange(tokens, node.start, node.end);
-
-            if (header) {
-                result.push(header);
-            }
+            result.push(node.start);
         }
 
         for (const child of node.children) {
@@ -529,128 +639,12 @@ function collectForHeaders(
         }
     };
 
-    visit(module.syntax.root);
-    result.sort((left, right) => left.start - right.start);
+    visit(root);
+    result.sort((left, right) => left - right);
 
     return result;
 }
 
-/** Диапазон от первой открывающей скобки до парной ей закрывающей. */
-function headerRange(
-    tokens: readonly IRslToken[],
-    start: number,
-    end: number
-): IRslOffsetRange | undefined {
-    let depth = 0;
-    let from = -1;
-
-    for (const token of tokens) {
-        if (token.start < start) {
-            continue;
-        }
-
-        if (token.start >= end) {
-            return undefined;
-        }
-
-        if (token.kind !== "symbol") {
-            continue;
-        }
-
-        if (token.raw === "(") {
-            depth++;
-
-            if (from < 0) {
-                from = token.start;
-            }
-
-            continue;
-        }
-
-        if (token.raw === ")") {
-            depth--;
-
-            if (depth === 0 && from >= 0) {
-                return { start: from, end: token.end };
-            }
-        }
-    }
-
-    return undefined;
-}
-
-/**
- * Имя, введённое присваиванием в заголовке for.
- *
- * `for (i = 0; i < 3; i = i + 1)` объявляет i не хуже, чем VAR: так пишут, и
- * компилятор это принимает. Без этого проверка сообщала о третьем выражении
- * заголовка — `i = i + 1`, — молча пропуская первое, где переменная и
- * появляется.
- */
-function addForHeaderVariables(
-    module: IIndexedModule,
-    scopes: IRslScopeNode,
-    headers: readonly IRslOffsetRange[]
-): void {
-    if (headers.length === 0) {
-        return;
-    }
-
-    const tokens = module.syntax.tokens;
-
-    for (let index = 0; index < tokens.length; index++) {
-        const token = tokens[index];
-
-        if (
-            token.kind !== "identifier" ||
-            !isInsideRange(headers, token.start)
-        ) {
-            continue;
-        }
-
-        const next = tokens[index + 1];
-
-        /* Токены синтаксического потока идут без пробелов и комментариев. */
-        if (!next || next.kind !== "symbol" || next.raw !== "=") {
-            continue;
-        }
-
-        const chain = scopeChainAt(scopes, token.start);
-        const scope = chain[chain.length - 1];
-
-        if (scope) {
-            scope.variables.add(normalizeIdentifier(token.value));
-        }
-    }
-}
-
-/** Двоичный поиск по отсортированным непересекающимся диапазонам. */
-function isInsideRange(
-    ranges: readonly IRslOffsetRange[],
-    offset: number
-): boolean {
-    let low = 0;
-    let high = ranges.length - 1;
-
-    while (low <= high) {
-        const middle = (low + high) >> 1;
-        const range = ranges[middle];
-
-        if (offset < range.start) {
-            high = middle - 1;
-            continue;
-        }
-
-        if (offset > range.end) {
-            low = middle + 1;
-            continue;
-        }
-
-        return true;
-    }
-
-    return false;
-}
 
 /**
  * Цепочка областей от модуля до самой внутренней, содержащей смещение.

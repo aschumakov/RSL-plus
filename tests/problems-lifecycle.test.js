@@ -83,7 +83,9 @@ function createStand(source, options = {}) {
             waitForIdle: async () => undefined,
             log: () => undefined,
             onImports: () => undefined,
-            resolver: new RslScopeResolver(index, getDefaults())
+            resolver: options.resolver
+                ? options.resolver(index)
+                : new RslScopeResolver(index, getDefaults())
         }
     );
     coordinator.setActiveDocument(MAIN);
@@ -353,6 +355,67 @@ test("выключенные проверки очищают список сра
  * пересчитывается — её ключ включает состояние импортов. Прежде результат
  * зависел от момента загрузки и держался до следующей правки файла.
  */
+/*
+ * Импорты дочитались, пока шёл порционный расчёт.
+ *
+ * Результат посчитан по промежуточному состоянию: проверка необъявленной
+ * переменной при незаконченном чтении молчит. Запомнить такой результат
+ * значит оставить Problems пустыми до следующей правки файла — поэтому
+ * условия сверяются и в отмене, и перед записью, а расхождение ставит
+ * расчёт заново.
+ *
+ * Момент загрузки в тесте иначе не поймать, поэтому состояние импортов
+ * подменено: первый ответ — «ещё грузится», дальше настоящий.
+ */
+test("результат промежуточного состояния импортов не запоминается", async () => {
+    const source = [
+        "Import lib;",
+        "Macro Test()",
+        "  Var known = 1;",
+        "  undeclaredName = known;",
+        "End;",
+        ""
+    ].join(String.fromCharCode(10));
+    const stand = createStand(source, {
+        resolver: index => {
+            const real = new RslScopeResolver(index, getDefaults());
+            const wrapper = Object.create(real);
+            const loading = {
+                completeness: "loading",
+                ambiguous: [],
+                opaque: [],
+                pending: ["lib"],
+                pendingPlatformModules: []
+            };
+            let asked = 0;
+
+            wrapper.getImportContextState = uri => {
+                asked++;
+
+                return asked <= 1 ? loading : real.getImportContextState(uri);
+            };
+            wrapper.getImportContextKey = uri => (asked >= 1
+                ? real.getImportContextKey(uri)
+                : "loading");
+
+            return wrapper;
+        }
+    });
+
+    stand.coordinator.scheduleLocal(MAIN, 0);
+    await settle();
+
+    const last = stand.publications[stand.publications.length - 1];
+    assert.ok(last, "публикация обязана быть");
+    assert.deepStrictEqual(
+        (last.diagnostics || [])
+            .filter(item => item.code === "undeclared-variable")
+            .map(item => String(item.data.name)),
+        ["undeclaredName"],
+        "Опубликован обязан быть результат готового состояния импортов"
+    );
+});
+
 test("объявление из импортированного модуля доходит без правки файла", async () => {
     const source = [
         "Import lib;",

@@ -75,8 +75,9 @@ export interface IRslUndeclaredAssignmentOptions {
  * в области нет ни одного VAR, отличить опечатку от намеренно созданной
  * неявной переменной нечем, и проверка молчит.
  *
- * Заголовок for пропускается: там присваивание — принятый способ ввести
- * переменную цикла, и сообщать о нём значило бы ругаться на `for (i = 0; …)`.
+ * Инициализатор for пропускается: там присваивание — принятый способ ввести
+ * переменную цикла. Условие и шаг проверяются как обычный код: опечатка в
+ * `for (i = 0; typo < 3; typo = typo + 1)` обязана находиться.
  */
 export function isRslUndeclaredAssignmentCandidate(
     tokens: readonly IRslToken[],
@@ -89,7 +90,7 @@ export function isRslUndeclaredAssignmentCandidate(
         facts.varScopes.length > 0 &&
         isRslSimpleAssignmentTarget(tokens, index) &&
         isInsideVarScope(facts.varScopes, token.start) &&
-        !isInsideVarScope(facts.forHeaders, token.start) &&
+        !isInsideVarScope(facts.forInitializers, token.start) &&
         !facts.knownGlobals.has(normalizeIdentifier(token.value)) &&
         isRslExpressionIdentifier(tokens, index, facts.declarationStarts);
 }
