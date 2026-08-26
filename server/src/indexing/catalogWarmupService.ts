@@ -1,9 +1,6 @@
 import { systemRslClock, type IRslClock } from "../core/clock";
-import {
-    createExternalModuleSummary,
-    type IRslModuleModel
-} from "../moduleModel";
 import type { WorkspaceIndex } from "../workspaceIndex";
+import type { ICompactModuleResponse } from "./compactModuleProtocol";
 
 /**
  * Полный каталог проекта независимо от режима индексации.
@@ -14,33 +11,39 @@ import type { WorkspaceIndex } from "../workspaceIndex";
  * Go to Implementation и переименование файла отвечали по той части проекта,
  * которую пользователь успел задеть. Ответ зависел от истории сеанса.
  *
- * Здесь каталог достраивается своим обходом: файл читается, из него компактным
- * сканером берутся объявления, каталог их запоминает — и модель тут же
- * выбрасывается. В хранилище модулей она не попадает, LRU открытых файлов не
- * вытесняется, память растёт на компактные записи каталога, а не на модели.
+ * Здесь каталог достраивается своим обходом. Чтение файла и его компактное
+ * сканирование уходят в тот же worker, что и обычная фоновая индексация, с
+ * фоновым приоритетом: навигация, Completion и Import активного файла его
+ * обгоняют. На основном потоке остаётся только запись готовых дескрипторов в
+ * каталог, и она ограничена бюджетом порции.
  *
- * Обход идёт порциями и уступает дорогу: он нужен «через минуту после
- * открытия», а не «сейчас», и не имеет права занимать поток, пока пользователь
- * печатает.
+ * Так было не всегда: первая версия читала и сканировала по двенадцать файлов
+ * подряд прямо на основном потоке. На файлах по 700 КБ одна такая порция
+ * занимала поток больше секунды — ровно то, что пользователь чувствует как
+ * подвисание при вводе.
  */
 
 export interface IRslCatalogWarmupOptions {
     index: WorkspaceIndex;
-    /** Чтение файла: сервер читает с диска, тест — из карты. */
-    readFile(uri: string): string | undefined;
+    /**
+     * Компактное чтение файла: тот же worker, что у фоновой индексации.
+     *
+     * Ответ содержит дескрипторы, импорты и строковые ссылки — всё, что нужно
+     * каталогу, и ничего тяжёлого (см. compactModuleProtocol).
+     */
+    read(uri: string): Promise<ICompactModuleResponse>;
     log?(message: string): void;
     clock?: IRslClock;
-    /** Файлов за порцию. */
-    chunkFiles?: number;
+    /** Сколько файлов запрашивать у worker одновременно. */
+    concurrency?: number;
+    /** Сколько времени порция вправе занимать основной поток. */
+    budgetMs?: number;
     /** Пауза между порциями. */
     pauseMs?: number;
-    /**
-     * Файл больше этого размера пропускается.
-     *
-     * Каталог нужен для навигации по именам; сгенерированный модуль на десятки
-     * мегабайт даёт мало имён и много работы.
-     */
-    maxFileBytes?: number;
+    /** Сколько ждать тишины после правки, прежде чем вернуться к работе. */
+    idleMs?: number;
+    /** Каталог пополнился: зависимые ответы могли устареть. */
+    onCatalogChanged?(uris: readonly string[]): void;
     /** Отчёт о ходе: для лога и тестов. */
     onProgress?(progress: IRslCatalogWarmupProgress): void;
 }
@@ -53,14 +56,16 @@ export interface IRslCatalogWarmupProgress {
     complete: boolean;
 }
 
-const DEFAULT_CHUNK_FILES = 12;
-const DEFAULT_PAUSE_MS = 20;
-const DEFAULT_MAX_FILE_BYTES = 4 * 1024 * 1024;
+const DEFAULT_CONCURRENCY = 2;
+const DEFAULT_BUDGET_MS = 10;
+const DEFAULT_PAUSE_MS = 25;
+const DEFAULT_IDLE_MS = 1500;
 
 export class RslCatalogWarmupService {
     private queue: string[] = [];
     private queued = new Set<string>();
     private timer: unknown;
+    private idleTimer: unknown;
     private running = false;
     private suspended = false;
     private done = 0;
@@ -75,29 +80,38 @@ export class RslCatalogWarmupService {
     /**
      * Добавить файлы проекта в очередь достройки.
      *
-     * Уже известные каталогу пропускаются: обход достраивает, а не пересчитывает.
+     * Файл, о котором каталог уже знает всё — и состав, и строковые ссылки, —
+     * пропускается: обход достраивает, а не пересчитывает. Файл, попавший в
+     * каталог из подробной модели, ссылок не имеет, и его прочитать нужно.
      */
     add(uris: readonly string[]): void {
         for (const uri of uris) {
-            if (this.queued.has(uri) || this.options.index.catalog.has(uri)) {
+            if (this.queued.has(uri) || this.isComplete(uri)) {
                 continue;
             }
 
-            this.queued.add(uri);
-            this.queue.push(uri);
-            this.total++;
+            this.enqueue(uri);
         }
 
         this.schedule();
     }
 
-    /** Пользователь работает: обход подождёт. */
+    /**
+     * Пользователь работает: обход ждёт.
+     *
+     * Возвращается сам, после тишины: иначе каждая правка требовала бы явного
+     * разрешения продолжать, а забытое разрешение означало бы каталог,
+     * достроенный до половины.
+     */
     suspend(): void {
         this.suspended = true;
         this.clearTimer();
+        this.armIdleTimer();
     }
 
     resume(): void {
+        this.clearIdleTimer();
+
         if (!this.suspended) {
             return;
         }
@@ -111,6 +125,7 @@ export class RslCatalogWarmupService {
         this.queue = [];
         this.queued.clear();
         this.clearTimer();
+        this.clearIdleTimer();
     }
 
     /** Файл изменился на диске: перечитать его в каталог. */
@@ -119,9 +134,7 @@ export class RslCatalogWarmupService {
             return;
         }
 
-        this.queued.add(uri);
-        this.queue.push(uri);
-        this.total++;
+        this.enqueue(uri);
         this.schedule();
     }
 
@@ -134,13 +147,30 @@ export class RslCatalogWarmupService {
         };
     }
 
-    /** Синхронный проход до конца: для тестов и для batch-режима. */
-    runToCompletion(): IRslCatalogWarmupProgress {
+    /** Проход до конца: для тестов и batch-режима. */
+    async runToCompletion(): Promise<IRslCatalogWarmupProgress> {
         while (this.queue.length > 0) {
-            this.processChunk(this.queue.length);
+            await this.processChunk(Number.POSITIVE_INFINITY);
         }
 
         return this.progress;
+    }
+
+    private enqueue(uri: string): void {
+        this.queued.add(uri);
+        this.queue.push(uri);
+        this.total++;
+    }
+
+    /**
+     * Знает ли каталог об этом файле всё.
+     *
+     * Строковые ссылки появляются только у файла, прочитанного этим обходом:
+     * запись из подробной модели их не содержит, и без перечитывания
+     * переименование файла не нашло бы ссылку в нём.
+     */
+    private isComplete(uri: string): boolean {
+        return this.options.index.catalog.hasFileReferences(uri);
     }
 
     private schedule(): void {
@@ -156,86 +186,131 @@ export class RslCatalogWarmupService {
         this.timer = this.clock.setTimeout(
             () => {
                 this.timer = undefined;
-                this.tick();
+                void this.tick();
             },
             this.options.pauseMs ?? DEFAULT_PAUSE_MS
         );
     }
 
-    private tick(): void {
-        this.processChunk(this.options.chunkFiles ?? DEFAULT_CHUNK_FILES);
+    private async tick(): Promise<void> {
+        await this.processChunk(this.options.budgetMs ?? DEFAULT_BUDGET_MS);
         this.options.onProgress?.(this.progress);
         this.schedule();
     }
 
-    private processChunk(count: number): void {
+    /**
+     * Одна порция: запросы уходят в worker, ответы пишутся в каталог.
+     *
+     * Бюджет считается по работе на основном потоке — записи в каталог, — а не
+     * по ожиданию worker: ожидание поток не занимает.
+     */
+    private async processChunk(budgetMs: number): Promise<void> {
         this.running = true;
 
-        try {
-            for (let index = 0; index < count && this.queue.length > 0; index++) {
-                const uri = this.queue.shift() as string;
+        const changed: string[] = [];
+        let spentMs = 0;
 
-                this.queued.delete(uri);
-                this.record(uri);
+        try {
+            while (this.queue.length > 0 && spentMs < budgetMs) {
+                if (this.suspended) {
+                    break;
+                }
+
+                const batch = this.queue.splice(
+                    0,
+                    Math.max(1, this.options.concurrency ?? DEFAULT_CONCURRENCY)
+                );
+
+                for (const uri of batch) {
+                    this.queued.delete(uri);
+                }
+
+                const responses = await Promise.all(
+                    batch.map(uri => this.readSafely(uri))
+                );
+                const started = process.hrtime.bigint();
+
+                for (const response of responses) {
+                    if (response && this.record(response)) {
+                        changed.push(response.uri);
+                    }
+                }
+
+                spentMs += Number(process.hrtime.bigint() - started) / 1e6;
             }
         } finally {
             this.running = false;
         }
+
+        if (changed.length > 0) {
+            this.options.onCatalogChanged?.(changed);
+        }
     }
 
-    /**
-     * Прочитать файл и запомнить его состав.
-     *
-     * Ошибка чтения — не повод останавливать обход: файл мог быть удалён между
-     * обнаружением и чтением, и это обычное дело в большом проекте.
-     */
-    private record(uri: string): void {
-        let source: string | undefined;
-
+    private async readSafely(
+        uri: string
+    ): Promise<ICompactModuleResponse | undefined> {
         try {
-            source = this.options.readFile(uri);
+            return await this.options.read(uri);
         } catch (error) {
             this.options.log?.(
                 "Каталог: файл не прочитан " + uri + ": " + String(error)
             );
             this.skipped++;
 
-            return;
+            return undefined;
         }
+    }
 
-        if (source === undefined) {
+    /** Записать состав файла; true — каталог изменился. */
+    private record(response: ICompactModuleResponse): boolean {
+        if (response.status !== "indexed") {
             this.skipped++;
 
-            return;
-        }
-
-        const limit = this.options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
-
-        if (source.length * 2 > limit) {
-            this.skipped++;
-
-            return;
+            return false;
         }
 
         /*
-         * Модель компактная и одноразовая: она нужна ровно на время записи в
-         * каталог. Загруженной моделью файла она не считается — иначе обход
-         * вытеснил бы из хранилища то, что нужно открытым файлам.
+         * Открытый файл живёт по буферу редактора, и его модель свежее любого
+         * чтения с диска. Перезаписать её ответом обхода значило бы вернуть
+         * каталог к состоянию сохранённого файла.
          */
-        const summary: IRslModuleModel = createExternalModuleSummary(source);
+        const loaded = this.options.index.getModule(response.uri);
 
-        this.options.index.catalog.record({
-            uri,
+        if (loaded?.isOpen) {
+            this.skipped++;
+
+            return false;
+        }
+
+        this.options.index.catalog.recordDeclarations({
+            uri: response.uri,
             version: 0,
-            symbolTree: summary.symbolTree,
-            imports: summary.imports,
-            lex: summary.lex
+            declarations: response.declarations,
+            imports: response.imports,
+            fileReferences: new Set(response.fileReferences)
         });
-        this.options.index.catalog.recordFileReferences(
-            uri,
-            fileReferencesIn(source)
-        );
         this.done++;
+
+        return true;
+    }
+
+    private armIdleTimer(): void {
+        this.clearIdleTimer();
+        this.idleTimer = this.clock.setTimeout(
+            () => {
+                this.idleTimer = undefined;
+                this.resume();
+            },
+            this.options.idleMs ?? DEFAULT_IDLE_MS
+        );
+    }
+
+    private clearIdleTimer(): void {
+        if (this.idleTimer !== undefined) {
+            this.clock.clearTimeout(this.idleTimer);
+            this.idleTimer = undefined;
+        }
     }
 
     private clearTimer(): void {
@@ -244,34 +319,4 @@ export class RslCatalogWarmupService {
             this.timer = undefined;
         }
     }
-}
-
-/*
- * Строковые ссылки на файлы модулей.
- *
- * `ExecMacroFile("lib.mac")` — ссылка на файл, которую не видит ни Import, ни
- * дерево символов. Переименование файла обязано её обновить, а найти её можно
- * только в тексте. Разбор для этого не нужен: достаточно строковых литералов,
- * похожих на имя файла модуля.
- *
- * Ищется по тексту, а не по токенам: обход читает файл один раз и токены ему
- * больше ни для чего не нужны, а лексирование проекта стоило бы в разы дороже.
- */
-const FILE_REFERENCE_PATTERN =
-    /["']\s*([\wА-Яа-яЁё@.\-\\/]+\.(?:mac|rsm|dlm))\s*["']/giu;
-
-export function fileReferencesIn(source: string): Set<string> {
-    const result = new Set<string>();
-    let match: RegExpExecArray | null;
-
-    FILE_REFERENCE_PATTERN.lastIndex = 0;
-
-    while ((match = FILE_REFERENCE_PATTERN.exec(source)) !== null) {
-        const value = match[1].replace(/\\/gu, "/");
-        const name = value.slice(value.lastIndexOf("/") + 1);
-
-        result.add(name.toLowerCase());
-    }
-
-    return result;
 }

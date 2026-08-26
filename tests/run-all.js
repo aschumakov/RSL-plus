@@ -59,7 +59,11 @@ const SERIAL = new Set([
      */
     "diagnostics.test.js",
     "class-member-diagnostics.test.js",
-    "unknown-variables.test.js"
+    "unknown-variables.test.js",
+    /* Меряет память: рядом работающие процессы искажают замер. */
+    "editing-session.test.js",
+    /* Меряет непрерывную занятость потока — ей тоже нужна тишина. */
+    "catalog-warmup.test.js"
 ]);
 
 /*
@@ -130,11 +134,23 @@ const parallelFiles = files
     });
 const serialFiles = files.filter(isSerial);
 
+/*
+ * Файлы, которым нужен доступ к уборщику мусора.
+ *
+ * Проверка объёма памяти без принудительной уборки меряет момент, когда
+ * уборщик решил не работать, а не удержание. Флаг ставится здесь, а не внутри
+ * файла: node не умеет включать его на ходу.
+ */
+const NEEDS_GC = new Set(["editing-session.test.js"]);
+
 function runFile(file) {
     const started = Date.now();
 
     return new Promise(resolve => {
-        const child = spawn(process.execPath, [path.join(TESTS_DIRECTORY, file)], {
+        const nodeArguments = NEEDS_GC.has(file)
+            ? ["--expose-gc", path.join(TESTS_DIRECTORY, file)]
+            : [path.join(TESTS_DIRECTORY, file)];
+        const child = spawn(process.execPath, nodeArguments, {
             cwd: path.join(TESTS_DIRECTORY, ".."),
             env: {
                 ...process.env,

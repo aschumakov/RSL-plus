@@ -297,8 +297,14 @@ test("без .editorconfig ответ пустой, а не выдуманный
 /* ─── Регистр вставляемых слов ───────────────────────────────────────────── */
 
 test("регистр вставляемого слова следует настройке", () => {
+    /*
+     * По умолчанию — как плагин писал всегда: у каждого места своё привычное
+     * написание, и появление настройки не меняет ни один файл само собой.
+     */
+    assert.strictEqual(applyRslKeywordCase("Var", undefined), "Var");
+    assert.strictEqual(applyRslKeywordCase("Var", "asIs"), "Var");
     assert.strictEqual(applyRslKeywordCase("end;", undefined), "end;");
-    assert.strictEqual(applyRslKeywordCase("end;", "lower"), "end;");
+    assert.strictEqual(applyRslKeywordCase("Var", "lower"), "var");
     assert.strictEqual(applyRslKeywordCase("end;", "upper"), "END;");
     assert.strictEqual(applyRslKeywordCase("end;", "capitalize"), "End;");
 });

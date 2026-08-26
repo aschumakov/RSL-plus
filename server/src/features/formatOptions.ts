@@ -52,11 +52,20 @@ export function resolveRslFormatOptions(
  *
  * Уже написанное пользователем не меняется — это его дело; речь только о том,
  * что дописывает Smart Enter, Quick Fix и сниппеты.
+ *
+ * Значение по умолчанию — "asIs": слово вставляется так, как его писал плагин
+ * до появления настройки, у каждого места своё привычное написание (end; в
+ * нижнем регистре, Var с большой буквы). Настройка нужна проекту с единым
+ * стилем, а не для того, чтобы менять поведение всем без спроса.
  */
 export function applyRslKeywordCase(
     text: string,
     keywordCase: string | undefined
 ): string {
+    if (keywordCase === "lower") {
+        return text.toLowerCase();
+    }
+
     if (keywordCase === "upper") {
         return text.toUpperCase();
     }
@@ -65,5 +74,5 @@ export function applyRslKeywordCase(
         return text.charAt(0).toUpperCase() + text.slice(1).toLowerCase();
     }
 
-    return text.toLowerCase();
+    return text;
 }

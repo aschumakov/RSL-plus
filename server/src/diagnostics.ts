@@ -957,17 +957,20 @@ function unitDiagnosticsFingerprint(
  * входят в отпечаток — их правка пересчитывает ленту целиком, а правка тела
  * процедуры не пересчитывает.
  *
- * Общее число переменных тоже входит: проверка молчит в файле, где нет ни
- * одного Var, и первое же объявление обязано включить её во всех единицах.
+ * Входит и признак «в файле есть хоть одно объявление переменной»:
+ * проверка молчит в файле, где нет ни одного Var, и первое же объявление
+ * обязано включить её во всех единицах. Именно признак, а не число:
+ * иначе каждый локальный `Var` внутри процедуры сбрасывал бы ленту
+ * целиком — то есть при обычном наборе текста лента не работала бы вовсе.
  */
 function moduleWideNamesFingerprint(module: IIndexedModule): string {
     const names: string[] = [];
-    let variables = 0;
+    let hasVariable = false;
 
     const walk = (symbol: RslSymbol, prefix: string): void => {
         for (const child of symbol.children) {
             if (VARIABLE_KINDS.has(child.kind)) {
-                variables++;
+                hasVariable = true;
 
                 if (prefix !== undefined && prefix !== "\u0000") {
                     names.push(prefix + normalizeIdentifier(child.name));
@@ -992,7 +995,7 @@ function moduleWideNamesFingerprint(module: IIndexedModule): string {
 
     walk(module.symbolTree, "");
 
-    return names.sort().join(",") + "#" + variables;
+    return names.sort().join(",") + "#" + hasVariable;
 }
 
 /**

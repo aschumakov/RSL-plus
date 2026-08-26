@@ -642,6 +642,16 @@ export class RslLanguageFeatureRegistry {
 
     }
 
+    /**
+     * .editorconfig изменился: прочитанное больше не годится.
+     *
+     * Сбрасывается весь разбор, а не запись одного каталога: секции
+     * влияют на вложенные каталоги, и вычислить задетых дешевле нельзя.
+     */
+    invalidateEditorConfig(): void {
+        this.editorConfig.clear();
+    }
+
     invalidate(uri: string): void {
         this.presentationFeatures.invalidate(uri);
         this.semanticTokensFeatures.invalidate(uri);

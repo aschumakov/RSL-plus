@@ -222,6 +222,8 @@ export class WorkspaceIndex {
         this.importContexts.clear();
         this.externalModuleOrder.clear();
         this.externalSizeByUri.clear();
+        /* Каталог — часть индекса: без этого он отвечал бы про прежний проект. */
+        this.catalogValue.clear();
         this.externalBytes = 0;
         this.revisionValue++;
     }

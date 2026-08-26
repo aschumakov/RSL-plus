@@ -41,6 +41,10 @@ import { extractParameterLabels } from "./signatureHelpProvider";
  */
 const MAX_CALLS = 200;
 
+/** Имя параметра: те же символы, что и в идентификаторах RSL. */
+const PARAMETER_NAME_PATTERN =
+    /^[A-Za-zА-Яа-яЁё_@][A-Za-zА-Яа-яЁё0-9_$@]*$/u;
+
 export function buildRslParameterInlayHints(
     module: IIndexedModule,
     resolver: RslScopeResolver,
@@ -230,7 +234,8 @@ function parameterName(label: string): string {
     const words = text.split(/\s+/).filter(Boolean);
     const last = words[words.length - 1] || "";
 
-    return /^[A-Za-z_][\w$]*$/.test(last) ? last : "";
+    /* Имена в RSL бывают кириллическими: ASCII-шаблон их отбрасывал. */
+    return PARAMETER_NAME_PATTERN.test(last) ? last : "";
 }
 
 /**

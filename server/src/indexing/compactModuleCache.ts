@@ -46,7 +46,12 @@ import type {
  * как актуальная, и исправление кодировки не дошло бы до тех, у кого кэш уже
  * есть.
  */
-const CACHE_VERSION = 2;
+/*
+ * Версия 3: в сводке появились строковые ссылки на файлы. Записи прежней
+ * версии не годятся — без них переименование файла молча не нашло бы
+ * ссылки в файлах, попавших в кэш до этой версии.
+ */
+const CACHE_VERSION = 3;
 const SAVE_DEBOUNCE_MS = 3000;
 
 /**
@@ -85,6 +90,14 @@ interface ISerializedEntry {
     sourceLength: number;
     declarations: IRslDeclarationSnapshot["declarations"];
     imports: string[];
+    /**
+     * Строковые ссылки на файлы модулей.
+     *
+     * Хранятся вместе со сводкой: иначе запись, поднятая из кэша, отдавала бы
+     * сводку без ссылок — и переименование файла молча не находило бы ссылки в
+     * файлах, попавших в кэш в прошлой сессии.
+     */
+    fileReferences: string[];
 }
 
 interface ISerializedCache {
@@ -257,7 +270,10 @@ export class CompactModuleCache {
                     sourceLength: Math.max(0, Number(item.sourceLength) || 0),
                     snapshot: {
                         declarations: item.declarations,
-                        imports: item.imports
+                        imports: item.imports,
+                        fileReferences: Array.isArray(item.fileReferences)
+                            ? item.fileReferences
+                            : []
                     }
                 });
             }
@@ -321,7 +337,8 @@ export class CompactModuleCache {
                 mtimeMs: entry.mtimeMs,
                 sourceLength: entry.sourceLength,
                 declarations: entry.snapshot.declarations,
-                imports: entry.snapshot.imports
+                imports: entry.snapshot.imports,
+                fileReferences: [...(entry.snapshot.fileReferences || [])]
             });
         }
 

@@ -6,6 +6,7 @@ import {
 } from "vscode-languageserver";
 
 import { normalizeIdentifier } from "../lexer";
+import { applyRslKeywordCase } from "./formatOptions";
 import {
     createRslAssignmentCheckFacts,
     visibleRslVariableNames
@@ -39,7 +40,8 @@ function maximumDistance(name: string): number {
 
 export function buildRslUndeclaredVariableFixes(
     module: IIndexedModule,
-    diagnostic: Diagnostic
+    diagnostic: Diagnostic,
+    options: { keywordCase?: string } = {}
 ): CodeAction[] {
     const data = diagnostic.data as
         { start?: number; end?: number; name?: string } | undefined;
@@ -67,11 +69,12 @@ export function buildRslUndeclaredVariableFixes(
         ));
     }
 
-    const declaration = declarationEdit(module, start, name);
+    const keyword = applyRslKeywordCase("Var", options.keywordCase);
+    const declaration = declarationEdit(module, start, name, keyword);
 
     if (declaration) {
         result.push(createAction(
-            `Объявить переменную: Var ${name};`,
+            `Объявить переменную: ${keyword} ${name};`,
             module.uri,
             [declaration],
             diagnostic,
@@ -177,7 +180,8 @@ function editDistance(left: string, right: string, limit: number): number {
 function declarationEdit(
     module: IIndexedModule,
     offset: number,
-    name: string
+    name: string,
+    keyword: string
 ): TextEdit | undefined {
     const scope = enclosingCallable(module, offset);
 
@@ -199,7 +203,18 @@ function declarationEdit(
     ).match(/^[ \t]*/u)?.[0] ?? "    ";
     const position = positionAt(module, lineStart);
 
-    return TextEdit.insert(position, `${indent}Var ${name};\n`);
+    /*
+     * Перевод строки — как в файле.
+     *
+     * Жёсткий \n в файле с CRLF давал строку с чужим окончанием: её
+     * видно в diff, и она мешает тем, кто этот файл потом читает.
+     */
+    const eol = module.lex.eol || "\n";
+
+    return TextEdit.insert(
+        position,
+        indent + keyword + " " + name + ";" + eol
+    );
 }
 
 function enclosingCallable(

@@ -418,6 +418,15 @@ interface IRslScopeNode {
     end: number;
     name: string;
     variables: Set<string>;
+    /**
+     * Написание имени: нормализованное имя — как оно объявлено.
+     *
+     * Поиск в RSL регистронезависим, поэтому variables хранит имена
+     * приведёнными. Но предложение «заменить на» вставляет имя в код, и
+     * вставлять его в нижнем регистре нельзя: в файле объявлено
+     * `documentNumber`, а исправление писало `documentnumber`.
+     */
+    displayNames: Map<string, string>;
     children: readonly IRslScopeNode[];
 }
 
@@ -454,7 +463,13 @@ export function createRslAssignmentCheckFacts(
         const scope = chain[chain.length - 1];
 
         if (scope) {
-            scope.variables.add(variable.name);
+            const normalized = normalizeIdentifier(variable.name);
+
+            scope.variables.add(normalized);
+
+            if (!scope.displayNames.has(normalized)) {
+                scope.displayNames.set(normalized, variable.name);
+            }
         }
     }
 
@@ -470,11 +485,18 @@ export function createRslAssignmentCheckFacts(
 /** Дерево областей файла с именами объявленных в них переменных. */
 function buildScopeNode(symbol: RslSymbol, path: string): IRslScopeNode {
     const variables = new Set<string>();
+    const displayNames = new Map<string, string>();
     const children: IRslScopeNode[] = [];
 
     for (const child of symbol.children) {
         if (isRslVariableSymbol(child)) {
-            variables.add(normalizeIdentifier(child.name));
+            const normalized = normalizeIdentifier(child.name);
+
+            variables.add(normalized);
+
+            if (!displayNames.has(normalized)) {
+                displayNames.set(normalized, child.name);
+            }
         }
 
         if (child.isContainer) {
@@ -493,6 +515,7 @@ function buildScopeNode(symbol: RslSymbol, path: string): IRslScopeNode {
         end: symbol.range.end,
         name: path,
         variables,
+        displayNames,
         children
     };
 }
@@ -745,7 +768,8 @@ export function visibleRslVariableNames(
 
     for (const scope of scopeChainAt(facts.scopes, offset)) {
         for (const name of scope.variables) {
-            result.add(name);
+            /* Имя отдаётся в том написании, в каком объявлено. */
+            result.add(scope.displayNames.get(name) || name);
         }
     }
 

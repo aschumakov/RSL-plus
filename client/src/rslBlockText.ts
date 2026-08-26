@@ -15,6 +15,10 @@ export type RslKeywordCase = "lower" | "upper" | "capitalize";
 
 /** Закрытие блока в том регистре, который выбран настройкой. */
 export function rslBlockEnd(keywordCase?: string): string {
+    if (keywordCase === "lower") {
+        return RSL_BLOCK_END.toLowerCase();
+    }
+
     if (keywordCase === "upper") {
         return RSL_BLOCK_END.toUpperCase();
     }
@@ -24,5 +28,6 @@ export function rslBlockEnd(keywordCase?: string): string {
             RSL_BLOCK_END.slice(1);
     }
 
+    /* asIs и всё незнакомое: как плагин писал всегда. */
     return RSL_BLOCK_END;
 }

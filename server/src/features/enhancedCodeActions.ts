@@ -68,14 +68,18 @@ quickFixRegistry.register(
         options.keywordCase
     )
 );
-quickFixRegistry.setFallback((module, diagnostic, params) =>
-    buildRslCodeActions(module, {
-        ...params,
-        context: {
-            ...params.context,
-            diagnostics: [diagnostic]
-        }
-    })
+quickFixRegistry.setFallback((module, diagnostic, params, options) =>
+    buildRslCodeActions(
+        module,
+        {
+            ...params,
+            context: {
+                ...params.context,
+                diagnostics: [diagnostic]
+            }
+        },
+        options
+    )
 );
 
 export function buildEnhancedRslCodeActions(

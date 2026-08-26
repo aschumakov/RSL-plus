@@ -61,6 +61,13 @@ export interface IRslDeclarationDescriptor {
 export interface IRslDeclarationSnapshot {
     imports: string[];
     declarations: IRslDeclarationDescriptor[];
+    /**
+     * Имена файлов, на которые файл ссылается строкой в ExecMacroFile.
+     *
+     * Заполняет тот, кто держит поток токенов, — компактное чтение файла.
+     * Сам сканер объявлений их не собирает: это не объявление.
+     */
+    fileReferences?: readonly string[];
 }
 
 interface IBlockFrame {
@@ -945,7 +952,15 @@ function buildChildren(
     });
 }
 
-function descriptorKind(
+/**
+ * Вид символа по дескриптору.
+ *
+ * Экспортируется, чтобы каталог проекта, заполняемый компактным
+ * сканером, различал виды так же, как дерево символов: иначе Ctrl+T
+ * показывал бы переменную процедурой в зависимости от того, каким путём
+ * попал в каталог файл.
+ */
+export function descriptorKind(
     descriptor: IRslDeclarationDescriptor
 ): CompletionItemKind {
     if (descriptor.kind === "macro") {

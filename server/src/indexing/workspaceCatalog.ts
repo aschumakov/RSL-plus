@@ -1,7 +1,16 @@
 import { CompletionItemKind } from "vscode-languageserver";
 
+import {
+    descriptorKind,
+    type IRslDeclarationDescriptor
+} from "../analysis/declarationExtractor";
 import { normalizeIdentifier } from "../lexer";
-import type { RslSymbol } from "../symbols/rslSymbol";
+import {
+    createSymbolId,
+    moduleSymbolId,
+    type RslSymbol,
+    type SymbolId
+} from "../symbols/rslSymbol";
 
 /**
  * Постоянный каталог символов проекта.
@@ -20,6 +29,15 @@ import type { RslSymbol } from "../symbols/rslSymbol";
  */
 export interface IRslCatalogSymbol {
     name: string;
+    /**
+     * Устойчивая часть тождества символа: пара {uri, symbolId}.
+     *
+     * По одному имени класса ответить нельзя: `Base` бывает в двух файлах
+     * проекта, и иерархия типов смешивала бы их наследников. Тождество
+     * даёт тот же идентификатор, что и подробная модель, поэтому запись
+     * компактного сканера и запись открытого файла сравнимы между собой.
+     */
+    symbolId: SymbolId;
     /** Нормализованное имя: поиск в RSL регистронезависим. */
     normalized: string;
     kind: CompletionItemKind;
@@ -134,6 +152,14 @@ export class WorkspaceCatalog {
         });
         this.attachFileReferences(module.uri, previousReferences);
 
+        this.indexSymbols(module.uri, symbols);
+        this.revisionValue++;
+    }
+
+    private indexSymbols(
+        uri: string,
+        symbols: readonly IRslCatalogSymbol[]
+    ): void {
         for (const symbol of symbols) {
             let byUri = this.byName.get(symbol.normalized);
 
@@ -142,16 +168,14 @@ export class WorkspaceCatalog {
                 this.byName.set(symbol.normalized, byUri);
             }
 
-            const list = byUri.get(module.uri);
+            const list = byUri.get(uri);
 
             if (list) {
                 list.push(symbol);
             } else {
-                byUri.set(module.uri, [symbol]);
+                byUri.set(uri, [symbol]);
             }
         }
-
-        this.revisionValue++;
     }
 
     /**
@@ -222,6 +246,77 @@ export class WorkspaceCatalog {
         ].sort();
     }
 
+    /**
+     * Состав файла по дескрипторам компактного сканера.
+     *
+     * Отдельный вход, а не record: у компактного сканера нет ни дерева
+     * символов, ни начал строк, зато у каждого дескриптора есть точная
+     * строка и колонка. Раньше такие файлы попадали в каталог с
+     * lineStarts = [0], и символ с третьей строки открывался как символ
+     * первой.
+     */
+    recordDeclarations(source: {
+        uri: string;
+        version: number;
+        declarations: readonly IRslDeclarationDescriptor[];
+        imports: readonly string[];
+        fileReferences?: ReadonlySet<string>;
+    }): void {
+        const symbols: IRslCatalogSymbol[] = [];
+        const exports = new Set<string>();
+        const rootId = moduleSymbolId();
+        const occurrences = new Map<string, number>();
+
+        for (const descriptor of source.declarations) {
+            const added = appendDescriptor(
+                symbols,
+                source.uri,
+                descriptor,
+                "",
+                rootId,
+                occurrences
+            );
+
+            if (added && descriptor.visibility !== "private") {
+                exports.add(added.normalized);
+            }
+
+            if (descriptor.kind !== "class" || !added) {
+                continue;
+            }
+
+            const members = new Map<string, number>();
+
+            for (const member of descriptor.children) {
+                appendDescriptor(
+                    symbols,
+                    source.uri,
+                    member,
+                    descriptor.name,
+                    added.symbolId,
+                    members
+                );
+            }
+        }
+
+        const previousReferences = this.modules.get(source.uri)
+            ?.fileReferences;
+        const references = source.fileReferences || previousReferences;
+
+        this.remove(source.uri);
+        this.modules.set(source.uri, {
+            uri: source.uri,
+            version: source.version,
+            symbols,
+            exports,
+            imports: source.imports.slice(),
+            fileReferences: references
+        });
+        this.indexSymbols(source.uri, symbols);
+        this.attachFileReferences(source.uri, references);
+        this.revisionValue++;
+    }
+
     /** Файла больше нет в проекте: запись уходит вместе с ним. */
     remove(uri: string): void {
         const previous = this.modules.get(uri);
@@ -247,6 +342,26 @@ export class WorkspaceCatalog {
         this.detachFileReferences(uri, previous.fileReferences);
         this.modules.delete(uri);
         this.revisionValue++;
+    }
+
+    /** Проект сменился: каталог прежнего проекта не годится. */
+    clear(): void {
+        this.modules.clear();
+        this.byName.clear();
+        this.byFileReference.clear();
+        this.revisionValue++;
+    }
+
+    /**
+     * Знает ли каталог о файле всё, включая строковые ссылки.
+     *
+     * Запись, сделанная из подробной модели, ссылок не содержит: их знает
+     * только тот, кто читал текст файла целиком. Достройка каталога отличает
+     * эти два случая — иначе файл, попавший в каталог при открытии, навсегда
+     * оставался бы без ссылок.
+     */
+    hasFileReferences(uri: string): boolean {
+        return this.modules.get(uri)?.fileReferences !== undefined;
     }
 
     has(uri: string): boolean {
@@ -404,6 +519,7 @@ function append(
 
     const record: IRslCatalogSymbol = {
         name: symbol.name,
+        symbolId: symbol.id,
         normalized: normalizeIdentifier(symbol.name),
         kind: symbol.kind,
         uri,
@@ -414,6 +530,56 @@ function append(
         container,
         isPrivate: !!symbol.isPrivate,
         baseClassName: symbol.baseClassName || ""
+    };
+
+    result.push(record);
+
+    return record;
+}
+
+/**
+ * Запись каталога по дескриптору компактного сканера.
+ *
+ * Позиция берётся из самого дескриптора: он знает строку и колонку
+ * объявления точно, а восстанавливать их из смещения без начал строк
+ * нельзя.
+ */
+function appendDescriptor(
+    result: IRslCatalogSymbol[],
+    uri: string,
+    descriptor: IRslDeclarationDescriptor,
+    container: string,
+    parentId: SymbolId,
+    occurrences: Map<string, number>
+): IRslCatalogSymbol | undefined {
+    if (!descriptor.name) {
+        return undefined;
+    }
+
+    const kind = descriptorKind(descriptor);
+    const key = kind + ":" + normalizeIdentifier(descriptor.name);
+    const occurrence = occurrences.get(key) || 0;
+
+    occurrences.set(key, occurrence + 1);
+
+    const record: IRslCatalogSymbol = {
+        name: descriptor.name,
+        symbolId: createSymbolId(
+            parentId,
+            kind,
+            descriptor.name,
+            occurrence
+        ),
+        normalized: normalizeIdentifier(descriptor.name),
+        kind,
+        uri,
+        start: descriptor.selectionStart,
+        end: descriptor.selectionEnd,
+        line: descriptor.startLine,
+        character: descriptor.startCharacter,
+        container,
+        isPrivate: descriptor.visibility === "private",
+        baseClassName: descriptor.baseClassName || ""
     };
 
     result.push(record);

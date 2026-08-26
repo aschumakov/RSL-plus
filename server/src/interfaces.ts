@@ -152,7 +152,7 @@ export interface IRslSettings {
  */
 export interface IRslFormatSettings {
     /** Регистр ключевых слов, которые вставляет плагин. */
-    keywordCase: "lower" | "upper" | "capitalize";
+    keywordCase: "asIs" | "lower" | "upper" | "capitalize";
     /** Ставить пробелы вокруг операторов и после запятых. */
     spaceAroundOperators: boolean;
     /** Выравнивать знак равенства в идущих подряд присваиваниях. */

@@ -328,13 +328,20 @@ export function activate(context: ExtensionContext): void {
 
     const macroFileWatcher =
         workspace.createFileSystemWatcher("**/*.mac");
+    /*
+     * .editorconfig тоже наблюдается: из него берётся отступ при
+     * форматировании, и правка файла обязана действовать сразу, а не
+     * после перезапуска редактора.
+     */
+    const editorConfigWatcher =
+        workspace.createFileSystemWatcher("**/.editorconfig");
     const performanceLogFile = readSetting(
         "performance.logFile",
         ""
     ).trim();
     const initialSettings = readRslSettings();
 
-    context.subscriptions.push(macroFileWatcher);
+    context.subscriptions.push(macroFileWatcher, editorConfigWatcher);
 
     const clientOptions: LanguageClientOptions = {
         documentSelector: [
@@ -344,7 +351,7 @@ export function activate(context: ExtensionContext): void {
             }
         ],
         synchronize: {
-            fileEvents: macroFileWatcher
+            fileEvents: [macroFileWatcher, editorConfigWatcher]
         },
         middleware: {
             provideDocumentSymbols: async (document, token, next) => {

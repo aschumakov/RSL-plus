@@ -131,9 +131,9 @@ function writeModule(directory, name, source) {
             assert.deepStrictEqual(
                 Object.keys(response).sort(),
                 [
-                    "declarations", "exportsRequestedName", "fingerprint",
-                    "generation", "id", "imports", "mtimeMs", "reused",
-                    "sourceLength", "status", "uri"
+                    "declarations", "exportsRequestedName", "fileReferences",
+                    "fingerprint", "generation", "id", "imports", "mtimeMs",
+                    "reused", "sourceLength", "status", "uri"
                 ],
                 "Состав ответа расширился — проверьте, не попал ли в него " +
                     "текст, дерево или токены"
@@ -1251,17 +1251,18 @@ function writeModule(directory, name, source) {
             const raw = fs.readFileSync(cacheFile, "utf8");
             const parsed = JSON.parse(raw);
             /*
-             * Версия 2 — распознавание CP866. Поднимать её нужно и тогда, когда
-             * изменился не формат записи, а способ получения содержимого:
-             * отпечаток считается по байтам файла и потому совпадал, и старые
-             * сводки без русских имён отдавались как актуальные.
+             * Версия 2 — распознавание CP866, версия 3 — строковые ссылки на
+             * файлы в сводке. Поднимать её нужно и тогда, когда изменился не
+             * формат записи, а способ получения содержимого: отпечаток
+             * считается по байтам файла и потому совпадал, и старые сводки без
+             * русских имён отдавались как актуальные.
              */
-            assert.strictEqual(parsed.version, 2);
+            assert.strictEqual(parsed.version, 3);
             assert.deepStrictEqual(
                 Object.keys(parsed.entries[0]).sort(),
                 [
-                    "declarations", "fingerprint", "imports", "mtimeMs",
-                    "sourceLength", "uri"
+                    "declarations", "fileReferences", "fingerprint", "imports",
+                    "mtimeMs", "sourceLength", "uri"
                 ],
                 "Состав записи расширился — проверьте, не попал ли в кэш " +
                     "текст, дерево или токены"

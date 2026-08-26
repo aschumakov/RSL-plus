@@ -232,7 +232,7 @@ export class DiagnosticsCoordinator {
             return;
         }
 
-        const now = Date.now();
+        const now = this.clock.now();
         const first = this.workspaceFirstScheduled.get(uri) ?? now;
         this.workspaceFirstScheduled.set(uri, first);
         const requestedAt = now + Math.max(
@@ -351,7 +351,7 @@ export class DiagnosticsCoordinator {
              */
             this.workspaceKeys.delete(uri);
             this.staleWorkspace.add(uri);
-            const started = Date.now();
+            const started = this.clock.now();
             const performance = this.options.performance;
             const span = performance?.enabled
                 ? performance.start("diagnostics.local", {
@@ -474,7 +474,7 @@ export class DiagnosticsCoordinator {
         this.maxProblems.set(uri, state.settings.diagnostics?.maxProblems ?? 200);
 
         if (this.workspaceKeys.get(uri) !== key || !this.workspaceCache.has(uri)) {
-            const started = Date.now();
+            const started = this.clock.now();
             const performance = this.options.performance;
             const span = performance?.enabled
                 ? performance.start("diagnostics.workspace", {
@@ -882,7 +882,7 @@ export class DiagnosticsCoordinator {
         version: number,
         started: number
     ): void {
-        const elapsed = Date.now() - started;
+        const elapsed = this.clock.now() - started;
         if (elapsed >= this.slowDiagnosticsLogMs) {
             this.options.log(
                 `Slow ${phase} diagnostics: ${uri}; version=${version}; ms=${elapsed}`

@@ -114,6 +114,15 @@ export interface ICompactModuleIndexed
     sourceLength: number;
     declarations: IRslDeclarationDescriptor[];
     imports: string[];
+    /**
+     * Имена файлов из строк ExecMacroFile.
+     *
+     * Их знает только тот, кто читал текст, а нужны они каталогу: без них
+     * переименование файла не находит ссылки в файлах, которые ни разу не
+     * открывались. Список короткий — обычно пустой, — и запрет на
+     * тяжёлые поля в ответе не нарушает.
+     */
+    fileReferences: readonly string[];
     /** Задан только для запроса с expectedExport. */
     exportsRequestedName?: boolean;
     /** true, если сканирование взято из памяти worker'а по отпечатку. */

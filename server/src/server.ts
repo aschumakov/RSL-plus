@@ -10,11 +10,7 @@ import {
 
 import { TextDocument } from "vscode-languageserver-textdocument";
 
-import * as fs from "fs";
-import { fileURLToPath } from "url";
-
 import { RslSymbol } from "./symbols/rslSymbol";
-import { decodeRslSourceText } from "./core/textDecoding";
 import { RslDiagnosticEngine } from "./diagnostics/diagnosticEngine";
 import { DiagnosticsCoordinator } from "./diagnostics/diagnosticsCoordinator";
 import {
@@ -83,7 +79,7 @@ const defaultSettings: IRslSettings = {
     semanticHighlighting: { maxFileSizeKb: 512 },
     inlayHints: { variableTypes: true, parameterNames: true },
     format: {
-        keywordCase: "lower",
+        keywordCase: "asIs",
         spaceAroundOperators: true,
         alignAssignments: true,
         useEditorConfig: true,
@@ -258,15 +254,17 @@ const moduleLoader = new WorkspaceModuleLoader(
 const catalogWarmup = new RslCatalogWarmupService({
     index: workspaceIndex,
     log: logMessage,
-    readFile: uri => {
-        const opened = documents.get(uri);
-
-        if (opened) {
-            return opened.getText();
-        }
-
-        return decodeRslSourceText(fs.readFileSync(fileURLToPath(uri)));
-    },
+    /*
+     * Чтение и сканирование — в том же worker, что у фоновой индексации, с
+     * фоновым приоритетом: навигация и Import активного файла его
+     * обгоняют.
+     */
+    read: uri => compactModules.index({
+        uri,
+        generation: 0,
+        priority: "background"
+    }),
+    onCatalogChanged: () => scheduleWorkspaceRefreshForOpenDocuments(),
     onProgress: progress => {
         if (progress.complete) {
             logMessage(
@@ -276,6 +274,31 @@ const catalogWarmup = new RslCatalogWarmupService({
         }
     }
 });
+
+/*
+ * Каталог пополнился — межфайловые ответы могли устареть.
+ *
+ * Неоднозначная ссылка и неизвестное имя — это ответы про весь проект:
+ * появление модуля в каталоге меняет их, не меняя ни текста открытого
+ * файла, ни его импортов. Ключ межфайловой фазы включает ревизию каталога,
+ * поэтому достаточно попросить пересчёт — он сам решит, нужен ли он.
+ */
+let workspaceRefreshTimer: NodeJS.Timeout | undefined;
+
+function scheduleWorkspaceRefreshForOpenDocuments(): void {
+    if (workspaceRefreshTimer) {
+        return;
+    }
+
+    workspaceRefreshTimer = setTimeout(() => {
+        workspaceRefreshTimer = undefined;
+
+        for (const document of documents.all()) {
+            diagnosticsCoordinator.scheduleWorkspace(document.uri, 0);
+        }
+    }, 750);
+    workspaceRefreshTimer.unref?.();
+}
 
 const workspaceDiscovery = new WorkspaceFileDiscoveryService({
     log: logMessage,
@@ -517,7 +540,7 @@ languageFeatures = new RslLanguageFeatureRegistry({
         moduleLoader.noteInteractiveActivity();
         workspaceDiscovery.noteInteractiveActivity();
         documentAnalysis.noteInteractiveActivity();
-        noteCatalogWarmupActivity();
+        catalogWarmup.suspend();
     },
     log: logMessage,
     performance: performanceLogger
@@ -694,6 +717,12 @@ documents.onDidClose(event => {
 documents.onDidChangeContent(change => {
     diagnosticsCoordinator.cancel(change.document.uri);
     documentAnalysis.changed(change.document);
+    /*
+     * Правка — самый сильный признак работы пользователя, и достройка каталога
+     * уступает ей сразу. Прежде она ждала только запросов функций редактора, а
+     * при обычном наборе текста продолжала читать файлы.
+     */
+    catalogWarmup.suspend();
 });
 
 async function ensureDocumentParsed(
@@ -705,30 +734,6 @@ async function ensureDocumentParsed(
 }
 
 /** Разбор нужен, но торопить его незачем: см. DocumentAnalysisService. */
-/*
- * Достройка каталога уступает дорогу и возвращается к работе.
- *
- * Пауза считается от последнего действия пользователя: чтение файлов —
- * работа для затишья, а не для середины набора текста.
- */
-const CATALOG_WARMUP_IDLE_MS = 1500;
-let catalogWarmupTimer: NodeJS.Timeout | undefined;
-
-function noteCatalogWarmupActivity(): void {
-    catalogWarmup.suspend();
-
-    if (catalogWarmupTimer) {
-        clearTimeout(catalogWarmupTimer);
-    }
-
-    catalogWarmupTimer = setTimeout(() => {
-        catalogWarmupTimer = undefined;
-        catalogWarmup.resume();
-    }, CATALOG_WARMUP_IDLE_MS);
-
-    catalogWarmupTimer.unref?.();
-}
-
 function requestDocumentParse(document: TextDocument): void {
     documentAnalysis.requestParse(document);
 }
@@ -751,6 +756,12 @@ async function handleWatchedFileChange(
     uri: string,
     type: FileChangeType
 ): Promise<void> {
+    if (/\.editorconfig$/iu.test(uri)) {
+        languageFeatures.invalidateEditorConfig();
+
+        return;
+    }
+
     /* Открытый файл живёт по буферу редактора: см. shouldHandleWatchedFileChange. */
     if (!shouldHandleWatchedFileChange(type, !!documents.get(uri))) {
         performanceLogger.mark?.("watcher.skipped", {

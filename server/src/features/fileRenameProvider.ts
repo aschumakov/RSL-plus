@@ -6,6 +6,10 @@ import { TextEdit, type WorkspaceEdit } from "vscode-languageserver";
 import type { TextDocument } from "vscode-languageserver-textdocument";
 
 import { decodeRslSourceText } from "../core/textDecoding";
+import {
+    GetMacroFileReferencesFromTokens,
+    type IRslMacroFileReference
+} from "../execMacroDefinition";
 import { lexRsl, normalizeIdentifier, type IRslToken } from "../lexer";
 import type { WorkspaceIndex } from "../workspaceIndex";
 
@@ -162,8 +166,10 @@ function readSource(
 /**
  * Правки в одном файле.
  *
- * Позиции считаются по токенам, а не поиском подстроки: имя `lib` встречается
- * и внутри `library`, и в комментарии, и в чужой строке.
+ * Правится ровно два вида ссылок: имя модуля внутри `Import` и первый
+ * аргумент `ExecMacroFile`. Всё остальное — не ссылка: `MsgBox("lib.mac")`
+ * это текст сообщения, а `library` — другое имя, и трогать их значило бы
+ * менять работающий код при переименовании файла.
  */
 function renameEditsIn(
     text: string,
@@ -172,9 +178,17 @@ function renameEditsIn(
 ): TextEdit[] {
     const lex = lexRsl(text, { includeTrivia: true });
     const wanted = normalizeIdentifier(oldName);
-    const wantedFile = wanted + ".mac";
     const edits: TextEdit[] = [];
     let inImport = false;
+
+    /* Строковые ссылки: только первый аргумент ExecMacroFile. */
+    for (const reference of GetMacroFileReferencesFromTokens(lex.tokens)) {
+        const edit = fileReferenceEdit(reference, oldName, newName);
+
+        if (edit) {
+            edits.push(edit);
+        }
+    }
 
     for (const token of lex.tokens) {
         if (token.kind === "identifier") {
@@ -192,38 +206,51 @@ function renameEditsIn(
             continue;
         }
 
-        if (token.kind === "string") {
-            const quote = token.raw[0];
-            const value = token.raw.slice(1, -1);
-
-            if (value.trim().toLowerCase() === wantedFile) {
-                edits.push({
-                    range: {
-                        start: {
-                            line: token.line,
-                            character: token.character
-                        },
-                        end: {
-                            line: token.endLine,
-                            character: token.endCharacter
-                        }
-                    },
-                    newText: quote + value.replace(
-                        new RegExp(escapeRegExp(oldName), "iu"),
-                        newName
-                    ) + quote
-                });
-            }
-
-            continue;
-        }
-
         if (token.kind === "symbol" && token.raw === ";") {
             inImport = false;
         }
     }
 
     return edits;
+}
+
+/**
+ * Правка строковой ссылки на файл.
+ *
+ * Меняется только имя файла; путь, расширение, кавычки и написание
+ * остального остаются как были — редактор покажет эту правку в
+ * предварительном просмотре, и она обязана быть предсказуемой.
+ */
+function fileReferenceEdit(
+    reference: IRslMacroFileReference,
+    oldName: string,
+    newName: string
+): TextEdit | undefined {
+    const value = reference.value;
+    const separator = Math.max(
+        value.lastIndexOf("/"),
+        value.lastIndexOf("\\")
+    );
+    const directory = value.slice(0, separator + 1);
+    const fileName = value.slice(separator + 1);
+    const dot = fileName.lastIndexOf(".");
+    const stem = dot < 0 ? fileName : fileName.slice(0, dot);
+    const extension = dot < 0 ? "" : fileName.slice(dot);
+
+    if (normalizeIdentifier(stem) !== normalizeIdentifier(oldName)) {
+        return undefined;
+    }
+
+    const token = reference.token;
+    const quote = token.raw[0];
+
+    return {
+        range: {
+            start: { line: token.line, character: token.character },
+            end: { line: token.endLine, character: token.endCharacter }
+        },
+        newText: quote + directory + newName + extension + quote
+    };
 }
 
 function replacement(token: IRslToken, newName: string): TextEdit {
@@ -236,6 +263,3 @@ function replacement(token: IRslToken, newName: string): TextEdit {
     };
 }
 
-function escapeRegExp(value: string): string {
-    return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-}

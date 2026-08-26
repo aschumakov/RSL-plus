@@ -143,7 +143,7 @@ function mergeSettings(
         format: {
             keywordCase: isKeywordCase(format.keywordCase)
                 ? format.keywordCase
-                : defaults.format?.keywordCase || "lower",
+                : defaults.format?.keywordCase || "asIs",
             spaceAroundOperators:
                 typeof format.spaceAroundOperators === "boolean"
                     ? format.spaceAroundOperators
@@ -173,7 +173,7 @@ function mergeSettings(
 function isKeywordCase(
     value: unknown
 ): value is IRslFormatSettings["keywordCase"] {
-    return value === "lower" || value === "upper" ||
+    return value === "asIs" || value === "lower" || value === "upper" ||
         value === "capitalize";
 }
 

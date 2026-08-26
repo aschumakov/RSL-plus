@@ -44,7 +44,9 @@ interface IDiagnosticData {
  */
 export function buildRslCodeActions(
     module: IIndexedModule,
-    params: CodeActionParams
+    params: CodeActionParams,
+    /* Регистр вставляемых слов — настройка проекта: см. formatOptions. */
+    options: { keywordCase?: string } = {}
 ): CodeAction[] {
     const result: CodeAction[] = [];
 
@@ -57,7 +59,11 @@ export function buildRslCodeActions(
              * Подбор ближайшего имени идёт только по Ctrl+.: перебор видимых
              * переменных при наборе текста был бы лишней работой.
              */
-            result.push(...buildRslUndeclaredVariableFixes(module, diagnostic));
+            result.push(...buildRslUndeclaredVariableFixes(
+                module,
+                diagnostic,
+                { keywordCase: options.keywordCase }
+            ));
             continue;
         }
 

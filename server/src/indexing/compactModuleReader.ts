@@ -6,7 +6,10 @@ import {
     extractCompactDeclarations,
     type IRslDeclarationSnapshot
 } from "../analysis/declarationExtractor";
-import { normalizeIdentifier } from "../lexer";
+import {
+    GetMacroFileReferenceNamesFromTokens
+} from "../execMacroDefinition";
+import { lexRsl, normalizeIdentifier } from "../lexer";
 import { CompactModuleCache } from "./compactModuleCache";
 import type {
     ICompactModuleRequest,
@@ -212,9 +215,21 @@ export async function readCompactModule(
          * иначе модуль, загруженный через worker, отличался бы от
          * загруженного на месте.
          */
-        const snapshot = extractCompactDeclarations(source, {
-            includeCallableParameters: false
-        });
+        /*
+         * Лексирование одно на оба ответа.
+         *
+         * Сканер объявлений всё равно лексирует файл внутри себя; передав
+         * ему готовый поток, тем же проходом собираются и строковые
+         * ссылки на файлы.
+         */
+        const tokens = lexRsl(source, { includeTrivia: false }).tokens;
+        const snapshot: IRslDeclarationSnapshot = {
+            ...extractCompactDeclarations(source, {
+                includeCallableParameters: false,
+                tokens
+            }),
+            fileReferences: GetMacroFileReferenceNamesFromTokens(tokens)
+        };
         remember(fingerprint, { snapshot, sourceLength: source.length });
         diskCache.set(request.uri, {
             fingerprint,
@@ -279,6 +294,7 @@ function indexed(
         sourceLength,
         declarations: snapshot.declarations,
         imports: snapshot.imports,
+        fileReferences: snapshot.fileReferences || [],
         reused,
         exportsRequestedName: expected === undefined
             ? undefined

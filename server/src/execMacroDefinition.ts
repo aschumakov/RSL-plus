@@ -283,6 +283,70 @@ export function GetDynamicMacroReferencesFromTokens(
     return result;
 }
 
+/**
+ * Ссылка на файл модуля строкой: первый аргумент ExecMacroFile.
+ *
+ * Именно первый и именно у этого вызова. Строка, равная имени файла, сама по
+ * себе ссылкой не является: MsgBox("lib.mac") — это текст сообщения, и
+ * переименование файла не имеет права его менять.
+ */
+export interface IRslMacroFileReference {
+    /** Значение строки без кавычек, как написано. */
+    value: string;
+    /** Токен строки: по нему считается точный диапазон правки. */
+    token: IRslToken;
+}
+
+export function GetMacroFileReferencesFromTokens(
+    sourceTokens: IRslToken[]
+): IRslMacroFileReference[] {
+    const tokens = cachedSignificantTokens(sourceTokens);
+    const result: IRslMacroFileReference[] = [];
+
+    for (const call of findDynamicCalls(tokens)) {
+        if (call.name !== "execmacrofile") {
+            continue;
+        }
+
+        const token = call.arguments[0]?.stringToken;
+
+        if (token) {
+            result.push({ value: token.value.trim(), token });
+        }
+    }
+
+    return result;
+}
+
+export function GetMacroFileReferences(
+    source: string
+): IRslMacroFileReference[] {
+    return GetMacroFileReferencesFromTokens(lexRsl(source || "").tokens);
+}
+
+/**
+ * Имена файлов, на которые файл ссылается строкой.
+ *
+ * Только имя файла, в нижнем регистре и без пути: каталогу нужен ключ поиска,
+ * а точный диапазон правки считается заново по тексту при переименовании.
+ */
+export function GetMacroFileReferenceNamesFromTokens(
+    sourceTokens: IRslToken[]
+): string[] {
+    const result = new Set<string>();
+
+    for (const reference of GetMacroFileReferencesFromTokens(sourceTokens)) {
+        const normalized = reference.value.split("\\").join("/");
+        const name = normalized.slice(normalized.lastIndexOf("/") + 1);
+
+        if (name) {
+            result.add(name.toLowerCase());
+        }
+    }
+
+    return [...result].sort();
+}
+
 export function GetImportDefinitionTargets(
     source: string
 ): IImportDefinitionTarget[] {

@@ -87,7 +87,7 @@ export function readRslSettings(resource?: Uri): IRslClientSettings {
         format: {
             keywordCase: readSetting(
                 "format.keywordCase",
-                "lower",
+                "asIs",
                 resource
             ),
             spaceAroundOperators: readSetting(
