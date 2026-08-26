@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("assert");
+const { isFullTestRun } = require("./test-mode");
 
 const serverModulePath = require.resolve("../server/out/server");
 require.cache[serverModulePath] = {
@@ -1010,6 +1011,11 @@ function assertLinearGrowth(measure, smallCount, largeCount, label) {
 }
 
 test("много вызовов SetParm вне процедур — рост линейный", () => {
+    if (!isFullTestRun()) {
+        /* Замер времени — в полном наборе: см. tests/test-mode.js. */
+        return;
+    }
+
     const sample = count => {
         const lines = [];
 
@@ -1054,6 +1060,11 @@ test("много вызовов SetParm вне процедур — рост л�
 });
 
 test("много процедур с SetParm — рост линейный", () => {
+    if (!isFullTestRun()) {
+        /* Замер времени — в полном наборе: см. tests/test-mode.js. */
+        return;
+    }
+
     const sample = count => {
         const lines = [];
 

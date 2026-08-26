@@ -6,69 +6,44 @@ import {
 import * as path from "path";
 import { fileURLToPath } from "url";
 
-import type { RslSymbol } from "../symbols/rslSymbol";
-import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
+import type { IRslCatalogSymbol } from "../indexing/workspaceCatalog";
+import type { WorkspaceIndex } from "../workspaceIndex";
 
 const MAX_WORKSPACE_SYMBOLS = 200;
 
-/** Лёгкий Ctrl+T по уже индексированным compact summaries. */
+/**
+ * Ctrl+T по постоянному каталогу проекта.
+ *
+ * Каталог отвечает за две вещи, которых прежде не было. Полнота: записи не
+ * исчезают вместе с вытесненной подробной моделью, поэтому в ответ попадают и
+ * файлы, которых сейчас нет в памяти. Повторяемость: совпадения сортируются
+ * целиком и лишь потом обрезаются лимитом — раньше перебор шёл в порядке Map
+ * и останавливался на двухсотом найденном, из-за чего один и тот же запрос
+ * после разных запусков давал разные списки.
+ */
 export function findRslWorkspaceSymbols(
     index: WorkspaceIndex,
     query: string
 ): SymbolInformation[] {
-    const normalizedQuery = query.trim().toLowerCase();
-    const result: SymbolInformation[] = [];
-
-    for (const module of index.getIndexedModules()) {
-        for (const symbol of module.symbolTree.children) {
-            appendSymbol(result, module, index, symbol, normalizedQuery);
-            if (symbol.kind === CompletionItemKind.Class) {
-                for (const member of symbol.children) {
-                    appendSymbol(
-                        result,
-                        module,
-                        index,
-                        member,
-                        normalizedQuery,
-                        symbol.name
-                    );
-                }
-            }
-            if (result.length >= MAX_WORKSPACE_SYMBOLS) {
-                return result;
-            }
-        }
-    }
-    return result;
+    return index.catalog
+        .find(query, MAX_WORKSPACE_SYMBOLS)
+        .map(symbol => toSymbolInformation(symbol));
 }
 
-function appendSymbol(
-    result: SymbolInformation[],
-    module: IIndexedModule,
-    index: WorkspaceIndex,
-    symbol: RslSymbol,
-    query: string,
-    parentName?: string
-): void {
-    if (query && !symbol.name.toLowerCase().includes(query)) {
-        return;
-    }
-
-    const externalRange = index.getDefinitionRange(module.uri, symbol);
-    const range = externalRange || {
-        start: positionAt(module, symbol.range.start),
-        end: positionAt(module, Math.max(
-            symbol.range.start,
-            Math.min(symbol.range.end, symbol.range.start + symbol.name.length)
-        ))
+function toSymbolInformation(symbol: IRslCatalogSymbol): SymbolInformation {
+    const start = { line: symbol.line, character: symbol.character };
+    const end = {
+        line: symbol.line,
+        character: symbol.character + symbol.name.length
     };
-    result.push(SymbolInformation.create(
+
+    return SymbolInformation.create(
         symbol.name,
         symbolKind(symbol.kind),
-        range,
-        module.uri,
-        parentName || displayModule(module.uri)
-    ));
+        { start, end },
+        symbol.uri,
+        symbol.container || displayModule(symbol.uri)
+    );
 }
 
 function symbolKind(kind: CompletionItemKind): SymbolKind {
@@ -90,15 +65,6 @@ function symbolKind(kind: CompletionItemKind): SymbolKind {
         default:
             return SymbolKind.Variable;
     }
-}
-
-function positionAt(module: IIndexedModule, offset: number) {
-    const starts = module.lex.lineStarts;
-    let line = 0;
-    while (line + 1 < starts.length && starts[line + 1] <= offset) {
-        line++;
-    }
-    return { line, character: Math.max(0, offset - starts[line]) };
 }
 
 function displayModule(uri: string): string {

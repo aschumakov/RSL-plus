@@ -24,6 +24,9 @@ const {
     RslSettingsService
 } = require("../server/out/services/settingsService");
 const {
+    createRslVirtualClock
+} = require("../server/out/core/clock");
+const {
     TextDocument
 } = require("../server/node_modules/vscode-languageserver-textdocument");
 
@@ -72,6 +75,13 @@ function createStand(source, options = {}) {
     };
     const publications = [];
     const settings = new RslSettingsService(SETTINGS);
+    /*
+     * Виртуальные часы: координатор ждёт склейки правок и придерживает
+     * публикацию ради межфайловой фазы. Ждать это по-настоящему —
+     * почти семь секунд на файл тестов, и «ждали достаточно?» каждый раз
+     * решается запасом, а не фактом.
+     */
+    const clock = createRslVirtualClock(1000);
     const coordinator = new DiagnosticsCoordinator(
         { sendDiagnostics: value => publications.push(value) },
         documents,
@@ -79,6 +89,7 @@ function createStand(source, options = {}) {
         settings,
         new RslDiagnosticEngine(),
         {
+            clock,
             isParseBusy: () => false,
             waitForIdle: async () => undefined,
             log: () => undefined,
@@ -92,6 +103,7 @@ function createStand(source, options = {}) {
 
     return {
         publications,
+        clock,
         coordinator,
         index,
         /** Настройки меняются так же, как из окна параметров. */
@@ -127,8 +139,13 @@ function codes(publication) {
     return (publication.diagnostics || []).map(item => item.code);
 }
 
-async function settle(milliseconds = 400) {
-    await new Promise(resolve => setTimeout(resolve, milliseconds));
+/**
+ * Двигает время стенда и даёт выполниться порционной работе.
+ *
+ * Стенд у каждого теста свой, поэтому часы передаются явно.
+ */
+async function settle(stand, milliseconds = 400) {
+    await stand.clock.advance(milliseconds);
 }
 
 const WITH_UNUSED_IMPORT = [
@@ -162,7 +179,7 @@ test("межфайловая ошибка не исчезает из-за лок
     const stand = createStand(WITH_LOCAL_ERROR);
     stand.coordinator.scheduleLocal(MAIN, 0);
     stand.coordinator.scheduleWorkspace(MAIN, 0);
-    await settle();
+    await settle(stand);
 
     const initial = stand.publications[stand.publications.length - 1];
     assert.ok(
@@ -174,7 +191,7 @@ test("межфайловая ошибка не исчезает из-за лок
     const before = stand.publications.length;
     stand.change(WITH_UNUSED_IMPORT);
     stand.coordinator.scheduleLocal(MAIN, 0);
-    await settle();
+    await settle(stand);
 
     const after = stand.publications.slice(before);
     assert.ok(after.length > 0, "публикация после правки обязана быть");
@@ -191,7 +208,7 @@ test("межфайловая ошибка не исчезает из-за лок
 test("локальная ошибка исчезает после правки", async () => {
     const stand = createStand(WITH_LOCAL_ERROR);
     stand.coordinator.scheduleLocal(MAIN, 0);
-    await settle();
+    await settle(stand);
 
     assert.ok(
         codes(stand.publications[stand.publications.length - 1])
@@ -201,7 +218,7 @@ test("локальная ошибка исчезает после правки",
 
     stand.change(WITH_UNUSED_IMPORT);
     stand.coordinator.scheduleLocal(MAIN, 0);
-    await settle();
+    await settle(stand);
 
     assert.ok(
         !codes(stand.publications[stand.publications.length - 1])
@@ -220,7 +237,7 @@ test("после появления вызова Import не остаётся н
     const stand = createStand(WITH_UNUSED_IMPORT);
     stand.coordinator.scheduleLocal(MAIN, 0);
     stand.coordinator.scheduleWorkspace(MAIN, 0);
-    await settle();
+    await settle(stand);
 
     assert.ok(
         codes(stand.publications[stand.publications.length - 1])
@@ -231,7 +248,7 @@ test("после появления вызова Import не остаётся н
     const before = stand.publications.length;
     stand.change(USES_IMPORT);
     stand.coordinator.scheduleLocal(MAIN, 0);
-    await settle();
+    await settle(stand);
 
     const after = stand.publications.slice(before);
     assert.ok(after.length > 0, "публикация после правки обязана быть");
@@ -255,7 +272,7 @@ test("межфайловая ошибка не переносится на пр�
     const stand = createStand(WITH_UNUSED_IMPORT);
     stand.coordinator.scheduleLocal(MAIN, 0);
     stand.coordinator.scheduleWorkspace(MAIN, 0);
-    await settle();
+    await settle(stand);
 
     assert.ok(
         codes(stand.publications[stand.publications.length - 1])
@@ -270,7 +287,7 @@ test("межфайловая ошибка не переносится на пр�
         .slice(1)
         .join("\n"));
     stand.coordinator.scheduleLocal(MAIN, 0);
-    await settle();
+    await settle(stand);
 
     const after = stand.publications.slice(before);
     assert.ok(after.length > 0, "публикация после правки обязана быть");
@@ -298,7 +315,7 @@ test("снятая галочка проверок убирает межфайл
     const stand = createStand(WITH_UNUSED_IMPORT);
     stand.coordinator.scheduleLocal(MAIN, 0);
     stand.coordinator.scheduleWorkspace(MAIN, 0);
-    await settle();
+    await settle(stand);
 
     assert.ok(
         codes(stand.publications[stand.publications.length - 1])
@@ -315,7 +332,7 @@ test("снятая галочка проверок убирает межфайл
      * межфайловый результат, посчитанный при прежних настройках.
      */
     stand.coordinator.scheduleLocal(MAIN, 0);
-    await settle(80);
+    await settle(stand, 80);
 
     assert.ok(
         !codes(stand.publications[stand.publications.length - 1])
@@ -327,7 +344,7 @@ test("снятая галочка проверок убирает межфайл
 test("выключенные проверки очищают список сразу", async () => {
     const stand = createStand(WITH_LOCAL_ERROR);
     stand.coordinator.scheduleLocal(MAIN, 0);
-    await settle();
+    await settle(stand);
 
     assert.ok(
         codes(stand.publications[stand.publications.length - 1]).length > 0,
@@ -403,7 +420,7 @@ test("результат промежуточного состояния имп�
     });
 
     stand.coordinator.scheduleLocal(MAIN, 0);
-    await settle();
+    await settle(stand);
 
     const last = stand.publications[stand.publications.length - 1];
     assert.ok(last, "публикация обязана быть");
@@ -435,7 +452,7 @@ test("объявление из импортированного модуля д
     };
 
     stand.coordinator.scheduleLocal(MAIN, 0);
-    await settle();
+    await settle(stand);
     assert.deepStrictEqual(
         undeclared(),
         [],
@@ -449,7 +466,7 @@ test("объявление из импортированного модуля д
         1
     );
     stand.coordinator.scheduleLocal(MAIN, 0);
-    await settle();
+    await settle(stand);
     assert.deepStrictEqual(undeclared(), []);
 
     /* Переменную из модуля убрали — ошибка появляется сама. */
@@ -459,7 +476,7 @@ test("объявление из импортированного модуля д
         2
     );
     stand.coordinator.scheduleLocal(MAIN, 0);
-    await settle();
+    await settle(stand);
     assert.deepStrictEqual(
         undeclared(),
         ["shared"],
@@ -475,7 +492,7 @@ test("объявление из импортированного модуля д
 test("публикация несёт версию документа", async () => {
     const stand = createStand(WITH_LOCAL_ERROR);
     stand.coordinator.scheduleLocal(MAIN, 0);
-    await settle();
+    await settle(stand);
 
     const last = stand.publications[stand.publications.length - 1];
     assert.strictEqual(
@@ -491,7 +508,7 @@ test("публикация несёт версию документа", async ()
     const before = stand.publications.length;
     stand.change(WITH_LOCAL_ERROR + "\n");
     stand.coordinator.scheduleLocal(MAIN, 0);
-    await settle();
+    await settle(stand);
 
     const republished = stand.publications.slice(before);
     assert.ok(

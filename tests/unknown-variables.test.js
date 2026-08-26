@@ -6,6 +6,7 @@
  */
 
 const assert = require("assert");
+const { isFullTestRun } = require("./test-mode");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -1065,6 +1066,11 @@ async function main() {
      * квадратичность на учетверении дала бы около шестнадцати.
      */
     await test("рост от числа присваиваний линейный", () => {
+    if (!isFullTestRun()) {
+        /* Замер времени — в полном наборе: см. tests/test-mode.js. */
+        return;
+    }
+
         const build = count => {
             const lines = ["Macro Test()", "  Var known;"];
 

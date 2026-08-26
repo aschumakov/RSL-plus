@@ -20,6 +20,7 @@ import {
 } from "vscode-languageclient/node";
 
 import { readRslSettings, readSetting } from "./clientSettings";
+import { openRslDocument } from "./documentOpenPolicy";
 import { registerEditorCommands } from "./editorCommands";
 
 
@@ -95,11 +96,17 @@ async function quickOpen(value: string): Promise<void> {
     }
 
     try {
-        const document = await workspace.openTextDocument(
-            uriFromValue(value)
+        /*
+         * Выбор в списке — явное действие пользователя, и preview
+         * указывается явно: без параметра поведение зависит от настройки
+         * workbench.editor.enablePreview и различается у разных людей.
+         */
+        await openRslDocument(
+            { openTextDocument: workspace.openTextDocument, 
+                showTextDocument: window.showTextDocument },
+            uriFromValue(value),
+            "quickPick"
         );
-
-        await window.showTextDocument(document);
     } catch (error) {
         console.error("RSL: cannot open file", value, error);
 
@@ -494,36 +501,6 @@ function registerServerNotifications(
 ): void {
     context.subscriptions.push(
         client.onNotification(
-            "getFilebyName",
-            (name: string) => {
-                getFilebyName(name).then(
-                    undefined,
-                    error => {
-                        console.error(
-                            "RSL: getFilebyName failed",
-                            name,
-                            error
-                        );
-                    }
-                );
-            }
-        ),
-        client.onNotification(
-            "getFile",
-            (filePath: string) => {
-                getFile(filePath).then(
-                    undefined,
-                    error => {
-                        console.error(
-                            "RSL: getFile failed",
-                            filePath,
-                            error
-                        );
-                    }
-                );
-            }
-        ),
-        client.onNotification(
             "updateStatusBar",
             (value: number) => {
                 updateStatusBarItem(value);
@@ -561,37 +538,6 @@ function updateStatusBarItem(value: number): void {
     }
 }
 
-
-async function getFile(filePath: string): Promise<void> {
-    if (!filePath) {
-        return;
-    }
-
-    await workspace.openTextDocument(
-        uriFromValue(filePath)
-    );
-}
-
-
-async function getFilebyName(
-    name: string
-): Promise<void> {
-    if (!name) {
-        return;
-    }
-
-    const files = await workspace.findFiles(
-        `**/${name}`,
-        null,
-        1
-    );
-
-    if (files.length > 0) {
-        await workspace.openTextDocument(
-            files[0]
-        );
-    }
-}
 
 
 export function deactivate():

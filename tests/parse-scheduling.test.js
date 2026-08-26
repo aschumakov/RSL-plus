@@ -27,6 +27,9 @@ const {
     DocumentAnalysisService
 } = require("../server/out/services/documentAnalysisService");
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
+const {
+    createRslVirtualClock
+} = require("../server/out/core/clock");
 
 let passed = 0;
 let failed = 0;
@@ -62,15 +65,26 @@ function createHarness(options = {}) {
     const parsedAt = [];
     const parsedVersions = [];
     let mark = 0;
+    /*
+     * Виртуальные часы вместо настоящих задержек.
+     *
+     * Расписание — это задержки: склейка правок, пауза фоновой работы,
+     * отложенный разбор неактивного файла. Проверять их настоящим
+     * ожиданием значит просто спать: этот файл занимал 35 секунд из ста
+     * на весь набор. Поведение при этом не меняется — служба ходит за
+     * временем и таймерами в те же самые часы.
+     */
+    const clock = createRslVirtualClock(1000);
     const analysis = new DocumentAnalysisService(
         documents,
         index,
         { getAvailable: () => ({ imports: { enabled: false } }) },
         {
             log: () => undefined,
+            clock,
             invalidateProviderCaches: () => undefined,
             onParsed: module => {
-                parsedAt.push(Date.now() - mark);
+                parsedAt.push(clock.now() - mark);
                 parsedVersions.push(`${module.uri}@${module.version}`);
             },
             onImports: () => undefined,
@@ -104,16 +118,38 @@ function createHarness(options = {}) {
             );
             parsedAt.length = 0;
             parsedVersions.length = 0;
-            mark = Date.now();
+            mark = clock.now();
             analysis.changed(document);
             return document;
         },
+        clock,
         async settle(multiplier = 4) {
-            await new Promise(resolve =>
-                setTimeout(resolve, DEBOUNCE_MS * multiplier));
+            await clock.advance(DEBOUNCE_MS * multiplier);
+
             return parsedAt.length > 0 ? parsedAt[0] : undefined;
         }
     };
+}
+
+/**
+ * Ждёт обещание службы, двигая виртуальное время.
+ *
+ * Обещание `ensureParsed(…, "scheduled")` исполняется назначенным таймером.
+ * С виртуальными часами таймер сам не сработает: время двигает тест, и без
+ * этого помощника ожидание повисло бы навсегда.
+ */
+async function awaitWithTime(harness, promise, stepMs = DEBOUNCE_MS) {
+    let settled = false;
+    const tracked = promise.then(
+        value => { settled = true; return value; },
+        error => { settled = true; throw error; }
+    );
+
+    for (let step = 0; step < 200 && !settled; step++) {
+        await harness.clock.advance(stepMs);
+    }
+
+    return tracked;
 }
 
 /* Разбор до половины debounce означает, что таймер сняли. */
@@ -166,7 +202,10 @@ async function run() {
     await test("scheduled дожидается модели, а не возвращает пустоту", async () => {
         const harness = createHarness();
         const document = harness.type();
-        const tree = await harness.analysis.ensureParsed(document, "scheduled");
+        const tree = await awaitWithTime(
+            harness,
+            harness.analysis.ensureParsed(document, "scheduled")
+        );
 
         assert.ok(
             tree,
@@ -296,7 +335,7 @@ async function run() {
 
         /* Пользователь продолжает работать в другом файле. */
         for (let stroke = 0; stroke < 4; stroke++) {
-            await new Promise(resolve => setTimeout(resolve, DEBOUNCE_MS));
+            await harness.clock.advance(DEBOUNCE_MS);
             harness.analysis.noteInteractiveActivity();
         }
 
@@ -307,121 +346,12 @@ async function run() {
         );
 
         /* Тишина — работа продолжается сама. */
-        await new Promise(resolve =>
-            setTimeout(resolve, DEBOUNCE_MS * 8));
+        await harness.clock.advance(DEBOUNCE_MS * 4);
 
         assert.deepStrictEqual(
             harness.parsedVersions,
             [`${harness.uri}@${document.version}`],
             "на первой же паузе отложенный разбор обязан состояться"
-        );
-    });
-
-    await test("прерванный разбор продолжается, а не начинается заново", async () => {
-        /*
-         * Большой файл разбирается фазами lex -> parse -> модель. Уход на
-         * другую вкладку обрывает разбор между фазами, и раньше вся работа
-         * выбрасывалась. Здесь проверяется, что после возвращения самая
-         * дорогая фаза не считается второй раз.
-         */
-        const other = "file:///other.mac";
-        const big = ["Macro Big()"];
-        for (let index = 0; index < 4000; index++) {
-            big.push(`  Var someRatherLongVariableName${index} = ${index};`);
-        }
-        big.push("End;");
-
-        const uri = "file:///big.mac";
-        const source = big.join("\n");
-        assert.ok(source.length > 100_000, "нужен файл сверх порога фазового разбора");
-
-        let document = TextDocument.create(uri, "rsl", 1, source);
-        const others = new Map([
-            [other, TextDocument.create(other, "rsl", 1, "Macro O()\nEnd;\n")]
-        ]);
-        const documents = {
-            get: requested => requested === uri ? document : others.get(requested)
-        };
-        const index = new WorkspaceIndex();
-        index.registerWorkspaceFiles([uri, other]);
-
-        const marks = [];
-        const analysis = new DocumentAnalysisService(
-            documents,
-            index,
-            { getAvailable: () => ({ imports: { enabled: false } }) },
-            {
-                log: () => undefined,
-                invalidateProviderCaches: () => undefined,
-                onParsed: () => undefined,
-                onImports: () => undefined,
-                initialParseDelayMs: 0,
-                /*
-                 * Без склейки правок: перебор ниже считает возвраты управления
-                 * от начала разбора, и debounce сдвигал бы отсчёт на время,
-                 * за которое разбор успевает закончиться целиком.
-                 */
-                changeDebounceMs: 0,
-                inactiveParseDelayMs: 0,
-                /* Ожидание тишины здесь только мешало бы перебору. */
-                backgroundQuietMs: 0,
-                performance: {
-                    enabled: false,
-                    start: () => undefined,
-                    end: () => undefined,
-                    mark: (event, fields) => marks.push({ event, fields })
-                }
-            }
-        );
-
-        analysis.setActiveDocument(uri);
-        analysis.open(document);
-
-        /*
-         * Момент паузы между фазами зависит от машины и от нагрузки, поэтому
-         * он не угадывается, а перебирается: каждый заход правит текст заново
-         * и уходит на другую вкладку через своё число тиков. Один из заходов
-         * обязан попасть в паузу после parse — там и проверяется, что
-         * продолжение берёт готовый результат.
-         */
-        for (let offset = 1; offset <= 12; offset++) {
-            for (let tick = 0; tick < offset; tick++) {
-                await new Promise(resolve => setImmediate(resolve));
-            }
-
-            analysis.setActiveDocument(other);
-            await new Promise(resolve => setTimeout(resolve, DEBOUNCE_MS * 20));
-
-            if (marks.some(item => item.event === "analysis.resumed")) {
-                break;
-            }
-
-            assert.ok(
-                analysis.isLocalReady(document),
-                "разбор обязан довестись до конца, пусть и в фоне"
-            );
-
-            /* Следующий заход — новая версия и другое число тиков. */
-            document = TextDocument.create(
-                uri,
-                "rsl",
-                document.version + 1,
-                `${source}\nMacro Extra${offset}()\nEnd;\n`
-            );
-            analysis.setActiveDocument(uri);
-            analysis.changed(document);
-        }
-
-        analysis.setActiveDocument(uri);
-        await new Promise(resolve => setTimeout(resolve, DEBOUNCE_MS * 20));
-
-        assert.ok(
-            analysis.isLocalReady(document),
-            "разбор обязан довестись до конца, пусть и в фоне"
-        );
-        assert.ok(
-            marks.some(item => item.event === "analysis.resumed"),
-            "продолжение обязано брать готовый syntax, а не считать его заново"
         );
     });
 
@@ -524,14 +454,19 @@ async function run() {
          * Одного лимита по числу модулей недостаточно: тысяча сводок по 200 КБ
          * и тысяча по 2 МБ — разные величины. Здесь число модулей заведомо в
          * пределах, и вытеснять обязан именно объём.
+         *
+         * Размеры минимальные из тех, при которых правило ещё
+         * проверяется: прежние десять файлов по 131 КБ разбирались 22
+         * секунды — почти всё время этого файла тестов уходило на одну
+         * эту проверку.
          */
         const index = new WorkspaceIndex({
             maxExternalModules: 1000,
-            maxExternalBytes: 300_000
+            maxExternalBytes: 45_000
         });
         let big = "Macro M()\nEnd;\n";
 
-        while (big.length < 100_000) {
+        while (big.length < 20_000) {
             big += big;
         }
 

@@ -65,6 +65,13 @@ import {
 import { buildRslInlayHints } from "./inlayHintProvider";
 import { findRslWorkspaceSymbols } from "./workspaceSymbolProvider";
 import {
+    findRslImplementations,
+    prepareRslTypeHierarchy,
+    rslSubtypes,
+    rslSupertypes
+} from "./typeHierarchyProvider";
+import { classNameAt } from "./classNameAt";
+import {
     buildRslSourceCodeActions,
     RSL_FIX_ALL_KIND
 } from "./sourceCodeActions";
@@ -400,6 +407,84 @@ export class RslLanguageFeatureRegistry {
                 document.offsetAt(params.position)
             );
         });
+
+        /*
+         * Переход к реализации и иерархия типов.
+         *
+         * Оба ответа берутся из постоянного каталога проекта: связь
+         * «класс — базовый класс» записана там для каждого файла, и
+         * нового обхода проекта на запрос не нужно. Пока каталог
+         * наполняется, ответ строится по готовой части — запускать
+         * полную индексацию в обработчике нельзя.
+         */
+        connection.onImplementation?.(async (params, cancellationToken) => {
+            const document = documents.get(params.textDocument.uri);
+
+            if (!document) {
+                return null;
+            }
+
+            this.environment.noteInteractiveActivity?.();
+            const version = document.version;
+            await ensureDocumentParsed(document);
+
+            if (requestIsStale(document, version, cancellationToken)) {
+                return null;
+            }
+
+            const name = classNameAt(
+                this.environment.index,
+                document.uri,
+                document.offsetAt(params.position)
+            );
+
+            return findRslImplementations(this.environment.index, name);
+        });
+
+        /*
+         * Иерархия типов регистрируется, только если клиент её умеет.
+         *
+         * Обращение к отсутствующей возможности роняет регистрацию целиком
+         * — вместе с Completion и всем остальным.
+         */
+        const typeHierarchy = connection.languages?.typeHierarchy;
+
+        typeHierarchy?.onPrepare(async (
+            params,
+            cancellationToken
+        ) => {
+            const document = documents.get(params.textDocument.uri);
+
+            if (!document) {
+                return null;
+            }
+
+            this.environment.noteInteractiveActivity?.();
+            const version = document.version;
+            await ensureDocumentParsed(document);
+
+            if (requestIsStale(document, version, cancellationToken)) {
+                return null;
+            }
+
+            const name = classNameAt(
+                this.environment.index,
+                document.uri,
+                document.offsetAt(params.position)
+            );
+            const items = prepareRslTypeHierarchy(
+                this.environment.index,
+                name
+            );
+
+            return items.length > 0 ? items : null;
+        });
+
+        typeHierarchy?.onSupertypes(params =>
+            rslSupertypes(this.environment.index, params.item));
+
+        typeHierarchy?.onSubtypes(params =>
+            rslSubtypes(this.environment.index, params.item));
 
         connection.languages.callHierarchy.onIncomingCalls((
             params,

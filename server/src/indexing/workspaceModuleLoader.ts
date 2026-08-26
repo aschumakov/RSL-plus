@@ -1,6 +1,11 @@
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 import { ReferenceIndex } from "../analysis/referenceIndex";
 import type { PerformanceLogger } from "../performanceLogger";
+import {
+    systemRslClock,
+    type IRslClock,
+    type IRslTimerHandle
+} from "../core/clock";
 import { normalizeIdentifier } from "../lexer";
 import { pickDeterministicCandidate } from "./moduleNames";
 import { readCompactModule } from "./compactModuleReader";
@@ -34,7 +39,14 @@ export interface IWorkspaceModuleLoaderOptions {
     onModuleLoaded(module: IIndexedModule): void;
     onModuleCountChanged(): void;
     onIndexProgress?(loaded: number, total: number): void;
-    requestMissingImport?(name: string): void;
+    /**
+     * Часы службы: задержки и текущее время.
+     *
+     * По умолчанию системные. Тесты расписания подставляют виртуальные и
+     * двигают время сами — иначе проверка склейки правок и пауз стоит
+     * секунд реального ожидания на каждый случай.
+     */
+    clock?: IRslClock;
     idleDelayMs?: number;
     interactivePauseMs?: number;
 }
@@ -55,6 +67,8 @@ export class WorkspaceModuleLoader {
     private workspaceUris = new Set<string>();
     private indexedUris = new Set<string>();
     private pendingImportNames = new Map<string, IQueuedModule>();
+    /* Имена, о которых уже сказано в лог: без этого он растёт на каждый разбор. */
+    private reportedMissingImports = new Set<string>();
     private running = false;
     private runningUri: string | undefined;
     private runningItem: IQueuedModule | undefined;
@@ -75,11 +89,12 @@ export class WorkspaceModuleLoader {
      */
     private fileEpochs = new Map<string, number>();
     private indexingMode: WorkspaceIndexingMode = "activeImports";
-    private idleTimer: NodeJS.Timeout | undefined;
+    private idleTimer: IRslTimerHandle | undefined;
+    private readonly clock: IRslClock;
     private idleDelayMs: number;
     private interactivePauseMs: number;
     private interactiveUntilMs = 0;
-    private backgroundResumeTimer: NodeJS.Timeout | undefined;
+    private backgroundResumeTimer: IRslTimerHandle | undefined;
 
     private referenceIndex: ReferenceIndex;
 
@@ -91,6 +106,7 @@ export class WorkspaceModuleLoader {
         this.referenceIndex = referenceIndex || new ReferenceIndex({
             log: options.log
         });
+        this.clock = options.clock ?? systemRslClock;
         this.idleDelayMs = Math.max(1000, options.idleDelayMs ?? 10000);
         this.interactivePauseMs = Math.max(
             0,
@@ -202,7 +218,7 @@ export class WorkspaceModuleLoader {
 
     /** Фоновая индексация уступает короткому всплеску запросов редактора. */
     noteInteractiveActivity(): void {
-        this.interactiveUntilMs = Date.now() + this.interactivePauseMs;
+        this.interactiveUntilMs = this.clock.now() + this.interactivePauseMs;
 
         if (this.indexingMode === "workspaceIdle") {
             this.clearIdleTimer();
@@ -259,7 +275,25 @@ export class WorkspaceModuleLoader {
         }
 
         if (resolution.kind === "missing") {
-            this.options.requestMissingImport?.(name);
+            /*
+             * Модуля нет среди .mac проекта — и это не ошибка: Import
+             * бывает у модуля RSM, DLM или встроенного, которых в
+             * workspace нет вовсе.
+             *
+             * Прежде сервер просил клиента найти файл по имени и открыть
+             * его. Открытый анализом документ получал didOpen, ломал
+             * preview-вкладку пользователя и заодно запускал глобальный
+             * findFiles в Extension Host. Каталог файлов строит сам
+             * сервер (WorkspaceFileDiscoveryService), и до его готовности
+             * имя ждёт в очереди выше.
+             */
+            if (!this.reportedMissingImports.has(name)) {
+                this.reportedMissingImports.add(name);
+                this.options.log(
+                    `Import "${name}" is not a workspace .mac file`
+                );
+            }
+
             return;
         }
 
@@ -601,7 +635,7 @@ export class WorkspaceModuleLoader {
             this.startBackgroundIndexing();
         } else if (this.indexingMode === "workspaceIdle") {
             this.clearIdleTimer();
-            this.idleTimer = setTimeout(() => {
+            this.idleTimer = this.clock.setTimeout(() => {
                 this.idleTimer = undefined;
                 this.startBackgroundIndexing();
             }, this.idleDelayMs);
@@ -610,7 +644,7 @@ export class WorkspaceModuleLoader {
 
     private clearIdleTimer(): void {
         if (this.idleTimer) {
-            clearTimeout(this.idleTimer);
+            this.clock.clearTimeout(this.idleTimer);
             this.idleTimer = undefined;
         }
     }
@@ -624,7 +658,7 @@ export class WorkspaceModuleLoader {
         if (
             !foreground &&
             this.backgroundQueue.length > 0 &&
-            Date.now() < this.interactiveUntilMs
+            this.clock.now() < this.interactiveUntilMs
         ) {
             this.scheduleBackgroundResume();
             return;
@@ -661,11 +695,11 @@ export class WorkspaceModuleLoader {
 
     private scheduleBackgroundResume(): void {
         if (this.backgroundResumeTimer) {
-            clearTimeout(this.backgroundResumeTimer);
+            this.clock.clearTimeout(this.backgroundResumeTimer);
         }
 
-        const delay = Math.max(1, this.interactiveUntilMs - Date.now());
-        this.backgroundResumeTimer = setTimeout(() => {
+        const delay = Math.max(1, this.interactiveUntilMs - this.clock.now());
+        this.backgroundResumeTimer = this.clock.setTimeout(() => {
             this.backgroundResumeTimer = undefined;
             this.processQueue();
         }, delay);

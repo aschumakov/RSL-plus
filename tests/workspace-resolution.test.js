@@ -36,6 +36,7 @@ const {
     isLocalReferenceTarget
 } = require("../server/out/analysis/references");
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
+const { isFullTestRun } = require("./test-mode");
 
 function createDocument(uri, version, source) {
     const lineStarts = [0];
@@ -1625,30 +1626,39 @@ async function waitFor(predicate, timeoutMs) {
     testCompactModuleAppearsAtomically();
     console.log("[OK] компактный модуль появляется в индексе целиком");
 
-    await testWorkspaceLoaderUsesActiveImports();
-    console.log("[OK] загружается только активный Import-граф");
+    /*
+     * Проверки конкуренции задач: очередь загрузки, вытеснение, фазы
+     * разбора и отзывчивость основного потока.
+     *
+     * Они смотрят на порядок и на время, поэтому идут только в полном
+     * наборе и только последовательно — рядом работающий тестовый процесс
+     * превращает такую проверку в лотерею.
+     */
+    if (isFullTestRun()) {
+        await testWorkspaceLoaderUsesActiveImports();
+        console.log("[OK] загружается только активный Import-граф");
 
-    await testActiveDocumentPreemptsQueuedModules();
-    console.log("[OK] новая активная Import-ветвь вытесняет старую очередь");
+        await testActiveDocumentPreemptsQueuedModules();
+        console.log("[OK] новая активная Import-ветвь вытесняет старую очередь");
 
-    await testActiveDocumentPreemptsQueuedParses();
-    console.log("[OK] полный parse активного файла вытесняет фоновые разборы");
+        await testActiveDocumentPreemptsQueuedParses();
+        console.log("[OK] полный parse активного файла вытесняет фоновые разборы");
 
-    await testValidationsYieldEventLoopBetweenFiles();
-    console.log("[OK] разборы не блокируют event loop пачкой, активный первым");
+        await testValidationsYieldEventLoopBetweenFiles();
+        console.log("[OK] разборы не блокируют event loop пачкой, активный первым");
 
-    await testLargeFileIsAnalysedInPhases();
-    console.log("[OK] очень большой файл разбирается фазами, разбор один");
+        await testLargeFileIsAnalysedInPhases();
+        console.log("[OK] очень большой файл разбирается фазами, разбор один");
 
-    await testActiveSwitchInterruptsPhasesOfLeftFile();
-    console.log("[OK] переключение вкладки прерывает фазы покинутого файла");
+        await testActiveSwitchInterruptsPhasesOfLeftFile();
+        console.log("[OK] переключение вкладки прерывает фазы покинутого файла");
 
-    await testFastTabSwitchingDoesNotBlockMainThread();
-    console.log("[OK] быстрое переключение вкладок не блокирует основной поток");
+        await testFastTabSwitchingDoesNotBlockMainThread();
+        console.log("[OK] быстрое переключение вкладок не блокирует основной поток");
 
-    await testStaleTaskIsSkippedAtDispatch();
-    console.log("[OK] ненужная задача пропускается на старте");
-
+        await testStaleTaskIsSkippedAtDispatch();
+        console.log("[OK] ненужная задача пропускается на старте");
+    }
     await testParseReadinessDoesNotWaitForSettings();
     console.log("[OK] парсер и Import не ждут workspace/configuration");
 

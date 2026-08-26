@@ -232,25 +232,6 @@ export function isInsideRslImport(
     return !!range && range.start <= token.start && token.end <= range.end;
 }
 
-/** Имя ближайшей области: Macro, метод или класс; пусто для модуля. */
-export function rslScopeNameAt(module: IIndexedModule, offset: number): string {
-    let name = "";
-    let current = module.symbolTree;
-
-    for (;;) {
-        const nested = current.children.find(child =>
-            child.isContainer &&
-            child.range.start <= offset &&
-            offset <= child.range.end
-        );
-
-        if (!nested) {
-            return name;
-        }
-        name = name ? `${name}.${nested.name}` : nested.name;
-        current = nested;
-    }
-}
 
 /**
  * Идентификатор в позиции выражения.
@@ -748,6 +729,27 @@ export function enclosingRslClassScope(
     }
 
     return undefined;
+}
+
+/**
+ * Имена переменных, видимых в этой точке.
+ *
+ * Нужны Quick Fix: подобрать ближайшее по написанию имя можно только среди
+ * переменных и параметров — процедура или класс целью присваивания не станут.
+ */
+export function visibleRslVariableNames(
+    facts: IRslAssignmentCheckFacts,
+    offset: number
+): string[] {
+    const result = new Set<string>();
+
+    for (const scope of scopeChainAt(facts.scopes, offset)) {
+        for (const name of scope.variables) {
+            result.add(name);
+        }
+    }
+
+    return [...result].sort();
 }
 
 /** Имя области для находки: `Holder.Method`. */

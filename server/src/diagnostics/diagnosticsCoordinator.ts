@@ -21,6 +21,11 @@ import {
 } from "../diagnostics";
 import type { PerformanceLogger } from "../performanceLogger";
 import type { IRslSettings } from "../interfaces";
+import {
+    systemRslClock,
+    type IRslClock,
+    type IRslTimerHandle
+} from "../core/clock";
 
 export interface IDiagnosticsCoordinatorOptions {
     isParseBusy(uri: string): boolean;
@@ -36,6 +41,14 @@ export interface IDiagnosticsCoordinatorOptions {
      * считается ли Import-контекст полным.
      */
     resolver?: RslScopeResolver;
+    /**
+     * Часы службы: задержки и текущее время.
+     *
+     * По умолчанию системные. Тесты расписания подставляют виртуальные и
+     * двигают время сами — иначе проверка склейки правок и пауз стоит
+     * секунд реального ожидания на каждый случай.
+     */
+    clock?: IRslClock;
     localDebounceMs?: number;
     largeLocalDebounceMs?: number;
     workspaceDebounceMs?: number;
@@ -79,11 +92,11 @@ const READY_WORKSPACE_DELAY_MS = 60;
 const WORKSPACE_HOLD_MS = 300;
 
 export class DiagnosticsCoordinator {
-    private localTimers = new Map<string, NodeJS.Timeout>();
-    private workspaceTimers = new Map<string, NodeJS.Timeout>();
+    private localTimers = new Map<string, IRslTimerHandle>();
+    private workspaceTimers = new Map<string, IRslTimerHandle>();
     private workspaceFirstScheduled = new Map<string, number>();
     /** Отложенные публикации, ждущие межфайловую фазу. */
-    private workspaceHolds = new Map<string, NodeJS.Timeout>();
+    private workspaceHolds = new Map<string, IRslTimerHandle>();
     private localCache = new Map<string, Diagnostic[]>();
     /**
      * Межфайловый результат вместе с текстом, по которому он посчитан.
@@ -113,6 +126,7 @@ export class DiagnosticsCoordinator {
     private workspaceDebounceMs: number;
     private workspaceMaxWaitMs: number;
     private slowDiagnosticsLogMs: number;
+    private clock: IRslClock;
 
     constructor(
         private connection: Connection,
@@ -122,6 +136,7 @@ export class DiagnosticsCoordinator {
         private engine: RslDiagnosticEngine,
         private options: IDiagnosticsCoordinatorOptions
     ) {
+        this.clock = options.clock ?? systemRslClock;
         this.localDebounceMs = options.localDebounceMs ?? 180;
         this.largeLocalDebounceMs = options.largeLocalDebounceMs ?? 350;
         this.workspaceDebounceMs = options.workspaceDebounceMs ?? 700;
@@ -198,7 +213,7 @@ export class DiagnosticsCoordinator {
         const actualDelay = delay === undefined
             ? this.getLocalDelay(uri)
             : Math.max(0, delay);
-        this.localTimers.set(uri, setTimeout(() => {
+        this.localTimers.set(uri, this.clock.setTimeout(() => {
             this.localTimers.delete(uri);
             this.runLocal(uri).catch(error => this.logFailure("Local", uri, error));
         }, actualDelay));
@@ -222,7 +237,7 @@ export class DiagnosticsCoordinator {
         const actualDelay = Math.max(0, Math.min(requestedAt, deadline) - now);
 
         this.cancelWorkspaceTimer(uri);
-        this.workspaceTimers.set(uri, setTimeout(() => {
+        this.workspaceTimers.set(uri, this.clock.setTimeout(() => {
             this.workspaceTimers.delete(uri);
             this.runWorkspace(uri).catch(error =>
                 this.logFailure("Workspace", uri, error)
@@ -744,7 +759,7 @@ export class DiagnosticsCoordinator {
             return;
         }
 
-        this.workspaceHolds.set(uri, setTimeout(() => {
+        this.workspaceHolds.set(uri, this.clock.setTimeout(() => {
             this.workspaceHolds.delete(uri);
             this.publishCombined(uri);
         }, WORKSPACE_HOLD_MS));
@@ -754,7 +769,7 @@ export class DiagnosticsCoordinator {
         const timer = this.workspaceHolds.get(uri);
 
         if (timer) {
-            clearTimeout(timer);
+            this.clock.clearTimeout(timer);
             this.workspaceHolds.delete(uri);
         }
     }
@@ -802,7 +817,7 @@ export class DiagnosticsCoordinator {
     private cancelLocal(uri: string): void {
         const timer = this.localTimers.get(uri);
         if (timer) {
-            clearTimeout(timer);
+            this.clock.clearTimeout(timer);
             this.localTimers.delete(uri);
         }
     }
@@ -810,7 +825,7 @@ export class DiagnosticsCoordinator {
     private cancelWorkspaceTimer(uri: string): void {
         const timer = this.workspaceTimers.get(uri);
         if (timer) {
-            clearTimeout(timer);
+            this.clock.clearTimeout(timer);
             this.workspaceTimers.delete(uri);
         }
     }

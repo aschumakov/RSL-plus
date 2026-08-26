@@ -9,6 +9,7 @@
  */
 
 const assert = require("assert");
+const { isFullTestRun } = require("./test-mode");
 
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
 const { buildRslDiagnostics } = require("../server/out/diagnostics");
@@ -201,6 +202,11 @@ function assertLinearGrowth(measure, smallCount, largeCount, label) {
 }
 
 test("проверка обращений через точку растёт линейно", () => {
+    if (!isFullTestRun()) {
+        /* Замер времени — в полном наборе: см. tests/test-mode.js. */
+        return;
+    }
+
     /*
      * Здесь был квадратичный рост: получатель перед точкой искался поиском
      * токена от начала файла, и на восьми тысячах обращений проверка
@@ -275,6 +281,11 @@ test("объявление модуля после первой процедур
 });
 
 test("много областей с Var — рост линейный", () => {
+    if (!isFullTestRun()) {
+        /* Замер времени — в полном наборе: см. tests/test-mode.js. */
+        return;
+    }
+
     /*
      * Прежде каждый идентификатор сверялся со всеми областями, где есть Var:
      * на четырёх тысячах процедур проверка занимала 451 мс.

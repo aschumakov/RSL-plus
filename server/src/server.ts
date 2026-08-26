@@ -18,6 +18,9 @@ import {
     type ParseWaitMode
 } from "./services/documentAnalysisService";
 import { RslDefinitionProvider } from "./features/definitionProvider";
+import {
+    buildRslFileRenameEdit
+} from "./features/fileRenameProvider";
 import { DEFAULT_DIAGNOSTIC_SETTINGS } from "./diagnostics";
 import {
     UnknownVariableAudit
@@ -225,8 +228,7 @@ const moduleLoader = new WorkspaceModuleLoader(
         onModuleLoaded: module => {
             refreshOpenDependents(module.uri);
         },
-        onModuleCountChanged: () => notifyModuleCount(),
-        requestMissingImport: name => notifyClient("getFilebyName", name)
+        onModuleCountChanged: () => notifyModuleCount()
     },
     referenceIndex
 );
@@ -413,18 +415,6 @@ connection.onNotification(
     }
 );
 
-export function GetFileByNameRequest(name: string): void {
-    if (workFolderOpened && name) {
-        moduleLoader.enqueueImport(name, "foreground");
-    }
-}
-
-export function GetFileRequest(filePath: string): void {
-    if (filePath) {
-        notifyClient("getFile", filePath);
-    }
-}
-
 export function getTree(): IIndexedModule[] {
     return workspaceIndex.getModules();
 }
@@ -555,6 +545,8 @@ connection.onInitialize((params: InitializeParams) => {
             selectionRangeProvider: true,
             definitionProvider: true,
             typeDefinitionProvider: true,
+            implementationProvider: true,
+            typeHierarchyProvider: true,
             referencesProvider: true,
             renameProvider: { prepareProvider: true },
             workspaceSymbolProvider: true,
@@ -580,6 +572,22 @@ connection.onInitialize((params: InitializeParams) => {
                 range: true
             },
             documentSymbolProvider: true,
+            /*
+             * Переименование macro-файла правит ссылки на него.
+             *
+             * Фильтр по .mac: остальные файлы проекта к RSL отношения не
+             * имеют, и спрашивать про них сервер незачем.
+             */
+            workspace: {
+                fileOperations: {
+                    willRename: {
+                        filters: [{
+                            scheme: "file",
+                            pattern: { glob: "**/*.mac" }
+                        }]
+                    }
+                }
+            },
             inlayHintProvider: true,
             documentFormattingProvider: true,
             documentRangeFormattingProvider: true,
@@ -606,6 +614,21 @@ connection.onInitialized(() => {
     connection.onRequest("getMacros", () =>
         workspaceIndex.getWorkspaceFileUris()
     );
+
+    /*
+     * Переименование файла: ссылки правятся до самого переименования,
+     * поэтому VS Code показывает предварительный просмотр и умеет
+     * отменить всё вместе.
+     */
+    connection.workspace.onWillRenameFiles(event =>
+        buildRslFileRenameEdit(
+            {
+                index: workspaceIndex,
+                getDocument: uri => documents.get(uri),
+                log: logMessage
+            },
+            event.files
+        ));
 });
 
 documents.onDidOpen(event => {

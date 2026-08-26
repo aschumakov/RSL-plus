@@ -23,7 +23,7 @@ import {
     isRslSimpleAssignmentTarget,
     previousRslCodeIndex,
     readKnownGlobals,
-    rslScopeNameAt
+    rslScopePathAt
 } from "./nameCheckScopes";
 
 /* Реэкспорт: список известных имён читают и другие проверки. */
@@ -335,7 +335,15 @@ function* unknownVariableSteps(
             end: token.end,
             line: token.line,
             character: token.character,
-            scope: rslScopeNameAt(module, token.start),
+            /*
+             * Имя области берётся из индекса, а не обходом дерева.
+             *
+             * Прежний rslScopeNameAt искал вложенную область перебором детей:
+             * у модуля с четырьмя тысячами процедур это четыре тысячи
+             * сравнений на КАЖДУЮ находку. По профилю на него уходило 64%
+             * времени строгого режима — он и давал сверхлинейный рост.
+             */
+            scope: facts ? rslScopePathAt(facts, token.start) : "",
             hasExplicitVar: true,
             importContext: state.completeness,
             reason

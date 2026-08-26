@@ -3,6 +3,11 @@ import type { TextDocument } from "vscode-languageserver-textdocument";
 
 import { createOpenModuleModel } from "../moduleModel";
 import { monotonicMs } from "../core/timeSlice";
+import {
+    systemRslClock,
+    type IRslClock,
+    type IRslTimerHandle
+} from "../core/clock";
 import { RslSymbol } from "../symbols/rslSymbol";
 import { parseRslSyntax } from "../syntaxParser";
 import type { RslSettingsService } from "./settingsService";
@@ -64,6 +69,13 @@ const PHASED_ANALYSIS_MIN_CHARS = 100_000;
 const MAX_PHASE_CHECKPOINTS = 2;
 
 export interface IDocumentAnalysisOptions {
+    /**
+     * Часы службы: задержки и текущее время.
+     *
+     * По умолчанию системные. Тесты расписания подставляют виртуальные и
+     * двигают время сами: настоящее ожидание склейки правок стоило секунд.
+     */
+    clock?: IRslClock;
     changeDebounceMs?: number;
     slowParseLogMs?: number;
     initialParseDelayMs?: number;
@@ -107,8 +119,9 @@ export class DocumentAnalysisService {
     private parseGeneration = new Map<string, number>();
     private parsedVersions = new Map<string, number>();
     /** Назначенный разбор и версия, ради которой он назначен. */
+    private readonly clock: IRslClock;
     private parseTimers = new Map<string, {
-        timer: NodeJS.Timeout;
+        timer: IRslTimerHandle;
         version: number;
     }>();
     /** Отложенный прогрев Outline; проверяется на актуальность при старте. */
@@ -158,6 +171,7 @@ export class DocumentAnalysisService {
         private settings: RslSettingsService,
         private options: IDocumentAnalysisOptions
     ) {
+        this.clock = options.clock ?? systemRslClock;
         this.changeDebounceMs = options.changeDebounceMs ?? 90;
         this.slowParseLogMs = options.slowParseLogMs ?? 75;
         this.initialParseDelayMs = options.initialParseDelayMs ?? 50;
@@ -172,12 +186,12 @@ export class DocumentAnalysisService {
      * задевает: у него своя очередь и свой приоритет.
      */
     noteInteractiveActivity(): void {
-        this.interactiveUntilMs = Date.now() + this.backgroundQuietMs;
+        this.interactiveUntilMs = this.clock.now() + this.backgroundQuietMs;
     }
 
     /** Сколько ещё ждать тишины; 0 — можно работать. */
     private quietDelayMs(): number {
-        return Math.max(0, this.interactiveUntilMs - Date.now());
+        return Math.max(0, this.interactiveUntilMs - this.clock.now());
     }
 
     /**
@@ -694,7 +708,7 @@ export class DocumentAnalysisService {
         const generation = this.nextGeneration(uri);
         this.cancelTimer(uri);
 
-        const timer = setTimeout(() => {
+        const timer = this.clock.setTimeout(() => {
             this.parseTimers.delete(uri);
             const current = this.documents.get(uri);
 
@@ -1318,7 +1332,7 @@ export class DocumentAnalysisService {
         const pending = this.parseTimers.get(uri);
 
         if (pending) {
-            clearTimeout(pending.timer);
+            this.clock.clearTimeout(pending.timer);
             this.parseTimers.delete(uri);
         }
     }

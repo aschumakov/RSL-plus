@@ -13,6 +13,9 @@ import {
     GetImportDefinitionTargetsFromTokens
 } from "./execMacroDefinition";
 import { DECLARATION_MODIFIERS } from "./language/rslLanguageReference";
+import {
+    buildRslUndeclaredVariableFixes
+} from "./features/undeclaredVariableFixes";
 import { IIndexedModule } from "./workspaceIndex";
 
 /**
@@ -48,6 +51,15 @@ export function buildRslCodeActions(
     for (const diagnostic of params.context.diagnostics) {
         const code = String(diagnostic.code || "");
         let action: CodeAction | undefined;
+
+        if (code === "undeclared-variable") {
+            /*
+             * Подбор ближайшего имени идёт только по Ctrl+.: перебор видимых
+             * переменных при наборе текста был бы лишней работой.
+             */
+            result.push(...buildRslUndeclaredVariableFixes(module, diagnostic));
+            continue;
+        }
 
         switch (code) {
             case "debugbreak":

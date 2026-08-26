@@ -15,6 +15,7 @@ import type {
 } from "./analysis/declarationExtractor";
 import type { RslSymbol } from "./symbols/rslSymbol";
 import { FileCatalog } from "./indexing/fileCatalog";
+import { WorkspaceCatalog } from "./indexing/workspaceCatalog";
 import { ImportGraph } from "./indexing/importGraph";
 import { ModuleStore } from "./indexing/moduleStore";
 import { SymbolIndex } from "./indexing/symbolIndex";
@@ -83,6 +84,7 @@ export class WorkspaceIndex {
     private externalBytes = 0;
     private importsEnabled = true;
     private revisionValue = 0;
+    private catalogValue = new WorkspaceCatalog();
 
     constructor(options: IWorkspaceIndexOptions = {}) {
         this.importContexts = new LruCache(
@@ -228,7 +230,11 @@ export class WorkspaceIndex {
         this.files.registerAll(uris);
     }
     registerWorkspaceFile(uri: string): void { this.files.register(uri); }
-    unregisterWorkspaceFile(uri: string): void { this.files.unregister(uri); }
+    unregisterWorkspaceFile(uri: string): void {
+        /* Файла нет в проекте — записи о нём тоже быть не должно. */
+        this.catalogValue.remove(uri);
+        this.files.unregister(uri);
+    }
     getWorkspaceFileUris(): string[] { return this.files.values(); }
     hasWorkspaceFile(uri: string): boolean { return this.files.has(uri); }
     resolveWorkspaceFile(name: string): ModuleResolution<string> {
@@ -264,6 +270,14 @@ export class WorkspaceIndex {
     }
     getModules(): IIndexedModule[] { return this.modules.values(); }
     getIndexedModules(): IIndexedModule[] { return this.modules.values(); }
+    /**
+     * Постоянный каталог символов проекта.
+     *
+     * Подробные модели вытесняются по объёму, каталог — нет: глобальные
+     * ответы (Ctrl+T, Auto Import, отбор кандидатов) обязаны видеть весь
+     * проект, а не только то, что сейчас держится в памяти.
+     */
+    get catalog(): WorkspaceCatalog { return this.catalogValue; }
     getOpenModules(): IIndexedModule[] {
         return this.modules.values().filter(module => module.isOpen);
     }
@@ -484,6 +498,7 @@ export class WorkspaceIndex {
             fingerprint
         };
         this.modules.set(module);
+        this.catalogValue.record(module);
         this.files.register(uri);
         this.symbols.add(module);
         this.imports.add(module);
