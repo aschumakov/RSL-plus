@@ -137,6 +137,52 @@ test("имя класса под курсором берётся из катал
     );
 });
 
+test("одноимённые базовые классы из разных модулей не смешиваются", () => {
+    /*
+     * В проекте два класса Base: один в base.mac, другой в legacy.mac. У
+     * каждого свой наследник, и вопрос «кто наследует ЭТОТ Base» имеет ровно
+     * один верный ответ — тот, что зависит от файла, из которого спросили.
+     */
+    const LEGACY = "file:///d:/hierarchy/legacy.mac";
+    const LEGACY_CHILD = "file:///d:/hierarchy/legacy-child.mac";
+    const index = project();
+
+    index.registerWorkspaceFiles([LEGACY, LEGACY_CHILD]);
+    index.updateExternalModule(LEGACY, ["Class Base", "  Var Old;", "End;", ""].join(String.fromCharCode(10)), 1);
+    index.updateExternalModule(
+        LEGACY_CHILD,
+        ["Import legacy;", "Class(Base) LegacyChild", "End;", ""].join(String.fromCharCode(10)),
+        1
+    );
+
+    assert.deepStrictEqual(
+        findRslImplementations(index, "Base", BASE).map(item => item.uri),
+        [MIDDLE],
+        "из base.mac видно наследника его собственного Base"
+    );
+    assert.deepStrictEqual(
+        findRslImplementations(index, "Base", LEGACY).map(item => item.uri),
+        [LEGACY_CHILD],
+        "из legacy.mac — наследника другого Base"
+    );
+
+    /* Без указания файла вопрос неоднозначен, и ответ остаётся полным. */
+    assert.deepStrictEqual(
+        findRslImplementations(index, "Base").map(item => item.uri).sort(),
+        [LEGACY_CHILD, MIDDLE].sort()
+    );
+
+    const [target] = prepareRslTypeHierarchy(index, "Base")
+        .filter(item => item.uri === LEGACY);
+
+    assert.ok(target, "элемент иерархии для legacy.mac");
+    assert.deepStrictEqual(
+        rslSubtypes(index, target).map(item => item.uri),
+        [LEGACY_CHILD],
+        "иерархия вниз тоже различает одноимённые классы"
+    );
+});
+
 if (failed > 0) {
     console.error(`\nПройдено: ${passed}\nОшибок: ${failed}`);
     process.exitCode = 1;

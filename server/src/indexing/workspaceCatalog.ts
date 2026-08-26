@@ -344,6 +344,59 @@ export class WorkspaceCatalog {
         this.revisionValue++;
     }
 
+    /**
+     * Где объявлен класс с этим именем, если смотреть из этого файла.
+     *
+     * Имя класса само по себе адреса не даёт: `Base` бывает в двух модулях
+     * проекта, и иерархия типов смешивала их наследников. Видно из файла
+     * либо своё объявление, либо объявление импортированного модуля —
+     * этого достаточно, чтобы отличить два одноимённых класса.
+     *
+     * undefined — не определилось: имени нет вовсе или его экспортируют
+     * несколько импортированных модулей. Тогда отсеивать нельзя: спрятать
+     * настоящего наследника хуже, чем показать лишнего.
+     */
+    classDeclaringUri(
+        fromUri: string,
+        className: string
+    ): string | undefined {
+        const wanted = normalizeIdentifier(className);
+        const candidates = this.byName.get(wanted);
+
+        if (!candidates) {
+            return undefined;
+        }
+
+        const isClass = (uri: string): boolean =>
+            (candidates.get(uri) || []).some(symbol =>
+                symbol.kind === CompletionItemKind.Class);
+
+        /* Своё объявление ближе любого импортированного. */
+        if (isClass(fromUri)) {
+            return fromUri;
+        }
+
+        const imported = new Set(
+            (this.modules.get(fromUri)?.imports || [])
+                .map(name => normalizeIdentifier(name))
+        );
+        const found: string[] = [];
+
+        for (const uri of candidates.keys()) {
+            if (!isClass(uri)) {
+                continue;
+            }
+
+            const moduleName = normalizeIdentifier(moduleNameOf(uri));
+
+            if (imported.has(moduleName)) {
+                found.push(uri);
+            }
+        }
+
+        return found.length === 1 ? found[0] : undefined;
+    }
+
     /** Проект сменился: каталог прежнего проекта не годится. */
     clear(): void {
         this.modules.clear();
@@ -585,6 +638,17 @@ function appendDescriptor(
     result.push(record);
 
     return record;
+}
+
+/** Имя модуля — имя файла без расширения. */
+function moduleNameOf(uri: string): string {
+    const withoutQuery = uri.split("?")[0];
+    const fileName = withoutQuery.slice(
+        withoutQuery.lastIndexOf("/") + 1
+    );
+    const dot = fileName.lastIndexOf(".");
+
+    return dot < 0 ? fileName : fileName.slice(0, dot);
 }
 
 /** -1 — не подходит; меньше — лучше. */

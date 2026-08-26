@@ -475,7 +475,12 @@ export class RslLanguageFeatureRegistry {
                 document.offsetAt(params.position)
             );
 
-            return findRslImplementations(this.environment.index, name);
+            /* Файл под курсором решает, о каком одноимённом классе речь. */
+            return findRslImplementations(
+                this.environment.index,
+                name,
+                document.uri
+            );
         });
 
         /*

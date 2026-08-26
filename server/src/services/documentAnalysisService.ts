@@ -12,8 +12,9 @@ import { RslSymbol } from "../symbols/rslSymbol";
 import type { IRslLexResult } from "../lexer";
 import { parseRslSyntax } from "../syntaxParser";
 import {
-    createRslModelState,
-    tryUpdateRslModelState,
+    createRslModelBuild,
+    tryUpdateRslParse,
+    type IRslModelBuild,
     type IRslModelState
 } from "./incrementalModel";
 import type { RslSettingsService } from "./settingsService";
@@ -73,6 +74,15 @@ const PHASED_ANALYSIS_MIN_CHARS = 100_000;
  * фоне и точку освобождает. Двух хватает на «ушёл и сразу вернулся».
  */
 const MAX_PHASE_CHECKPOINTS = 2;
+
+/*
+ * Порция сборки модели.
+ *
+ * Восемь миллисекунд — это половина кадра при 60 Гц: за такую задержку
+ * ответ на нажатие клавиши не успевает стать заметным. Порция меньше
+ * стоила бы дороже самой работы: между порциями поток идёт в event loop.
+ */
+const MODEL_SLICE_MS = 8;
 
 export interface IDocumentAnalysisOptions {
     /**
@@ -178,6 +188,14 @@ export class DocumentAnalysisService {
     private phaseCheckpoints = new Map<string, {
         version: number;
         syntax: ReturnType<typeof parseRslSyntax>;
+        /**
+         * Начатая сборка модели этой версии.
+         *
+         * Без неё продолжение считало модель заново полным путём — то
+         * есть прерванная правка теряла всю выгоду точечного пути ровно
+         * там, где пользователь и так ждал дольше обычного.
+         */
+        build: IRslModelBuild;
     }>();
 
     constructor(
@@ -219,10 +237,11 @@ export class DocumentAnalysisService {
     private rememberCheckpoint(
         uri: string,
         version: number,
-        syntax: ReturnType<typeof parseRslSyntax>
+        syntax: ReturnType<typeof parseRslSyntax>,
+        build: IRslModelBuild
     ): void {
         this.phaseCheckpoints.delete(uri);
-        this.phaseCheckpoints.set(uri, { version, syntax });
+        this.phaseCheckpoints.set(uri, { version, syntax, build });
 
         while (this.phaseCheckpoints.size > MAX_PHASE_CHECKPOINTS) {
             const oldest = this.phaseCheckpoints.keys().next().value;
@@ -388,31 +407,15 @@ export class DocumentAnalysisService {
      * готовыми. Любое сомнение — и работает полный путь, потому что
      * неверная модель недопустима.
      */
-    private buildModelWithReuse(
+    private startModelBuild(
         uri: string,
         text: string,
         lex: IRslLexResult,
-        version: number,
-        resumedSyntax?: ReturnType<typeof parseRslSyntax>
-    ): {
-        syntax: ReturnType<typeof parseRslSyntax>;
-        model: ReturnType<typeof createOpenModuleModel>;
-    } {
+        version: number
+    ): { syntax: ReturnType<typeof parseRslSyntax>; build: IRslModelBuild } {
         const performance = this.options.performance;
-
-        if (resumedSyntax) {
-            /* Продолжение прерванного разбора: дерево этой версии готово. */
-            const resumedState = createRslModelState(text, resumedSyntax);
-            this.modelStates.set(uri, resumedState.state);
-
-            return {
-                syntax: resumedSyntax,
-                model: resumedState.model
-            };
-        }
-
         const previous = this.modelStates.get(uri);
-        const update = (previous && tryUpdateRslModelState(
+        const parsed = previous && tryUpdateRslParse(
             previous,
             text,
             lex,
@@ -420,14 +423,62 @@ export class DocumentAnalysisService {
                 "analysis.incrementalParse",
                 { uri, version, ...decision }
             )
-        )) || createRslModelState(
-            text,
-            parseRslSyntax(text, lex, { buildExpressionTree: false })
         );
+
+        if (parsed) {
+            return {
+                syntax: parsed.parse,
+                build: createRslModelBuild({
+                    text,
+                    parse: parsed.parse,
+                    lex,
+                    previous,
+                    splice: parsed.splice
+                })
+            };
+        }
+
+        const syntax = parseRslSyntax(text, lex, {
+            buildExpressionTree: false
+        });
+
+        return {
+            syntax,
+            build: createRslModelBuild({ text, parse: syntax, lex })
+        };
+    }
+
+    /**
+     * Сборка модели порциями с возвратом управления.
+     *
+     * Пользователь чувствует не сумму времени, а самый длинный кусок, в
+     * который поток занят непрерывно. Между порциями проверяется, нужна ли
+     * ещё эта версия: собранная половина модели наружу не выходит.
+     */
+    private async finishModelBuild(
+        uri: string,
+        version: number,
+        generation: number,
+        build: IRslModelBuild,
+        phased: boolean
+    ): Promise<ReturnType<typeof createOpenModuleModel> | undefined> {
+        while (build.step(MODEL_SLICE_MS)) {
+            if (!phased) {
+                continue;
+            }
+
+            await yieldToEventLoop();
+
+            if (!this.stillCurrent(uri, version, generation)) {
+                return undefined;
+            }
+        }
+
+        const update = build.result();
 
         this.modelStates.set(uri, update.state);
 
-        return { syntax: update.state.parse, model: update.model };
+        return update.model;
     }
 
     /** Совместимость со старым API: считается изменением документа. */
@@ -1229,14 +1280,10 @@ export class DocumentAnalysisService {
          */
         const checkpoint = this.phaseCheckpoints.get(uri);
         const resumed = checkpoint?.version === version;
-        const built = this.buildModelWithReuse(
-            uri,
-            text,
-            fastSnapshot.lex,
-            version,
-            resumed ? checkpoint!.syntax : undefined
-        );
-        const syntax = built.syntax;
+        const phase = resumed
+            ? { syntax: checkpoint!.syntax, build: checkpoint!.build }
+            : this.startModelBuild(uri, text, fastSnapshot.lex, version);
+        const syntax = phase.syntax;
 
         if (resumed) {
             performance?.mark?.("analysis.resumed", {
@@ -1282,7 +1329,7 @@ export class DocumentAnalysisService {
              * ещё нет. Результат откладывается ДО паузы — иначе проверка ниже
              * выйдет, и посчитанное пропадёт.
              */
-            this.rememberCheckpoint(uri, version, syntax);
+            this.rememberCheckpoint(uri, version, syntax, phase.build);
             await yieldToEventLoop();
             blockingSinceMs = monotonicMs();
         }
@@ -1298,10 +1345,29 @@ export class DocumentAnalysisService {
         }
 
         /*
-         * Модель уже собрана вместе с разбором: объявления неизменившихся
-         * единиц взяты у прошлой версии, а не извлечены заново.
+         * Модель собирается здесь, а не вместе с разбором: между фазами
+         * поток возвращается редактору, и прерванная сборка продолжается с
+         * того же места — по контрольной точке.
          */
-        const model = built.model;
+        const model = await this.finishModelBuild(
+            uri,
+            version,
+            generation,
+            phase.build,
+            phased
+        );
+
+        if (!model) {
+            if (fullSpan) {
+                performance.end(fullSpan, {
+                    cancelled: true,
+                    checkpoint: phased
+                });
+            }
+
+            return;
+        }
+
         this.phaseCheckpoints.delete(uri);
         if (treeSpan) {
             performance.end(treeSpan, {

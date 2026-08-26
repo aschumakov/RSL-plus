@@ -235,6 +235,95 @@ test("двести правок подряд: ответ верен, памят�
     );
 });
 
+test("сборка модели не занимает поток одним куском", async () => {
+    /*
+     * Пользователь чувствует не сумму времени, а самый длинный кусок, в
+     * который поток занят непрерывно. Раньше разбор и модель считались одним
+     * вызовом, и на большом файле это были десятки миллисекунд подряд.
+     *
+     * Замер идёт настоящими часами и настоящим event loop: виртуальные часы
+     * показали бы расписание, а не занятость потока.
+     */
+    const base = sample(2000);
+
+    assert.ok(
+        base.length > 100_000,
+        "файл обязан быть больше порога фазового разбора: " + base.length
+    );
+
+    let document = TextDocument.create(URI, "rsl", 1, base);
+
+    const documents = { get: uri => (uri === URI ? document : undefined) };
+    const index = new WorkspaceIndex();
+
+    index.registerWorkspaceFiles([URI]);
+
+    const analysis = new DocumentAnalysisService(
+        documents,
+        index,
+        { getAvailable: () => ({ imports: { enabled: false } }) },
+        {
+            log: () => undefined,
+            invalidateProviderCaches: () => undefined,
+            onParsed: () => undefined,
+            onImports: () => undefined,
+            initialParseDelayMs: 0,
+            changeDebounceMs: 1
+        }
+    );
+
+    analysis.setActiveDocument(URI);
+    analysis.open(document);
+    await analysis.ensureParsed(document, "force");
+
+    /* Правка внутри тела: точечный путь, который и надо мерить. */
+    const at = base.indexOf(NEEDLE, Math.floor(base.length / 2));
+    const edited = base.slice(0, at) + "  total = total + 7;" +
+        base.slice(at + NEEDLE.length);
+
+    document = TextDocument.create(URI, "rsl", 2, edited);
+
+    const gaps = [];
+    let previous = process.hrtime.bigint();
+    const interval = setInterval(() => {
+        const now = process.hrtime.bigint();
+
+        gaps.push(Number(now - previous) / 1e6);
+        previous = now;
+    }, 1);
+
+    analysis.changed(document);
+    await analysis.ensureParsed(document, "force");
+    clearInterval(interval);
+    analysis.close(URI);
+
+    const longest = Math.max(...gaps);
+
+    console.log(
+        "[METRIC] правка файла " + Math.round(base.length / 1024) +
+        " КБ: самая долгая непрерывная занятость потока " +
+        longest.toFixed(0) + " мс, возвратов управления " + gaps.length
+    );
+    /*
+     * Число возвратов зависит от машины: важно, что их больше одного, — то
+     * есть работа не идёт одним неделимым куском. Ограничение на длительность
+     * ниже и есть настоящая проверка.
+     */
+    assert.ok(
+        gaps.length >= 2,
+        "поток возвращался управлению: " + gaps.length
+    );
+    /*
+     * Порог с запасом к порции (8 мс): в один кусок всё равно попадают
+     * неделимые фазы — точечный lex и разбор изменённой единицы. Он отделяет
+     * порционную сборку от прежней, когда весь путь шёл одним вызовом.
+     */
+    assert.ok(
+        longest < 120,
+        "непрерывная занятость потока: " + longest.toFixed(0) + " мс"
+    );
+});
+
 (async () => {
     for (const item of tests) {
         try {

@@ -30,15 +30,48 @@ export interface IRslHierarchyRequest {
 /** Классы-наследники: Go to Implementation. */
 export function findRslImplementations(
     index: WorkspaceIndex,
-    className: string
+    className: string,
+    /** Файл, из которого спрашивают: он и решает, о каком классе речь. */
+    fromUri?: string
 ): Location[] {
     if (!className) {
         return [];
     }
 
-    return index.catalog
-        .implementationsOf(className)
+    const target = fromUri
+        ? index.catalog.classDeclaringUri(fromUri, className)
+        : undefined;
+
+    return subtypesOf(index, className, target)
         .map(symbol => toLocation(symbol));
+}
+
+/**
+ * Наследники именно этого класса.
+ *
+ * Кандидат оставляется, если его база разрешается в тот же файл. Не
+ * разрешилась — кандидат остаётся тоже: спрятать настоящего наследника
+ * хуже, чем показать лишнего.
+ */
+function subtypesOf(
+    index: WorkspaceIndex,
+    className: string,
+    targetUri: string | undefined
+): IRslCatalogSymbol[] {
+    const candidates = index.catalog.implementationsOf(className);
+
+    if (!targetUri) {
+        return candidates;
+    }
+
+    return candidates.filter(symbol => {
+        const resolved = index.catalog.classDeclaringUri(
+            symbol.uri,
+            symbol.baseClassName
+        );
+
+        return resolved === undefined || resolved === targetUri;
+    });
 }
 
 /** Элемент иерархии для класса под курсором. */
@@ -76,8 +109,8 @@ export function rslSubtypes(
     index: WorkspaceIndex,
     item: TypeHierarchyItem
 ): TypeHierarchyItem[] {
-    return index.catalog
-        .implementationsOf(item.name)
+    /* Элемент иерархии знает свой файл — значит знает, о каком классе речь. */
+    return subtypesOf(index, item.name, item.uri)
         .map(symbol => toItem(symbol));
 }
 

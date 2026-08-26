@@ -11,7 +11,8 @@ import type { RslSymbol } from "../symbols/rslSymbol";
 import type { IRslParseResult, IRslSyntaxNode } from "../syntaxParser";
 import {
     tryIncrementalRslParse,
-    type IRslIncrementalParseDecision
+    type IRslIncrementalParseDecision,
+    type IRslParseSplice
 } from "./incrementalParse";
 
 /**
@@ -24,6 +25,13 @@ import {
  * Символы хранятся по единицам верхнего уровня. При правке заново считаются
  * изменённая единица и всё, что за ней: их смещения сдвинулись. То, что перед
  * правкой, берётся по ссылке — там та же версия текста и те же смещения.
+ *
+ * Сборка идёт порциями. Пользователь чувствует не сумму времени, а самый
+ * длинный кусок, в который поток занят непрерывно: модель на 2600 процедур,
+ * собранная одним куском, — это десятки миллисекунд, в которые редактор не
+ * отвечает ни на подсказку, ни на переход. Поэтому сборка отдаёт управление
+ * между единицами, а вызывающий между порциями проверяет, нужна ли ещё эта
+ * версия документа.
  *
  * Объявления между правками не хранятся: они нужны только как заготовка для
  * символов, а держать их для открытого документа — лишние 3,5 МБ на 651 КБ.
@@ -57,53 +65,25 @@ export interface IRslModelUpdate {
     incremental: boolean;
 }
 
-/** Полный путь: модель и состояние для будущих правок. */
-export function createRslModelState(
-    text: string,
-    parse: IRslParseResult
-): IRslModelUpdate {
-    const snapshot = extractDeclarationsFromSyntax(text, parse);
-    const units = splitByUnit(parse.root.children, snapshot.declarations);
-    const definitionRanges = new WeakMap<RslSymbol, IExternalLocationRange>();
-    const builder = createRslSymbolUnitBuilder(definitionRanges);
-    const unitSymbols = (units || [snapshot.declarations.slice()])
-        .map(unit => builder.build(unit));
-    const built = builder.finish(text.length, unitSymbols);
-
-    return {
-        model: {
-            kind: "open",
-            source: text,
-            sourceLength: text.length,
-            symbolTree: built.root,
-            syntax: parse,
-            lex: parse.lex,
-            imports: snapshot.imports,
-            definitionRanges: built.definitionRanges
-        },
-        state: {
-            text,
-            parse,
-            unitSymbols: units ? unitSymbols : undefined,
-            definitionRanges,
-            imports: snapshot.imports
-        },
-        incremental: false
-    };
+/** Точечный разбор без сборки модели: первая половина работы. */
+export interface IRslParsedUpdate {
+    parse: IRslParseResult;
+    splice: IRslParseSplice;
 }
 
 /**
- * Точечное обновление модели.
+ * Точечный разбор правки.
  *
- * Возвращает undefined, когда точечный путь неприменим: вызывающий делает
- * полный разбор и строит состояние заново.
+ * Отдельно от сборки модели: между ними вызывающий возвращает управление
+ * редактору и проверяет, нужна ли ещё эта версия. Слитые в один вызов, они
+ * занимали поток непрерывно — а разбор большого файла и так самая долгая фаза.
  */
-export function tryUpdateRslModelState(
+export function tryUpdateRslParse(
     state: IRslModelState,
     nextText: string,
     nextLex: IRslLexResult,
     onDecision?: (decision: IRslIncrementalParseDecision) => void
-): IRslModelUpdate | undefined {
+): IRslParsedUpdate | undefined {
     if (!state.unitSymbols) {
         return undefined;
     }
@@ -120,59 +100,233 @@ export function tryUpdateRslModelState(
         return undefined;
     }
 
-    const { parse, splice } = incremental;
-    const units = parse.root.children;
-
-    if (units.length !== state.unitSymbols.length) {
+    if (
+        incremental.parse.root.children.length !== state.unitSymbols.length
+    ) {
         /* Число единиц точечный путь менять не должен; проверка дешёвая. */
         return undefined;
     }
 
-    const changed = units.slice(splice.unitIndex);
-    const buckets = splitByUnit(
-        changed,
-        extractUnits(nextText, parse, changed)
-    );
+    return incremental;
+}
 
-    if (!buckets) {
+export interface IRslModelBuildOptions {
+    text: string;
+    parse: IRslParseResult;
+    lex: IRslLexResult;
+    /** Прошлое состояние: только для точечного пути. */
+    previous?: IRslModelState;
+    /** Что именно изменилось: только для точечного пути. */
+    splice?: IRslParseSplice;
+}
+
+/**
+ * Сборка модели порциями.
+ *
+ * step делает работу не дольше бюджета и отвечает, осталось ли ещё. result
+ * отдаёт готовую модель — и только целиком: половина модели не годится ни
+ * для навигации, ни для диагностик, поэтому наружу она не выходит.
+ */
+export interface IRslModelBuild {
+    step(budgetMs: number): boolean;
+    result(): IRslModelUpdate;
+}
+
+export function createRslModelBuild(
+    options: IRslModelBuildOptions
+): IRslModelBuild {
+    const { text, parse, lex, previous, splice } = options;
+    const units = parse.root.children;
+    const incremental = !!(previous?.unitSymbols && splice);
+    const definitionRanges = incremental
+        ? previous!.definitionRanges
+        : new WeakMap<RslSymbol, IExternalLocationRange>();
+    const builder = createRslSymbolUnitBuilder(definitionRanges);
+    const unitSymbols: IRslSymbolUnit[] = new Array(units.length);
+
+    /*
+     * Объявления берутся одним проходом: у полного пути по всему файлу, у
+     * точечного — по изменённой единице и хвосту. Резать его порциями нечем,
+     * зато он дешевле сборки символов втрое.
+     */
+    let buckets: IRslDeclarationDescriptor[][] | undefined;
+    let imports: string[] = [];
+    let cursor = 0;
+    let prepared = false;
+    let finished: IRslModelUpdate | undefined;
+
+    const prepare = (): boolean => {
+        if (incremental) {
+            const changed = units.slice(splice!.unitIndex);
+            const split = splitByUnit(
+                changed,
+                extractUnits(text, parse, changed)
+            );
+
+            if (!split) {
+                return false;
+            }
+
+            buckets = split;
+            imports = previous!.imports;
+
+            return true;
+        }
+
+        const snapshot = extractDeclarationsFromSyntax(text, parse);
+        const split = splitByUnit(units, snapshot.declarations);
+
+        imports = snapshot.imports;
+        buckets = split || [snapshot.declarations.slice()];
+
+        return true;
+    };
+
+    const first = incremental ? splice!.unitIndex : 0;
+
+    return {
+        step(budgetMs: number): boolean {
+            if (finished) {
+                return false;
+            }
+
+            const started = process.hrtime.bigint();
+
+            if (!prepared) {
+                if (!prepare()) {
+                    /*
+                     * Раскладка не сложилась: точечный путь для этого файла
+                     * недоступен. Модель собирается полным путём, иначе
+                     * плоский список объявлений не собрать обратно тем же.
+                     */
+                    return fallback();
+                }
+
+                prepared = true;
+
+                if (elapsed(started) >= budgetMs) {
+                    return true;
+                }
+            }
+
+            /* Единицы до правки: их символы уже есть, нужен только порядок. */
+            while (cursor < first) {
+                unitSymbols[cursor] = previous!.unitSymbols![cursor];
+                builder.reuse(unitSymbols[cursor]);
+                cursor++;
+
+                if (elapsed(started) >= budgetMs) {
+                    return true;
+                }
+            }
+
+            while (cursor < units.length) {
+                const bucket = buckets![cursor - first] || [];
+
+                unitSymbols[cursor] = builder.build(bucket);
+                cursor++;
+
+                if (elapsed(started) >= budgetMs) {
+                    return cursor < units.length;
+                }
+            }
+
+            return false;
+        },
+        result(): IRslModelUpdate {
+            if (finished) {
+                return finished;
+            }
+
+            /* Незаконченную сборку доводим до конца: без бюджета. */
+            while (this.step(Number.POSITIVE_INFINITY)) {
+                /* Пустое тело: step сам двигает курсор. */
+            }
+
+            const built = builder.finish(text.length, unitSymbols);
+
+            finished = {
+                model: {
+                    kind: "open",
+                    source: text,
+                    sourceLength: text.length,
+                    symbolTree: built.root,
+                    syntax: parse,
+                    lex,
+                    /* Import не менялся: точечный путь этого не допускает. */
+                    imports,
+                    definitionRanges: built.definitionRanges
+                },
+                state: {
+                    text,
+                    parse,
+                    unitSymbols: buckets && buckets.length === units.length - first
+                        ? unitSymbols
+                        : undefined,
+                    definitionRanges,
+                    imports
+                },
+                incremental
+            };
+
+            return finished;
+        }
+    };
+
+    /** Раскладка не сложилась: считаем всё заново полным путём. */
+    function fallback(): boolean {
+        const snapshot = extractDeclarationsFromSyntax(text, parse);
+
+        imports = snapshot.imports;
+        buckets = [snapshot.declarations.slice()];
+        prepared = true;
+        cursor = 0;
+
+        return true;
+    }
+}
+
+function elapsed(started: bigint): number {
+    return Number(process.hrtime.bigint() - started) / 1e6;
+}
+
+/** Полный путь одним вызовом: для тестов и прямых вызовов. */
+export function createRslModelState(
+    text: string,
+    parse: IRslParseResult
+): IRslModelUpdate {
+    return createRslModelBuild({
+        text,
+        parse,
+        lex: parse.lex
+    }).result();
+}
+
+/**
+ * Точечное обновление модели одним вызовом.
+ *
+ * Порционный путь живёт в createRslModelBuild; здесь он же, но без паузы —
+ * так вызывают тесты и сверки, которым порционность не нужна.
+ */
+export function tryUpdateRslModelState(
+    state: IRslModelState,
+    nextText: string,
+    nextLex: IRslLexResult,
+    onDecision?: (decision: IRslIncrementalParseDecision) => void
+): IRslModelUpdate | undefined {
+    const parsed = tryUpdateRslParse(state, nextText, nextLex, onDecision);
+
+    if (!parsed) {
         return undefined;
     }
 
-    const builder = createRslSymbolUnitBuilder(state.definitionRanges);
-    const unitSymbols: IRslSymbolUnit[] = new Array(units.length);
-
-    for (let index = 0; index < splice.unitIndex; index++) {
-        unitSymbols[index] = state.unitSymbols[index];
-        builder.reuse(unitSymbols[index]);
-    }
-
-    for (let index = 0; index < buckets.length; index++) {
-        unitSymbols[splice.unitIndex + index] = builder.build(buckets[index]);
-    }
-
-    const built = builder.finish(nextText.length, unitSymbols);
-
-    return {
-        model: {
-            kind: "open",
-            source: nextText,
-            sourceLength: nextText.length,
-            symbolTree: built.root,
-            syntax: parse,
-            lex: nextLex,
-            /* Import не менялся: точечный путь этого не допускает. */
-            imports: state.imports,
-            definitionRanges: built.definitionRanges
-        },
-        state: {
-            text: nextText,
-            parse,
-            unitSymbols,
-            definitionRanges: state.definitionRanges,
-            imports: state.imports
-        },
-        incremental: true
-    };
+    return createRslModelBuild({
+        text: nextText,
+        parse: parsed.parse,
+        lex: nextLex,
+        previous: state,
+        splice: parsed.splice
+    }).result();
 }
 
 /**
