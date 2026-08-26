@@ -164,6 +164,42 @@ test("проверку членов можно выключить", () => {
     );
 });
 
+/**
+ * Рост времени от размера — линейный, а не квадратичный.
+ *
+ * Замер по времени в тестовом прогоне шумит: уборки мусора не видно (нет
+ * --expose-gc), и одна пауза внутри большого замера давала ложное
+ * «квадратично» — 26 мс против 69 мс при пороге 67. Поэтому большой размер
+ * меряется первым, он же прогревает JIT, вердикт берётся по лучшей из двух
+ * попыток, а порог отличает линейное от квадратичного: удвоение размера при
+ * квадратичности даёт ×4, а не ×3.
+ *
+ * Настоящий инструмент для роста — npm run bench:diagnostics: он считает с
+ * управляемой уборкой памяти и на нескольких размерах.
+ */
+function assertLinearGrowth(measure, smallCount, largeCount, label) {
+    let best;
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+        const large = measure(largeCount);
+        const small = measure(smallCount);
+
+        if (!best || large / small < best.large / best.small) {
+            best = { small, large };
+        }
+
+        if (best.large < best.small * 3 + 5) {
+            break;
+        }
+    }
+
+    assert.ok(
+        best.large < best.small * 3 + 5,
+        label + ": " + best.small.toFixed(1) + " -> " +
+            best.large.toFixed(1) + " мс"
+    );
+}
+
 test("проверка обращений через точку растёт линейно", () => {
     /*
      * Здесь был квадратичный рост: получатель перед точкой искался поиском
@@ -208,13 +244,11 @@ test("проверка обращений через точку растёт л�
 
         return best;
     };
-    const small = measure(2000);
-    const large = measure(4000);
-
-    assert.ok(
-        large < small * 2.5 + 2,
-        "удвоение обращений: " + small.toFixed(1) + " -> " +
-            large.toFixed(1) + " мс"
+    assertLinearGrowth(
+        measure,
+        2000,
+        4000,
+        "удвоение обращений"
     );
 });
 
@@ -278,13 +312,11 @@ test("много областей с Var — рост линейный", () => {
 
         return best;
     };
-    const small = measure(1000);
-    const large = measure(2000);
-
-    assert.ok(
-        large < small * 2.5 + 2,
-        "удвоение областей: " + small.toFixed(1) + " -> " +
-            large.toFixed(1) + " мс"
+    assertLinearGrowth(
+        measure,
+        1000,
+        2000,
+        "удвоение областей"
     );
 });
 

@@ -552,8 +552,23 @@ export function collectRslForLoops(module: IIndexedModule): {
         const token = tokens[index];
 
         while (next < starts.length && starts[next] <= token.start) {
-            /* Дошли до ключевого слова FOR: его скобки — следующие. */
-            open = { depth: 0, from: -1, inInitializer: false };
+            /*
+             * Дошли до ключевого слова FOR. Заголовок открывается только
+             * если скобка стоит СРАЗУ за ним.
+             *
+             * RSL допускает бесконечный цикл без заголовка — `for` … `end;`.
+             * Пока автомат ждал первую скобку где угодно, он принимал за
+             * заголовок скобки первой команды тела: в `for` + `Foo(parm =
+             * known);` присваивание внутри вызова становилось
+             * «инициализатором», а `parm` — переменной цикла, и опечатка
+             * пропадала из Problems целиком.
+             */
+            const following = tokens[index + 1];
+
+            open = following &&
+                following.kind === "symbol" && following.raw === "("
+                ? { depth: 0, from: -1, inInitializer: false }
+                : undefined;
             next++;
         }
 

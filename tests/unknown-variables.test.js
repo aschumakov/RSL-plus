@@ -818,6 +818,96 @@ async function main() {
      * активный main не пересчитается вовсе, хотя его Import-замыкание
      * изменилось вместе с lib.
      */
+    /*
+     * Бесконечный цикл без заголовка: `for` … `end;`.
+     *
+     * Автомат заголовка ждал первую скобку где угодно после `for` и
+     * принимал за заголовок скобки первой команды тела: в `Foo(parm =
+     * known)` присваивание становилось «инициализатором», `parm` —
+     * переменной цикла, и опечатка исчезала из Problems в обоих режимах.
+     */
+    await test("for без скобок не создаёт переменную цикла", () => {
+        const engine = new RslDiagnosticEngine();
+        const check = lines => {
+            const context = open(lines.join(String.fromCharCode(10)));
+            const all = mode => [
+                ...engine.buildLocal(context.module, context.index, {
+                    unknownVariables: mode
+                }),
+                ...engine.buildWorkspace(context.module, context.index, {
+                    unknownVariables: mode
+                })
+            ];
+
+            return {
+                safe: undeclared(all("safe")),
+                strict: names(all("strict")).sort()
+            };
+        };
+
+        const withCall = check([
+            "Macro Test()",
+            "  Var known, value;",
+            "  for",
+            "    Foo(parm = known);",
+            "    value = parm;",
+            "    break;",
+            "  end;",
+            "End;"
+        ]);
+
+        assert.deepStrictEqual(
+            withCall.strict,
+            ["Foo", "parm", "parm"],
+            "Тело бесконечного цикла — обычный код: имя parm нигде не объявлено"
+        );
+
+        /* То же с условием: скобки if — тоже не заголовок цикла. */
+        const withIf = check([
+            "Macro Test()",
+            "  Var known;",
+            "  for",
+            "    if (parm = known)",
+            "    end;",
+            "    break;",
+            "  end;",
+            "End;"
+        ]);
+
+        assert.deepStrictEqual(withIf.strict, ["parm"]);
+
+        /* Контроль: пустой заголовок ведёт себя так же. */
+        const emptyHeader = check([
+            "Macro Test()",
+            "  Var known, value;",
+            "  for ()",
+            "    Foo(parm = known);",
+            "    value = parm;",
+            "    break;",
+            "  end;",
+            "End;"
+        ]);
+
+        assert.deepStrictEqual(
+            emptyHeader.strict,
+            withCall.strict,
+            "`for ()` и `for` без скобок обязаны отвечать одинаково"
+        );
+
+        /* Контроль: у обычного цикла переменная заголовка объявлена. */
+        const usual = check([
+            "Macro Test()",
+            "  Var total = 0;",
+            "  for (i = 0; i < 3; i = i + 1)",
+            "    total = total + i;",
+            "  end;",
+            "End;"
+        ]);
+
+        assert.deepStrictEqual(usual.safe, []);
+        assert.deepStrictEqual(usual.strict, []);
+    });
+
     await test("изменение lib доходит до main через middle", () => {
         const middle = "file:///middle.mac";
         const lib = "file:///lib.mac";
