@@ -9,7 +9,13 @@ import {
     type IRslTimerHandle
 } from "../core/clock";
 import { RslSymbol } from "../symbols/rslSymbol";
+import type { IRslLexResult } from "../lexer";
 import { parseRslSyntax } from "../syntaxParser";
+import {
+    createRslModelState,
+    tryUpdateRslModelState,
+    type IRslModelState
+} from "./incrementalModel";
 import type { RslSettingsService } from "./settingsService";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 
@@ -120,6 +126,15 @@ export class DocumentAnalysisService {
     private parsedVersions = new Map<string, number>();
     /** Назначенный разбор и версия, ради которой он назначен. */
     private readonly clock: IRslClock;
+    /**
+     * Прошлое состояние модели открытого файла: основа точечной правки.
+     *
+     * Хранится одно на документ и заменяется следующей успешной
+     * сборкой. Памяти это почти не добавляет: текст и дерево этой
+     * версии всё равно держит модель, а неизменившиеся поддеревья и
+     * объявления новое состояние берёт у прежнего по ссылке.
+     */
+    private modelStates = new Map<string, IRslModelState>();
     private parseTimers = new Map<string, {
         timer: IRslTimerHandle;
         version: number;
@@ -365,6 +380,56 @@ export class DocumentAnalysisService {
         }
     }
 
+    /**
+     * Разбор и модель с переиспользованием прошлой версии.
+     *
+     * Правка внутри тела процедуры меняет одну единицу верхнего уровня:
+     * её дерево и объявления считаются заново, остальные берутся
+     * готовыми. Любое сомнение — и работает полный путь, потому что
+     * неверная модель недопустима.
+     */
+    private buildModelWithReuse(
+        uri: string,
+        text: string,
+        lex: IRslLexResult,
+        version: number,
+        resumedSyntax?: ReturnType<typeof parseRslSyntax>
+    ): {
+        syntax: ReturnType<typeof parseRslSyntax>;
+        model: ReturnType<typeof createOpenModuleModel>;
+    } {
+        const performance = this.options.performance;
+
+        if (resumedSyntax) {
+            /* Продолжение прерванного разбора: дерево этой версии готово. */
+            const resumedState = createRslModelState(text, resumedSyntax);
+            this.modelStates.set(uri, resumedState.state);
+
+            return {
+                syntax: resumedSyntax,
+                model: resumedState.model
+            };
+        }
+
+        const previous = this.modelStates.get(uri);
+        const update = (previous && tryUpdateRslModelState(
+            previous,
+            text,
+            lex,
+            decision => performance?.mark?.(
+                "analysis.incrementalParse",
+                { uri, version, ...decision }
+            )
+        )) || createRslModelState(
+            text,
+            parseRslSyntax(text, lex, { buildExpressionTree: false })
+        );
+
+        this.modelStates.set(uri, update.state);
+
+        return { syntax: update.state.parse, model: update.model };
+    }
+
     /** Совместимость со старым API: считается изменением документа. */
     schedule(document: TextDocument): void {
         this.changed(document);
@@ -567,6 +632,8 @@ export class DocumentAnalysisService {
         this.cancelTimer(uri);
         this.cancelQueued(uri);
         this.phaseCheckpoints.delete(uri);
+        /* Прошлое состояние модели нужно только открытому файлу. */
+        this.modelStates.delete(uri);
         this.fastSnapshots.delete(uri);
         this.openedVersions.delete(uri);
         this.parsedVersions.delete(uri);
@@ -1162,11 +1229,14 @@ export class DocumentAnalysisService {
          */
         const checkpoint = this.phaseCheckpoints.get(uri);
         const resumed = checkpoint?.version === version;
-        const syntax = resumed
-            ? checkpoint!.syntax
-            : parseRslSyntax(text, fastSnapshot.lex, {
-                buildExpressionTree: false
-            });
+        const built = this.buildModelWithReuse(
+            uri,
+            text,
+            fastSnapshot.lex,
+            version,
+            resumed ? checkpoint!.syntax : undefined
+        );
+        const syntax = built.syntax;
 
         if (resumed) {
             performance?.mark?.("analysis.resumed", {
@@ -1227,7 +1297,11 @@ export class DocumentAnalysisService {
             return;
         }
 
-        const model = createOpenModuleModel(text, syntax);
+        /*
+         * Модель уже собрана вместе с разбором: объявления неизменившихся
+         * единиц взяты у прошлой версии, а не извлечены заново.
+         */
+        const model = built.model;
         this.phaseCheckpoints.delete(uri);
         if (treeSpan) {
             performance.end(treeSpan, {

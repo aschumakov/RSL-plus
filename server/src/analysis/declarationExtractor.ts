@@ -785,9 +785,25 @@ export function extractDeclarationsFromSyntax(
     };
 }
 
+/**
+ * Позиции определений: только чтение по символу.
+ *
+ * Тип нарочно минимальный — Map и WeakMap одинаково подходят, а
+ * точечному пути нужен именно WeakMap: он переживает версии файла и
+ * не требует пересборки для неизменившихся символов.
+ */
+export interface IRslDefinitionRanges {
+    get(symbol: RslSymbol): IExternalLocationRange | undefined;
+}
+
+export interface IRslMutableDefinitionRanges
+    extends IRslDefinitionRanges {
+    set(symbol: RslSymbol, range: IExternalLocationRange): unknown;
+}
+
 export interface IRslSymbolTreeBuildResult {
     root: RslSymbol;
-    definitionRanges: Map<RslSymbol, IExternalLocationRange>;
+    definitionRanges: IRslDefinitionRanges;
 }
 
 /** Единственное место преобразования деклараций в semantic symbol model. */
@@ -807,12 +823,84 @@ export function buildRslSymbolTree(
     return { root, definitionRanges };
 }
 
+/** Символы одной единицы верхнего уровня. */
+export interface IRslSymbolUnit {
+    symbols: RslSymbol[];
+}
+
+/**
+ * Сборка дерева символов по единицам верхнего уровня.
+ *
+ * Нужна точечному пути: при правке внутри одной процедуры символы
+ * остальных пересобирать незачем, а на файле 651 КБ это 17 мс из 50.
+ *
+ * Порядок обязателен: идентификатор символа включает номер одноимённого
+ * среди предыдущих братьев, поэтому единицы подаются слева направо, а
+ * готовые — через reuse, чтобы счётчик шёл дальше как при полной сборке.
+ */
+export function createRslSymbolUnitBuilder(
+    definitionRanges: IRslMutableDefinitionRanges
+): {
+    build(
+        descriptors: readonly IRslDeclarationDescriptor[]
+    ): IRslSymbolUnit;
+    reuse(unit: IRslSymbolUnit): void;
+    finish(
+        sourceLength: number,
+        units: readonly IRslSymbolUnit[]
+    ): IRslSymbolTreeBuildResult;
+} {
+    const rootId = moduleSymbolId();
+    const occurrences = new Map<string, number>();
+
+    return {
+        build(descriptors) {
+            return {
+                symbols: buildChildren(
+                    descriptors,
+                    rootId,
+                    definitionRanges,
+                    occurrences
+                )
+            };
+        },
+        reuse(unit) {
+            for (const symbol of unit.symbols) {
+                const key = `${symbol.kind}:${normalizeIdentifier(
+                    symbol.name
+                )}`;
+                occurrences.set(key, (occurrences.get(key) || 0) + 1);
+            }
+        },
+        finish(sourceLength, units) {
+            const children: RslSymbol[] = [];
+
+            for (const unit of units) {
+                for (const symbol of unit.symbols) {
+                    children.push(symbol);
+                }
+            }
+
+            const root = new RslSymbol({
+                id: rootId,
+                name: "",
+                kind: CompletionItemKind.Unit,
+                range: { start: 0, end: Math.max(0, sourceLength) },
+                children
+            });
+            return { root, definitionRanges };
+        }
+    };
+}
+
 function buildChildren(
     descriptors: readonly IRslDeclarationDescriptor[],
     parentId: SymbolId,
-    definitionRanges: Map<RslSymbol, IExternalLocationRange>
+    definitionRanges: IRslMutableDefinitionRanges,
+    /* Счётчик одноимённых: точечный путь ведёт его через все единицы. */
+    sharedOccurrences?: Map<string, number>
 ): RslSymbol[] {
-    const occurrences = new Map<string, number>();
+    const occurrences = sharedOccurrences || new Map<string, number>();
     return descriptors.map(descriptor => {
         const kind = descriptorKind(descriptor);
         const occurrenceKey = `${kind}:${normalizeIdentifier(descriptor.name)}`;

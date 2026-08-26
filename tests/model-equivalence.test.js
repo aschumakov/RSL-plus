@@ -4,11 +4,11 @@
  * Эталонное сравнение: модель после серии правок обязана совпадать с моделью,
  * построенной по итоговому тексту с нуля.
  *
- * Это защитный контур для перехода к инкрементальной модели документа. Пока
- * инкрементален только лексер, но проверка уже не пустая: правки идут через
- * точечный пересчёт токенов, и если он даст хоть чуть другой поток, разойдутся
- * и AST, и symbol tree, и диагностика. Тест лексера сравнивает токены; здесь
- * сравнивается то, что из них построено.
+ * Это защитный контур инкрементальной модели документа: правка идёт через
+ * точечный lex, точечный разбор и точечную сборку символов. Разойдись любой из
+ * трёх хоть на смещение — разойдутся AST, symbol tree и Problems. Тест лексера
+ * сравнивает токены; здесь сравнивается то, что из них построено, включая
+ * диагностику.
  *
  * Сам компаратор обязан быть чувствительным, иначе он проверяет ничто. Поэтому
  * первым делом он проверяется на намеренно испорченной копии.
@@ -20,6 +20,10 @@ const { WorkspaceIndex } = require("../server/out/workspaceIndex");
 const { lexRsl } = require("../server/out/lexer");
 const { parseRslSyntax } = require("../server/out/syntaxParser");
 const { createOpenModuleModel } = require("../server/out/moduleModel");
+const {
+    createRslModelState,
+    tryUpdateRslModelState
+} = require("../server/out/services/incrementalModel");
 const { buildRslDiagnostics } = require("../server/out/diagnostics");
 const {
     createFastDocumentSnapshot
@@ -226,6 +230,7 @@ test("серия правок даёт ту же модель, что расчё
     let version = 1;
     let applied = 0;
     let incremental = 0;
+    let incrementalModel = 0;
 
     /*
      * Правки идут через ту же цепочку, что и в службе разбора: снимок этой
@@ -237,12 +242,13 @@ test("серия правок даёт ту же модель, что расчё
     let snapshot = createFastDocumentSnapshot(
         TextDocument.create(uri, "rsl", version, source)
     );
+    let state = createRslModelState(
+        source,
+        parseRslSyntax(source, snapshot.lex, { buildExpressionTree: false })
+    ).state;
     let module = index.updateOpenModuleModel(
         uri,
-        createOpenModuleModel(
-            source,
-            parseRslSyntax(source, snapshot.lex, { buildExpressionTree: false })
-        ),
+        createRslModelState(source, state.parse).model,
         version
     );
 
@@ -265,18 +271,22 @@ test("серия правок даёт ту же модель, что расчё
             incremental++;
         }
 
-        module = index.updateOpenModuleModel(
-            uri,
-            createOpenModuleModel(
+        const update = tryUpdateRslModelState(state, source, snapshot.lex) ||
+            createRslModelState(
                 source,
                 parseRslSyntax(
                     source,
                     snapshot.lex,
                     { buildExpressionTree: false }
                 )
-            ),
-            version
-        );
+            );
+
+        if (update.incremental) {
+            incrementalModel++;
+        }
+
+        state = update.state;
+        module = index.updateOpenModuleModel(uri, update.model, version);
         applied++;
 
         const scratch = buildFromScratch(uri, source);
@@ -314,12 +324,17 @@ test("серия правок даёт ту же модель, что расчё
 
     console.log(
         `[METRIC] проверено правок: ${applied}, ` +
-        `из них точечным lex: ${incremental}`
+        `из них точечным lex: ${incremental}, ` +
+        `точечной моделью: ${incrementalModel}`
     );
     assert.ok(
         incremental > 0,
         "проверка обязана задевать точечный путь, иначе она сравнивает " +
             "полный расчёт с полным"
+    );
+    assert.ok(
+        incrementalModel > 0,
+        "проверка обязана задевать точечную модель, а не только точечный lex"
     );
 });
 

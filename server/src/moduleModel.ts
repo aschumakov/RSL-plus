@@ -7,8 +7,8 @@ import {
     buildRslSymbolTree,
     extractCompactDeclarations,
     extractDeclarationsFromSyntax,
-    type IExternalLocationRange,
-    type IRslDeclarationSnapshot
+    type IRslDeclarationSnapshot,
+    type IRslDefinitionRanges
 } from "./analysis/declarationExtractor";
 import type { RslSymbol } from "./symbols/rslSymbol";
 
@@ -23,7 +23,7 @@ export interface IRslModuleModel {
     syntax: IRslParseResult;
     lex: IRslLexResult;
     imports: string[];
-    definitionRanges?: Map<RslSymbol, IExternalLocationRange>;
+    definitionRanges?: IRslDefinitionRanges;
 }
 
 const EMPTY_LEX_RESULT = Object.freeze({

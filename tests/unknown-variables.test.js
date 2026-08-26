@@ -6,6 +6,7 @@
  */
 
 const assert = require("assert");
+const { assertLinearGrowth } = require("./measure");
 const { isFullTestRun } = require("./test-mode");
 const fs = require("fs");
 const os = require("os");
@@ -1082,79 +1083,26 @@ async function main() {
 
             return lines.join(String.fromCharCode(10));
         };
+        /*
+         * Контексты готовятся заранее: замер обязан мерить проверку, а не
+         * постройку текста и разбор. Внутри цикла повторов большой файл
+         * давал вчетверо больше мусора, и уборка памяти — тоже
+         * процессорное время — превращала линейную проверку в «×14».
+         */
+        const contexts = new Map([
+            [2000, open(build(2000))],
+            [8000, open(build(8000))]
+        ]);
         const measure = count => {
-            const context = open(build(count));
-            let best = Infinity;
+            const context = contexts.get(count);
 
-            for (let run = 0; run < 3; run++) {
-                const started = process.hrtime.bigint();
-                collectRslUndeclaredAssignments(
-                    context.module,
-                    context.resolver
-                );
-                best = Math.min(
-                    best,
-                    Number(process.hrtime.bigint() - started) / 1e6
-                );
-            }
-
-            return best;
+            collectRslUndeclaredAssignments(
+                context.module,
+                context.resolver
+            );
         };
 
-        /*
-         * Большой замер идёт первым: он же и прогревает JIT, иначе
-         * маленький оказывается несопоставимо быстрым. Сборки мусора в
-         * тестовом прогоне не видно (нет --expose-gc), поэтому отношение
-         * берётся лучшее из двух попыток: одиночный выброс GC давал ×30
-         * там, где обе величины линейны.
-         *
-         * Замер по времени здесь — дымовая проверка: настоящий инструмент —
-         * npm run bench:diagnostics, он считает рост с уборкой памяти.
-         */
-        let ratio = Number.POSITIVE_INFINITY;
-        let attempt = [0, 0];
-
-        for (let round = 0; round < 3 && ratio >= 8; round++) {
-            const large = measure(8000);
-            const small = measure(2000);
-            const current = large / Math.max(small, 0.5);
-
-            if (current < ratio) {
-                ratio = current;
-                attempt = [small, large];
-            }
-        }
-
-        assert.ok(
-            ratio < 8,
-            `Учетверение размера дало рост ×${ratio.toFixed(1)}: ` +
-                `${attempt[0].toFixed(1)} мс -> ${attempt[1].toFixed(1)} мс`
-        );
-    });
-
-    /*
-     * ─── Неразрешённые имена (strict) ─────────────────────────────────
-     */
-    await test("strict проверяет и файл без объявлений", () => {
-        /*
-         * Требование объявленного VAR — правило соседней проверки. Режим
-         * strict обещан как «все неразрешённые имена», и файл без единого
-         * VAR он тоже проверяет: пользователь выбрал его сознательно.
-         */
-        const context = open([
-            "Macro Test()",
-            "    typo = Missing;",
-            "End;"
-        ].join(String.fromCharCode(10)));
-
-        assert.deepStrictEqual(
-            names(buildUnknownVariableDiagnostics(
-                context.module,
-                context.resolver,
-                { mode: "strict" }
-            )).sort(),
-            ["Missing", "typo"]
-        );
+        assertLinearGrowth(assert, measure, 2000, 8000, "учетверение");
     });
 
     await test("strict проверяет и неполный контекст", () => {

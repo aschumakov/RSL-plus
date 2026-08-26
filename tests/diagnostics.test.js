@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("assert");
+const { assertLinearGrowth } = require("./measure");
 const { isFullTestRun } = require("./test-mode");
 
 const serverModulePath = require.resolve("../server/out/server");
@@ -974,41 +975,6 @@ test("SetParm вне процедуры ничьих параметров не �
     );
 });
 
-/**
- * Рост времени от размера — линейный, а не квадратичный.
- *
- * Замер по времени в тестовом прогоне шумит: уборки мусора не видно (нет
- * --expose-gc), и одна пауза внутри большого замера давала ложное
- * «квадратично» — 26 мс против 69 мс при пороге 67. Поэтому большой размер
- * меряется первым, он же прогревает JIT, вердикт берётся по лучшей из двух
- * попыток, а порог отличает линейное от квадратичного: удвоение размера при
- * квадратичности даёт ×4, а не ×3.
- *
- * Настоящий инструмент для роста — npm run bench:diagnostics: он считает с
- * управляемой уборкой памяти и на нескольких размерах.
- */
-function assertLinearGrowth(measure, smallCount, largeCount, label) {
-    let best;
-
-    for (let attempt = 0; attempt < 2; attempt++) {
-        const large = measure(largeCount);
-        const small = measure(smallCount);
-
-        if (!best || large / small < best.large / best.small) {
-            best = { small, large };
-        }
-
-        if (best.large < best.small * 3 + 5) {
-            break;
-        }
-    }
-
-    assert.ok(
-        best.large < best.small * 3 + 5,
-        label + ": " + best.small.toFixed(1) + " -> " +
-            best.large.toFixed(1) + " мс"
-    );
-}
 
 test("много вызовов SetParm вне процедур — рост линейный", () => {
     if (!isFullTestRun()) {
@@ -1032,26 +998,25 @@ test("много вызовов SetParm вне процедур — рост л�
 
         return lines.join(String.fromCharCode(10));
     };
-    const measure = count => {
+    /* Готовые контексты: см. соседний замер роста. */
+    const engine = new RslDiagnosticEngine();
+    const prepared = new Map([1000, 2000].map(count => {
         const index = new WorkspaceIndex();
         const uri = "file:///setparm-top.mac";
         index.registerWorkspaceFiles([uri]);
-        const opened = index.updateOpenModule(uri, sample(count), 1);
-        const engine = new RslDiagnosticEngine();
-        let best = Infinity;
 
-        for (let run = 0; run < 3; run++) {
-            const started = process.hrtime.bigint();
-            engine.buildLocal(opened, index);
-            best = Math.min(
-                best,
-                Number(process.hrtime.bigint() - started) / 1e6
-            );
-        }
+        return [count, {
+            index,
+            opened: index.updateOpenModule(uri, sample(count), 1)
+        }];
+    }));
+    const measure = count => {
+        const context = prepared.get(count);
 
-        return best;
+        engine.buildLocal(context.opened, context.index);
     };
     assertLinearGrowth(
+        assert,
         measure,
         1000,
         2000,
@@ -1080,26 +1045,25 @@ test("много процедур с SetParm — рост линейный", () 
 
         return lines.join(String.fromCharCode(10));
     };
-    const measure = count => {
+    /* Готовые контексты: см. соседний замер роста. */
+    const engine = new RslDiagnosticEngine();
+    const prepared = new Map([1000, 2000].map(count => {
         const index = new WorkspaceIndex();
         const uri = "file:///setparm-many.mac";
         index.registerWorkspaceFiles([uri]);
-        const opened = index.updateOpenModule(uri, sample(count), 1);
-        const engine = new RslDiagnosticEngine();
-        let best = Infinity;
 
-        for (let run = 0; run < 3; run++) {
-            const started = process.hrtime.bigint();
-            engine.buildLocal(opened, index);
-            best = Math.min(
-                best,
-                Number(process.hrtime.bigint() - started) / 1e6
-            );
-        }
+        return [count, {
+            index,
+            opened: index.updateOpenModule(uri, sample(count), 1)
+        }];
+    }));
+    const measure = count => {
+        const context = prepared.get(count);
 
-        return best;
+        engine.buildLocal(context.opened, context.index);
     };
     assertLinearGrowth(
+        assert,
         measure,
         1000,
         2000,

@@ -9,6 +9,7 @@
  */
 
 const assert = require("assert");
+const { assertLinearGrowth } = require("./measure");
 const { isFullTestRun } = require("./test-mode");
 
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
@@ -165,41 +166,6 @@ test("проверку членов можно выключить", () => {
     );
 });
 
-/**
- * Рост времени от размера — линейный, а не квадратичный.
- *
- * Замер по времени в тестовом прогоне шумит: уборки мусора не видно (нет
- * --expose-gc), и одна пауза внутри большого замера давала ложное
- * «квадратично» — 26 мс против 69 мс при пороге 67. Поэтому большой размер
- * меряется первым, он же прогревает JIT, вердикт берётся по лучшей из двух
- * попыток, а порог отличает линейное от квадратичного: удвоение размера при
- * квадратичности даёт ×4, а не ×3.
- *
- * Настоящий инструмент для роста — npm run bench:diagnostics: он считает с
- * управляемой уборкой памяти и на нескольких размерах.
- */
-function assertLinearGrowth(measure, smallCount, largeCount, label) {
-    let best;
-
-    for (let attempt = 0; attempt < 2; attempt++) {
-        const large = measure(largeCount);
-        const small = measure(smallCount);
-
-        if (!best || large / small < best.large / best.small) {
-            best = { small, large };
-        }
-
-        if (best.large < best.small * 3 + 5) {
-            break;
-        }
-    }
-
-    assert.ok(
-        best.large < best.small * 3 + 5,
-        label + ": " + best.small.toFixed(1) + " -> " +
-            best.large.toFixed(1) + " мс"
-    );
-}
 
 test("проверка обращений через точку растёт линейно", () => {
     if (!isFullTestRun()) {
@@ -233,24 +199,27 @@ test("проверка обращений через точку растёт л�
 
         return lines.join(String.fromCharCode(10));
     };
-    const measure = count => {
+    /*
+     * Контексты готовятся заранее: замер обязан мерить проверку, а не
+     * постройку текста и разбор. Внутри цикла повторов большой файл даёт
+     * вчетверо больше мусора, и уборка памяти — тоже процессорное время.
+     */
+    const prepared = new Map([2000, 4000].map(count => {
         const index = new WorkspaceIndex();
         index.registerWorkspaceFiles([MAIN]);
-        const module = index.updateOpenModule(MAIN, sample(count), 1);
-        let best = Infinity;
 
-        for (let run = 0; run < 5; run++) {
-            const started = process.hrtime.bigint();
-            buildRslDiagnostics(module, index);
-            best = Math.min(
-                best,
-                Number(process.hrtime.bigint() - started) / 1e6
-            );
-        }
+        return [count, {
+            index,
+            module: index.updateOpenModule(MAIN, sample(count), 1)
+        }];
+    }));
+    const measure = count => {
+        const context = prepared.get(count);
 
-        return best;
+        buildRslDiagnostics(context.module, context.index);
     };
     assertLinearGrowth(
+        assert,
         measure,
         2000,
         4000,
@@ -306,24 +275,27 @@ test("много областей с Var — рост линейный", () => {
 
         return lines.join(String.fromCharCode(10));
     };
-    const measure = count => {
+    /*
+     * Контексты готовятся заранее: замер обязан мерить проверку, а не
+     * постройку текста и разбор. Внутри цикла повторов большой файл даёт
+     * вчетверо больше мусора, и уборка памяти — тоже процессорное время.
+     */
+    const prepared = new Map([1000, 2000].map(count => {
         const index = new WorkspaceIndex();
         index.registerWorkspaceFiles([MAIN]);
-        const module = index.updateOpenModule(MAIN, sample(count), 1);
-        let best = Infinity;
 
-        for (let run = 0; run < 5; run++) {
-            const started = process.hrtime.bigint();
-            buildRslDiagnostics(module, index);
-            best = Math.min(
-                best,
-                Number(process.hrtime.bigint() - started) / 1e6
-            );
-        }
+        return [count, {
+            index,
+            module: index.updateOpenModule(MAIN, sample(count), 1)
+        }];
+    }));
+    const measure = count => {
+        const context = prepared.get(count);
 
-        return best;
+        buildRslDiagnostics(context.module, context.index);
     };
     assertLinearGrowth(
+        assert,
         measure,
         1000,
         2000,
