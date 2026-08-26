@@ -18,6 +18,9 @@ const { WorkspaceIndex } = require(path.join(outDir, "workspaceIndex"));
 const {
     findRslWorkspaceSymbols
 } = require(path.join(outDir, "features", "workspaceSymbolProvider"));
+const {
+    RslCatalogWarmupService
+} = require(path.join(outDir, "indexing", "catalogWarmupService"));
 
 const FILES = Number(process.argv[2] || 5800);
 
@@ -129,4 +132,66 @@ const sameAnswer = queries.every(query => {
 
 console.log(
     "  ответ не зависит от порядка загрузки: " + (sameAnswer ? "да" : "НЕТ")
+);
+
+/*
+ * Достройка каталога: тот же проект, но ни одной подробной модели.
+ *
+ * Так каталог заполняется в режиме activeImports — фоновым чтением файлов.
+ * Интересны три числа: время, память и полнота ответа.
+ */
+const warmupBefore = memoryMb();
+const warmupIndex = new WorkspaceIndex();
+const warmupUris = [];
+const texts = new Map();
+
+for (let file = 0; file < FILES; file++) {
+    const uri = "file:///d:/project/module" +
+        String(file).padStart(5, "0") + ".mac";
+
+    warmupUris.push(uri);
+    texts.set(uri, source(file));
+}
+
+warmupIndex.registerWorkspaceFiles(warmupUris);
+
+const warmup = new RslCatalogWarmupService({
+    index: warmupIndex,
+    readFile: uri => texts.get(uri)
+});
+
+warmup.add(warmupUris);
+
+const warmupStarted = process.hrtime.bigint();
+const progress = warmup.runToCompletion();
+const warmupMs = Number(process.hrtime.bigint() - warmupStarted) / 1e6;
+const warmupAfter = memoryMb();
+const warmupStats = warmupIndex.catalog.stats;
+
+console.log("достройка каталога чтением файлов:");
+console.log(
+    "  " + progress.done + " файлов за " + warmupMs.toFixed(0) +
+    " мс (" + (warmupMs / Math.max(1, progress.done)).toFixed(2) +
+    " мс на файл)"
+);
+console.log(
+    "  в каталоге: " + warmupStats.modules + " модулей, " +
+    warmupStats.symbols + " символов"
+);
+console.log(
+    "  куча: " + warmupBefore.toFixed(1) + " -> " +
+    warmupAfter.toFixed(1) + " МБ"
+);
+console.log(
+    "  подробных моделей в памяти: " +
+    warmupIndex.getIndexedModules().length
+);
+
+const sameAsIndexed = queries.every(query =>
+    findRslWorkspaceSymbols(warmupIndex, query).length ===
+        findRslWorkspaceSymbols(forward.index, query).length);
+
+console.log(
+    "  Ctrl+T находит столько же, сколько при полной индексации: " +
+    (sameAsIndexed ? "да" : "НЕТ")
 );

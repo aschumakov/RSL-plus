@@ -79,11 +79,13 @@ export function buildRslFileRenameEdit(
 /**
  * Файлы, которые стоит проверить.
  *
- * Каталог знает, кто импортирует модуль, — этого достаточно для
- * `Import`. Строковые ссылки `ExecMacroFile("lib.mac")` ищутся среди
- * загруженных моделей: их токены уже в памяти. Держать такой список в
- * каталоге пришлось бы ценой прохода по токенам на каждую правку
- * файла — переименование того не стоит.
+ * Каталог знает и кто импортирует модуль, и кто упоминает его файл строкой:
+ * `ExecMacroFile("lib.mac")`. Строковые ссылки в каталог складывает фоновая
+ * достройка, которая читает файл целиком, — поэтому отвечает он и про файлы,
+ * которые ни разу не открывались.
+ *
+ * Загруженные модели просматриваются всё равно: файл, правленный в редакторе,
+ * мог получить новую ссылку уже после того, как его прочитала достройка.
  */
 function candidateUris(
     environment: IRslRenameEnvironment,
@@ -93,6 +95,12 @@ function candidateUris(
         environment.index.catalog.modulesReferencing(oldName)
     );
     const fileName = oldName.toLowerCase() + ".mac";
+
+    for (const uri of environment.index.catalog.modulesMentioningFile(
+        fileName
+    )) {
+        result.add(uri);
+    }
 
     for (const module of environment.index.getIndexedModules()) {
         if (result.has(module.uri)) {

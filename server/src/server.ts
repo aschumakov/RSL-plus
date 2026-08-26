@@ -10,7 +10,11 @@ import {
 
 import { TextDocument } from "vscode-languageserver-textdocument";
 
+import * as fs from "fs";
+import { fileURLToPath } from "url";
+
 import { RslSymbol } from "./symbols/rslSymbol";
+import { decodeRslSourceText } from "./core/textDecoding";
 import { RslDiagnosticEngine } from "./diagnostics/diagnosticEngine";
 import { DiagnosticsCoordinator } from "./diagnostics/diagnosticsCoordinator";
 import {
@@ -39,6 +43,9 @@ import { RSL_SEMANTIC_TOKENS_LEGEND } from "./semanticTokens";
 import { RslSettingsService } from "./services/settingsService";
 import { IIndexedModule, WorkspaceIndex } from "./workspaceIndex";
 import { WorkspaceModuleLoader } from "./indexing/workspaceModuleLoader";
+import {
+    RslCatalogWarmupService
+} from "./indexing/catalogWarmupService";
 import {
     CompactModuleWorkerService
 } from "./indexing/compactModuleWorkerService";
@@ -241,11 +248,41 @@ const moduleLoader = new WorkspaceModuleLoader(
     referenceIndex
 );
 
+/*
+ * Достройка каталога проекта.
+ *
+ * Идёт при любом режиме индексации: каталог отвечает на Ctrl+T, Go to
+ * Implementation и переименование файла, и его полнота не должна зависеть
+ * от того, какие файлы пользователь успел задеть в этом сеансе.
+ */
+const catalogWarmup = new RslCatalogWarmupService({
+    index: workspaceIndex,
+    log: logMessage,
+    readFile: uri => {
+        const opened = documents.get(uri);
+
+        if (opened) {
+            return opened.getText();
+        }
+
+        return decodeRslSourceText(fs.readFileSync(fileURLToPath(uri)));
+    },
+    onProgress: progress => {
+        if (progress.complete) {
+            logMessage(
+                "Каталог проекта достроен: файлов " + progress.done +
+                ", пропущено " + progress.skipped
+            );
+        }
+    }
+});
+
 const workspaceDiscovery = new WorkspaceFileDiscoveryService({
     log: logMessage,
     performance: performanceLogger,
     onFiles: uris => {
         moduleLoader.registerWorkspaceFiles(uris);
+        catalogWarmup.add(uris);
         definitionProvider?.clearCaches();
     }
 });
@@ -480,6 +517,7 @@ languageFeatures = new RslLanguageFeatureRegistry({
         moduleLoader.noteInteractiveActivity();
         workspaceDiscovery.noteInteractiveActivity();
         documentAnalysis.noteInteractiveActivity();
+        noteCatalogWarmupActivity();
     },
     log: logMessage,
     performance: performanceLogger
@@ -667,6 +705,30 @@ async function ensureDocumentParsed(
 }
 
 /** Разбор нужен, но торопить его незачем: см. DocumentAnalysisService. */
+/*
+ * Достройка каталога уступает дорогу и возвращается к работе.
+ *
+ * Пауза считается от последнего действия пользователя: чтение файлов —
+ * работа для затишья, а не для середины набора текста.
+ */
+const CATALOG_WARMUP_IDLE_MS = 1500;
+let catalogWarmupTimer: NodeJS.Timeout | undefined;
+
+function noteCatalogWarmupActivity(): void {
+    catalogWarmup.suspend();
+
+    if (catalogWarmupTimer) {
+        clearTimeout(catalogWarmupTimer);
+    }
+
+    catalogWarmupTimer = setTimeout(() => {
+        catalogWarmupTimer = undefined;
+        catalogWarmup.resume();
+    }, CATALOG_WARMUP_IDLE_MS);
+
+    catalogWarmupTimer.unref?.();
+}
+
 function requestDocumentParse(document: TextDocument): void {
     documentAnalysis.requestParse(document);
 }

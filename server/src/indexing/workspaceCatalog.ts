@@ -2,7 +2,6 @@ import { CompletionItemKind } from "vscode-languageserver";
 
 import { normalizeIdentifier } from "../lexer";
 import type { RslSymbol } from "../symbols/rslSymbol";
-import type { IIndexedModule } from "../workspaceIndex";
 
 /**
  * Постоянный каталог символов проекта.
@@ -43,6 +42,30 @@ export interface IRslCatalogModule {
     /** Экспортируемые имена: кандидаты для References и Auto Import. */
     exports: ReadonlySet<string>;
     imports: readonly string[];
+    /**
+     * Имена файлов, упомянутые строками: ExecMacroFile("lib.mac").
+     *
+     * Заполняет только фоновая достройка каталога, которая и так читает
+     * файл целиком. На каждое обновление модели этого не делается: проход
+     * по тексту на каждую правку стоил бы дороже, чем переименование файла
+     * раз в месяц.
+     */
+    fileReferences?: ReadonlySet<string>;
+}
+
+/**
+ * Что нужно каталогу от модуля.
+ *
+ * Не IIndexedModule: каталог заполняется и одноразовой компактной моделью
+ * фоновой достройки, у которой нет ни версии документа, ни признака
+ * открытости.
+ */
+export interface IRslCatalogSource {
+    uri: string;
+    version: number;
+    symbolTree: RslSymbol;
+    imports: readonly string[];
+    lex?: { lineStarts: readonly number[] };
 }
 
 export interface IRslCatalogStats {
@@ -63,6 +86,8 @@ export class WorkspaceCatalog {
      * записей — обновление одного файла стоило прохода по всему проекту.
      */
     private byName = new Map<string, Map<string, IRslCatalogSymbol[]>>();
+    /** Имя файла -> файлы, которые упоминают его строкой. */
+    private byFileReference = new Map<string, Set<string>>();
     private revisionValue = 0;
 
     get revision(): number {
@@ -75,7 +100,7 @@ export class WorkspaceCatalog {
      * Вызывается на каждое обновление модели — и открытой, и компактной
      * внешней. Дороже одного прохода по объявлениям это не стоит.
      */
-    record(module: IIndexedModule): void {
+    record(module: IRslCatalogSource): void {
         const symbols: IRslCatalogSymbol[] = [];
         const exports = new Set<string>();
         const lineStarts = module.lex?.lineStarts || [0];
@@ -94,14 +119,20 @@ export class WorkspaceCatalog {
             }
         }
 
+        const previousReferences = this.modules.get(module.uri)
+            ?.fileReferences;
+
         this.remove(module.uri);
         this.modules.set(module.uri, {
             uri: module.uri,
             version: module.version,
             symbols,
             exports,
-            imports: module.imports.slice()
+            imports: module.imports.slice(),
+            /* Ссылки живут своей записью: см. recordFileReferences. */
+            fileReferences: previousReferences
         });
+        this.attachFileReferences(module.uri, previousReferences);
 
         for (const symbol of symbols) {
             let byUri = this.byName.get(symbol.normalized);
@@ -121,6 +152,74 @@ export class WorkspaceCatalog {
         }
 
         this.revisionValue++;
+    }
+
+    /**
+     * Строковые ссылки на файлы модулей.
+     *
+     * Отдельный вход, а не часть record: их знает только тот, кто читал
+     * текст файла целиком, — фоновая достройка каталога.
+     */
+    recordFileReferences(uri: string, names: ReadonlySet<string>): void {
+        const previous = this.modules.get(uri);
+
+        /*
+         * Прежние ссылки снимаются по списку самого файла, а не обходом
+         * всей карты: обход стоил бы столько же на каждую правку любого
+         * файла, сколько сама достройка каталога.
+         */
+        this.detachFileReferences(uri, previous?.fileReferences);
+        this.attachFileReferences(uri, names);
+
+        if (previous) {
+            this.modules.set(uri, { ...previous, fileReferences: names });
+        }
+
+        this.revisionValue++;
+    }
+
+    private attachFileReferences(
+        uri: string,
+        names: ReadonlySet<string> | undefined
+    ): void {
+        for (const name of names || []) {
+            const uris = this.byFileReference.get(name) ||
+                new Set<string>();
+
+            uris.add(uri);
+            this.byFileReference.set(name, uris);
+        }
+    }
+
+    private detachFileReferences(
+        uri: string,
+        names: ReadonlySet<string> | undefined
+    ): void {
+        for (const name of names || []) {
+            const uris = this.byFileReference.get(name);
+
+            if (!uris) {
+                continue;
+            }
+
+            uris.delete(uri);
+
+            if (uris.size === 0) {
+                this.byFileReference.delete(name);
+            }
+        }
+    }
+
+    /**
+     * Кто упоминает файл строкой.
+     *
+     * Отвечает и про файлы, которые ни разу не открывались: их прочитала
+     * фоновая достройка каталога.
+     */
+    modulesMentioningFile(fileName: string): string[] {
+        return [
+            ...(this.byFileReference.get(fileName.toLowerCase()) || [])
+        ].sort();
     }
 
     /** Файла больше нет в проекте: запись уходит вместе с ним. */
@@ -145,6 +244,7 @@ export class WorkspaceCatalog {
             }
         }
 
+        this.detachFileReferences(uri, previous.fileReferences);
         this.modules.delete(uri);
         this.revisionValue++;
     }
