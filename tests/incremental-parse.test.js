@@ -22,6 +22,7 @@ const { lexRsl } = require("../server/out/lexer");
 const {
     extractDeclarationsFromSyntax
 } = require("../server/out/analysis/declarationExtractor");
+const { isFullTestRun } = require("./test-mode");
 
 let passed = 0;
 let failed = 0;
@@ -329,10 +330,14 @@ test("маленький файл идёт полным путём", () => {
 });
 
 /*
- * Направленные мутации: сто правок в разные места файла. Каждая, если пошла
+ * Направленные мутации: правки в разные места файла. Каждая, если пошла
  * точечным путём, обязана дать в точности то же, что полный разбор.
+ *
+ * В полном наборе их сто, в быстром двадцать: каждая сверка — это разбор
+ * файла на 400 процедур дважды и сравнение четырёх подписей, и сто таких
+ * сверок занимают больше времени, чем весь остальной быстрый набор.
  */
-test("сто мутаций совпадают с полным разбором", () => {
+test("направленные мутации совпадают с полным разбором", () => {
     let applied = 0;
     let refused = 0;
     const inserts = [" ", "\n", "  Var extra = 1;\n", "+ 1", "0", "  "];
@@ -344,7 +349,9 @@ test("сто мутаций совпадают с полным разбором"
         return seed / 0x7fffffff;
     };
 
-    for (let attempt = 0; attempt < 100; attempt++) {
+    const attempts = isFullTestRun() ? 100 : 20;
+
+    for (let attempt = 0; attempt < attempts; attempt++) {
         const at = Math.floor(
             BASE.length * 0.2 + random() * BASE.length * 0.7
         );
