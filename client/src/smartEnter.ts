@@ -1,4 +1,4 @@
-import { RSL_BLOCK_END } from "./rslBlockText";
+import { rslBlockEnd } from "./rslBlockText";
 
 const RSL_NAME = String.raw`(?:\{[^}\r\n]+\}|[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё0-9_]*)`;
 /* Пустые скобки допустимы во время набора: диагностика отдельно подскажет,
@@ -23,6 +23,8 @@ export interface IRslSmartEnterContext {
     indentUnit: string;
     eol: string;
     nextNonEmptyLine?: string;
+    /** Регистр вставляемых слов: rslPlus.format.keywordCase. */
+    keywordCase?: string;
 }
 
 /** Возвращает snippet только для полностью введённого заголовка RSL-блока. */
@@ -48,7 +50,7 @@ export function buildRslSmartEnterSnippet(
 
     return isEndLine(context.nextNonEmptyLine)
         ? body
-        : `${body}${context.eol}${RSL_BLOCK_END}`;
+        : `${body}${context.eol}${rslBlockEnd(context.keywordCase)}`;
 }
 
 /**

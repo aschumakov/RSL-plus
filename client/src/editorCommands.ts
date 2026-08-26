@@ -201,7 +201,11 @@ async function smartEnter(): Promise<void> {
         afterCursor,
         indentUnit,
         eol,
-        nextNonEmptyLine: findNextNonEmptyLine(editor, position.line + 1)
+        nextNonEmptyLine: findNextNonEmptyLine(editor, position.line + 1),
+        /* Регистр закрытия — настройка проекта, а не свойство команды. */
+        keywordCase: workspace
+            .getConfiguration("rslPlus", editor.document.uri)
+            .get<string>("format.keywordCase")
     });
 
     if (!snippet) {

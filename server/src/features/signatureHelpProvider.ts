@@ -241,7 +241,7 @@ function countArguments(
     return active;
 }
 
-function extractParameterLabels(symbol: RslSymbol): string[] {
+export function extractParameterLabels(symbol: RslSymbol): string[] {
     const detail = String(symbol.completionItem.detail || "");
     const nameIndex = detail.toLowerCase().indexOf(
         symbol.name.toLowerCase()

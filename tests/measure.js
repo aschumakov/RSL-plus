@@ -1,27 +1,51 @@
 "use strict";
 
 /**
- * Замеры в тестах: процессорное время, одинаковые условия для обоих размеров.
+ * Замеры в тестах: сравнимые условия для обоих размеров.
+ *
+ * Проверка роста отвечает на один вопрос: удвоение входа удваивает время или
+ * возводит его в квадрат. Отвечать на него оказалось неожиданно трудно.
  *
  * Настенное время в общем прогоне гуляет: рядом работают другие тестовые
  * процессы, операционная система занимает ядро, уборка мусора вклинивается в
- * середину замера. Одна и та же проверка роста давала то ×1,7, то ×30 — и
- * падала не из-за регрессии.
+ * середину замера. Одна и та же проверка давала то ×1,7, то ×30.
  *
- * Процессорное время своего процесса от соседей почти не зависит, но у него
- * две тонкости. Первая: на Windows счётчик тикает примерно раз в 15 мс, и
- * короткое действие показывает ноль — поэтому замер накапливается повторами.
- * Вторая: если маленький размер повторить двадцать раз, а большой один, то
- * маленький окажется вдесятеро «быстрее» просто из-за прогрева JIT. Поэтому
- * число повторов подбирается по маленькому размеру и применяется к обоим.
+ * Процессорное время своего процесса от соседей не зависит, но на Windows его
+ * счётчик тикает примерно раз в 15 мс. Замер на 16 мс — это один тик, и
+ * отношение «один тик к одиннадцати» не значит ничего: те же данные давали то
+ * ×2,0, то ×10,7.
+ *
+ * Поэтому здесь настенное время — и три условия, которые делают его пригодным.
+ * Первое: файлы с такими проверками идут в тихой части прогона, по одному
+ * (см. tests/run-all.js). Второе: замер накапливается повторами до величины,
+ * заметно большей планировочной дрожи. Третье: размеры меряются вперемешку, а
+ * из повторов берётся минимум — помеха может замер только замедлить.
  *
  * Абсолютные величины по-прежнему меряются бенчмарками (build/bench-*.js) с
  * управляемой уборкой памяти: там нужны настоящие миллисекунды.
  */
 
-/** Гранулярность счётчика на Windows: ниже этого замер бессмыслен. */
-const MINIMUM_SAMPLE_MS = 60;
-const MAXIMUM_ITERATIONS = 256;
+/** Ниже этого замер сравнивать нельзя: планировочная дрожь того же порядка. */
+const MINIMUM_SAMPLE_MS = 50;
+const MAXIMUM_ITERATIONS = 4096;
+
+/*
+ * Сколько раз мерить каждый размер.
+ *
+ * Берётся минимум: помеха может только замедлить замер, но не ускорить его.
+ */
+const ROUNDS = 4;
+
+/** Суммарное время iterations вызовов, в миллисекундах. */
+function elapsed(action, iterations) {
+    const started = process.hrtime.bigint();
+
+    for (let index = 0; index < iterations; index++) {
+        action();
+    }
+
+    return Number(process.hrtime.bigint() - started) / 1e6;
+}
 
 /** Суммарное процессорное время iterations вызовов, в миллисекундах. */
 function cpuTotal(action, iterations) {
@@ -36,14 +60,14 @@ function cpuTotal(action, iterations) {
     return (spent.user + spent.system) / 1000;
 }
 
-/** Процессорное время одного вызова: повторы подбираются автоматически. */
+/** Время одного вызова: повторы подбираются автоматически. */
 function cpuMillis(action, minimumSampleMs = MINIMUM_SAMPLE_MS) {
     action();
 
     let iterations = 1;
 
     for (;;) {
-        const total = cpuTotal(action, iterations);
+        const total = elapsed(action, iterations);
 
         if (total >= minimumSampleMs || iterations >= MAXIMUM_ITERATIONS) {
             return total / iterations;
@@ -72,14 +96,30 @@ function assertLinearGrowth(
     measure(largeCount);
 
     let iterations = 1;
-    let small = cpuTotal(() => measure(smallCount), iterations);
+    let small = elapsed(() => measure(smallCount), iterations);
 
     while (small < MINIMUM_SAMPLE_MS && iterations < MAXIMUM_ITERATIONS) {
         iterations *= 2;
-        small = cpuTotal(() => measure(smallCount), iterations);
+        small = elapsed(() => measure(smallCount), iterations);
     }
 
-    const large = cpuTotal(() => measure(largeCount), iterations);
+    let large = elapsed(() => measure(largeCount), iterations);
+
+    /*
+     * Замеры чередуются, а не идут блоками: помеха длится дольше одного
+     * замера и блоками попадала бы целиком в один размер.
+     */
+    for (let round = 1; round < ROUNDS; round++) {
+        small = Math.min(small, elapsed(
+            () => measure(smallCount),
+            iterations
+        ));
+        large = Math.min(large, elapsed(
+            () => measure(largeCount),
+            iterations
+        ));
+    }
+
     const factor = largeCount / smallCount;
     const ratio = large / Math.max(small, 0.001);
     /* Линейному росту позволяется полуторный запас от идеального. */
@@ -87,7 +127,7 @@ function assertLinearGrowth(
 
     assert.ok(
         ratio < limit,
-        `${label}: ${small.toFixed(1)} -> ${large.toFixed(1)} мс CPU за ` +
+        `${label}: ${small.toFixed(1)} -> ${large.toFixed(1)} мс за ` +
             `${iterations} повторов (×${ratio.toFixed(1)}, ` +
             `предел ×${limit.toFixed(1)})`
     );
@@ -95,4 +135,4 @@ function assertLinearGrowth(
     return { small, large, ratio, iterations };
 }
 
-module.exports = { cpuMillis, cpuTotal, assertLinearGrowth };
+module.exports = { cpuMillis, cpuTotal, elapsed, assertLinearGrowth };

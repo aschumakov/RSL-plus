@@ -6,10 +6,21 @@ import type {
 
 import type { IIndexedModule } from "../workspaceIndex";
 
+/**
+ * Настройки, влияющие на вставляемый текст.
+ *
+ * Исправление дописывает код за пользователя, и регистр этого кода —
+ * настройка проекта, а не свойство исправления.
+ */
+export interface IRslQuickFixOptions {
+    keywordCase?: string;
+}
+
 export type RslQuickFixProvider = (
     module: IIndexedModule,
     diagnostic: Diagnostic,
-    params: CodeActionParams
+    params: CodeActionParams,
+    options: IRslQuickFixOptions
 ) => CodeAction | CodeAction[] | undefined;
 
 /** Централизованный реестр фабрик Quick Fix по diagnostic.code. */
@@ -34,7 +45,8 @@ export class RslQuickFixRegistry {
 
     build(
         module: IIndexedModule,
-        params: CodeActionParams
+        params: CodeActionParams,
+        options: IRslQuickFixOptions = {}
     ): CodeAction[] {
         const result: CodeAction[] = [];
 
@@ -46,7 +58,8 @@ export class RslQuickFixRegistry {
                 providers,
                 module,
                 diagnostic,
-                params
+                params,
+                options
             );
 
             if (customActions.length > 0) {
@@ -58,7 +71,8 @@ export class RslQuickFixRegistry {
                 result.push(...normalizeActions(this.fallbackProvider(
                     module,
                     diagnostic,
-                    params
+                    params,
+                    options
                 )));
             }
         }
@@ -71,7 +85,8 @@ function collectActions(
     providers: readonly RslQuickFixProvider[],
     module: IIndexedModule,
     diagnostic: Diagnostic,
-    params: CodeActionParams
+    params: CodeActionParams,
+    options: IRslQuickFixOptions
 ): CodeAction[] {
     const result: CodeAction[] = [];
 
@@ -79,7 +94,8 @@ function collectActions(
         result.push(...normalizeActions(provider(
             module,
             diagnostic,
-            params
+            params,
+            options
         )));
     }
 

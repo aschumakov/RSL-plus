@@ -10,10 +10,14 @@ import {
 } from "vscode-languageserver";
 
 import { buildRslCodeActions } from "../codeActions";
-import { RslQuickFixRegistry } from "./quickFixRegistry";
+import {
+    RslQuickFixRegistry,
+    type IRslQuickFixOptions
+} from "./quickFixRegistry";
 import type { IRslSyntaxNode } from "../syntaxParser";
 import type { IIndexedModule } from "../workspaceIndex";
 import { RSL_BLOCK_END } from "../language/rslLanguageReference";
+import { applyRslKeywordCase } from "./formatOptions";
 
 interface IDiagnosticData {
     start?: number;
@@ -58,7 +62,11 @@ quickFixRegistry.register(
 );
 quickFixRegistry.register(
     "missing-end",
-    (module, diagnostic) => createCloseBlockAction(module, diagnostic)
+    (module, diagnostic, _params, options) => createCloseBlockAction(
+        module,
+        diagnostic,
+        options.keywordCase
+    )
 );
 quickFixRegistry.setFallback((module, diagnostic, params) =>
     buildRslCodeActions(module, {
@@ -72,9 +80,10 @@ quickFixRegistry.setFallback((module, diagnostic, params) =>
 
 export function buildEnhancedRslCodeActions(
     module: IIndexedModule,
-    params: CodeActionParams
+    params: CodeActionParams,
+    options: IRslQuickFixOptions = {}
 ): CodeAction[] {
-    return quickFixRegistry.build(module, params);
+    return quickFixRegistry.build(module, params, options);
 }
 
 /**
@@ -206,7 +215,8 @@ const BLOCK_OPENERS = new Set([
  */
 function createCloseBlockAction(
     module: IIndexedModule,
-    diagnostic: Diagnostic
+    diagnostic: Diagnostic,
+    keywordCase?: string
 ): CodeAction | undefined {
     const unclosed = findUnclosedBlocks(module);
 
@@ -222,10 +232,11 @@ function createCloseBlockAction(
     /* Вставка в конец текста: ниже незакрытого блока ничего нет по определению. */
     const tail = source.replace(/\s+$/, "").length;
     const position = positionOfOffset(module, tail);
-    const closing = eol + indent + RSL_BLOCK_END + eol;
+    const blockEnd = applyRslKeywordCase(RSL_BLOCK_END, keywordCase);
+    const closing = eol + indent + blockEnd + eol;
 
     return {
-        title: "Добавить " + RSL_BLOCK_END,
+        title: "Добавить " + blockEnd,
         kind: CodeActionKind.QuickFix,
         diagnostics: [diagnostic],
         isPreferred: true,

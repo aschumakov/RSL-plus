@@ -15,6 +15,13 @@ import {
     type IFastDocumentSnapshot
 } from "../services/fastDocumentSnapshot";
 import { formatRslDocumentRange } from "./rangeFormatting";
+import {
+    resolveRslFormatOptions,
+} from "./formatOptions";
+import type {
+    IRslIndentStyle
+} from "../services/editorConfigService";
+import type { IRslFormatSettings } from "../interfaces";
 
 export interface IPresentationFeatureEnvironment {
     connection: Connection;
@@ -29,6 +36,14 @@ export interface IPresentationFeatureEnvironment {
     getBlockStartLines?(
         document: TextDocument
     ): readonly number[] | undefined;
+    /**
+     * Настройки форматирования и отступ проекта.
+     *
+     * Без них форматирование слушало бы только редактор, а .editorconfig
+     * проекта и настройки плагина не значили бы ничего.
+     */
+    getFormatSettings?(uri: string): IRslFormatSettings | undefined;
+    getProjectIndentStyle?(uri: string): IRslIndentStyle | undefined;
     noteInteractiveActivity?(): void;
     log(message: string): void;
     performance?: PerformanceLogger;
@@ -105,7 +120,15 @@ export class PresentationFeatureRegistry {
                 })
                 : undefined;
             try {
-                const formatted = FormatCode(source, params.options.tabSize);
+                const options = this.formatOptions(
+                    document.uri,
+                    params.options
+                );
+                const formatted = FormatCode(
+                    source,
+                    options.tabSize,
+                    options
+                );
                 if (span) performance.end(span, {
                     changed: formatted !== source,
                     failed: false,
@@ -137,13 +160,29 @@ export class PresentationFeatureRegistry {
                         ? this.environment.getBlockStartLines(document)
                         : undefined,
                     tokens: this.environment
-                        .getFastDocumentSnapshot(document).lex.tokens
+                        .getFastDocumentSnapshot(document).lex.tokens,
+                    format: this.formatOptions(
+                        document.uri,
+                        params.options
+                    )
                 });
             } catch (error) {
                 this.environment.log(`Range formatting failed: ${document.uri}\n${errorText(error)}`);
                 return [];
             }
         });
+    }
+
+    /** Настройки одного форматирования: см. resolveRslFormatOptions. */
+    private formatOptions(
+        uri: string,
+        editor: { tabSize: number; insertSpaces: boolean }
+    ): ReturnType<typeof resolveRslFormatOptions> {
+        return resolveRslFormatOptions(
+            editor,
+            this.environment.getFormatSettings?.(uri),
+            this.environment.getProjectIndentStyle?.(uri)
+        );
     }
 
     invalidate(uri: string): void {

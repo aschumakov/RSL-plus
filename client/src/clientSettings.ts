@@ -8,7 +8,15 @@ export interface IRslClientSettings {
         workspaceIndexing: "activeImports" | "workspaceIdle" | "full";
     };
     semanticHighlighting: { maxFileSizeKb: number };
-    inlayHints: { variableTypes: boolean };
+    inlayHints: { variableTypes: boolean; parameterNames: boolean };
+    format: {
+        keywordCase: string;
+        spaceAroundOperators: boolean;
+        alignAssignments: boolean;
+        useEditorConfig: boolean;
+        indentStyle: string;
+        indentSize: number;
+    };
     /*
      * Раздел обязан перечислять ВСЕ настройки диагностик из package.json.
      *
@@ -69,7 +77,40 @@ export function readRslSettings(resource?: Uri): IRslClientSettings {
                 "inlayHints.variableTypes",
                 true,
                 resource
+            ),
+            parameterNames: readSetting(
+                "inlayHints.parameterNames",
+                true,
+                resource
             )
+        },
+        format: {
+            keywordCase: readSetting(
+                "format.keywordCase",
+                "lower",
+                resource
+            ),
+            spaceAroundOperators: readSetting(
+                "format.spaceAroundOperators",
+                true,
+                resource
+            ),
+            alignAssignments: readSetting(
+                "format.alignAssignments",
+                true,
+                resource
+            ),
+            useEditorConfig: readSetting(
+                "format.useEditorConfig",
+                true,
+                resource
+            ),
+            indentStyle: readSetting(
+                "format.indentStyle",
+                "editor",
+                resource
+            ),
+            indentSize: readSetting("format.indentSize", 0, resource)
         },
         diagnostics: {
             enabled: readSetting("diagnostics.enabled", true, resource),

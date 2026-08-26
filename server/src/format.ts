@@ -59,6 +59,20 @@ export interface IRslFormatOptions {
      * шириной в настройку редактора его бы разъехала.
      */
     insertSpaces?: boolean;
+    /**
+     * Ставить пробелы вокруг операторов и после запятых.
+     *
+     * Выключено — код внутри строки остаётся тем же, что написал автор:
+     * форматируется только отступ. Так форматтер годится проекту, где принято
+     * писать `a=b` и менять это не собираются.
+     */
+    spaceAroundOperators?: boolean;
+    /**
+     * Выравнивать знаки «=» в идущих подряд присваиваниях.
+     *
+     * Выключено — присваивание остаётся с одним пробелом до и после знака.
+     */
+    alignAssignments?: boolean;
 }
 
 export function FormatCode(
@@ -111,7 +125,8 @@ export function FormatCode(
         const normalizedLine = normalizeLineSafely(
             originalLine,
             absoluteLineStart,
-            lineTokens
+            lineTokens,
+            options.spaceAroundOperators !== false
         );
         const structure = analyzeStructure(lineTokens);
         const isBranch = structure.firstKeyword !== undefined &&
@@ -213,7 +228,10 @@ export function FormatCode(
         );
     }
 
-    alignConsecutiveAssignments(formatted, alignments);
+    if (options.alignAssignments !== false) {
+        alignConsecutiveAssignments(formatted, alignments);
+    }
+
     return bom + formatted.join(lex.eol);
 }
 
@@ -442,7 +460,8 @@ function analyzeStructure(tokens: IRslToken[]): ILineStructure {
 function normalizeLineSafely(
     line: string,
     absoluteStart: number,
-    tokens: IRslToken[]
+    tokens: IRslToken[],
+    spaceAroundOperators: boolean
 ): string {
     const protectedTokens = tokens
         .filter(token =>
@@ -464,17 +483,32 @@ function normalizeLineSafely(
         }
 
         result += normalizeCodeSegment(
-            line.substring(localPosition, tokenStart)
+            line.substring(localPosition, tokenStart),
+            spaceAroundOperators
         );
         result += line.substring(tokenStart, tokenEnd);
         localPosition = tokenEnd;
     }
 
-    result += normalizeCodeSegment(line.substring(localPosition));
+    result += normalizeCodeSegment(
+        line.substring(localPosition),
+        spaceAroundOperators
+    );
     return result.trim();
 }
 
-function normalizeCodeSegment(segment: string): string {
+function normalizeCodeSegment(
+    segment: string,
+    spaceAroundOperators: boolean
+): string {
+    if (!spaceAroundOperators) {
+        /*
+         * Пробелы внутри строки не наши: правится только отступ. Схлопывать
+         * повторные пробелы тоже нельзя — выравнивание таблицей делают ими.
+         */
+        return segment;
+    }
+
     return segment
         .replace(/[ \t]*(==|!=|<=|>=|>|<)[ \t]*/g, " $1 ")
         .replace(

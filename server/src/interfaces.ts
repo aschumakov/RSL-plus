@@ -135,8 +135,34 @@ export interface IRslSettings {
     inlayHints: {
         /** Показывать выведенный тип у объявлений без написанного типа. */
         variableTypes: boolean;
+        /** Показывать имя параметра рядом с аргументом вызова. */
+        parameterNames: boolean;
     };
+    format: IRslFormatSettings;
     diagnostics?: IRslDiagnosticSettings;
+}
+
+/**
+ * Настройки форматирования.
+ *
+ * Отступ задаётся здесь только для проектов без .editorconfig: если он
+ * есть и не запрещён настройкой, слушается он. Перевод строки, BOM и
+ * финальный EOL не настраиваются вовсе — форматтер сохраняет их такими,
+ * какие они в файле.
+ */
+export interface IRslFormatSettings {
+    /** Регистр ключевых слов, которые вставляет плагин. */
+    keywordCase: "lower" | "upper" | "capitalize";
+    /** Ставить пробелы вокруг операторов и после запятых. */
+    spaceAroundOperators: boolean;
+    /** Выравнивать знак равенства в идущих подряд присваиваниях. */
+    alignAssignments: boolean;
+    /** Слушать .editorconfig проекта. */
+    useEditorConfig: boolean;
+    /** Символ отступа; "editor" — как настроен редактор. */
+    indentStyle: "editor" | "space" | "tab";
+    /** Ширина отступа; 0 — как настроено в редакторе. */
+    indentSize: number;
 }
 
 

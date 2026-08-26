@@ -5,7 +5,7 @@ import {
 } from "vscode-languageserver";
 import type { TextDocument } from "vscode-languageserver-textdocument";
 
-import { FormatCode } from "../format";
+import { FormatCode, type IRslFormatOptions } from "../format";
 import { normalizeIdentifier, type IRslToken } from "../lexer";
 import { BLOCK_START_KEYWORDS } from "../language/rslLanguageReference";
 
@@ -46,6 +46,14 @@ export interface IRangeFormattingOptions {
      * форматируется весь документ: медленно, зато тем же текстом.
      */
     tokens?: readonly IRslToken[];
+    /**
+     * Настройки форматирования: отступ проекта, пробелы, выравнивание.
+     *
+     * Их считает вызывающий: диапазонное форматирование обязано давать
+     * тот же текст, что и форматирование всего документа, а значит и
+     * настройки у них одни.
+     */
+    format?: IRslFormatOptions & { tabSize?: number };
 }
 
 export function formatRslDocumentRange(
@@ -90,8 +98,13 @@ function formatLines(
     editor: { tabSize: number; insertSpaces: boolean },
     options: IRangeFormattingOptions
 ): string {
-    const tabSize = Math.max(1, editor.tabSize || 4);
-    const insertSpaces = editor.insertSpaces !== false;
+    const format = options.format || {};
+    const tabSize = Math.max(1, format.tabSize || editor.tabSize || 4);
+    const formatOptions: IRslFormatOptions = {
+        insertSpaces: format.insertSpaces ?? editor.insertSpaces !== false,
+        spaceAroundOperators: format.spaceAroundOperators,
+        alignAssignments: format.alignAssignments
+    };
     const window = findWindow(
         options.blockStartLines,
         startLine,
@@ -100,7 +113,7 @@ function formatLines(
     );
 
     if (!window || openBlocksBefore(options.tokens, window.from) !== 0) {
-        const whole = FormatCode(source, tabSize, { insertSpaces });
+        const whole = FormatCode(source, tabSize, formatOptions);
         const offsets = lineRangeOffsets(whole, startLine, endLine);
 
         return whole.substring(offsets.start, offsets.end);
@@ -113,7 +126,7 @@ function formatLines(
     const formatted = FormatCode(
         source.slice(sliceStart, sliceEnd),
         tabSize,
-        { insertSpaces }
+        formatOptions
     );
     /*
      * Из отформатированного куска берутся ровно выбранные строки: их номера

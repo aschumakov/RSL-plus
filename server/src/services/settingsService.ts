@@ -1,4 +1,7 @@
-import type { IRslSettings } from "../interfaces";
+import type {
+    IRslFormatSettings,
+    IRslSettings
+} from "../interfaces";
 
 /**
  * Хранит уже разрешённые клиентом настройки.
@@ -93,6 +96,7 @@ function mergeSettings(
         ? input.semanticHighlighting
         : {};
     const inlayHints = isRecord(input.inlayHints) ? input.inlayHints : {};
+    const format = isRecord(input.format) ? input.format : {};
     const language = isRecord(input.language) ? input.language : {};
     const dialect = isLanguageDialect(language.dialect)
         ? language.dialect
@@ -131,7 +135,32 @@ function mergeSettings(
              */
             variableTypes: typeof inlayHints.variableTypes === "boolean"
                 ? inlayHints.variableTypes
-                : defaults.inlayHints?.variableTypes !== false
+                : defaults.inlayHints?.variableTypes !== false,
+            parameterNames: typeof inlayHints.parameterNames === "boolean"
+                ? inlayHints.parameterNames
+                : defaults.inlayHints?.parameterNames !== false
+        },
+        format: {
+            keywordCase: isKeywordCase(format.keywordCase)
+                ? format.keywordCase
+                : defaults.format?.keywordCase || "lower",
+            spaceAroundOperators:
+                typeof format.spaceAroundOperators === "boolean"
+                    ? format.spaceAroundOperators
+                    : defaults.format?.spaceAroundOperators !== false,
+            alignAssignments: typeof format.alignAssignments === "boolean"
+                ? format.alignAssignments
+                : defaults.format?.alignAssignments !== false,
+            useEditorConfig: typeof format.useEditorConfig === "boolean"
+                ? format.useEditorConfig
+                : defaults.format?.useEditorConfig !== false,
+            indentStyle: isIndentStyle(format.indentStyle)
+                ? format.indentStyle
+                : defaults.format?.indentStyle || "editor",
+            indentSize: typeof format.indentSize === "number" &&
+                format.indentSize > 0
+                ? Math.floor(format.indentSize)
+                : defaults.format?.indentSize || 0
         },
         diagnostics: {
             ...(defaults.diagnostics || {}),
@@ -139,6 +168,19 @@ function mergeSettings(
             dialect
         }
     };
+}
+
+function isKeywordCase(
+    value: unknown
+): value is IRslFormatSettings["keywordCase"] {
+    return value === "lower" || value === "upper" ||
+        value === "capitalize";
+}
+
+function isIndentStyle(
+    value: unknown
+): value is IRslFormatSettings["indentStyle"] {
+    return value === "editor" || value === "space" || value === "tab";
 }
 
 function cloneSettings(value: IRslSettings): IRslSettings {
@@ -149,8 +191,10 @@ function cloneSettings(value: IRslSettings): IRslSettings {
         analysis: { ...value.analysis },
         semanticHighlighting: { ...value.semanticHighlighting },
         inlayHints: {
-            variableTypes: value.inlayHints?.variableTypes !== false
+            variableTypes: value.inlayHints?.variableTypes !== false,
+            parameterNames: value.inlayHints?.parameterNames !== false
         },
+        format: { ...value.format },
         diagnostics: {
             ...(value.diagnostics || {})
         }
@@ -169,6 +213,10 @@ function settingsEqual(
             right.semanticHighlighting.maxFileSizeKb &&
         left.inlayHints?.variableTypes ===
             right.inlayHints?.variableTypes &&
+        left.inlayHints?.parameterNames ===
+            right.inlayHints?.parameterNames &&
+        JSON.stringify(left.format || {}) ===
+            JSON.stringify(right.format || {}) &&
         JSON.stringify(left.diagnostics || {}) ===
         JSON.stringify(right.diagnostics || {});
 }

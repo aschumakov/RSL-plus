@@ -63,6 +63,9 @@ import {
     RslCallHierarchyProvider
 } from "./callHierarchyProvider";
 import { buildRslInlayHints } from "./inlayHintProvider";
+import {
+    buildRslParameterInlayHints
+} from "./parameterInlayHints";
 import { findRslWorkspaceSymbols } from "./workspaceSymbolProvider";
 import {
     findRslImplementations,
@@ -76,6 +79,9 @@ import {
     RSL_FIX_ALL_KIND
 } from "./sourceCodeActions";
 import { PresentationFeatureRegistry } from "./presentationFeatureRegistry";
+import {
+    RslEditorConfigService
+} from "../services/editorConfigService";
 import { SemanticTokensFeatureRegistry } from "./semanticTokensFeatureRegistry";
 
 interface IRslCurrentBlockRangeParams {
@@ -139,6 +145,10 @@ export class RslLanguageFeatureRegistry {
      * устаревший», а прямо неверный.
      */
     private usages: IRslSymbolUsageHandlers;
+    /*
+     * .editorconfig проекта: читается по требованию и запоминается по каталогу.
+     */
+    private readonly editorConfig = new RslEditorConfigService();
     private presentationFeatures: PresentationFeatureRegistry;
     private semanticTokensFeatures: SemanticTokensFeatureRegistry;
     /** Файлы, которым отдали пустые подсказки: модель тогда не была готова. */
@@ -186,7 +196,14 @@ export class RslLanguageFeatureRegistry {
         );
         this.presentationFeatures = new PresentationFeatureRegistry({
             ...environment,
-            getBlockStartLines: document => this.blockStartLines(document)
+            getBlockStartLines: document => this.blockStartLines(document),
+            getFormatSettings: uri => environment.getSettings(uri).format,
+            /*
+             * Отступ проекта читается один раз на каталог и живёт до смены
+             * настроек: форматирование не должно ходить в файловую систему на
+             * каждое нажатие «переформатировать».
+             */
+            getProjectIndentStyle: uri => this.editorConfig.resolve(uri)
         });
         this.semanticTokensFeatures = new SemanticTokensFeatureRegistry({
             ...environment,
@@ -253,11 +270,14 @@ export class RslLanguageFeatureRegistry {
             cancellationToken
         ) => {
             const document = documents.get(params.textDocument.uri);
+            const hintSettings = document
+                ? this.environment.getSettings(document.uri).inlayHints
+                : undefined;
 
             if (
                 !document ||
-                !this.environment.getSettings(document.uri)
-                    .inlayHints.variableTypes
+                !hintSettings ||
+                (!hintSettings.variableTypes && !hintSettings.parameterNames)
             ) {
                 return [];
             }
@@ -301,12 +321,26 @@ export class RslLanguageFeatureRegistry {
                 return [];
             }
 
-            const hints = buildRslInlayHints(
-                module,
-                resolver,
-                params.range,
-                () => requestIsStale(document, version, cancellationToken)
-            );
+            const stale = (): boolean =>
+                requestIsStale(document, version, cancellationToken);
+            const hints = [
+                ...(hintSettings.variableTypes
+                    ? buildRslInlayHints(module, resolver, params.range, stale)
+                    : []),
+                /*
+                 * Имена параметров считаются по тому же снимку и тому же
+                 * диапазону: разбор не форсируется, видимые строки не
+                 * расширяются.
+                 */
+                ...(hintSettings.parameterNames
+                    ? buildRslParameterInlayHints(
+                        module,
+                        resolver,
+                        params.range,
+                        stale
+                    )
+                    : [])
+            ];
 
             if (span) {
                 this.environment.performance!.end(span, {
@@ -372,7 +406,10 @@ export class RslLanguageFeatureRegistry {
                 return [];
             }
             return [
-                ...buildEnhancedRslCodeActions(module, params),
+                ...buildEnhancedRslCodeActions(module, params, {
+                    keywordCase: this.environment
+                        .getSettings(module.uri).format?.keywordCase
+                }),
                 ...navigation,
                 ...autoImports,
                 ...sourceActions

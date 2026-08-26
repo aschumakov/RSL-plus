@@ -74,7 +74,15 @@ const defaultSettings: IRslSettings = {
     autoImport: { enabled: true },
     analysis: { workspaceIndexing: "activeImports" },
     semanticHighlighting: { maxFileSizeKb: 512 },
-    inlayHints: { variableTypes: true },
+    inlayHints: { variableTypes: true, parameterNames: true },
+    format: {
+        keywordCase: "lower",
+        spaceAroundOperators: true,
+        alignAssignments: true,
+        useEditorConfig: true,
+        indentStyle: "editor",
+        indentSize: 0
+    },
     diagnostics: DEFAULT_DIAGNOSTIC_SETTINGS
 };
 const settingsService = new RslSettingsService(defaultSettings);
