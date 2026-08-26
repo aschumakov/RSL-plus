@@ -7,6 +7,12 @@ import type { TextDocument } from "vscode-languageserver-textdocument";
 
 import type { RslDiagnosticEngine } from "./diagnosticEngine";
 import {
+    mergeRslSnapshotDependencies,
+    rslSnapshotKey,
+    type IRslComputationSnapshot
+} from "./computationSnapshot";
+import { rslDiagnosticRules } from "./ruleRegistry";
+import {
     type IDiagnosticPublication,
     planActiveDocumentDiagnostics,
     planUpdatedDiagnostics,
@@ -699,13 +705,25 @@ export class DiagnosticsCoordinator {
             : [];
     }
 
-    /** Условия расчёта межфайловой фазы: версия, замыкание, настройки. */
+    /**
+     * Условия расчёта межфайловой фазы.
+     *
+     * В отличие от локальной, сюда входит ревизия каталога проекта: неоднозначная
+     * ссылка и неизвестное имя — это ответы про весь проект, и появление нового
+     * модуля меняет их, не меняя ни текста, ни замыкания Import этого файла.
+     */
     private workspaceConditionKey(uri: string, version: number): string {
-        return [
-            version,
-            this.index.getImportClosureKey(uri),
-            diagnosticsSettingsKey(this.settings.getAvailable(uri))
-        ].join(":");
+        return rslSnapshotKey(
+            {
+                textVersion: version,
+                importClosure: this.index.getImportClosureKey(uri),
+                catalog: this.catalogRevision(),
+                settings: diagnosticsSettingsKey(
+                    this.settings.getAvailable(uri)
+                )
+            },
+            WORKSPACE_PHASE_DEPENDENCIES
+        );
     }
 
     /** Условия расчёта локальной фазы: версия, импорты, настройки. */
@@ -713,11 +731,29 @@ export class DiagnosticsCoordinator {
         uri: string,
         state: { module: { version: number }; settings: IRslSettings }
     ): string {
-        return [
-            state.module.version,
-            this.importContextKey(uri),
-            diagnosticsSettingsKey(state.settings)
-        ].join(":");
+        return rslSnapshotKey(
+            this.snapshot(uri, state.module.version, state.settings),
+            LOCAL_PHASE_DEPENDENCIES
+        );
+    }
+
+    /**
+     * Снимок условий расчёта.
+     *
+     * Один на обе фазы: подмножество, от которого зависит фаза, задаёт реестр
+     * проверок, а не выписанный рядом список полей.
+     */
+    private snapshot(
+        uri: string,
+        version: number,
+        settings: IRslSettings
+    ): IRslComputationSnapshot {
+        return {
+            textVersion: version,
+            importClosure: this.importContextKey(uri),
+            catalog: this.catalogRevision(),
+            settings: diagnosticsSettingsKey(settings)
+        };
     }
 
     /**
@@ -727,6 +763,16 @@ export class DiagnosticsCoordinator {
      * модуля читается отдельно от файлов проекта, и без ревизии его
      * появление ключ не меняло бы.
      */
+    /*
+     * Ревизия каталога проекта.
+     *
+     * Индекс в тестах бывает заглушкой без каталога: для ключа это значит
+     * «состав проекта не меняется», а не отказ считать диагностики.
+     */
+    private catalogRevision(): number {
+        return this.index.catalog?.revision ?? 0;
+    }
+
     private importContextKey(uri: string): string {
         return this.options.resolver
             ? this.options.resolver.getImportContextKey(uri)
@@ -892,6 +938,19 @@ export class DiagnosticsCoordinator {
  * достаточно взять её целиком. Лишний пересчёт при смене чужой настройки
  * дешевле молча устаревшего ответа, а меняются настройки редко.
  */
+/*
+ * Зависимости фаз считаются из реестра проверок один раз.
+ *
+ * Список полей рядом с ключом отставал от таблицы проверок; теперь добавленная
+ * проверка приносит свои зависимости с собой.
+ */
+const LOCAL_PHASE_DEPENDENCIES = mergeRslSnapshotDependencies(
+    rslDiagnosticRules("local").map(rule => rule.depends)
+);
+const WORKSPACE_PHASE_DEPENDENCIES = mergeRslSnapshotDependencies(
+    rslDiagnosticRules("workspace").map(rule => rule.depends)
+);
+
 function diagnosticsSettingsKey(settings: IRslSettings): string {
     return JSON.stringify(
         normalizeDiagnosticSettings({

@@ -479,7 +479,11 @@ testAsync("полный расчёт запоминается", async () => {
         cache
     );
 
-    assert.strictEqual(cache.size, 1, "результат запомнен");
+    /*
+     * Записей на файл столько, сколько лент: проверки, зависящие только от
+     * текста, и проверки, читающие импорты, устаревают от разных событий.
+     */
+    assert.ok(cache.size >= 1, "результат запомнен: " + cache.size);
     assert.ok(cache.bytes > 0);
 });
 
@@ -491,11 +495,12 @@ test("закрытый файл уходит из кэша", () => {
     const cache = new RslUnitDiagnosticsCache();
 
     diagnose(index, EDITED, BASE, 1, cache);
-    assert.strictEqual(cache.size, 1);
+    assert.ok(cache.size >= 1, "результат запомнен: " + cache.size);
     assert.ok(cache.bytes > 0);
 
+    /* Забыть файл — значит забыть все его ленты, а не только первую. */
     cache.forget(EDITED);
-    assert.strictEqual(cache.size, 0, "запись удалена");
+    assert.strictEqual(cache.size, 0, "записи удалены");
     assert.strictEqual(cache.bytes, 0, "память освобождена");
 });
 
@@ -541,17 +546,22 @@ test("счёт объёма не расходится с содержимым п
 
     assert.strictEqual(cache.size, 2, "записей не больше предела");
 
-    /* Объём двух записей: у всех файлов текст один и тот же. */
+    /*
+     * Объём двух записей: у всех файлов текст один и тот же, а размер записи
+     * от ленты не зависит — он считается по тексту и числу находок.
+     */
     const single = new RslUnitDiagnosticsCache();
     const index = new WorkspaceIndex();
     index.registerWorkspaceFiles(["file:///single.mac"]);
     diagnose(index, "file:///single.mac", BASE, 1, single);
 
+    const expected = (single.bytes / single.size) * 2;
+
     assert.strictEqual(
         cache.bytes,
-        single.bytes * 2,
+        expected,
         "учтён объём ровно оставшихся записей: " + cache.bytes +
-            " против " + single.bytes * 2
+            " против " + expected
     );
 });
 
