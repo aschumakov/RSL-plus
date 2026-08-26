@@ -769,6 +769,8 @@ async function handleWatchedFileChange(
     if (type === FileChangeType.Deleted) {
         moduleLoader.remove(uri);
         documentAnalysis.invalidate(uri);
+        /* Каталог держит запись и о незагруженном файле: см. достройку. */
+        workspaceIndex.catalog.remove(uri);
         dependents.forEach(dependentUri =>
             diagnosticsCoordinator.scheduleWorkspace(dependentUri, 650)
         );
@@ -776,6 +778,11 @@ async function handleWatchedFileChange(
     }
 
     workspaceIndex.registerWorkspaceFile(uri);
+    /*
+     * Файл изменился на диске: его запись в каталоге устарела. Перечитает
+     * достройка — она же и решит, когда это делать.
+     */
+    catalogWarmup.invalidate(uri);
 
     if (workspaceIndex.getModule(uri)) {
         /* Не загружаем изменённый файл, если он не был частью активного Import-графа. */
