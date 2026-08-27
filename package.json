@@ -462,7 +462,8 @@
       "bench:interactive": "npm run compile && node --expose-gc build/bench-interactive.js",
       "bench:problems": "npm run compile && node build/bench-problems.js",
       "bench:fast-index": "npm run compile && node --expose-gc build/bench-fast-index.js",
-      "bench:diagnostics": "npm run compile && node --expose-gc --max-old-space-size=6144 build/bench-diagnostics-scale.js"
+      "bench:diagnostics": "npm run compile && node --expose-gc --max-old-space-size=6144 build/bench-diagnostics-scale.js",
+      "bench:project": "npm run compile && node --max-old-space-size=6144 build/bench-project-versions.js"
    },
    "devDependencies": {
       "@types/node": "22.16.5",
