@@ -107,6 +107,12 @@ export class WorkspaceCatalog {
     /** Имя файла -> файлы, которые упоминают его строкой. */
     private byFileReference = new Map<string, Set<string>>();
     private revisionValue = 0;
+    /** Готовый ответ на пустой запрос: см. firstSymbols. */
+    private firstSymbolsCache: {
+        revision: number;
+        limit: number;
+        symbols: IRslCatalogSymbol[];
+    } | undefined;
 
     get revision(): number {
         return this.revisionValue;
@@ -450,32 +456,80 @@ export class WorkspaceCatalog {
     }
 
     /**
-     * Поиск по имени с полной сортировкой до лимита.
+     * Поиск по проекту: точное имя, начало, вхождение, подпоследовательность.
      *
-     * Порядок: точное имя, начало имени, вхождение, затем URI и стабильный
-     * идентификатор. Одинаковый запрос при одинаковом составе проекта даёт
-     * один и тот же ответ независимо от того, в каком порядке файлы попали в
-     * каталог.
-     */
-    /**
-     * Поиск по проекту: точные совпадения, потом начало, потом вхождение,
-     * потом подпоследовательность.
-     *
-     * Совпадения раскладываются по корзинам ранга, а сортируется только та
-     * корзина, которая попадает в ответ. Прежде сортировался весь список: на
-     * проекте в 97 тысяч символов запрос «Check» стоил 20 мс, потому что
-     * тысячи заведомо лишних совпадений сортировались ради двухсот верхних.
+     * Стоимость ответа определяется его размером, а не числом совпадений.
+     * Каждый ранг набирается ограниченным отбором: список растёт до четырёх
+     * лимитов, после чего сортируется и обрезается до лимита — остальное в
+     * ответ всё равно не попадёт. Полная сортировка всех совпадений стоила на
+     * проекте в 97 тысяч символов 20 мс на запрос: тысячи заведомо лишних
+     * записей сортировались ради двухсот верхних.
      *
      * Заодно не считается то, что уже не понадобится: подпоследовательность —
      * самая дорогая проверка, и пока лучших совпадений меньше лимита, она
      * нужна, а как только их набралось достаточно — нет. Ответ от этого не
      * меняется: ранг сортируется первым, и совпадение худшего ранга в первые
      * limit не попало бы.
+     *
+     * Порядок ответа не зависит от порядка загрузки файлов: внутри ранга
+     * сравниваются имя, URI и положение.
      */
     find(query: string, limit: number): IRslCatalogSymbol[] {
-        const normalized = normalizeIdentifier(query.trim());
         const wanted = Math.max(0, limit);
+
+        if (wanted === 0) {
+            /* Ответ пуст по условию: каталог обходить незачем. */
+            return [];
+        }
+
+        const normalized = normalizeIdentifier(query.trim());
+
+        if (!normalized) {
+            return this.firstSymbols(wanted);
+        }
+
+        return this.collect(normalized, wanted);
+    }
+
+    /**
+     * Начало общего списка: ответ на пустой запрос.
+     *
+     * Пустому запросу подходит весь каталог, и отбор по нему — это обход ста
+     * тысяч символов ради двухсот первых, одинаковый от запроса к запросу.
+     * Ответ зависит только от содержимого каталога, поэтому считается один
+     * раз и живёт до следующего изменения — ревизия каталога его и отменяет.
+     */
+    private firstSymbols(limit: number): IRslCatalogSymbol[] {
+        const cached = this.firstSymbolsCache;
+
+        if (
+            cached &&
+            cached.revision === this.revisionValue &&
+            cached.limit >= limit
+        ) {
+            return cached.symbols.slice(0, limit);
+        }
+
+        /* С запасом: запрос с бо́льшим лимитом не заставит считать заново. */
+        const prepared = Math.max(limit, FIRST_SYMBOLS_LIMIT);
+        const symbols = this.collect("", prepared);
+
+        this.firstSymbolsCache = {
+            revision: this.revisionValue,
+            limit: prepared,
+            symbols
+        };
+
+        return symbols.slice(0, limit);
+    }
+
+    /** Отбор по рангам, каждый ранг — ограниченным списком. */
+    private collect(
+        normalized: string,
+        limit: number
+    ): IRslCatalogSymbol[] {
         const buckets: IRslCatalogSymbol[][] = [[], [], [], []];
+        const bound = limit * BOUNDED_COLLECT_FACTOR;
         let cheapCount = 0;
 
         for (const module of this.modules.values()) {
@@ -483,14 +537,22 @@ export class WorkspaceCatalog {
                 const rank = matchRank(
                     symbol.normalized,
                     normalized,
-                    cheapCount < wanted
+                    cheapCount < limit
                 );
 
                 if (rank < 0) {
                     continue;
                 }
 
-                buckets[rank].push(symbol);
+                const bucket = buckets[rank];
+
+                bucket.push(symbol);
+
+                if (bucket.length >= bound) {
+                    /* Отобрать лучшие и забыть остальные: они уже лишние. */
+                    bucket.sort(compareSymbols);
+                    bucket.length = limit;
+                }
 
                 if (rank < 3) {
                     cheapCount++;
@@ -501,18 +563,14 @@ export class WorkspaceCatalog {
         const result: IRslCatalogSymbol[] = [];
 
         for (const bucket of buckets) {
-            if (result.length >= wanted) {
+            if (result.length >= limit) {
                 break;
             }
 
-            bucket.sort((left, right) =>
-                compare(left.normalized, right.normalized) ||
-                compare(left.uri, right.uri) ||
-                (left.start - right.start)
-            );
+            bucket.sort(compareSymbols);
 
             for (const symbol of bucket) {
-                if (result.length >= wanted) {
+                if (result.length >= limit) {
                     break;
                 }
 
@@ -679,6 +737,29 @@ function appendDescriptor(
     result.push(record);
 
     return record;
+}
+
+/*
+ * Во сколько раз список ранга растёт сверх лимита, прежде чем его обрежут.
+ *
+ * Обрезка стоит сортировки, поэтому чем реже, тем лучше; но чем больше запас,
+ * тем больше памяти на популярный префикс. Четыре лимита — это одна сортировка
+ * на каждые три лимита совпадений и восемьсот записей в памяти при обычном
+ * лимите Ctrl+T в двести имён.
+ */
+const BOUNDED_COLLECT_FACTOR = 4;
+
+/* С каким запасом считается сохраняемый ответ на пустой запрос. */
+const FIRST_SYMBOLS_LIMIT = 500;
+
+/** Порядок внутри одного ранга: имя, файл, положение. */
+function compareSymbols(
+    left: IRslCatalogSymbol,
+    right: IRslCatalogSymbol
+): number {
+    return compare(left.normalized, right.normalized) ||
+        compare(left.uri, right.uri) ||
+        (left.start - right.start);
 }
 
 /** Имя модуля — имя файла без расширения. */

@@ -63,7 +63,9 @@ const SERIAL = new Set([
     /* Меряет память: рядом работающие процессы искажают замер. */
     "editing-session.test.js",
     /* Меряет непрерывную занятость потока — ей тоже нужна тишина. */
-    "catalog-warmup.test.js"
+    "catalog-warmup.test.js",
+    /* Меряет цену запроса к каталогу на ста тысячах символов. */
+    "workspace-catalog-scale.test.js"
 ]);
 
 /*
