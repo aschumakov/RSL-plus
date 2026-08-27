@@ -229,6 +229,110 @@ test("duplicate-branch-condition: разные цепочки и вызовы н
     );
 });
 
+test("duplicate-branch-condition: словесный оператор не считается вызовом", () => {
+    /*
+     * `not (…)`, `and (…)`, `or (…)` — оператор и скобка группировки, а не
+     * вызов. Пока скобка после любого имени считалась вызовом, любое условие
+     * со словесным оператором объявлялось «содержащим вызов», и повторные
+     * ветки молча пропускались.
+     */
+    const cases = [
+        {
+            name: "not",
+            body: [
+                "if (not (kind == 1))",
+                "elif (not (kind == 1))",
+                "end;"
+            ]
+        },
+        {
+            name: "and",
+            body: [
+                "if (kind == 1 and (kind == 2))",
+                "elif (kind == 1 and (kind == 2))",
+                "end;"
+            ]
+        },
+        {
+            name: "or",
+            body: [
+                "if (kind == 1 or (kind == 2))",
+                "elif (kind == 1 or (kind == 2))",
+                "end;"
+            ]
+        }
+    ];
+
+    for (const item of cases) {
+        const found = diagnose(inMacro(item.body))
+            .filter(entry => entry.code === "duplicate-branch-condition");
+
+        assert.strictEqual(
+            found.length,
+            1,
+            item.name + ": ожидалось одно предупреждение, получено " +
+                found.length
+        );
+        assert.strictEqual(
+            found[0].severity,
+            DiagnosticSeverity.Warning,
+            item.name + ": уровень обязан быть предупреждением"
+        );
+        assert.strictEqual(
+            found[0].range.start.line + 1,
+            3,
+            item.name + ": подчёркнута вторая ветка"
+        );
+        assert.ok(
+            found[0].range.end.character > found[0].range.start.character ||
+                found[0].range.end.line > found[0].range.start.line,
+            item.name + ": диапазон непустой"
+        );
+    }
+});
+
+test("duplicate-branch-condition: настоящий вызов по-прежнему пропускается", () => {
+    /* Два одинаковых вызова могут вернуть разное — ветка не мертва. */
+    assert.deepStrictEqual(
+        findings(inMacro([
+            "if (IsAllowed(kind))",
+            "elif (IsAllowed(kind))",
+            "end;"
+        ]), "duplicate-branch-condition"),
+        []
+    );
+    assert.deepStrictEqual(
+        findings(inMacro([
+            "if (not IsAllowed(kind))",
+            "elif (not IsAllowed(kind))",
+            "end;"
+        ]), "duplicate-branch-condition"),
+        [],
+        "вызов под отрицанием остаётся вызовом"
+    );
+});
+
+test("duplicate-branch-condition: со словесным оператором нет дублей", () => {
+    const body = [
+        "if (not (kind == 1))",
+        "elif (not (kind == 1))",
+        "end;"
+    ];
+    const signature = () => diagnose(inMacro(body))
+        .filter(entry => entry.code === "duplicate-branch-condition")
+        .map(entry => [
+            entry.range.start.line,
+            entry.range.start.character,
+            entry.range.end.line,
+            entry.range.end.character,
+            entry.message
+        ].join(":"));
+    const first = signature();
+
+    assert.deepStrictEqual(first, signature(), "повторный анализ даёт то же");
+    assert.strictEqual(new Set(first).size, first.length, "дублей нет");
+});
+
 test("duplicate-branch-condition: вложенная цепочка не мешает внешней", () => {
     assert.deepStrictEqual(
         findings(inMacro([

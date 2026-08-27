@@ -189,10 +189,7 @@ export function createRslStatementScanner(
                 if (raw === "(" || raw === "[" || raw === "{") {
                     depth++;
 
-                    if (
-                        index > start &&
-                        tokens[index - 1].kind === "identifier"
-                    ) {
+                    if (index > start && isCallOpening(tokens, index)) {
                         hasCall = true;
                     }
 
@@ -459,8 +456,7 @@ function describeCondition(
 
             if (raw === "(" || raw === "[" || raw === "{") {
                 depth++;
-                hasCall = hasCall ||
-                    (index > 0 && tokens[index - 1].kind === "identifier");
+                hasCall = hasCall || isCallOpening(tokens, index);
                 continue;
             }
 
@@ -490,6 +486,43 @@ function describeCondition(
     }
 
     return { hasCall, comparisons, constantOnly };
+}
+
+/**
+ * Открывающая скобка после имени процедуры, а не после слова языка.
+ *
+ * `not (kind == 1)`, `and (a == b)`, `or (...)` — это оператор и
+ * скобка группировки, а не вызов. Пока они считались вызовом, поиск
+ * повторных условий молча пропускал одинаковые ветки: любое условие со
+ * словесным оператором и скобками объявлялось «содержащим вызов».
+ */
+function isCallOpening(
+    tokens: readonly IRslToken[],
+    index: number
+): boolean {
+    if (index <= 0) {
+        return false;
+    }
+
+    const previous = tokens[index - 1];
+
+    if (previous.kind !== "identifier") {
+        return false;
+    }
+
+    if (previous.value.length > LONGEST_KEYWORD) {
+        return true;
+    }
+
+    const word = normalizeIdentifier(previous.value);
+
+    /*
+     * Слово языка вызовом не бывает: ни оператор, ни ветвь, ни END. Имя
+     * процедуры совпасть с ними не может — это зарезервированные слова.
+     */
+    return !WORD_OPERATOR_SET.has(word) &&
+        !WORD_ROLES.has(word) &&
+        !LITERAL_WORDS.has(word);
 }
 
 /** Условие — это ровно `true`, с любым числом внешних скобок. */
@@ -938,8 +971,7 @@ function containsCall(tokens: readonly IRslToken[]): boolean {
     return tokens.some((token, index) =>
         token.kind === "symbol" &&
         OPENING.has(token.raw) &&
-        index > 0 &&
-        tokens[index - 1].kind === "identifier");
+        isCallOpening(tokens, index));
 }
 
 function withoutOuterParentheses(
