@@ -457,29 +457,70 @@ export class WorkspaceCatalog {
      * один и тот же ответ независимо от того, в каком порядке файлы попали в
      * каталог.
      */
+    /**
+     * Поиск по проекту: точные совпадения, потом начало, потом вхождение,
+     * потом подпоследовательность.
+     *
+     * Совпадения раскладываются по корзинам ранга, а сортируется только та
+     * корзина, которая попадает в ответ. Прежде сортировался весь список: на
+     * проекте в 97 тысяч символов запрос «Check» стоил 20 мс, потому что
+     * тысячи заведомо лишних совпадений сортировались ради двухсот верхних.
+     *
+     * Заодно не считается то, что уже не понадобится: подпоследовательность —
+     * самая дорогая проверка, и пока лучших совпадений меньше лимита, она
+     * нужна, а как только их набралось достаточно — нет. Ответ от этого не
+     * меняется: ранг сортируется первым, и совпадение худшего ранга в первые
+     * limit не попало бы.
+     */
     find(query: string, limit: number): IRslCatalogSymbol[] {
         const normalized = normalizeIdentifier(query.trim());
-        const matches: { rank: number; symbol: IRslCatalogSymbol }[] = [];
+        const wanted = Math.max(0, limit);
+        const buckets: IRslCatalogSymbol[][] = [[], [], [], []];
+        let cheapCount = 0;
 
         for (const module of this.modules.values()) {
             for (const symbol of module.symbols) {
-                const rank = matchRank(symbol.normalized, normalized);
+                const rank = matchRank(
+                    symbol.normalized,
+                    normalized,
+                    cheapCount < wanted
+                );
 
-                if (rank >= 0) {
-                    matches.push({ rank, symbol });
+                if (rank < 0) {
+                    continue;
+                }
+
+                buckets[rank].push(symbol);
+
+                if (rank < 3) {
+                    cheapCount++;
                 }
             }
         }
 
-        matches.sort((left, right) =>
-            left.rank - right.rank ||
-            compare(left.symbol.normalized, right.symbol.normalized) ||
-            compare(left.symbol.uri, right.symbol.uri) ||
-            (left.symbol.start - right.symbol.start)
-        );
+        const result: IRslCatalogSymbol[] = [];
 
-        return matches.slice(0, Math.max(0, limit))
-            .map(item => item.symbol);
+        for (const bucket of buckets) {
+            if (result.length >= wanted) {
+                break;
+            }
+
+            bucket.sort((left, right) =>
+                compare(left.normalized, right.normalized) ||
+                compare(left.uri, right.uri) ||
+                (left.start - right.start)
+            );
+
+            for (const symbol of bucket) {
+                if (result.length >= wanted) {
+                    break;
+                }
+
+                result.push(symbol);
+            }
+        }
+
+        return result;
     }
 
     /** Все объявления с таким именем: кандидаты References и Auto Import. */
@@ -652,7 +693,12 @@ function moduleNameOf(uri: string): string {
 }
 
 /** -1 — не подходит; меньше — лучше. */
-function matchRank(candidate: string, query: string): number {
+function matchRank(
+    candidate: string,
+    query: string,
+    /* Считать ли подпоследовательность: см. find. */
+    withSubsequence: boolean = true
+): number {
     if (!query) {
         return 2;
     }
@@ -669,6 +715,19 @@ function matchRank(candidate: string, query: string): number {
         return 2;
     }
 
+    if (!withSubsequence) {
+        return -1;
+    }
+
+    /*
+     * Дешёвая отсечка: подпоследовательность обязана начинаться с первой буквы
+     * запроса. Поиск буквы — встроенный, а проверка подпоследовательности —
+     * цикл по строке, и на проекте в сто тысяч символов разница заметна.
+     */
+    if (!candidate.includes(query[0])) {
+        return -1;
+    }
+
     return isSubsequence(query, candidate) ? 3 : -1;
 }
 
@@ -676,8 +735,13 @@ function matchRank(candidate: string, query: string): number {
 function isSubsequence(query: string, candidate: string): boolean {
     let index = 0;
 
-    for (const letter of candidate) {
-        if (letter === query[index]) {
+    /*
+     * Обход по индексу, а не по итератору строки: итератор идёт по кодовым
+     * точкам и на длинном списке символов стоит заметно дороже, а имена в RSL
+     * суррогатных пар не содержат.
+     */
+    for (let position = 0; position < candidate.length; position++) {
+        if (candidate.charCodeAt(position) === query.charCodeAt(index)) {
             index++;
 
             if (index === query.length) {

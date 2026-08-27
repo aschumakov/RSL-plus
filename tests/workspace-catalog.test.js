@@ -185,6 +185,63 @@ test("каталог знает наследников класса и эксп�
     );
 });
 
+test("порядок ответа не зависит от способа отбора", () => {
+    /*
+     * Поиск раскладывает совпадения по корзинам ранга и сортирует только ту,
+     * что попадает в ответ, а самую дорогую проверку — подпоследовательность —
+     * пропускает, когда лучших совпадений уже набралось на весь лимит. Ответ
+     * от этого меняться не должен: ни составом, ни порядком.
+     */
+    const index = new WorkspaceIndex();
+    const uris = [];
+
+    for (let file = 0; file < 40; file++) {
+        uris.push("file:///d:/project/module" + file + ".mac");
+    }
+
+    index.registerWorkspaceFiles(uris);
+
+    for (let file = 0; file < 40; file++) {
+        index.updateExternalModule(
+            uris[file],
+            [
+                "Macro Check" + file + "()",
+                "End;",
+                "Macro PrepareCheck" + file + "()",
+                "End;",
+                "Macro CalculateHugeCost" + file + "()",
+                "End;",
+                ""
+            ].join(String.fromCharCode(10)),
+            1
+        );
+    }
+
+    /* Точных и префиксных совпадений больше лимита: хвост не нужен. */
+    const narrow = index.catalog.find("check", 5).map(item => item.name);
+
+    assert.strictEqual(narrow.length, 5);
+    assert.deepStrictEqual(
+        narrow,
+        [...narrow].sort((left, right) =>
+            left.toLowerCase().localeCompare(right.toLowerCase())),
+        "внутри одного ранга ответ упорядочен по имени: " + narrow.join(", ")
+    );
+
+    /* Совпадение только подпоследовательностью обязано находиться. */
+    const sparse = index.catalog.find("cek", 10).map(item => item.name);
+
+    assert.ok(
+        sparse.length > 0 && sparse.every(name => /Check/.test(name)),
+        "подпоследовательность найдена: " + sparse.join(", ")
+    );
+
+    /* Лимит больше числа совпадений: отбор не теряет ничего. */
+    const all = index.catalog.find("CalculateHugeCost", 100);
+
+    assert.strictEqual(all.length, 40, "нашлись все одноимённые");
+});
+
 if (failed > 0) {
     console.error(`\nПройдено: ${passed}\nОшибок: ${failed}`);
     process.exitCode = 1;
