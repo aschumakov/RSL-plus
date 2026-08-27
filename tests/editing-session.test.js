@@ -12,6 +12,11 @@
  * держит её локальные переменные, и обнуление их внутри ничего не доказывает.
  * Без --expose-gc проверка объёма пропускается — но сама сессия правок и
  * сверка ответа выполняются всё равно.
+ *
+ * Занятость потока при правке меряется отдельным файлом и отдельным процессом:
+ * см. editing-responsiveness.test.js. Замер памяти гоняет сборщик мусора и
+ * держит сотни версий документа, и мерить рядом с ним занятость потока значит
+ * мерить последствия чужой проверки.
  */
 
 const assert = require("assert");
@@ -232,101 +237,6 @@ test("двести правок подряд: ответ верен, памят�
         retained < 8,
         "после закрытия документа память вернулась к плато: остаток " +
             retained.toFixed(2) + " МиБ"
-    );
-});
-
-test("сборка модели не занимает поток одним куском", async () => {
-    /*
-     * Пользователь чувствует не сумму времени, а самый длинный кусок, в
-     * который поток занят непрерывно. Раньше разбор и модель считались одним
-     * вызовом, и на большом файле это были десятки миллисекунд подряд.
-     *
-     * Замер идёт настоящими часами и настоящим event loop: виртуальные часы
-     * показали бы расписание, а не занятость потока.
-     */
-    const base = sample(2000);
-
-    assert.ok(
-        base.length > 100_000,
-        "файл обязан быть больше порога фазового разбора: " + base.length
-    );
-
-    let document = TextDocument.create(URI, "rsl", 1, base);
-
-    const documents = { get: uri => (uri === URI ? document : undefined) };
-    const index = new WorkspaceIndex();
-
-    index.registerWorkspaceFiles([URI]);
-
-    const analysis = new DocumentAnalysisService(
-        documents,
-        index,
-        { getAvailable: () => ({ imports: { enabled: false } }) },
-        {
-            log: () => undefined,
-            invalidateProviderCaches: () => undefined,
-            onParsed: () => undefined,
-            onImports: () => undefined,
-            initialParseDelayMs: 0,
-            changeDebounceMs: 1
-        }
-    );
-
-    analysis.setActiveDocument(URI);
-    analysis.open(document);
-    await analysis.ensureParsed(document, "force");
-
-    /* Правка внутри тела: точечный путь, который и надо мерить. */
-    const at = base.indexOf(NEEDLE, Math.floor(base.length / 2));
-    const edited = base.slice(0, at) + "  total = total + 7;" +
-        base.slice(at + NEEDLE.length);
-
-    document = TextDocument.create(URI, "rsl", 2, edited);
-
-    const gaps = [];
-    let previous = process.hrtime.bigint();
-    const interval = setInterval(() => {
-        const now = process.hrtime.bigint();
-
-        gaps.push(Number(now - previous) / 1e6);
-        previous = now;
-    }, 1);
-
-    analysis.changed(document);
-    await analysis.ensureParsed(document, "force");
-    clearInterval(interval);
-    analysis.close(URI);
-
-    const longest = Math.max(...gaps);
-
-    console.log(
-        "[METRIC] правка файла " + Math.round(base.length / 1024) +
-        " КБ: самая долгая непрерывная занятость потока " +
-        longest.toFixed(0) + " мс, возвратов управления " + gaps.length
-    );
-    /*
-     * Число возвратов зависит от машины: важно, что их больше одного, — то
-     * есть работа не идёт одним неделимым куском. Ограничение на длительность
-     * ниже и есть настоящая проверка.
-     */
-    assert.ok(
-        gaps.length >= 2,
-        "поток возвращался управлению: " + gaps.length
-    );
-    /*
-     * Порог с запасом к порции (8 мс): в один кусок всё равно попадают
-     * неделимые фазы — точечный lex и разбор изменённой единицы. Он отделяет
-     * порционную сборку от прежней, когда весь путь шёл одним вызовом.
-     */
-    /*
-     * Порог отделяет порционную работу от прежней, когда весь путь — разбор,
-     * перенос хвоста и сборка модели — шёл одним куском. Точное значение
-     * зависит от машины: на 335 КБ самый длинный кусок это точечный lex,
-     * который порциями пока не режется.
-     */
-    assert.ok(
-        longest < 80,
-        "непрерывная занятость потока: " + longest.toFixed(0) + " мс"
     );
 });
 
