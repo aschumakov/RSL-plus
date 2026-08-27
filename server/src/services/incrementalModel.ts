@@ -10,7 +10,7 @@ import type { IRslModuleModel } from "../moduleModel";
 import type { RslSymbol } from "../symbols/rslSymbol";
 import type { IRslParseResult, IRslSyntaxNode } from "../syntaxParser";
 import {
-    tryIncrementalRslParse,
+    beginIncrementalRslParse,
     type IRslIncrementalParseDecision,
     type IRslParseSplice
 } from "./incrementalParse";
@@ -84,11 +84,35 @@ export function tryUpdateRslParse(
     nextLex: IRslLexResult,
     onDecision?: (decision: IRslIncrementalParseDecision) => void
 ): IRslParsedUpdate | undefined {
+    const build = beginUpdateRslParse(
+        state,
+        nextText,
+        nextLex,
+        onDecision
+    );
+
+    return build ? build.result() : undefined;
+}
+
+/**
+ * Точечный разбор правки порциями.
+ *
+ * Перенос хвоста — самая длинная непрерывная часть правки большого
+ * файла: правка в его начале переносит все единицы разом. Вызывающий
+ * делает порцию, возвращает управление редактору и проверяет, нужна ли
+ * ещё эта версия.
+ */
+export function beginUpdateRslParse(
+    state: IRslModelState,
+    nextText: string,
+    nextLex: IRslLexResult,
+    onDecision?: (decision: IRslIncrementalParseDecision) => void
+): IRslParseUpdateBuild | undefined {
     if (!state.unitSymbols) {
         return undefined;
     }
 
-    const incremental = tryIncrementalRslParse(
+    const build = beginIncrementalRslParse(
         state.text,
         state.parse,
         nextText,
@@ -96,18 +120,35 @@ export function tryUpdateRslParse(
         onDecision
     );
 
-    if (!incremental) {
+    if (!build) {
         return undefined;
     }
 
-    if (
-        incremental.parse.root.children.length !== state.unitSymbols.length
-    ) {
-        /* Число единиц точечный путь менять не должен; проверка дешёвая. */
-        return undefined;
-    }
+    return {
+        step: budgetMs => build.step(budgetMs),
+        result: () => {
+            const incremental = build.result();
 
-    return incremental;
+            if (!incremental) {
+                return undefined;
+            }
+
+            if (
+                incremental.parse.root.children.length !==
+                    state.unitSymbols?.length
+            ) {
+                /* Число единиц точечный путь менять не должен. */
+                return undefined;
+            }
+
+            return incremental;
+        }
+    };
+}
+
+export interface IRslParseUpdateBuild {
+    step(budgetMs: number): boolean;
+    result(): IRslParsedUpdate | undefined;
 }
 
 export interface IRslModelBuildOptions {
@@ -157,17 +198,15 @@ export function createRslModelBuild(
 
     const prepare = (): boolean => {
         if (incremental) {
-            const changed = units.slice(splice!.unitIndex);
-            const split = splitByUnit(
-                changed,
-                extractUnits(text, parse, changed)
-            );
-
-            if (!split) {
-                return false;
-            }
-
-            buckets = split;
+            /*
+             * Объявления изменившихся единиц извлекаются по одной, вместе с
+             * их символами.
+             *
+             * Одним вызовом на весь хвост это был кусок в тринадцать
+             * миллисекунд посреди порционной сборки — больше самой порции.
+             * Извлечение по единице чуть дороже суммарно, зато ни один кусок
+             * не выбивается из бюджета.
+             */
             imports = previous!.imports;
 
             return true;
@@ -180,6 +219,18 @@ export function createRslModelBuild(
         buckets = split || [snapshot.declarations.slice()];
 
         return true;
+    };
+    /** Объявления одной единицы точечного пути. */
+    const bucketOf = (index: number): IRslDeclarationDescriptor[] => {
+        if (!incremental) {
+            return buckets![index - first] || [];
+        }
+
+        const unit = units[index];
+        const declarations = extractUnits(text, parse, [unit]);
+        const split = splitByUnit([unit], declarations);
+
+        return split ? split[0] : [];
     };
 
     const first = incremental ? splice!.unitIndex : 0;
@@ -221,9 +272,7 @@ export function createRslModelBuild(
             }
 
             while (cursor < units.length) {
-                const bucket = buckets![cursor - first] || [];
-
-                unitSymbols[cursor] = builder.build(bucket);
+                unitSymbols[cursor] = builder.build(bucketOf(cursor));
                 cursor++;
 
                 if (elapsed(started) >= budgetMs) {
@@ -260,7 +309,12 @@ export function createRslModelBuild(
                 state: {
                     text,
                     parse,
-                    unitSymbols: buckets && buckets.length === units.length - first
+                    /*
+                     * Точечный путь всегда даёт символы по единицам; полный —
+                     * только если объявления разложились по ним.
+                     */
+                    unitSymbols: incremental ||
+                        (buckets !== undefined && buckets.length === units.length)
                         ? unitSymbols
                         : undefined,
                     definitionRanges,

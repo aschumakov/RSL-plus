@@ -12,8 +12,8 @@ import { RslSymbol } from "../symbols/rslSymbol";
 import type { IRslLexResult } from "../lexer";
 import { parseRslSyntax } from "../syntaxParser";
 import {
+    beginUpdateRslParse,
     createRslModelBuild,
-    tryUpdateRslParse,
     type IRslModelBuild,
     type IRslModelState
 } from "./incrementalModel";
@@ -438,15 +438,20 @@ export class DocumentAnalysisService {
      * готовыми. Любое сомнение — и работает полный путь, потому что
      * неверная модель недопустима.
      */
-    private startModelBuild(
+    private async startModelBuild(
         uri: string,
         text: string,
         lex: IRslLexResult,
-        version: number
-    ): { syntax: ReturnType<typeof parseRslSyntax>; build: IRslModelBuild } {
+        version: number,
+        generation: number,
+        phased: boolean
+    ): Promise<{
+        syntax: ReturnType<typeof parseRslSyntax>;
+        build: IRslModelBuild;
+    } | undefined> {
         const performance = this.options.performance;
         const previous = this.modelStates.get(uri);
-        const parsed = previous && tryUpdateRslParse(
+        const parseBuild = previous && beginUpdateRslParse(
             previous,
             text,
             lex,
@@ -456,17 +461,38 @@ export class DocumentAnalysisService {
             )
         );
 
-        if (parsed) {
-            return {
-                syntax: parsed.parse,
-                build: createRslModelBuild({
-                    text,
-                    parse: parsed.parse,
-                    lex,
-                    previous,
-                    splice: parsed.splice
-                })
-            };
+        if (parseBuild) {
+            /*
+             * Перенос хвоста идёт порциями: правка в начале большого
+             * файла переносит все единицы, и одним куском это
+             * десятки миллисекунд занятого потока.
+             */
+            while (parseBuild.step(MODEL_SLICE_MS)) {
+                if (!phased) {
+                    continue;
+                }
+
+                await yieldToEventLoop();
+
+                if (!this.stillCurrent(uri, version, generation)) {
+                    return undefined;
+                }
+            }
+
+            const parsed = parseBuild.result();
+
+            if (parsed) {
+                return {
+                    syntax: parsed.parse,
+                    build: createRslModelBuild({
+                        text,
+                        parse: parsed.parse,
+                        lex,
+                        previous,
+                        splice: parsed.splice
+                    })
+                };
+            }
         }
 
         const syntax = parseRslSyntax(text, lex, {
@@ -1327,7 +1353,28 @@ export class DocumentAnalysisService {
         const resumed = checkpoint?.version === version;
         const phase = resumed
             ? { syntax: checkpoint!.syntax, build: checkpoint!.build }
-            : this.startModelBuild(uri, text, fastSnapshot.lex, version);
+            : await this.startModelBuild(
+                uri,
+                text,
+                fastSnapshot.lex,
+                version,
+                generation,
+                phased
+            );
+
+        if (!phase) {
+            /* Версия устарела посреди разбора: продолжать незачем. */
+            if (syntaxSpan) {
+                performance.end(syntaxSpan, { cancelled: true });
+            }
+
+            if (fullSpan) {
+                performance.end(fullSpan, { cancelled: true });
+            }
+
+            return;
+        }
+
         const syntax = phase.syntax;
 
         if (resumed) {

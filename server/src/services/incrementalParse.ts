@@ -98,13 +98,31 @@ export interface IRslIncrementalParse {
     splice: IRslParseSplice;
 }
 
-export function tryIncrementalRslParse(
+/**
+ * Точечный разбор порциями.
+ *
+ * step делает работу не дольше бюджета и отвечает, осталось ли ещё; result
+ * отдаёт готовый разбор — или undefined, если по ходу выяснилось, что точечный
+ * путь не годится.
+ */
+export interface IRslIncrementalParseBuild {
+    step(budgetMs: number): boolean;
+    result(): IRslIncrementalParse | undefined;
+}
+
+/**
+ * Начать точечный разбор.
+ *
+ * Отказ виден сразу: undefined означает, что правку точечно разобрать нельзя и
+ * нужен полный разбор. Всё остальное считается порциями.
+ */
+export function beginIncrementalRslParse(
     previousText: string,
     previousParse: IRslParseResult,
     nextText: string,
     nextLex: IRslLexResult,
     onDecision?: (decision: IRslIncrementalParseDecision) => void
-): IRslIncrementalParse | undefined {
+): IRslIncrementalParseBuild | undefined {
     const decide = (
         reason: IRslIncrementalParseDecision["reason"],
         fields?: Partial<IRslIncrementalParseDecision>
@@ -112,6 +130,16 @@ export function tryIncrementalRslParse(
         onDecision?.({ reason, ...fields });
 
         return undefined;
+    };
+    /* Отказ по ходу переноса: результат тогда не строится. */
+    let refused = false;
+    const refuse = (
+        reason: IRslIncrementalParseDecision["reason"],
+        fields?: Partial<IRslIncrementalParseDecision>
+    ): undefined => {
+        refused = true;
+
+        return decide(reason, fields);
     };
 
     if (previousText === nextText) {
@@ -231,67 +259,106 @@ export function tryIncrementalRslParse(
     const children: IRslSyntaxNode[] = new Array(units.length);
     const cursor = createTokenCursor(nextLex.tokens);
     const miss = { happened: false };
+    /*
+     * Перенос хвоста идёт порциями.
+     *
+     * Правка в начале файла на 654 КБ переносит все три с половиной тысячи
+     * единиц — двадцать восемь миллисекунд, в которые поток занят
+     * непрерывно. Порция ограничена временем, между порциями вызывающий
+     * возвращает управление редактору.
+     */
+    let cursorIndex = 0;
 
-    for (let index = 0; index < units.length; index++) {
-        if (index < unitIndex) {
-            children[index] = units[index];
-            continue;
+    const shiftTail = (budgetMs: number): boolean => {
+        const started = process.hrtime.bigint();
+
+        while (cursorIndex < units.length) {
+            const index = cursorIndex++;
+
+            if (index < unitIndex) {
+                children[index] = units[index];
+                continue;
+            }
+
+            if (index === unitIndex) {
+                children[index] = replacement[0];
+                continue;
+            }
+
+            children[index] = shiftNode(units[index], shift, cursor, miss);
+
+            if (
+                Number(process.hrtime.bigint() - started) / 1e6 >= budgetMs
+            ) {
+                return cursorIndex < units.length;
+            }
         }
 
-        if (index === unitIndex) {
-            children[index] = replacement[0];
-            continue;
+        return false;
+    };
+
+    const finishParse = (): IRslIncrementalParse | undefined => {
+        while (shiftTail(Number.POSITIVE_INFINITY)) {
+            /* Пустое тело: перенос сам двигает курсор. */
         }
 
-        children[index] = shiftNode(units[index], shift, cursor, miss);
-    }
+        const shiftMs =
+            Number(process.hrtime.bigint() - shiftStarted) / 1e6;
 
-    const shiftMs = Number(process.hrtime.bigint() - shiftStarted) / 1e6;
+        if (miss.happened) {
+            return refuse("tokenMiss", {
+                editStart: edit.oldStart,
+                unitKind: unit.kind,
+                unitName: unit.name
+            });
+        }
 
-    if (miss.happened) {
-        return decide("tokenMiss", {
+        onDecision?.({
+            reason: "incremental",
             editStart: edit.oldStart,
             unitKind: unit.kind,
-            unitName: unit.name
+            unitName: unit.name,
+            unitChars: unitEnd - unitStart,
+            unitParseMs,
+            shiftMs
         });
-    }
 
-    onDecision?.({
-        reason: "incremental",
-        editStart: edit.oldStart,
-        unitKind: unit.kind,
-        unitName: unit.name,
-        unitChars: unitEnd - unitStart,
-        unitParseMs,
-        shiftMs
-    });
-
-    const parse = withLazyTokens({
-        root: {
-            ...previousParse.root,
-            end: nextText.length,
-            children,
-            tokens: []
-        },
-        diagnostics: spliceDiagnostics(
-            previousParse.diagnostics,
-            reparsed.diagnostics,
-            unit,
-            shift
-        ),
-        lex: nextLex
-    });
+        return completed();
+    };
 
     return {
-        parse,
-        splice: {
-            unitIndex,
-            unit: replacement[0],
-            previousUnitStart: unit.start,
-            previousUnitEnd: unit.end,
-            shift
-        }
+        step: shiftTail,
+        result: () => (refused ? undefined : finishParse())
     };
+
+    function completed(): IRslIncrementalParse {
+        const parse = withLazyTokens({
+            root: {
+                ...previousParse.root,
+                end: nextText.length,
+                children,
+                tokens: []
+            },
+            diagnostics: spliceDiagnostics(
+                previousParse.diagnostics,
+                reparsed.diagnostics,
+                unit,
+                shift
+            ),
+            lex: nextLex
+        });
+
+        return {
+            parse,
+            splice: {
+                unitIndex,
+                unit: replacement[0],
+                previousUnitStart: unit.start,
+                previousUnitEnd: unit.end,
+                shift
+            }
+        };
+    }
 }
 
 /**
@@ -579,4 +646,28 @@ export function fullRslParse(text: string): IRslParseResult {
         lexRsl(text, { includeTrivia: true }),
         { buildExpressionTree: false }
     );
+}
+
+/**
+ * Точечный разбор одним вызовом.
+ *
+ * Порционный путь живёт в beginIncrementalRslParse; здесь он же, но без пауз —
+ * так вызывают тесты, стенды и прямые сверки.
+ */
+export function tryIncrementalRslParse(
+    previousText: string,
+    previousParse: IRslParseResult,
+    nextText: string,
+    nextLex: IRslLexResult,
+    onDecision?: (decision: IRslIncrementalParseDecision) => void
+): IRslIncrementalParse | undefined {
+    const build = beginIncrementalRslParse(
+        previousText,
+        previousParse,
+        nextText,
+        nextLex,
+        onDecision
+    );
+
+    return build ? build.result() : undefined;
 }
