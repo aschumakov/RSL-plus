@@ -268,14 +268,56 @@ async function testAbandonedFileDiagnosticsAreNotPublished() {
   }
 
   const publications = [];
+  /*
+   * Ожидание — событие, а не срок.
+   *
+   * Проверка ждёт публикации Problems активного файла: под нагрузкой фиксированные
+   * 300 мс иногда истекали раньше, чем координатор успевал их посчитать, и полный
+   * набор падал на коде, который не менялся. Ограничение по времени осталось
+   * только как защита от зависания.
+   */
+  let onPublication = () => undefined;
+  const waitForPublication = (uri, description) => new Promise(
+    (resolve, reject) => {
+      const done = publications.find(
+        item => item.uri === uri && item.count > 0
+      );
+
+      if (done) {
+        resolve(done);
+
+        return;
+      }
+
+      const timer = setTimeout(() => {
+        onPublication = () => undefined;
+        reject(new Error(
+          "не дождались: " + description + "; опубликовано: " +
+            JSON.stringify(publications)
+        ));
+      }, 20000);
+
+      onPublication = item => {
+        if (item.uri !== uri || item.count === 0) {
+          return;
+        }
+
+        clearTimeout(timer);
+        onPublication = () => undefined;
+        resolve(item);
+      };
+    }
+  );
   let switched = false;
   let coordinator;
   coordinator = new DiagnosticsCoordinator(
     {
-      sendDiagnostics: value => publications.push({
-        uri: value.uri,
-        count: value.diagnostics.length
-      })
+      sendDiagnostics: value => {
+        const item = { uri: value.uri, count: value.diagnostics.length };
+
+        publications.push(item);
+        onPublication(item);
+      }
     },
     {
       get: uri => documents.get(uri),
@@ -314,7 +356,9 @@ async function testAbandonedFileDiagnosticsAreNotPublished() {
   );
 
   coordinator.setActiveDocument(first);
-  await tick(300);
+  await waitForPublication(second, "Problems активного файла " + second);
+  /* Небольшая пауза после публикации: лишние публикации тоже видны. */
+  await tick(20);
 
   const leftovers = publications.filter(
     item => item.uri === first && item.count > 0

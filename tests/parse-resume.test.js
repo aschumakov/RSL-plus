@@ -7,11 +7,14 @@
  * на другую вкладку и правка обрывают работу между фазами, и раньше вся она
  * выбрасывалась.
  *
- * Момент прерывания здесь задаётся, а не подбирается. Прежняя проверка
- * перебирала число тактов до переключения вкладки в надежде попасть в паузу
- * между фазами: под нагрузкой разбор успевал закончиться раньше, и тест падал
- * на коде, который не менялся. Служба сообщает о каждой границе фазы, и тест
- * прерывает работу ровно там, где проверяет.
+ * Здесь ничего не угадывается. Момент прерывания задаётся: служба сообщает о
+ * каждой границе фазы, и тест прерывает работу ровно там, где проверяет.
+ * Ожидание — тоже событие, а не число тактов: тест ждёт нужную границу или
+ * готовность нужной версии. Ограничение по времени оставлено только как защита
+ * от зависания, и при срабатывании оно печатает, чего ждали и что случилось.
+ *
+ * Файл собран из девятисот отдельных процедур: сборка модели обязана пройти
+ * через множество единиц, иначе проверка продолжения ничего не проверяет.
  */
 
 const assert = require("assert");
@@ -42,36 +45,48 @@ async function test(name, action) {
 
 const URI = "file:///big.mac";
 const OTHER = "file:///other.mac";
+/** Защита от зависания: столько ждём событие, прежде чем признать провал. */
+const WAIT_LIMIT_MS = 20_000;
 
-/** Файл больше порога фазового разбора: иначе фаз просто нет. */
+/**
+ * Файл из девятисот процедур.
+ *
+ * Больше порога фазового разбора (100 КБ) и с множеством единиц верхнего
+ * уровня: сборка модели идёт по ним порциями, и прерывание попадает в
+ * середину работы, а не между двумя единицами.
+ */
 function bigSource(salt) {
-    const lines = ["Macro Big()"];
+    const lines = [];
 
-    for (let index = 0; index < 4000; index++) {
+    for (let index = 0; index < 900; index++) {
         lines.push(
-            "  Var someRatherLongVariableName" + index + " = " +
-            (index + salt) + ";"
+            "Macro Process" + index + "(document, options)",
+            "  Var result = " + (index + salt) + ";",
+            "  if (options == 1)",
+            "    result = document.Value;",
+            "  end;",
+            "  return result;",
+            "End;",
+            ""
         );
     }
-
-    lines.push("End;");
 
     return lines.join("\n");
 }
 
 /**
- * Стенд: служба разбора с наблюдателем за границами фаз.
+ * Стенд: служба разбора с наблюдателем за границами фаз и журналом событий.
  *
  * Наблюдатель — единственный способ прервать работу детерминированно: он
  * вызывается до возврата управления, и то, что он сделает, служба увидит на
- * ближайшей проверке актуальности.
+ * ближайшей проверке актуальности. Он же ведёт журнал, по которому тест ждёт.
  */
 function createStand() {
     const source = bigSource(0);
 
     assert.ok(
         source.length > 100_000,
-        "нужен файл сверх порога фазового разбора"
+        "нужен файл сверх порога фазового разбора, получено " + source.length
     );
 
     let document = TextDocument.create(URI, "rsl", 1, source);
@@ -88,8 +103,27 @@ function createStand() {
     index.registerWorkspaceFiles([URI, OTHER]);
 
     const marks = [];
-    const boundaries = [];
+    const events = [];
+    const waiters = new Set();
     let pending;
+
+    const record = event => {
+        events.push(event);
+
+        for (const waiter of [...waiters]) {
+            if (waiter.match(event)) {
+                waiters.delete(waiter);
+                waiter.settle(event);
+            }
+        }
+    };
+    const summary = () => events
+        .map(event => event.kind === "boundary"
+            ? event.phase + "@" + event.version +
+                (event.resumed ? " (продолжение)" : "")
+            : "готово@" + event.version)
+        .join(", ") || "ничего";
+
     const analysis = new DocumentAnalysisService(
         documents,
         index,
@@ -97,7 +131,11 @@ function createStand() {
         {
             log: () => undefined,
             invalidateProviderCaches: () => undefined,
-            onParsed: () => undefined,
+            onParsed: module => record({
+                kind: "parsed",
+                version: module.version,
+                uri: module.uri
+            }),
             onImports: () => undefined,
             initialParseDelayMs: 0,
             changeDebounceMs: 0,
@@ -106,7 +144,8 @@ function createStand() {
             /* Каждая единица заканчивает порцию: границы предсказуемы. */
             modelSliceMs: 0,
             onPhaseBoundary: async (phase, context) => {
-                boundaries.push({
+                record({
+                    kind: "boundary",
                     phase,
                     version: context.version,
                     resumed: context.resumed
@@ -129,13 +168,63 @@ function createStand() {
         }
     );
 
-    return {
+    const stand = {
         analysis,
         index,
         marks,
-        boundaries,
         get document() {
             return document;
+        },
+        /**
+         * Ждать событие службы.
+         *
+         * Сначала смотрит в журнал: событие могло случиться до начала
+         * ожидания. Ограничение по времени — не расписание, а защита от
+         * зависания: при срабатывании видно, чего ждали и что было.
+         */
+        waitFor(description, match) {
+            const seen = events.find(match);
+
+            if (seen) {
+                return Promise.resolve(seen);
+            }
+
+            return new Promise((resolve, reject) => {
+                const timer = setTimeout(() => {
+                    waiters.delete(waiter);
+                    reject(new Error(
+                        "не дождались: " + description + "; за " +
+                        WAIT_LIMIT_MS + " мс случилось: " + summary()
+                    ));
+                }, WAIT_LIMIT_MS);
+                const waiter = {
+                    match,
+                    settle: event => {
+                        clearTimeout(timer);
+                        resolve(event);
+                    }
+                };
+
+                waiters.add(waiter);
+            });
+        },
+        /** Граница фазы указанной версии. */
+        waitForBoundary(phase, version) {
+            return stand.waitFor(
+                "граница " + phase + " версии " + version,
+                event => event.kind === "boundary" &&
+                    event.phase === phase &&
+                    event.version === version
+            );
+        },
+        /** Готовая модель указанной версии. */
+        waitForVersion(version) {
+            return stand.waitFor(
+                "готовая модель версии " + version,
+                event => event.kind === "parsed" &&
+                    event.uri === URI &&
+                    event.version === version
+            );
         },
         /** Прервать работу на первой границе фазы с этим именем. */
         interruptAt(phase, action) {
@@ -161,170 +250,166 @@ function createStand() {
 
             return document;
         },
-        /* Освободить память стенда: их в одном процессе десятки. */
-        dispose() {
-            analysis.close(URI);
-            index.clear();
-        },
+        summary,
         boundariesOf(phase, version) {
-            return boundaries.filter(item =>
-                item.phase === phase &&
-                (version === undefined || item.version === version)).length;
+            return events.filter(event =>
+                event.kind === "boundary" &&
+                event.phase === phase &&
+                (version === undefined || event.version === version)).length;
         },
         /** Сколько раз фаза выполнялась заново, а не продолжалась. */
         freshRunsOf(phase, version) {
-            return boundaries.filter(item =>
-                item.phase === phase &&
-                !item.resumed &&
-                (version === undefined || item.version === version)).length;
+            return events.filter(event =>
+                event.kind === "boundary" &&
+                event.phase === phase &&
+                !event.resumed &&
+                (version === undefined || event.version === version)).length;
+        },
+        /** Освободить память стенда: их в одном процессе десятки. */
+        dispose() {
+            for (const waiter of [...waiters]) {
+                waiters.delete(waiter);
+                waiter.settle({ kind: "disposed" });
+            }
+
+            analysis.close(URI);
+            index.clear();
         }
     };
-}
 
-/** Прокручивает цикл событий, не сдвигая время. */
-async function pumpTicks(count, until) {
-    for (let index = 0; index < count; index++) {
-        if (until && until()) {
-            return;
-        }
-
-        await new Promise(resolve => setImmediate(resolve));
-    }
+    return stand;
 }
 
 async function run() {
     await test("прерывание после разбора не теряет его результат", async () => {
         const stand = createStand();
 
-        stand.analysis.setActiveDocument(URI);
-        stand.interruptAt("syntax", () => stand.leave());
-        stand.analysis.open(stand.document);
+        try {
+            stand.analysis.setActiveDocument(URI);
+            stand.interruptAt("syntax", () => stand.leave());
+            stand.analysis.open(stand.document);
 
-        await pumpTicks(200, () => stand.boundariesOf("syntax") > 0);
+            await stand.waitForBoundary("syntax", 1);
 
-        assert.strictEqual(
-            stand.freshRunsOf("syntax", 1),
-            1,
-            "разбор дошёл до контрольной точки"
-        );
+            assert.strictEqual(
+                stand.freshRunsOf("syntax", 1),
+                1,
+                "разбор дошёл до контрольной точки: " + stand.summary()
+            );
 
-        /*
-         * Уход на другую вкладку не отменяет разбор навсегда: он становится
-         * фоновым и доводится до конца. Проверяется не остановка, а то, что
-         * продолжение не считает заново самую дорогую фазу.
-         */
-        stand.comeBack();
-        await pumpTicks(400, () => stand.analysis.isLocalReady(stand.document));
+            /*
+             * Уход на другую вкладку не отменяет разбор навсегда: он
+             * становится фоновым и доводится до конца. Проверяется не
+             * остановка, а то, что продолжение не считает заново самую дорогую
+             * фазу.
+             */
+            stand.comeBack();
+            await stand.waitForVersion(1);
 
-        assert.ok(
-            stand.analysis.isLocalReady(stand.document),
-            "после возвращения разбор доводится до конца"
-        );
-        assert.ok(
-            stand.marks.some(item => item.event === "analysis.resumed"),
-            "продолжение отмечено как продолжение"
-        );
-        assert.strictEqual(
-            stand.freshRunsOf("syntax", 1),
-            1,
-            "фаза разбора этой версии второй раз не выполнялась"
-        );
-        stand.dispose();
+            assert.ok(
+                stand.marks.some(item => item.event === "analysis.resumed"),
+                "продолжение отмечено как продолжение: " + stand.summary()
+            );
+            assert.strictEqual(
+                stand.freshRunsOf("syntax", 1),
+                1,
+                "фаза разбора этой версии второй раз не выполнялась: " +
+                    stand.summary()
+            );
+        } finally {
+            stand.dispose();
+        }
     });
 
     await test("сборка модели продолжается, а не начинается заново", async () => {
         const stand = createStand();
 
-        stand.analysis.setActiveDocument(URI);
-        /* Прерываем в середине сборки модели, а не до неё. */
-        stand.interruptAt("modelSlice", () => stand.leave());
-        stand.analysis.open(stand.document);
+        try {
+            stand.analysis.setActiveDocument(URI);
+            /* Прерываем в середине сборки модели, а не до неё. */
+            stand.interruptAt("modelSlice", () => stand.leave());
+            stand.analysis.open(stand.document);
 
-        await pumpTicks(400, () => stand.boundariesOf("modelSlice") > 0);
+            await stand.waitForBoundary("modelSlice", 1);
 
-        assert.ok(
-            stand.boundariesOf("modelSlice") > 0,
-            "сборка модели успела начаться"
-        );
+            const slicesBefore = stand.boundariesOf("modelSlice", 1);
 
-        const slicesBefore = stand.boundariesOf("modelSlice", 1);
+            stand.comeBack();
+            await stand.waitForVersion(1);
 
-        stand.comeBack();
-        await pumpTicks(400, () => stand.analysis.isLocalReady(stand.document));
-
-        assert.ok(
-            stand.analysis.isLocalReady(stand.document),
-            "модель этой версии готова"
-        );
-        assert.strictEqual(
-            stand.freshRunsOf("syntax", 1),
-            1,
-            "разбор второй раз не выполнялся"
-        );
-        assert.ok(
-            stand.boundariesOf("modelSlice", 1) >= slicesBefore,
-            "сборка продолжилась, а не потерялась"
-        );
-        stand.dispose();
+            assert.strictEqual(
+                stand.freshRunsOf("syntax", 1),
+                1,
+                "разбор второй раз не выполнялся: " + stand.summary()
+            );
+            assert.ok(
+                stand.boundariesOf("modelSlice", 1) >= slicesBefore,
+                "сборка продолжилась, а не потерялась: " + stand.summary()
+            );
+            assert.ok(
+                stand.index.getCurrentModule(URI, 1),
+                "модель этой версии готова"
+            );
+        } finally {
+            stand.dispose();
+        }
     });
 
     await test("правка во время паузы отменяет устаревшую сборку", async () => {
         const stand = createStand();
 
-        stand.analysis.setActiveDocument(URI);
-        stand.interruptAt("syntax", () => {
-            /* Пользователь правит файл ровно в паузу между фазами. */
-            stand.edit(1);
-        });
-        stand.analysis.open(stand.document);
+        try {
+            stand.analysis.setActiveDocument(URI);
+            stand.interruptAt("syntax", () => {
+                /* Пользователь правит файл ровно в паузу между фазами. */
+                stand.edit(1);
+            });
+            stand.analysis.open(stand.document);
 
-        await pumpTicks(600, () =>
-            stand.analysis.isLocalReady(stand.document));
+            await stand.waitForVersion(2);
 
-        assert.ok(
-            stand.analysis.isLocalReady(stand.document),
-            "новая версия разобрана"
-        );
-        assert.strictEqual(
-            stand.index.getCurrentModule(URI, 1),
-            undefined,
-            "модель устаревшей версии не публиковалась"
-        );
+            assert.strictEqual(
+                stand.index.getCurrentModule(URI, 1),
+                undefined,
+                "модель устаревшей версии не публиковалась: " + stand.summary()
+            );
 
-        const model = stand.index.getCurrentModule(
-            URI,
-            stand.document.version
-        );
+            const model = stand.index.getCurrentModule(URI, 2);
 
-        assert.ok(model, "в индексе лежит модель актуальной версии");
-        assert.strictEqual(
-            model.source,
-            stand.document.getText(),
-            "модель собрана по актуальному тексту"
-        );
-        stand.dispose();
+            assert.ok(model, "в индексе лежит модель актуальной версии");
+            assert.strictEqual(
+                model.source,
+                stand.document.getText(),
+                "модель собрана по актуальному тексту"
+            );
+        } finally {
+            stand.dispose();
+        }
     });
 
     await test("устаревшая сборка не публикуется и после порции", async () => {
         const stand = createStand();
 
-        stand.analysis.setActiveDocument(URI);
-        stand.interruptAt("modelSlice", () => stand.edit(2));
-        stand.analysis.open(stand.document);
+        try {
+            stand.analysis.setActiveDocument(URI);
+            stand.interruptAt("modelSlice", () => stand.edit(2));
+            stand.analysis.open(stand.document);
 
-        await pumpTicks(600, () =>
-            stand.analysis.isLocalReady(stand.document));
+            await stand.waitForVersion(2);
 
-        assert.strictEqual(
-            stand.index.getCurrentModule(URI, 1),
-            undefined,
-            "половина модели прежней версии наружу не вышла"
-        );
-        assert.ok(
-            stand.analysis.isLocalReady(stand.document),
-            "актуальная версия доведена до конца"
-        );
-        stand.dispose();
+            assert.strictEqual(
+                stand.index.getCurrentModule(URI, 1),
+                undefined,
+                "половина модели прежней версии наружу не вышла: " +
+                    stand.summary()
+            );
+            assert.ok(
+                stand.index.getCurrentModule(URI, 2),
+                "актуальная версия доведена до конца"
+            );
+        } finally {
+            stand.dispose();
+        }
     });
 
     await test("серия прерываний не расшатывает разбор", async () => {
@@ -339,28 +424,25 @@ async function run() {
             const stand = createStand();
             const phase = round % 2 === 0 ? "syntax" : "modelSlice";
 
-            stand.analysis.setActiveDocument(URI);
-            stand.interruptAt(phase, () => stand.leave());
-            stand.analysis.open(stand.document);
+            try {
+                stand.analysis.setActiveDocument(URI);
+                stand.interruptAt(phase, () => stand.leave());
+                stand.analysis.open(stand.document);
 
-            await pumpTicks(400, () => stand.boundariesOf(phase) > 0);
+                await stand.waitForBoundary(phase, 1);
 
-            stand.comeBack();
-            await pumpTicks(
-                600,
-                () => stand.analysis.isLocalReady(stand.document)
-            );
+                stand.comeBack();
+                await stand.waitForVersion(1);
 
-            assert.ok(
-                stand.analysis.isLocalReady(stand.document),
-                `заход ${round} (${phase}): разбор обязан довестись до конца`
-            );
-            assert.strictEqual(
-                stand.freshRunsOf("syntax", 1),
-                1,
-                `заход ${round} (${phase}): разбор считался ровно один раз`
-            );
-            stand.dispose();
+                assert.strictEqual(
+                    stand.freshRunsOf("syntax", 1),
+                    1,
+                    `заход ${round} (${phase}): разбор считался ровно один ` +
+                        `раз; ${stand.summary()}`
+                );
+            } finally {
+                stand.dispose();
+            }
         }
 
         console.log(
