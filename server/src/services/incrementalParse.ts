@@ -1,4 +1,5 @@
 import { lexRsl, type IRslLexResult, type IRslToken } from "../lexer";
+import type { IRslChangedSpan } from "./documentChangeLog";
 import {
     parseRslSyntax,
     type IRslParseResult,
@@ -121,7 +122,9 @@ export function beginIncrementalRslParse(
     previousParse: IRslParseResult,
     nextText: string,
     nextLex: IRslLexResult,
-    onDecision?: (decision: IRslIncrementalParseDecision) => void
+    onDecision?: (decision: IRslIncrementalParseDecision) => void,
+    /* Готовый участок из журнала правок: см. editRange. */
+    knownSpan?: IRslChangedSpan
 ): IRslIncrementalParseBuild | undefined {
     const decide = (
         reason: IRslIncrementalParseDecision["reason"],
@@ -150,7 +153,7 @@ export function beginIncrementalRslParse(
         return decide("smallFile");
     }
 
-    const edit = editRange(previousText, nextText);
+    const edit = editRange(previousText, nextText, knownSpan);
 
     if (!edit) {
         return decide("unsplittableEdit");
@@ -386,11 +389,29 @@ function withLazyTokens(
     });
 }
 
-/** Границы правки: общий префикс и общий суффикс. */
+/**
+ * Границы правки.
+ *
+ * Готовый участок из журнала правок берётся как есть: редактор уже прислал
+ * точные диапазоны, и искать их вторым проходом по всему тексту незачем — на
+ * файле 700 КБ это мегабайт сравнений на каждое нажатие клавиши, и делает их
+ * ещё и lex. Без журнала работает прежний поиск по префиксу и суффиксу.
+ */
 function editRange(
     previousText: string,
-    nextText: string
+    nextText: string,
+    knownSpan?: IRslChangedSpan
 ): { oldStart: number; oldEnd: number; delta: number } | undefined {
+    if (knownSpan) {
+        return knownSpan.oldEnd < knownSpan.oldStart
+            ? undefined
+            : {
+                oldStart: knownSpan.oldStart,
+                oldEnd: knownSpan.oldEnd,
+                delta: nextText.length - previousText.length
+            };
+    }
+
     let prefix = 0;
     const shortest = Math.min(previousText.length, nextText.length);
 

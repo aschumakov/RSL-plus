@@ -11,6 +11,7 @@ import {
 import { RslSymbol } from "../symbols/rslSymbol";
 import type { IRslLexResult } from "../lexer";
 import { parseRslSyntax } from "../syntaxParser";
+import type { IRslChangedSpan } from "./documentChangeLog";
 import {
     beginUpdateRslParse,
     createRslModelBuild,
@@ -131,6 +132,20 @@ export interface IDocumentAnalysisOptions {
             resumed: boolean;
         }
     ): void | Promise<void>;
+    /**
+     * Где правили документ между двумя версиями, если это достоверно известно.
+     *
+     * Редактор присылает точные диапазоны правок, и журнал их сохраняет.
+     * Без ответа lex и разбор ищут изменение сами — сравнением префикса и
+     * суффикса, то есть двумя проходами по всему тексту.
+     */
+    changedSpan?(
+        uri: string,
+        fromVersion: number,
+        toVersion: number,
+        previousLength: number,
+        nextLength: number
+    ): IRslChangedSpan | undefined;
     invalidateProviderCaches(uri: string): void;
     onParsed(module: IIndexedModule, wasKnown: boolean): void;
     onImports(uri: string, imports: readonly string[]): void;
@@ -176,6 +191,13 @@ export class DocumentAnalysisService {
      * объявления новое состояние берёт у прежнего по ссылке.
      */
     private modelStates = new Map<string, IRslModelState>();
+    /**
+     * Версия документа, из которой собрано состояние модели.
+     *
+     * Само состояние версии не хранит, а журналу правок нужна именно она:
+     * участок спрашивается за переход «от версии состояния к версии текста».
+     */
+    private modelStateVersions = new Map<string, number>();
     private parseTimers = new Map<string, {
         timer: IRslTimerHandle;
         version: number;
@@ -451,6 +473,7 @@ export class DocumentAnalysisService {
     } | undefined> {
         const performance = this.options.performance;
         const previous = this.modelStates.get(uri);
+        const previousVersion = this.modelStateVersions.get(uri);
         const parseBuild = previous && beginUpdateRslParse(
             previous,
             text,
@@ -458,7 +481,16 @@ export class DocumentAnalysisService {
             decision => performance?.mark?.(
                 "analysis.incrementalParse",
                 { uri, version, ...decision }
-            )
+            ),
+            previousVersion === undefined
+                ? undefined
+                : this.options.changedSpan?.(
+                    uri,
+                    previousVersion,
+                    version,
+                    previous.text.length,
+                    text.length
+                )
         );
 
         if (parseBuild) {
@@ -548,6 +580,7 @@ export class DocumentAnalysisService {
         const update = build.result();
 
         this.modelStates.set(uri, update.state);
+        this.modelStateVersions.set(uri, version);
 
         return update.model;
     }
@@ -756,6 +789,7 @@ export class DocumentAnalysisService {
         this.phaseCheckpoints.delete(uri);
         /* Прошлое состояние модели нужно только открытому файлу. */
         this.modelStates.delete(uri);
+        this.modelStateVersions.delete(uri);
         this.fastSnapshots.delete(uri);
         this.openedVersions.delete(uri);
         this.parsedVersions.delete(uri);
@@ -786,12 +820,20 @@ export class DocumentAnalysisService {
             })
             : undefined;
         let decision: IRslRelexDecision | undefined;
+        const previous = this.fastSnapshots.get(document.uri);
         const snapshot = createFastDocumentSnapshot(
             document,
-            this.fastSnapshots.get(document.uri),
+            previous,
             value => {
                 decision = value;
-            }
+            },
+            previous && this.options.changedSpan?.(
+                document.uri,
+                previous.version,
+                document.version,
+                previous.text.length,
+                document.getText().length
+            )
         );
         if (span) {
             performance.end(span, {

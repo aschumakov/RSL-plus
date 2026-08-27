@@ -4,6 +4,7 @@ import {
     type IRslToken,
     type RslTokenKind
 } from "../lexer";
+import type { IRslChangedSpan } from "./documentChangeLog";
 
 /** Ниже этого размера полный lexRsl уже быстрее правки и её проверок. */
 export const INCREMENTAL_LEX_MIN_CHARS = 50_000;
@@ -122,7 +123,15 @@ export function tryIncrementalRelex(
     previousText: string,
     previousLex: IRslLexResult,
     nextText: string,
-    onDecision?: (decision: IRslRelexDecision) => void
+    onDecision?: (decision: IRslRelexDecision) => void,
+    /*
+     * Готовый изменённый участок из журнала правок, если он есть.
+     *
+     * Редактор присылает точные диапазоны, и искать их заново сравнением
+     * префикса и суффикса — два прохода по всему тексту на каждое нажатие
+     * клавиши. Участок необязателен: без него работает прежний поиск.
+     */
+    knownSpan?: IRslChangedSpan
 ): IRslLexResult | undefined {
     /*
      * Причина решения уходит в лог: по одной длительности lex не видно, почему
@@ -144,18 +153,13 @@ export function tryIncrementalRelex(
         return previousLex;
     }
 
-    const prefix = commonPrefixLength(previousText, nextText);
-    const maxSuffix = Math.min(
-        previousText.length - prefix,
-        nextText.length - prefix
-    );
-    const suffix = commonSuffixLength(previousText, nextText, maxSuffix);
+    const found = knownSpan ||
+        scanChangedSpan(previousText, nextText);
+    const oldStart = found.oldStart;
+    const oldEnd = found.oldEnd;
+    const newEnd = found.newEnd;
 
-    const oldStart = prefix;
-    const oldEnd = previousText.length - suffix;
-    const newEnd = nextText.length - suffix;
-
-    if (oldEnd < oldStart || newEnd < prefix) {
+    if (oldEnd < oldStart || newEnd < oldStart) {
         decide("unsplittableEdit", { editStart: oldStart });
         return undefined;
     }
@@ -532,6 +536,25 @@ function lowerBound(tokens: readonly IRslToken[], offset: number): number {
     }
 
     return low;
+}
+
+/** Изменённый участок сравнением: запасной путь, когда журнал молчит. */
+function scanChangedSpan(
+    previousText: string,
+    nextText: string
+): IRslChangedSpan {
+    const prefix = commonPrefixLength(previousText, nextText);
+    const maxSuffix = Math.min(
+        previousText.length - prefix,
+        nextText.length - prefix
+    );
+    const suffix = commonSuffixLength(previousText, nextText, maxSuffix);
+
+    return {
+        oldStart: prefix,
+        oldEnd: previousText.length - suffix,
+        newEnd: nextText.length - suffix
+    };
 }
 
 function commonPrefixLength(left: string, right: string): number {

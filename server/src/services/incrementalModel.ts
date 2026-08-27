@@ -6,6 +6,7 @@ import {
     type IRslSymbolUnit
 } from "../analysis/declarationExtractor";
 import type { IRslLexResult } from "../lexer";
+import type { IRslChangedSpan } from "./documentChangeLog";
 import type { IRslModuleModel } from "../moduleModel";
 import type { RslSymbol } from "../symbols/rslSymbol";
 import type { IRslParseResult, IRslSyntaxNode } from "../syntaxParser";
@@ -82,13 +83,16 @@ export function tryUpdateRslParse(
     state: IRslModelState,
     nextText: string,
     nextLex: IRslLexResult,
-    onDecision?: (decision: IRslIncrementalParseDecision) => void
+    onDecision?: (decision: IRslIncrementalParseDecision) => void,
+    /* Готовый участок из журнала правок, если он известен. */
+    knownSpan?: IRslChangedSpan
 ): IRslParsedUpdate | undefined {
     const build = beginUpdateRslParse(
         state,
         nextText,
         nextLex,
-        onDecision
+        onDecision,
+        knownSpan
     );
 
     return build ? build.result() : undefined;
@@ -106,7 +110,9 @@ export function beginUpdateRslParse(
     state: IRslModelState,
     nextText: string,
     nextLex: IRslLexResult,
-    onDecision?: (decision: IRslIncrementalParseDecision) => void
+    onDecision?: (decision: IRslIncrementalParseDecision) => void,
+    /* Готовый участок из журнала правок, если он известен. */
+    knownSpan?: IRslChangedSpan
 ): IRslParseUpdateBuild | undefined {
     if (!state.unitSymbols) {
         return undefined;
@@ -117,7 +123,8 @@ export function beginUpdateRslParse(
         state.parse,
         nextText,
         nextLex,
-        onDecision
+        onDecision,
+        knownSpan
     );
 
     if (!build) {

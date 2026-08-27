@@ -17,6 +17,10 @@ import {
     DocumentAnalysisService,
     type ParseWaitMode
 } from "./services/documentAnalysisService";
+import {
+    connectionWithChangeLog,
+    RslDocumentChangeLog
+} from "./services/documentChangeLog";
 import { RslDefinitionProvider } from "./features/definitionProvider";
 import {
     buildRslFileRenameEdit
@@ -310,6 +314,13 @@ const workspaceDiscovery = new WorkspaceFileDiscoveryService({
     }
 });
 
+/*
+ * Журнал правок: где именно менялся документ.
+ *
+ * Редактор присылает точные диапазоны, и без журнала они пропадали — служба
+ * искала изменение заново сравнением префикса и суффикса двух версий текста.
+ */
+const documentChangeLog = new RslDocumentChangeLog();
 const documentAnalysis = new DocumentAnalysisService(
     documents,
     workspaceIndex,
@@ -317,6 +328,14 @@ const documentAnalysis = new DocumentAnalysisService(
     {
         log: logMessage,
         performance: performanceLogger,
+        changedSpan: (uri, from, to, previousLength, nextLength) =>
+            documentChangeLog.changedSpan(
+                uri,
+                from,
+                to,
+                previousLength,
+                nextLength
+            ),
         invalidateProviderCaches,
         /*
          * Разбор своего файла запускает обе волны: локальные ошибки сразу,
@@ -709,6 +728,7 @@ documents.onDidClose(event => {
     const uri = event.document.uri;
     settingsService.clear(uri);
     documentAnalysis.close(uri);
+    documentChangeLog.forget(uri);
     diagnosticsCoordinator.close(uri);
     languageFeatures?.forget(uri);
     workspaceIndex.markClosed(uri);
@@ -913,5 +933,9 @@ connection.onShutdown(async () => {
     return compactModules.dispose();
 });
 
-documents.listen(connection);
+documents.listen(connectionWithChangeLog(
+    connection,
+    documents,
+    documentChangeLog
+));
 connection.listen();

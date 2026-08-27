@@ -6,6 +6,7 @@ import {
     type IRslFoldingRange
 } from "../folding";
 import { lexRsl, type IRslLexResult } from "../lexer";
+import type { IRslChangedSpan } from "./documentChangeLog";
 import {
     extractCompactDeclarations,
     type IRslDeclarationDescriptor,
@@ -44,11 +45,19 @@ export interface IFastDocumentSnapshot {
 export function createFastDocumentSnapshot(
     document: TextDocument,
     previous?: IFastDocumentSnapshot,
-    onLexDecision?: (decision: IRslRelexDecision) => void
+    onLexDecision?: (decision: IRslRelexDecision) => void,
+    /* Готовый участок из журнала правок, если он известен. */
+    knownSpan?: IRslChangedSpan
 ): IFastDocumentSnapshot {
     const text = document.getText();
     const lex = (previous &&
-        tryIncrementalRelex(previous.text, previous.lex, text, onLexDecision)) ||
+        tryIncrementalRelex(
+            previous.text,
+            previous.lex,
+            text,
+            onLexDecision,
+            knownSpan
+        )) ||
         lexRsl(text);
 
     /* Первое лексирование сравнивать не с чем: точечный путь тут неприменим. */
