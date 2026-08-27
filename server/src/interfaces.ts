@@ -55,6 +55,16 @@ export interface IRslDiagnosticSettings {
     unusedVariables?: boolean;
     unusedImports?: boolean;
     debugBreak?: boolean;
+    /** Присваивание переменной самой себе. */
+    selfAssignment?: boolean;
+    /** Сравнение значения с самим собой. */
+    selfComparison?: boolean;
+    /** Заведомо постоянное условие. */
+    constantCondition?: boolean;
+    /** Повторное условие в цепочке if/elif. */
+    duplicateBranchCondition?: boolean;
+    /** Выражение, результат которого никуда не идёт. */
+    unusedExpression?: boolean;
     useBeforeDeclaration?: boolean;
     ambiguousReferences?: boolean;
     /**

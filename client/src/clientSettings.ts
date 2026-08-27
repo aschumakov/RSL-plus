@@ -33,6 +33,11 @@ export interface IRslClientSettings {
         unusedVariables: boolean;
         unusedImports: boolean;
         debugBreak: boolean;
+        selfAssignment: boolean;
+        selfComparison: boolean;
+        constantCondition: boolean;
+        duplicateBranchCondition: boolean;
+        unusedExpression: boolean;
         useBeforeDeclaration: boolean;
         ambiguousReferences: boolean;
         redundantImports: boolean;
@@ -75,7 +80,7 @@ export function readRslSettings(resource?: Uri): IRslClientSettings {
         inlayHints: {
             variableTypes: readSetting(
                 "inlayHints.variableTypes",
-                true,
+                false,
                 resource
             ),
             parameterNames: readSetting(
@@ -132,6 +137,31 @@ export function readRslSettings(resource?: Uri): IRslClientSettings {
             ),
             debugBreak: readSetting(
                 "diagnostics.debugBreak",
+                true,
+                resource
+            ),
+            selfAssignment: readSetting(
+                "diagnostics.selfAssignment",
+                true,
+                resource
+            ),
+            selfComparison: readSetting(
+                "diagnostics.selfComparison",
+                true,
+                resource
+            ),
+            constantCondition: readSetting(
+                "diagnostics.constantCondition",
+                true,
+                resource
+            ),
+            duplicateBranchCondition: readSetting(
+                "diagnostics.duplicateBranchCondition",
+                true,
+                resource
+            ),
+            unusedExpression: readSetting(
+                "diagnostics.unusedExpression",
                 true,
                 resource
             ),

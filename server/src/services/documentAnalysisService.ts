@@ -84,6 +84,9 @@ const MAX_PHASE_CHECKPOINTS = 2;
  */
 const MODEL_SLICE_MS = 8;
 
+/** Граница фазы разбора: см. onPhaseBoundary. */
+export type RslAnalysisPhase = "syntax" | "modelSlice" | "model";
+
 export interface IDocumentAnalysisOptions {
     /**
      * Часы службы: задержки и текущее время.
@@ -100,6 +103,34 @@ export interface IDocumentAnalysisOptions {
     backgroundQuietMs?: number;
     log(message: string): void;
     performance?: PerformanceLogger;
+    /**
+     * Порция сборки модели, мс.
+     *
+     * По умолчанию MODEL_SLICE_MS. Тест задаёт ноль, чтобы каждая единица
+     * заканчивала порцию: иначе момент прерывания снова зависел бы от того,
+     * успела ли машина собрать модель за одну порцию.
+     */
+    modelSliceMs?: number;
+    /**
+     * Наблюдатель за границами фаз разбора.
+     *
+     * Момент прерывания разбора иначе не воспроизвести: он приходится на паузу
+     * между фазами, и тест, подбирающий его числом тактов, отвечает то одно, то
+     * другое. Наблюдатель вызывается ровно на границе, до возврата управления,
+     * и может сделать версию неактуальной — то есть прервать разбор там, где
+     * это и нужно проверить.
+     *
+     * В рабочем сервере не задан и ничего не стоит.
+     */
+    onPhaseBoundary?(
+        phase: RslAnalysisPhase,
+        context: {
+            uri: string;
+            version: number;
+            /** true — фаза продолжает прерванную работу, а не начинает её. */
+            resumed: boolean;
+        }
+    ): void | Promise<void>;
     invalidateProviderCaches(uri: string): void;
     onParsed(module: IIndexedModule, wasKnown: boolean): void;
     onImports(uri: string, imports: readonly string[]): void;
@@ -460,19 +491,33 @@ export class DocumentAnalysisService {
         version: number,
         generation: number,
         build: IRslModelBuild,
-        phased: boolean
+        phased: boolean,
+        resumed: boolean
     ): Promise<ReturnType<typeof createOpenModuleModel> | undefined> {
-        while (build.step(MODEL_SLICE_MS)) {
+        const sliceMs = this.options.modelSliceMs ?? MODEL_SLICE_MS;
+
+        while (build.step(sliceMs)) {
             if (!phased) {
                 continue;
             }
 
+            await this.options.onPhaseBoundary?.("modelSlice", {
+                uri,
+                version,
+                resumed
+            });
             await yieldToEventLoop();
 
             if (!this.stillCurrent(uri, version, generation)) {
                 return undefined;
             }
         }
+
+        await this.options.onPhaseBoundary?.("model", {
+            uri,
+            version,
+            resumed
+        });
 
         const update = build.result();
 
@@ -1330,6 +1375,11 @@ export class DocumentAnalysisService {
              * выйдет, и посчитанное пропадёт.
              */
             this.rememberCheckpoint(uri, version, syntax, phase.build);
+            await this.options.onPhaseBoundary?.("syntax", {
+                uri,
+                version,
+                resumed
+            });
             await yieldToEventLoop();
             blockingSinceMs = monotonicMs();
         }
@@ -1354,7 +1404,8 @@ export class DocumentAnalysisService {
             version,
             generation,
             phase.build,
-            phased
+            phased,
+            resumed
         );
 
         if (!model) {

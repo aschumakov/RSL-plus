@@ -270,6 +270,33 @@ export const RSL_DIAGNOSTIC_RULES: readonly IRslDiagnosticRule[] = [
         produces: true
     },
     {
+        /*
+         * Пять проверок одного оператора: присваивание самому себе,
+         * сравнение с самим собой, постоянное условие, повторное условие
+         * ветки, выражение без эффекта. Настройки у них разные, обход
+         * общий — поэтому в плане это один этап.
+         */
+        id: "statements",
+        phase: "local",
+        settings: [
+            "selfAssignment",
+            "selfComparison",
+            "constantCondition",
+            "duplicateBranchCondition",
+            "unusedExpression"
+        ],
+        requires: [],
+        depends: TEXT_ONLY,
+        /*
+         * Оператор и цепочка if/elif целиком лежат в своей единице, и
+         * ответ правил зависит ровно от её текста: правка в одной
+         * процедуре не меняет находок в остальных.
+         */
+        cache: "unit",
+        resumable: true,
+        produces: true
+    },
+    {
         id: "deprecated",
         phase: "local",
         settings: ["deprecatedDeclarations"],

@@ -77,7 +77,7 @@ const defaultSettings: IRslSettings = {
     autoImport: { enabled: true },
     analysis: { workspaceIndexing: "activeImports" },
     semanticHighlighting: { maxFileSizeKb: 512 },
-    inlayHints: { variableTypes: true, parameterNames: true },
+    inlayHints: { variableTypes: false, parameterNames: true },
     format: {
         keywordCase: "asIs",
         spaceAroundOperators: true,

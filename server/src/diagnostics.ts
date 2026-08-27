@@ -17,12 +17,21 @@ import {
 } from "vscode-languageserver";
 
 import { RslSymbol } from "./symbols/rslSymbol";
+import type {
+    IRslDocumentUnit
+} from "./analysis/documentUnits";
 import {
     runRslUnitDiagnosticsWithoutCache,
     tokensOfRslUnits,
     type IRslUnitDiagnosticsRun,
     type RslUnitDiagnosticsCache
 } from "./diagnostics/unitDiagnosticsCache";
+import {
+    checkRslConditions,
+    createRslStatementScanner,
+    type IRslStatementScanner
+} from "./diagnostics/statementChecks";
+import type { IRslDiagnosticStage } from "./diagnostics/stages";
 import {
     rslUnitCacheFingerprint,
     rslUnitCacheLane,
@@ -138,6 +147,11 @@ export const DEFAULT_DIAGNOSTIC_SETTINGS: Required<IRslDiagnosticSettings> = {
     unusedVariables: true,
     unusedImports: true,
     debugBreak: true,
+    selfAssignment: true,
+    selfComparison: true,
+    constantCondition: true,
+    duplicateBranchCondition: true,
+    unusedExpression: true,
     useBeforeDeclaration: true,
     ambiguousReferences: true,
     /*
@@ -172,6 +186,12 @@ export function normalizeDiagnosticSettings(
         unusedVariables: settings?.unusedVariables !== false,
         unusedImports: settings?.unusedImports !== false,
         debugBreak: settings?.debugBreak !== false,
+        selfAssignment: settings?.selfAssignment !== false,
+        selfComparison: settings?.selfComparison !== false,
+        constantCondition: settings?.constantCondition !== false,
+        duplicateBranchCondition:
+            settings?.duplicateBranchCondition !== false,
+        unusedExpression: settings?.unusedExpression !== false,
         useBeforeDeclaration:
             settings?.useBeforeDeclaration !== false,
         ambiguousReferences:
@@ -643,6 +663,26 @@ function planLocalRslDiagnostics(
                 options.maxProblems
             )
         ],
+        /*
+         * Пять проверок одного оператора идут одним обходом.
+         *
+         * Каждая включается своей настройкой, но поток токенов у них
+         * общий: пять отдельных обходов файла стоили бы впятеро дороже
+         * ради работы, которая вся помещается в один.
+         */
+        [
+            "statements",
+            statementChecksEnabled(options),
+            createStatementStage(
+                module,
+                options,
+                unitResult,
+                () => unitRun.full
+                    ? undefined
+                    : unitRun.stale,
+                countUnitStage
+            )
+        ],
         [
             "deprecated",
             options.deprecatedDeclarations,
@@ -1012,6 +1052,85 @@ function importClosureKeyOf(
     return resolver
         ? resolver.getImportContextKey(uri)
         : index.getImportClosureKey(uri);
+}
+
+/** Включена ли хоть одна проверка оператора. */
+function statementChecksEnabled(
+    options: Required<IRslDiagnosticSettings>
+): boolean {
+    return options.selfAssignment ||
+        options.selfComparison ||
+        options.constantCondition ||
+        options.duplicateBranchCondition ||
+        options.unusedExpression;
+}
+
+/**
+ * Проверки оператора: возобновляемый обход потока и разбор условий.
+ *
+ * Условия берутся из дерева — там заголовок ветвления лежит целиком, —
+ * а операторы из потока: их узлов в дереве нет. Обход один, и он
+ * прерывается по бюджету, как и остальные.
+ */
+function createStatementStage(
+    module: IIndexedModule,
+    options: Required<IRslDiagnosticSettings>,
+    result: Diagnostic[],
+    staleUnits: () => readonly IRslDocumentUnit[] | undefined,
+    onComplete: () => void
+): IRslDiagnosticStage {
+    const checkOptions = {
+        selfAssignment: options.selfAssignment,
+        selfComparison: options.selfComparison,
+        constantCondition: options.constantCondition,
+        duplicateBranchCondition: options.duplicateBranchCondition,
+        unusedExpression: options.unusedExpression,
+        maxProblems: options.maxProblems
+    };
+    /*
+     * Обход идёт по изменившимся единицам, а не по всему файлу.
+     *
+     * Оператор и условие целиком лежат в своей единице, поэтому
+     * результат правил зависит ровно от её текста — и переносится на
+     * новую версию сдвигом, как у остальных проверок этой ленты.
+     */
+    let scanned: readonly IRslToken[] | undefined;
+    let scanner: IRslStatementScanner | undefined;
+    const tokens = (): readonly IRslToken[] => {
+        if (!scanned) {
+            const stale = staleUnits();
+
+            scanned = stale === undefined
+                ? module.syntax.tokens
+                : tokensOfRslUnits(module.syntax.tokens, stale);
+            scanner = createRslStatementScanner(
+                module,
+                checkOptions,
+                result,
+                scanned
+            );
+        }
+
+        return scanned;
+    };
+
+    return createScanStage(
+        tokens,
+        (token, index) => scanner?.accept(token, index),
+        () => {
+            const stale = staleUnits();
+
+            checkRslConditions(
+                module,
+                checkOptions,
+                result,
+                stale === undefined
+                    ? undefined
+                    : stale.flatMap(unit => unit.ranges)
+            );
+            onComplete();
+        }
+    );
 }
 
 /** Полный результат для unit-тестов и batch-клиентов. */

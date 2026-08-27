@@ -220,7 +220,7 @@
             "rslPlus.inlayHints.variableTypes": {
                "scope": "resource",
                "type": "boolean",
-               "default": true,
+               "default": false,
                "description": "Показывать выведенный тип рядом с объявлением, в котором тип не написан: Var doc; и Var doc = TBFile(...) — это Variant, и подсказка сообщает, чем он оказался."
             },
             "rslPlus.inlayHints.parameterNames": {
@@ -315,6 +315,36 @@
                "type": "boolean",
                "default": true,
                "description": "Предупреждать об оставленном DEBUGBREAK."
+            },
+            "rslPlus.diagnostics.selfAssignment": {
+               "scope": "resource",
+               "type": "boolean",
+               "default": true,
+               "description": "Предупреждать о присваивании переменной самой себе: clientIIN = clientIIN. Вызовы и индексы не проверяются — их повторное вычисление может иметь смысл."
+            },
+            "rslPlus.diagnostics.selfComparison": {
+               "scope": "resource",
+               "type": "boolean",
+               "default": true,
+               "description": "Предупреждать о сравнении значения с самим собой: if (status == status). Проверяется простая форма без вызовов."
+            },
+            "rslPlus.diagnostics.constantCondition": {
+               "scope": "resource",
+               "type": "boolean",
+               "default": true,
+               "description": "Предупреждать о заведомо постоянном условии: if (true), while (false), if (1 == 2). Вычисляются только литералы и связки над ними."
+            },
+            "rslPlus.diagnostics.duplicateBranchCondition": {
+               "scope": "resource",
+               "type": "boolean",
+               "default": true,
+               "description": "Предупреждать о повторном условии в цепочке if/elif: такая ветка недостижима. Условия с вызовами не сравниваются."
+            },
+            "rslPlus.diagnostics.unusedExpression": {
+               "scope": "resource",
+               "type": "boolean",
+               "default": true,
+               "description": "Предупреждать о выражении, результат которого никуда не идёт: amount + commission;. Вызовы, присваивания, обращения к членам и индексам бесполезными не считаются."
             },
             "rslPlus.diagnostics.useBeforeDeclaration": {
                "scope": "resource",

@@ -133,9 +133,16 @@ function mergeSettings(
              * Обращение к отсутствующей секции роняло бы разрешение настроек
              * целиком, а не теряло одно значение.
              */
+            /*
+             * Выключено по умолчанию.
+             *
+             * Подсказка типа стоит у каждого объявления без написанного типа —
+             * в файле их сотни, и постоянно висящий текст мешает читать код
+             * тем, кто его не просил. Кому нужно, включает настройкой.
+             */
             variableTypes: typeof inlayHints.variableTypes === "boolean"
                 ? inlayHints.variableTypes
-                : defaults.inlayHints?.variableTypes !== false,
+                : defaults.inlayHints?.variableTypes === true,
             parameterNames: typeof inlayHints.parameterNames === "boolean"
                 ? inlayHints.parameterNames
                 : defaults.inlayHints?.parameterNames !== false
@@ -191,7 +198,7 @@ function cloneSettings(value: IRslSettings): IRslSettings {
         analysis: { ...value.analysis },
         semanticHighlighting: { ...value.semanticHighlighting },
         inlayHints: {
-            variableTypes: value.inlayHints?.variableTypes !== false,
+            variableTypes: value.inlayHints?.variableTypes === true,
             parameterNames: value.inlayHints?.parameterNames !== false
         },
         format: { ...value.format },
