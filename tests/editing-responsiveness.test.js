@@ -124,6 +124,11 @@ async function attempt(base) {
         document = TextDocument.create(URI, "rsl", 2, edited);
 
         const gaps = [];
+        /*
+         * Возвраты считаются по срабатываниям таймера, а заключительный
+         * отрезок в их число не входит: он меряет работу, а не паузу.
+         */
+        let returns = 0;
         let previous = process.hrtime.bigint();
         /*
          * Между порциями поток свободен, и таймер успевает сработать.
@@ -136,12 +141,29 @@ async function attempt(base) {
             previous = now;
         }, 1);
 
-        analysis.changed(document);
+        try {
+            analysis.changed(document);
 
-        await analysis.ensureParsed(document, "force");
-        clearInterval(interval);
+            await analysis.ensureParsed(document, "force");
 
-        return { longest: Math.max(...gaps), returns: gaps.length };
+            /*
+             * Последний отрезок — вручную.
+             *
+             * Продолжение await выполняется раньше очередного срабатывания
+             * таймера, поэтому промежуток от последнего срабатывания до
+             * готовой модели сам в gaps не попадает. Это и есть завершающая
+             * порция работы, и монолитная работа в ней осталась бы
+             * незамеченной.
+             */
+            returns = gaps.length;
+            gaps.push(
+                Number(process.hrtime.bigint() - previous) / 1e6
+            );
+        } finally {
+            clearInterval(interval);
+        }
+
+        return { longest: Math.max(...gaps), returns };
     } finally {
         analysis.close(URI);
     }

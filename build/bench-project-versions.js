@@ -28,11 +28,21 @@
  *
  * Меряются два пути, потому что они разные:
  *
- *   холодный  — сплошной проход по проекту: модель с нуля и buildRslDiagnostics
- *               без движка и без кэша. Так считается файл, который никто не
+ *   изолированный холодный файл — модель с нуля и buildRslDiagnostics без
+ *               движка и без кэша. Так считается файл, который никто не
  *               открывал;
- *   редактор  — DocumentAnalysisService и RslDiagnosticEngine, то есть ровно
- *               то, что происходит при открытии вкладки и при наборе текста.
+ *   изолированный путь редактора — DocumentAnalysisService и
+ *               RslDiagnosticEngine: то, что происходит при открытии вкладки
+ *               и при наборе текста.
+ *
+ * Слово «изолированный» здесь существенно. Каждый файл меряется в собственном
+ * индексе, где зарегистрирован он один: зависимостей проекта в индексе нет и
+ * загрузка импортов выключена. Lex, разбор, модель, локальные Problems и вся
+ * механика кэша по единицам от этого не страдают — они смотрят только на сам
+ * файл. А вот межфайловые Problems и цена работы с Import-контекстом в таком
+ * замере ниже, чем в настоящем открытом проекте, и сравнивать их с рабочими
+ * ощущениями нельзя. Режим с заранее собранным каталогом и подгруженными
+ * зависимостями — задача следующей версии.
  *
  * На каждый файл записывается: lex, разбор и модель по отдельности (из
  * span-ов самой службы разбора, а не замером снаружи); Problems локальные и
@@ -48,6 +58,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { pathToFileURL } = require("url");
 
 /* ──────────────────────────── разбор аргументов ────────────────────────── */
 
@@ -219,18 +230,28 @@ function collect(directory) {
     return result.sort();
 }
 
+/**
+ * Какие файлы мерить.
+ *
+ * Размер отсекается ДО ограничения количества. Иначе `--files 200`
+ * отбирает две сотни первых по алфавиту, мелкие из них потом отсеиваются, и
+ * вместо двух сотен меряется сколько получится — при том что подходящие файлы
+ * в проекте есть, просто они дальше по алфавиту.
+ */
 function chooseFiles() {
-    const all = OPTIONS.projects.flatMap(collect);
+    const sized = OPTIONS.projects
+        .flatMap(collect)
+        .map(file => ({ file, size: fs.statSync(file).size }))
+        .filter(item => item.size >= MIN_BYTES);
 
     if (OPTIONS.largest > 0) {
-        return all
-            .map(file => ({ file, size: fs.statSync(file).size }))
+        return sized
             .sort((left, right) => right.size - left.size)
             .slice(0, OPTIONS.largest)
             .map(item => item.file);
     }
 
-    return all.slice(0, OPTIONS.files);
+    return sized.slice(0, OPTIONS.files).map(item => item.file);
 }
 
 /* ─────────────────────────────── статистика ────────────────────────────── */
@@ -784,12 +805,7 @@ async function benchBuild(root, files) {
             continue;
         }
 
-        if (source.length < MIN_BYTES) {
-            /* Мелкие файлы меряют шум таймера, а не работу. */
-            continue;
-        }
-
-        const uri = "file:///" + file.split(path.sep).join("/");
+        const uri = pathToFileURL(file).toString();
         let best;
 
         try {
@@ -981,7 +997,7 @@ function printReport(report) {
         "  правка: " + report.edit + ", предел Problems " + report.maxProblems
     );
 
-    console.log("\n  Холодный путь (сплошной проход по проекту)");
+    console.log("\n  Изолированный холодный файл");
     line("модель с нуля", stats.coldModel);
     line("buildRslDiagnostics", stats.coldProblems);
 
@@ -994,13 +1010,16 @@ function printReport(report) {
         return;
     }
 
-    console.log("\n  Открытие вкладки");
+    console.log("\n  Изолированный путь редактора: открытие вкладки");
     line("lex", stats.openLex);
     line("разбор", stats.openParse);
     line("модель", stats.openModel);
     line("Problems локальные", stats.openLocal);
     line("Problems межфайловые", stats.openWorkspace);
     line("опубликовано Problems", stats.published, " шт");
+    console.log(
+        "  (межфайловые Problems занижены: зависимостей проекта в индексе нет)"
+    );
 
     console.log("\n  Первая правка");
     line("lex", stats.editLex);
