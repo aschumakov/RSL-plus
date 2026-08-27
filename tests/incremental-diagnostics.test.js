@@ -14,6 +14,7 @@
  */
 
 const assert = require("assert");
+const fs = require("fs");
 
 const serverModulePath = require.resolve("../server/out/server");
 require.cache[serverModulePath] = {
@@ -34,6 +35,7 @@ const {
 const {
     RslUnitDiagnosticsCache
 } = require("../server/out/diagnostics/unitDiagnosticsCache");
+const { RslScopeResolver } = require("../server/out/scopeResolver");
 
 let passed = 0;
 let failed = 0;
@@ -488,6 +490,293 @@ testAsync("полный расчёт запоминается", async () => {
 });
 
 /* --- Память --- */
+
+/* ─────────────────── Ленты кэша: text и imports ────────────────────────── */
+
+/*
+ * Лента imports устаревает от окружения файла, а не от каждой правки.
+ *
+ * Прежде её отпечаток содержал полный ключ Import-замыкания, а тот включает
+ * версию самого открытого документа. Любая правка меняла версию, и лента не
+ * давала ни одного попадания на всём проекте макросов: проверки, читающие
+ * импорты, считались заново на каждое нажатие клавиши.
+ *
+ * Здесь проверяется граница: что ленту обязано обнулять, а что нет.
+ */
+
+const LANE_MAIN = "file:///d:/lane/main.mac";
+const LANE_DIRECT = "file:///d:/lane/direct.mac";
+const LANE_DEEP = "file:///d:/lane/deep.mac";
+
+/** Файл, в котором есть присваивание: проверка импортов на нём работает. */
+function laneSource(body, imports = "Import direct;") {
+    return [
+        imports,
+        "Var moduleWide;",
+        "Macro Handle(value)",
+        "  Var local;",
+        "  local = value;",
+        body,
+        "  return local;",
+        "End;",
+        ""
+    ].join("\n");
+}
+
+/**
+ * Стенд одного открытого файла: кэш, resolver и наблюдение за лентами.
+ *
+ * Ревизия каталога прикладных модулей подставная: настоящий каталог читает
+ * файлы с диска, а тесту нужно только её изменение.
+ */
+function laneStand() {
+    const index = new WorkspaceIndex();
+    const platform = {
+        revision: 0,
+        /* Пустой каталог: тесту нужно только изменение ревизии. */
+        findSymbol: () => undefined,
+        findClass: () => undefined,
+        findBaseClass: () => undefined,
+        findResultType: () => undefined,
+        knowsModule: () => false,
+        indexState: () => "loaded",
+        completionItems: () => [],
+        classCompletionItems: () => []
+    };
+
+    index.registerWorkspaceFiles([LANE_MAIN, LANE_DIRECT, LANE_DEEP]);
+    index.updateExternalModule(LANE_DEEP, "Macro DeepHelper()\nEnd;\n", 1);
+    index.updateExternalModule(
+        LANE_DIRECT,
+        "Import deep;\nMacro DirectHelper()\nEnd;\n",
+        1
+    );
+
+    const cache = new RslUnitDiagnosticsCache();
+    const resolver = new RslScopeResolver(index, undefined, platform);
+    let version = 0;
+
+    return {
+        index,
+        platform,
+        cache,
+        /** Пересчитать файл и вернуть, попала ли лента imports. */
+        run(source) {
+            const before = cache.laneStats("imports");
+
+            version++;
+
+            const module = index.updateOpenModule(LANE_MAIN, source, version);
+
+            buildLocalRslDiagnostics(
+                module,
+                index,
+                undefined,
+                undefined,
+                resolver,
+                cache
+            );
+
+            const after = cache.laneStats("imports");
+
+            if (
+                after.hits + after.misses ===
+                before.hits + before.misses
+            ) {
+                throw new Error(
+                    "лента imports не участвовала в расчёте: проверка, " +
+                    "читающая импорты, не запустилась"
+                );
+            }
+
+            return after.hits > before.hits;
+        },
+        /** Заменить содержимое зависимости. */
+        change(uri, source, moduleVersion) {
+            index.updateExternalModule(uri, source, moduleVersion);
+        }
+    };
+}
+
+test("правка тела процедуры оставляет ленту imports тёплой", () => {
+    const stand = laneStand();
+
+    stand.run(laneSource("  local = local + 1;"));
+
+    assert.strictEqual(
+        stand.run(laneSource("  local = local + 2;")),
+        true,
+        "первая правка тела обязана попасть в ленту imports"
+    );
+    assert.strictEqual(
+        stand.run(laneSource("  local = local + 3;")),
+        true,
+        "вторая правка подряд — тоже"
+    );
+});
+
+test("новая локальная Var не обнуляет ленту imports", () => {
+    const stand = laneStand();
+
+    stand.run(laneSource("  local = local + 1;"));
+
+    assert.strictEqual(
+        stand.run(laneSource("  Var another;\n  another = local;")),
+        true,
+        "объявление внутри процедуры окружения файла не меняет"
+    );
+});
+
+test("правка Import обнуляет ленту imports", () => {
+    for (const [name, imports] of [
+        ["добавление", "Import direct;\nImport deep;"],
+        ["удаление", ""],
+        ["замена", "Import deep;"],
+        ["ненайденный модуль", "Import direct;\nImport notyet;"]
+    ]) {
+        const stand = laneStand();
+
+        stand.run(laneSource("  local = local + 1;"));
+
+        assert.strictEqual(
+            stand.run(laneSource("  local = local + 1;", imports)),
+            false,
+            name + " Import обязано обнулить ленту imports"
+        );
+    }
+});
+
+test("изменение зависимости обнуляет ленту imports", () => {
+    const direct = laneStand();
+
+    direct.run(laneSource("  local = local + 1;"));
+    direct.change(
+        LANE_DIRECT,
+        "Import deep;\nMacro DirectHelper()\nEnd;\nMacro Added()\nEnd;\n",
+        2
+    );
+
+    assert.strictEqual(
+        direct.run(laneSource("  local = local + 1;")),
+        false,
+        "изменение прямой зависимости обязано обнулить ленту"
+    );
+
+    const deep = laneStand();
+
+    deep.run(laneSource("  local = local + 1;"));
+    deep.change(
+        LANE_DEEP,
+        "Macro DeepHelper()\nEnd;\nMacro DeepAdded()\nEnd;\n",
+        2
+    );
+
+    assert.strictEqual(
+        deep.run(laneSource("  local = local + 1;")),
+        false,
+        "изменение транзитивной зависимости обязано обнулить ленту"
+    );
+});
+
+test("появление недоступного модуля обнуляет ленту imports", () => {
+    const stand = laneStand();
+    const source = laneSource("  local = local + 1;", "Import later;");
+
+    stand.run(source);
+
+    /* Модуль появился в проекте: имена из него теперь обязаны разрешаться. */
+    stand.index.registerWorkspaceFiles([
+        LANE_MAIN,
+        LANE_DIRECT,
+        LANE_DEEP,
+        "file:///d:/lane/later.mac"
+    ]);
+    stand.index.updateExternalModule(
+        "file:///d:/lane/later.mac",
+        "Macro LaterHelper()\nEnd;\n",
+        1
+    );
+
+    assert.strictEqual(
+        stand.run(source),
+        false,
+        "прежде ненайденный модуль появился — лента обязана обнулиться"
+    );
+});
+
+test("изменение каталога прикладных модулей обнуляет ленту imports", () => {
+    const stand = laneStand();
+
+    stand.run(laneSource("  local = local + 1;"));
+    stand.platform.revision++;
+
+    assert.strictEqual(
+        stand.run(laneSource("  local = local + 1;")),
+        false,
+        "каталог дочитан — имена могли разрешиться, лента обязана обнулиться"
+    );
+});
+
+test("новое имя уровня модуля обнуляет ленту imports", () => {
+    const stand = laneStand();
+
+    stand.run(laneSource("  local = local + 1;"));
+
+    const withName = laneSource("  local = local + 1;")
+        .replace("Var moduleWide;", "Var moduleWide;\nVar moduleWideToo;");
+
+    assert.strictEqual(
+        stand.run(withName),
+        false,
+        "новая переменная уровня модуля обязана обнулить ленту"
+    );
+});
+
+test("полный ключ окружения остаётся у прочих потребителей", () => {
+    /*
+     * Кэш semantic tokens сверяется по полному ключу: там версия документа как
+     * раз нужна — подсветку пересчитывать при каждой правке и надо. Ключ без
+     * документа существует отдельно и от правки не меняется.
+     */
+    const index = new WorkspaceIndex();
+
+    index.registerWorkspaceFiles([LANE_MAIN]);
+
+    const resolver = new RslScopeResolver(index);
+    const source = laneSource("  local = local + 1;", "");
+
+    index.updateOpenModule(LANE_MAIN, source, 1);
+
+    const fullBefore = resolver.getImportContextKey(LANE_MAIN);
+    const importedBefore = resolver.getImportedContextKey(LANE_MAIN);
+
+    index.updateOpenModule(LANE_MAIN, source + "\n", 2);
+
+    assert.notStrictEqual(
+        resolver.getImportContextKey(LANE_MAIN),
+        fullBefore,
+        "полный ключ обязан меняться от версии документа"
+    );
+    assert.strictEqual(
+        resolver.getImportedContextKey(LANE_MAIN),
+        importedBefore,
+        "ключ окружения от версии документа зависеть не имеет права"
+    );
+
+    const registry = fs.readFileSync(
+        "server/src/features/semanticTokensFeatureRegistry.ts",
+        "utf8"
+    );
+
+    assert.ok(
+        registry.includes("getImportContextKey"),
+        "кэш semantic tokens обязан сверяться по полному ключу"
+    );
+    assert.ok(
+        !registry.includes("getImportedContextKey"),
+        "ключ без документа кэшу semantic tokens не годится"
+    );
+});
 
 test("закрытый файл уходит из кэша", () => {
     const index = new WorkspaceIndex();

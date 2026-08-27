@@ -306,6 +306,26 @@ export class WorkspaceIndex {
             .sort()
             .join("|");
     }
+    /**
+     * Ключ написанных в файле Import.
+     *
+     * Отдельно от замыкания, потому что замыкание знает только те модули,
+     * которые нашлись. Написанный `Import notyet`, который пока никуда не
+     * разрешается, замыкание не меняет — а смысл файла меняет: как только
+     * модуль появится, имена из него начнут разрешаться. Без этой части
+     * ключа добавление и удаление такого Import прошли бы незамеченными.
+     */
+    getDeclaredImportsKey(uri: string): string {
+        if (!this.importsEnabled) {
+            return "imports-disabled";
+        }
+
+        return (this.modules.get(uri)?.imports || [])
+            .map(name => normalizeName(name))
+            .sort()
+            .join(",");
+    }
+
     getImportClosureKey(uri: string): string {
         return this.importsEnabled
             ? this.getImportContext(uri).closureKey

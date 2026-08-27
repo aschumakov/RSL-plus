@@ -388,7 +388,11 @@ function planLocalRslDiagnostics(
                     module,
                     "imports",
                     unitDiagnosticsFingerprint("imports", options) + "@" +
-                        importClosureKeyOf(index, sharedResolver, module.uri) +
+                        importedContextKeyOf(
+                            index,
+                            sharedResolver,
+                            module.uri
+                        ) +
                         "@" + moduleWideNamesFingerprint(module)
                 )
                 : runRslUnitDiagnosticsWithoutCache(module);
@@ -1044,14 +1048,25 @@ function moduleWideNamesFingerprint(module: IIndexedModule): string {
  * Резолвер знает о нём больше индекса: он видит, какие модули уже дочитаны, а
  * какие ещё нет. Без резолвера остаётся ключ замыкания индекса.
  */
-function importClosureKeyOf(
+/**
+ * Ключ окружения файла: что сервер знает о других модулях.
+ *
+ * Без самого документа — намеренно. Прежде здесь стоял полный ключ, и он
+ * содержал версию открытого файла: лента imports обнулялась на каждой правке
+ * и не давала ни одного попадания на всём проекте макросов. Собственное
+ * содержимое файла закрывает moduleWideNamesFingerprint, который идёт в тот же
+ * отпечаток: новая переменная модуля или новый класс ленту обнуляют, а пробел
+ * в теле процедуры — нет.
+ */
+function importedContextKeyOf(
     index: WorkspaceIndex,
     resolver: RslScopeResolver | undefined,
     uri: string
 ): string {
     return resolver
-        ? resolver.getImportContextKey(uri)
-        : index.getImportClosureKey(uri);
+        ? resolver.getImportedContextKey(uri)
+        : index.getDeclaredImportsKey(uri) + "|" +
+            index.getImportedClosureKey(uri);
 }
 
 /** Включена ли хоть одна проверка оператора. */
