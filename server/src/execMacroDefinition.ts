@@ -24,10 +24,36 @@ export interface IDynamicDefinitionTarget {
 /**
  * Упоминание подключаемого модуля в директиве Import.
  */
+/**
+ * Ссылка на файл модуля в директиве Import.
+ *
+ * Это ссылка на файл, а не на символ: её разрешает каталог проекта по имени
+ * файла, и разбор для неё не нужен. Обычная строка с тем же текстом ссылкой не
+ * является — `MsgBox("lib.mac")` остаётся текстом сообщения.
+ */
 export interface IImportDefinitionTarget {
+    kind: "import-file";
+    /** Имя, как оно написано в файле: без кавычек и без нормализации. */
+    rawText: string;
+    /** Имя файла модуля после нормализации: регистр, разделители, расширение. */
     moduleName: string;
+    /**
+     * Весь фрагмент директивы, включая кавычки.
+     *
+     * По нему диагностика подчёркивает импорт целиком, а переименование файла
+     * заменяет ссылку вместе с кавычками.
+     */
     start: number;
     end: number;
+    /**
+     * Точный диапазон самого имени: кавычки в него не входят.
+     *
+     * По нему решается, попал ли курсор в ссылку, и по нему же редактор
+     * подсвечивает переход. Кавычка частью имени файла не является, и
+     * подчёркивать её как ссылку незачем.
+     */
+    nameStart: number;
+    nameEnd: number;
 }
 
 interface ICallArgument {
@@ -243,8 +269,8 @@ export function GetImportDefinitionTargetFromTokens(
     offset: number
 ): IImportDefinitionTarget | undefined {
     return getImportReferencesFromTokens(sourceTokens).find(reference =>
-        reference.start <= offset &&
-        offset < reference.end
+        reference.nameStart <= offset &&
+        offset < reference.nameEnd
     );
 }
 
@@ -527,26 +553,42 @@ function addImportReference(
         return;
     }
 
-    let value: string;
+    const first = tokens[0];
+    const last = tokens[tokens.length - 1];
+    let raw: string;
+    let nameStart = first.start;
+    let nameEnd = last.end;
 
-    if (tokens.length === 1 && tokens[0].kind === "string") {
-        value = tokens[0].value.trim();
+    if (tokens.length === 1 && first.kind === "string") {
+        /*
+         * Берётся исходный текст строки, а не её значение.
+         *
+         * Значение строки прошло через escape-последовательности лексера, и
+         * `"sub\checkaml.mac"` превращается в `subcheckaml.mac`: обратная
+         * косая черта там понята как escape. В имени файла она разделитель
+         * каталогов, и терять её нельзя.
+         */
+        raw = first.raw.slice(1, -1).trim();
+        nameStart = first.start + 1;
+        nameEnd = last.end - 1;
     } else {
-        value = tokens.map(token => token.raw).join("").trim();
+        raw = tokens.map(token => token.raw).join("").trim();
     }
 
-    if (!value) {
+    if (!raw) {
         return;
     }
 
-    if (!/\.mac$/i.test(value)) {
-        value += ".mac";
-    }
+    const value = /\.mac$/i.test(raw) ? raw : raw + ".mac";
 
     result.push({
+        kind: "import-file",
+        rawText: raw,
         moduleName: value,
-        start: tokens[0].start,
-        end: tokens[tokens.length - 1].end
+        start: first.start,
+        end: last.end,
+        nameStart,
+        nameEnd
     });
 }
 

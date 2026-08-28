@@ -246,18 +246,39 @@ test("Import поддерживает кавычки и относительны
         "Import folder\\payments;"
     ].join("\n");
 
+    const quoted = source.indexOf('"cards.mac"');
+
     assert.deepStrictEqual(
         GetImportDefinitionTarget(
             source,
             inside(source, "cards.mac")
         ),
         {
+            kind: "import-file",
+            rawText: "cards.mac",
             moduleName: "cards.mac",
-            start: source.indexOf('"cards.mac"'),
-            end:
-                source.indexOf('"cards.mac"') +
-                '"cards.mac"'.length
+            /* Весь фрагмент директивы: его подчёркивает диагностика. */
+            start: quoted,
+            end: quoted + '"cards.mac"'.length,
+            /* Само имя: кавычки в него не входят. */
+            nameStart: quoted + 1,
+            nameEnd: quoted + '"cards.mac"'.length - 1
         }
+    );
+
+    /* Клик по кавычке ссылкой не считается: она не часть имени файла. */
+    assert.strictEqual(
+        GetImportDefinitionTarget(source, quoted),
+        undefined,
+        "открывающая кавычка частью ссылки не является"
+    );
+    assert.strictEqual(
+        GetImportDefinitionTarget(
+            source,
+            quoted + '"cards.mac"'.length - 1
+        ),
+        undefined,
+        "закрывающая кавычка тоже"
     );
 
     const relative = GetImportDefinitionTarget(
