@@ -72,6 +72,8 @@ export interface IRslDiagnosticSettings {
     incompatibleOverride?: boolean;
     /** Значение записано и перезаписано без чтения. */
     overwrittenValue?: boolean;
+    /** Объявление закрывает поле класса или имя из модуля; по умолчанию нет. */
+    shadowedDeclaration?: boolean;
     /** Сравнение значения с самим собой. */
     selfComparison?: boolean;
     /** Заведомо постоянное условие. */

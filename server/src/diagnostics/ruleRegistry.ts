@@ -255,6 +255,16 @@ export const RSL_DIAGNOSTIC_RULES: readonly IRslDiagnosticRule[] = [
         produces: true
     },
     {
+        id: "shadowedDeclaration",
+        phase: "local",
+        settings: ["shadowedDeclaration"],
+        requires: [],
+        depends: WITH_IMPORTS,
+        cache: "file",
+        resumable: true,
+        produces: true
+    },
+    {
         id: "coreDialect",
         phase: "local",
         settings: ["structure", "dialect"],

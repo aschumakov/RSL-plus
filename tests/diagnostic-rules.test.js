@@ -85,6 +85,8 @@ const ALL_ON = {
     unknownMembers: true,
     unknownVariables: "strict",
     unknownSpecialVariables: "warn",
+    /* Единственная проверка, выключенная по умолчанию: здесь включены все. */
+    shadowedDeclaration: true,
     dialect: "coreRsl"
 };
 

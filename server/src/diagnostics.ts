@@ -122,6 +122,7 @@ import {
     runDiagnosticPlanChunked
 } from "./diagnostics/stages";
 import { addOverrideDiagnostics } from "./diagnostics/overrideChecks";
+import { createShadowingStage } from "./diagnostics/shadowingChecks";
 import {
     addCoreDialectDiagnostics,
     addDebugBreakDiagnostic,
@@ -182,6 +183,8 @@ export const DEFAULT_DIAGNOSTIC_SETTINGS: Required<IRslDiagnosticSettings> = {
     argumentCount: true,
     incompatibleOverride: true,
     overwrittenValue: true,
+    /* Затенение — приём законный: по умолчанию молчим. */
+    shadowedDeclaration: false,
     maxProblems: 200,
     /* Уровни правил по умолчанию не переопределяются. */
     rules: {}
@@ -228,6 +231,7 @@ export function normalizeDiagnosticSettings(
         argumentCount: settings?.argumentCount !== false,
         incompatibleOverride: settings?.incompatibleOverride !== false,
         overwrittenValue: settings?.overwrittenValue !== false,
+        shadowedDeclaration: settings?.shadowedDeclaration === true,
         rules: settings?.rules || {}
     };
 }
@@ -673,6 +677,15 @@ function planLocalRslDiagnostics(
             "incompatibleOverride",
             options.incompatibleOverride,
             () => addOverrideDiagnostics(module, index, result)
+        ],
+        [
+            /*
+             * Закрытое имя может прийти из подключённого модуля, поэтому
+             * проверка зависит от импортов.
+             */
+            "shadowedDeclaration",
+            options.shadowedDeclaration,
+            createShadowingStage(module, index, result)
         ],
         [
             "coreDialect",

@@ -41,6 +41,7 @@ export interface IRslClientSettings {
         overwrittenValue: boolean;
         argumentCount: boolean;
         incompatibleOverride: boolean;
+        shadowedDeclaration: boolean;
         /** Уровень отдельных проверок по их коду; см. rslPlus.diagnostics.rules. */
         rules: Record<string, string>;
         useBeforeDeclaration: boolean;
@@ -183,6 +184,11 @@ export function readRslSettings(resource?: Uri): IRslClientSettings {
             incompatibleOverride: readSetting(
                 "diagnostics.incompatibleOverride",
                 true,
+                resource
+            ),
+            shadowedDeclaration: readSetting(
+                "diagnostics.shadowedDeclaration",
+                false,
                 resource
             ),
             rules: readSetting(

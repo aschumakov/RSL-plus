@@ -380,21 +380,11 @@
                "default": true,
                "description": "Предупреждать, когда метод наследника расходится с методом базового класса числом параметров или передачей по ссылке. Если базовый класс не определяется однозначно, проверка молчит."
             },
-            "rslPlus.diagnostics.rules": {
+            "rslPlus.diagnostics.shadowedDeclaration": {
                "scope": "resource",
-               "type": "object",
-               "default": {},
-               "additionalProperties": {
-                  "type": "string",
-                  "enum": [
-                     "error",
-                     "warning",
-                     "information",
-                     "hint",
-                     "none"
-                  ]
-               },
-               "markdownDescription": "Уровень отдельных проверок по их коду: `{ \"overwritten-value\": \"information\", \"argument-count\": \"none\" }`. Код проверки виден в панели Problems. Уровень `none` выключает проверку."
+               "type": "boolean",
+               "default": false,
+               "description": "Показывать подсказку, когда объявление закрывает собой поле своего класса или процедуру, класс либо константу из подключённого модуля. Выключено по умолчанию: затенение — приём законный. Закрытая глобальная переменная модуля не проверяется — на проекте макросов это обычное дело."
             },
             "rslPlus.diagnostics.useBeforeDeclaration": {
                "scope": "resource",
