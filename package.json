@@ -126,6 +126,10 @@
          {
             "command": "rsl.smartEnter",
             "title": "RSL: Новая строка с завершением блока (Shift+Enter)"
+         },
+         {
+            "command": "rsl.showServerStatus",
+            "title": "RSL: Show Language Server Status"
          }
       ],
       "keybindings": [

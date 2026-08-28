@@ -59,6 +59,10 @@ import {
 } from "./analysis/referenceShards";
 import { RslCatalogStore } from "./indexing/catalogStore";
 import {
+    collectRslServerStatus,
+    formatRslServerStatus
+} from "./features/serverStatus";
+import {
     PerformanceLogger,
     type IPerformanceFields
 } from "./performanceLogger";
@@ -777,6 +781,63 @@ connection.onInitialized(() => {
     connection.onRequest("getMacros", () =>
         workspaceIndex.getWorkspaceFileUris()
     );
+
+    /*
+     * Что сервер держит в памяти.
+     *
+     * Общая цифра heap не отвечает ни на вопрос «кто занял», ни на вопрос
+     * «почему выросло»: постоянных структур стало много, и каждая молча
+     * добавляет к сумме.
+     */
+    connection.onRequest("rsl/serverStatus", () => {
+        const status = collectRslServerStatus({
+            openModels: () => documents.all().length,
+            externalModules: () => ({
+                count: workspaceIndex.size,
+                bytes: workspaceIndex.externalModuleBytes,
+                limit: workspaceIndex.externalModuleLimit
+            }),
+            catalog: () => ({
+                modules: workspaceIndex.catalog.stats.modules,
+                symbols: workspaceIndex.catalog.stats.symbols,
+                bytes: workspaceIndex.catalog.stats.approximateBytes
+            }),
+            referenceIndex: () => {
+                const stats = referenceIndex.getStats();
+
+                return {
+                    files: stats.indexedFiles,
+                    identifiers: stats.indexedIdentifiers,
+                    persisted: stats.persistedFiles
+                };
+            },
+            referenceShards: () => {
+                const stats = referenceShards.stats;
+
+                return {
+                    files: stats.files,
+                    names: stats.names,
+                    buckets: stats.loadedBuckets
+                };
+            },
+            catalogStore: () => ({
+                files: catalogStore.stats.files,
+                loaded: catalogStore.stats.loaded
+            }),
+            importContexts: () => workspaceIndex.importCacheSize,
+            diagnosticCache: () => diagnosticEngine.unitCacheStats,
+            semanticTokens: () =>
+                languageFeatures?.semanticTokenCacheSize ?? 0,
+            pinnedModules: () => workspaceIndex.pinnedModuleCount,
+            changeLogSteps: () => documentChangeLog.size,
+            evictions: () => workspaceIndex.evictionStats
+        });
+        const report = formatRslServerStatus(status);
+
+        logMessage(report);
+
+        return { status, report };
+    });
 
     /*
      * Переименование файла: ссылки правятся до самого переименования,

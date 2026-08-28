@@ -61,6 +61,11 @@ const REFRESH_COALESCE_MS = 300;
 /** Владеет semantic-token lifecycle, resultId и delta-кэшем. */
 export class SemanticTokensFeatureRegistry {
     private static readonly MAX_CACHED_DOCUMENTS = 4;
+    /** Сколько документов держит кэш: для отчёта о памяти. */
+    get cachedDocumentCount(): number {
+        return this.cache.size;
+    }
+
     private cache = new Map<string, {
         version: number;
         /**

@@ -132,6 +132,11 @@ export interface IRslLanguageFeatureEnvironment {
 export class RslLanguageFeatureRegistry {
     private registered = false;
     private referenceIndex: ReferenceIndex;
+
+    /** Сколько документов держит кэш подсветки: для отчёта о памяти. */
+    get semanticTokenCacheSize(): number {
+        return this.semanticTokensFeatures.cachedDocumentCount;
+    }
     private callHierarchyProvider: RslCallHierarchyProvider;
     private completionProvider: RslCompletionProvider;
     /**

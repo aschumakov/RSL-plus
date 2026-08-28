@@ -475,6 +475,34 @@ export function activate(context: ExtensionContext): void {
         })
     );
 
+    /*
+     * Что сервер держит в памяти.
+     *
+     * Общая цифра heap не отвечает ни на вопрос «кто занял», ни на вопрос
+     * «почему выросло»: постоянных структур много, и каждая молча добавляет к
+     * сумме. Отчёт показывает их по отдельности.
+     */
+    context.subscriptions.push(
+        commands.registerCommand("rsl.showServerStatus", () => {
+            const channel = window.createOutputChannel("RSL-plus: память");
+
+            void client.sendRequest("rsl/serverStatus").then(
+                (answer: unknown) => {
+                    const report = (answer as { report?: string })?.report;
+
+                    channel.appendLine(report || "Сервер не ответил");
+                    channel.show(true);
+                },
+                error => {
+                    channel.appendLine(
+                        "RSL: не удалось получить состояние сервера: " + error
+                    );
+                    channel.show(true);
+                }
+            );
+        })
+    );
+
     const showMacrosCommand = "rsl.showMacroFiles";
 
     context.subscriptions.push(

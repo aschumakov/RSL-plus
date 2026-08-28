@@ -91,6 +91,18 @@ export class WorkspaceIndex {
      */
     private readonly pinnedWantedNames = new Set<string>();
     /**
+     * Почему вытеснялись сводки.
+     *
+     * Одного числа удержанных модулей мало: рост памяти объясняется не тем,
+     * сколько их сейчас, а тем, упирается ли индекс в предел по числу, в
+     * предел по объёму — или не вытесняет вовсе, потому что всё закреплено.
+     */
+    private evictionCounters = {
+        byCount: 0,
+        byBytes: 0,
+        blockedByPinned: 0
+    };
+    /**
      * Объём сводки каждого внешнего модуля и их сумма.
      *
      * Размеры хранятся поимённо, а не одним счётчиком. Счётчик приходилось бы
@@ -273,6 +285,20 @@ export class WorkspaceIndex {
     /** Сколько модулей закреплено: для отчёта о памяти и для тестов. */
     get pinnedModuleCount(): number {
         return this.pinnedModules.size;
+    }
+
+    /** Почему вытеснялись сводки: для отчёта о памяти. */
+    get evictionStats(): {
+        byCount: number;
+        byBytes: number;
+        blockedByPinned: number;
+    } {
+        return { ...this.evictionCounters };
+    }
+
+    /** Предел числа сводок: для отчёта о памяти. */
+    get externalModuleLimit(): number {
+        return this.maxExternalModules;
     }
 
     markOpen(uri: string): void {
@@ -689,7 +715,14 @@ export class WorkspaceIndex {
             }
 
             if (victim === undefined) {
+                this.evictionCounters.blockedByPinned++;
                 break;
+            }
+
+            if (this.externalModuleOrder.size > this.maxExternalModules) {
+                this.evictionCounters.byCount++;
+            } else {
+                this.evictionCounters.byBytes++;
             }
 
             this.externalModuleOrder.delete(victim);
