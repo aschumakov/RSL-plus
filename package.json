@@ -28,6 +28,9 @@
       "vscode": "^1.90.0"
    },
    "main": "./client/out/extension",
+   "bin": {
+      "rsl-plus": "./bin/rsl-plus.js"
+   },
    "contributes": {
       "languages": [
          {
