@@ -17,6 +17,9 @@ import {
     findRslReferencesForSymbol
 } from "../analysis/references";
 import type { ReferenceIndex } from "../analysis/referenceIndex";
+import type {
+    RslReferenceShardStore
+} from "../analysis/referenceShards";
 import { normalizeIdentifier } from "../lexer";
 import type { RslScopeResolver } from "../scopeResolver";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
@@ -34,6 +37,8 @@ export interface ICallHierarchyEnvironment {
     index: WorkspaceIndex;
     resolver: RslScopeResolver;
     referenceIndex: ReferenceIndex;
+    /** Постоянные записи о ссылках, если сервер их ведёт. */
+    referenceShards?: RslReferenceShardStore;
 }
 
 export class RslCallHierarchyProvider {
@@ -90,7 +95,8 @@ export class RslCallHierarchyProvider {
             data.uri,
             targetObject,
             false,
-            isCancelled
+            isCancelled,
+            this.environment.referenceShards
         );
         const byUri = groupLocationsByUri(references);
         const grouped = new Map<string, CallHierarchyIncomingCall>();

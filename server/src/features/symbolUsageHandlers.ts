@@ -263,7 +263,8 @@ export function createRslSymbolUsageHandlers(
                 environment.referenceIndex,
                 offset,
                 params.newName,
-                () => cancellationToken.isCancellationRequested
+                () => cancellationToken.isCancellationRequested,
+                environment.referenceShards
             );
         }
     };

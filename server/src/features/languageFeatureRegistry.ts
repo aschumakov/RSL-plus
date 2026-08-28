@@ -165,7 +165,8 @@ export class RslLanguageFeatureRegistry {
         this.callHierarchyProvider = new RslCallHierarchyProvider({
             index: environment.index,
             resolver: environment.resolver,
-            referenceIndex: this.referenceIndex
+            referenceIndex: this.referenceIndex,
+            referenceShards: environment.referenceShards
         });
         this.usages = createRslSymbolUsageHandlers({
             documents: environment.documents,

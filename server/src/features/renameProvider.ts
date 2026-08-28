@@ -2,6 +2,9 @@ import type { Range, WorkspaceEdit } from "vscode-languageserver";
 
 import { findRslReferencesInWorkspace } from "../analysis/references";
 import type { ReferenceIndex } from "../analysis/referenceIndex";
+import type {
+    RslReferenceShardStore
+} from "../analysis/referenceShards";
 import { isReservedWord } from "../language/rslLanguageReference";
 import { RSL_BUILTIN_URI, type RslScopeResolver } from "../scopeResolver";
 import type { RslSymbol } from "../symbols/rslSymbol";
@@ -43,7 +46,9 @@ export async function buildRslRenameEdit(
     referenceIndex: ReferenceIndex,
     offset: number,
     newName: string,
-    isCancelled: () => boolean = () => false
+    isCancelled: () => boolean = () => false,
+    /* Постоянные записи о ссылках, если сервер их ведёт. */
+    referenceShards?: RslReferenceShardStore
 ): Promise<WorkspaceEdit | null> {
     const target = resolver.resolveAt(module.uri, module.symbolTree, offset);
     if (
@@ -60,7 +65,8 @@ export async function buildRslRenameEdit(
         module.uri,
         offset,
         true,
-        isCancelled
+        isCancelled,
+        referenceShards
     );
     if (isCancelled() || locations.length === 0) {
         return null;
