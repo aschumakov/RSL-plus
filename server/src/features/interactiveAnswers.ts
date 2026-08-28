@@ -214,16 +214,49 @@ export function findRslReferenceTypeDefinition(
  * Отдельно от разрешения имён: это не ссылка на символ, а имя файла, и знает о
  * нём каталог проекта.
  */
+/**
+ * Переход к файлу модуля из директивы Import.
+ *
+ * Имя файла в проекте бывает не одно: в проверенном проекте макросов таких
+ * имён семьдесят три. Прежде такой переход не работал вовсе — увести в один из
+ * двух файлов наугад хуже, чем не уводить никуда. Теперь показываются все
+ * подходящие файлы, и выбирает человек.
+ */
 export function findRslImportModuleDefinition(
     context: IRslInteractiveContext,
     index: WorkspaceIndex
-): Location | undefined {
+): Location | Location[] | undefined {
     const target = GetImportDefinitionTargetFromTokens(
         context.tokens as IRslToken[],
         context.offset
     );
 
-    return target ? moduleLocation(index, target.moduleName) : undefined;
+    if (!target) {
+        return undefined;
+    }
+
+    const resolution = index.resolveWorkspaceFile(target.moduleName);
+
+    if (resolution.kind === "resolved") {
+        return fileStartLocation(resolution.value);
+    }
+
+    if (resolution.kind !== "ambiguous" || resolution.candidates.length === 0) {
+        return undefined;
+    }
+
+    /* Порядок ответа не зависит от порядка обхода проекта. */
+    return [...resolution.candidates]
+        .sort()
+        .map(uri => fileStartLocation(uri));
+}
+
+/** Начало файла: у макромодуля нет объявления, к которому можно было бы вести. */
+function fileStartLocation(uri: string): Location {
+    return Location.create(uri, {
+        start: { line: 0, character: 0 },
+        end: { line: 0, character: 0 }
+    });
 }
 
 /** Переход по строковой ссылке: ExecMacro, ExecMacro2, ExecMacroFile. */

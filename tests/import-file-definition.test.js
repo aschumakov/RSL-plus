@@ -41,6 +41,7 @@ const {
 const {
     createFastDocumentSnapshot
 } = require("../server/out/services/fastDocumentSnapshot");
+const { buildLocalRslDiagnostics } = require("../server/out/diagnostics");
 
 let passed = 0;
 let failed = 0;
@@ -205,14 +206,61 @@ test("отсутствующий файл не даёт ложного назн�
     );
 });
 
-test("два одноимённых файла: перехода нет", () => {
+test("два одноимённых файла: показываются оба", () => {
+    /*
+     * В проверенном проекте макросов семьдесят три имени файла встречаются не
+     * по одному разу. Увести в один из них наугад нельзя, но и молчать не
+     * лучше: показываются все подходящие, выбирает человек.
+     */
     const source = 'Import "checkaml.mac";\n\nMacro Run()\nEnd;\n';
     const board = stand(source, { registered: [MAIN, TARGET, NESTED] });
+    const found = board.at(source.indexOf("checkaml") + 4);
+
+    assert.ok(Array.isArray(found), "неоднозначность даёт список назначений");
+    assert.deepStrictEqual(
+        found.map(item => item.uri).sort(),
+        [NESTED, TARGET].sort(),
+        "в списке обязаны быть оба одноимённых файла"
+    );
+
+    /* Порядок ответа не зависит от порядка регистрации файлов. */
+    const reversed = stand(source, {
+        registered: [MAIN, NESTED, TARGET]
+    }).at(source.indexOf("checkaml") + 4);
+
+    assert.deepStrictEqual(
+        reversed.map(item => item.uri),
+        found.map(item => item.uri),
+        "порядок ответа обязан быть устойчивым"
+    );
+});
+
+test("предупреждение о повторном импорте сохраняется", () => {
+    /*
+     * `Import "checkaml.mac", checkaml;` — это один и тот же модуль дважды.
+     * Точный диапазон имени завёлся ради перехода и не имеет права отменить
+     * существующую диагностику: она подчёркивает всю директиву целиком.
+     */
+    const source = 'Import "checkaml.mac", checkaml;\n\nMacro Run()\nEnd;\n';
+    const index = new WorkspaceIndex();
+
+    index.registerWorkspaceFiles([MAIN, TARGET]);
+    index.updateExternalModule(TARGET, TARGET_SOURCE, 1);
+
+    const module = index.updateOpenModule(MAIN, source, 1);
+    const found = buildLocalRslDiagnostics(module, index, { maxProblems: 50 })
+        .filter(item => item.code === "duplicate-import");
 
     assert.strictEqual(
-        board.at(source.indexOf("checkaml") + 4),
-        undefined,
-        "увести в один из двух наугад хуже, чем не уводить никуда"
+        found.length,
+        1,
+        "повторный импорт обязан остаться одним предупреждением"
+    );
+
+    /* И переход из строковой части при этом работает. */
+    assert.ok(
+        stand(source).at(source.indexOf("checkaml") + 4),
+        "из строковой части перехода никто не лишал"
     );
 });
 
