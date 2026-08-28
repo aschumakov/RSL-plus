@@ -19,26 +19,29 @@ const SAFE_KINDS = new Set<RslTokenKind>([
 ]);
 
 /*
- * Какую долю token stream разрешено сдвигать точечной правкой.
+ * Место правки больше не отсекается.
  *
- * Цена пути — не размер правки, а число токенов ПОСЛЕ неё: им пересчитываются
- * позиции. Прежний порог 0.5 отсекал всю первую половину файла и был выставлен
- * по замерам, где токен копировался через spread. Сборка токена перечислением
- * полей (см. shiftToken) сделала копирование в пять раз дешевле, но не убрала
- * зависимость — при сдвиге почти всего потока выигрыш вырождается в шум:
+ * Цена точечного пути — не размер правки, а перекладывание хвоста потока:
+ * токенам после правки нужны новые смещения и номера строк. Прежде это
+ * считалось дорогим, и правки в первой части файла отвергались порогом 0.85 —
+ * то есть уходили на полный lexRsl.
  *
- *   размер | сдвиг потока | точечный | полный | выигрыш
- *    255КБ |          80% |  13.6 мс | 19.6мс |  1.4x
- *    515КБ |          80% |  33.8 мс | 46.2мс |  1.4x
- *    1.1МБ |          80% |  78.0 мс | 104мс  |  1.3x
- *    1.1МБ |          98% |  95.2 мс | 97.9мс |  1.0x
+ * Замер на настоящих файлах проекта показал обратное. На fxclose.mac (705 КБ,
+ * 174 526 токенов) перекладывание всего потока целиком стоит 3.9 мс, а полный
+ * lexRsl — 26-33 мс. С порогом правка в первых процентах файла отвергалась и
+ * стоила 33 мс; без порога она стоит 9.2 мс, то есть втрое дешевле. Дальше по
+ * файлу выигрыш только растёт: 5.0 мс на середине, 1.0 мс в конце.
  *
- * На машине медленнее моей последняя строка уже уходит в минус: замер
- * рецензента на 1.1МБ дал 46.3 мс против 38.1 мс полного лексирования.
- * Поэтому порог стоит там, где выигрыш ещё измерим, а не там, где он
- * теоретически положителен.
+ * Прежняя таблица замеров, по которой ставился порог, снималась до того, как
+ * изменённый участок стал приходить из журнала правок: тогда каждая попытка
+ * точечного пути начиналась с двух проходов по всему тексту в поисках общего
+ * префикса и суффикса, и на файле в мегабайт это съедало весь выигрыш. Теперь
+ * участок известен заранее, и отсекать по месту правки больше нечего.
+ *
+ * Остальные отказы никуда не делись: слишком широкое окно, многострочная
+ * конструкция в нём и неразделимая правка по-прежнему уводят на полный путь.
  */
-const MAX_SHIFTED_TOKEN_FRACTION = 0.85;
+/* Оставлено для отчёта: доля сдвинутого потока попадает в решение. */
 
 /*
  * Какую долю файла разрешено перелексировать одним окном.
@@ -59,7 +62,7 @@ const MAX_WINDOW_FRACTION = 0.25;
  */
 export interface IRslRelexDecision {
     reason: "incremental" | "firstLex" | "smallFile" | "unchanged" |
-        "editTooEarly" | "multilineConstruct" | "windowTooLarge" |
+        "multilineConstruct" | "windowTooLarge" |
         "unsplittableEdit";
     /** Смещение правки: видно, в какой части файла её сделали. */
     editStart?: number;
@@ -153,7 +156,7 @@ export function tryIncrementalRelex(
         return previousLex;
     }
 
-    const found = knownSpan ||
+    const found = trustedSpan(previousText, nextText, knownSpan) ||
         scanChangedSpan(previousText, nextText);
     const oldStart = found.oldStart;
     const oldEnd = found.oldEnd;
@@ -181,17 +184,6 @@ export function tryIncrementalRelex(
     }
 
     const shifted = previousLex.tokens.length - window.lastIndex - 1;
-
-    if (
-        shifted > previousLex.tokens.length * MAX_SHIFTED_TOKEN_FRACTION
-    ) {
-        decide("editTooEarly", {
-            editStart: oldStart,
-            editLine: window.line,
-            shiftedFraction: shifted / previousLex.tokens.length
-        });
-        return undefined;
-    }
 
     const delta = nextText.length - previousText.length;
     const sliceEnd = window.end + delta;
@@ -536,6 +528,75 @@ function lowerBound(tokens: readonly IRslToken[], offset: number): number {
     }
 
     return low;
+}
+
+/*
+ * Сколько символов сверять по обе стороны участка.
+ *
+ * Полная сверка означала бы два прохода по всему тексту — ровно то, ради чего
+ * участок и приходит готовым. Окна в шестьдесят четыре символа хватает, чтобы
+ * поймать настоящую беду этого места — участок, съехавший на несколько
+ * символов: тогда по одну сторону от границы тексты уже расходятся.
+ */
+const SPAN_CHECK_CHARS = 64;
+
+/**
+ * Участок из журнала, если он похож на правду.
+ *
+ * Участок приходит снаружи, и неверный означал бы молча неверный token stream.
+ * Сверяются границы: то, что примыкает к участку снаружи, обязано совпадать в
+ * обоих текстах — по определению участка. Не сошлось — участок отбрасывается,
+ * и работает обычный поиск сравнением: медленнее, но правильно.
+ *
+ * Сверка ограниченная и полной гарантии не даёт: участок, съехавший целиком в
+ * другое место файла, границы пройдёт. От этого защищает не проверка, а
+ * источник — журнал строит участок из диапазонов самого редактора и сверяет
+ * длины; см. documentChangeLog.
+ */
+function trustedSpan(
+    previousText: string,
+    nextText: string,
+    span: IRslChangedSpan | undefined
+): IRslChangedSpan | undefined {
+    if (!span) {
+        return undefined;
+    }
+
+    if (
+        span.oldStart < 0 ||
+        span.oldEnd > previousText.length ||
+        span.newEnd > nextText.length ||
+        span.oldEnd < span.oldStart ||
+        span.newEnd < span.oldStart
+    ) {
+        return undefined;
+    }
+
+    if (
+        nextText.length - previousText.length !==
+        span.newEnd - span.oldEnd
+    ) {
+        /* Разница длин обязана совпадать с разницей длин участка. */
+        return undefined;
+    }
+
+    const before = Math.max(0, span.oldStart - SPAN_CHECK_CHARS);
+
+    if (
+        previousText.slice(before, span.oldStart) !==
+        nextText.slice(before, span.oldStart)
+    ) {
+        return undefined;
+    }
+
+    if (
+        previousText.slice(span.oldEnd, span.oldEnd + SPAN_CHECK_CHARS) !==
+        nextText.slice(span.newEnd, span.newEnd + SPAN_CHECK_CHARS)
+    ) {
+        return undefined;
+    }
+
+    return span;
 }
 
 /** Изменённый участок сравнением: запасной путь, когда журнал молчит. */

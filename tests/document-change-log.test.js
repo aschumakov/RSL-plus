@@ -406,11 +406,17 @@ test("точечный lex с участком совпадает с полны�
     );
 });
 
-test("заведомо неверный участок не принимается на веру", () => {
+test("съехавший участок не принимается на веру", () => {
     /*
-     * Журнал такого участка не выдаст, но проверка обязана быть: точечный lex
-     * получает участок снаружи, и его собственные проверки — последняя защита.
-     * Здесь участок указывает на середину другой строки.
+     * Участок приходит в точечный lex снаружи, и неверный означал бы молча
+     * неверный token stream. Настоящая беда здесь — участок, съехавший на
+     * несколько символов: ровно такую ошибку журнал и допустил бы, считай он
+     * смещения сам, а не спрашивая их у документа.
+     *
+     * Полной проверки тут быть не может: сверить участок целиком — это два
+     * прохода по всему тексту, то есть ровно то, ради чего участок и приходит
+     * готовым. Сверяются границы, и этого достаточно, чтобы съехавший участок
+     * был отброшен, а ответ остался верным.
      */
     const lines = ["Import common;", ""];
 
@@ -425,26 +431,39 @@ test("заведомо неверный участок не принимаетс
 
     const text = lines.join("\n");
     const baseLex = lexRsl(text, { includeTrivia: true });
-    const at = text.indexOf("Process1500");
-    const next = text.slice(0, at) + "Renamed" + text.slice(at + 7);
-    const wrong = { oldStart: 0, oldEnd: 0, newEnd: 0 };
-    const result = tryIncrementalRelex(
-        text,
-        baseLex,
-        next,
-        undefined,
-        wrong
+    const at = text.indexOf("document.Value", text.indexOf("Process1500"));
+    const next = text.slice(0, at) + "Item" + text.slice(at + 8);
+    const right = { oldStart: at, oldEnd: at + 8, newEnd: at + 4 };
+    const full = lexRsl(next, { includeTrivia: true });
+
+    assert.deepStrictEqual(
+        tryIncrementalRelex(text, baseLex, next, undefined, right).tokens,
+        full.tokens,
+        "верный участок обязан давать верный ответ"
     );
 
-    /*
-     * Пустой участок означает «ничего не менялось». Результат обязан либо
-     * совпасть с полным lex, либо отсутствовать — но не быть тихо неверным.
-     */
-    if (result) {
+    for (const drift of [-7, -3, -1, 1, 3, 7]) {
+        const moved = {
+            oldStart: right.oldStart + drift,
+            oldEnd: right.oldEnd + drift,
+            newEnd: right.newEnd + drift
+        };
+        const result = tryIncrementalRelex(
+            text,
+            baseLex,
+            next,
+            undefined,
+            moved
+        );
+
+        assert.ok(
+            result,
+            "съехавший участок обязан привести к обычному поиску, не к отказу"
+        );
         assert.deepStrictEqual(
             result.tokens,
-            lexRsl(next, { includeTrivia: true }).tokens,
-            "точечный lex обязан либо отказаться, либо дать верный ответ"
+            full.tokens,
+            "участок со сдвигом " + drift + " не имеет права менять ответ"
         );
     }
 });

@@ -333,10 +333,22 @@ function editOffset(source) {
     const share = OPTIONS.edit === "start"
         ? 0.05
         : (OPTIONS.edit === "end" ? 0.95 : 0.5);
-    const at = Math.floor(source.length * share);
-    const line = source.indexOf("\n", at);
+    const target = Math.floor(source.length * share);
+    const lineStart = source.lastIndexOf("\n", target) + 1;
+    const found = source.indexOf("\n", lineStart);
+    const lineEnd = found < 0 ? source.length : found;
 
-    return line < 0 ? source.length : line;
+    /*
+     * Правка ставится ВНУТРИ строки, а не на её границе.
+     *
+     * Вставка ровно перед переводом строки — не набор текста, а редкий случай,
+     * и точечный lex её отвергает: окно строки при этом неоднозначно. Стенд,
+     * ставивший правку туда, мерил не набор текста, а отказ, и на всех сорока
+     * крупных файлах показывал multilineConstruct.
+     */
+    return lineEnd > lineStart
+        ? lineStart + Math.floor((lineEnd - lineStart) / 2)
+        : lineEnd;
 }
 
 /* ──────────────────────── наблюдатель за службой ───────────────────────── */
