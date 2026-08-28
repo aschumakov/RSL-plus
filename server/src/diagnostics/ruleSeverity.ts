@@ -35,6 +35,7 @@ const BY_NAME = new Map<RslRuleSeverity, DiagnosticSeverity | undefined>([
  */
 export const RSL_KNOWN_DIAGNOSTIC_CODES: readonly string[] = [
     "ambiguous-import",
+    "argument-count",
     "ambiguous-reference",
     "assignment-to-constant",
     "branch-without-if",

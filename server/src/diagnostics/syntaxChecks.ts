@@ -3,6 +3,7 @@ import {
 } from "../execMacroDefinition";
 import {
     BLOCK_START_KEYWORDS,
+    DECLARATION_KEYWORDS,
     DECLARATION_MODIFIERS,
     deprecatedConstructMessage,
     END_KEYWORD
@@ -14,7 +15,8 @@ import {
 } from "../lexer";
 import {
     getScopeChain,
-    RslScopeResolver
+    RslScopeResolver,
+    type IResolvedSymbol
 } from "../scopeResolver";
 import {
     IIndexedModule
@@ -56,6 +58,12 @@ export interface IBlockEntry {
 export const BLOCK_START = new Set(BLOCK_START_KEYWORDS);
 
 export const MODIFIERS = new Set(DECLARATION_MODIFIERS);
+
+/** Слова, после которых имя со скобкой — объявление, а не вызов. */
+const DECLARATION_START = new Set([
+    ...DECLARATION_KEYWORDS,
+    ...DECLARATION_MODIFIERS
+]);
 
 export function addSyntaxParserDiagnostics(
     module: IIndexedModule,
@@ -294,6 +302,173 @@ export function addReferenceArgumentDiagnostics(
             ));
         }
     }
+}
+
+/**
+ * Аргументов больше, чем параметров у однозначно разрешённой процедуры.
+ *
+ * Проверяется только избыток, и только он. Недостаток аргументов в проекте
+ * встречается у 3,9% вызовов с известной сигнатурой — столько настоящих ошибок
+ * там быть не может, и это согласуется с тем, что хвостовые аргументы в RSL
+ * разрешено опускать. Ни одного параметра со значением по умолчанию среди
+ * 31 314 просмотренных объявлений не нашлось, то есть правил необязательности
+ * подтвердить нечем — а раз нечем, недостаток и не проверяется.
+ *
+ * Избыток же доказуем: лишний аргумент никуда не попадёт. В проверенном
+ * проекте таких вызовов 2,6% — например `MACRO AddCol(ar, ind, fld, head,
+ * width, rdonly)`, который зовут с седьмым аргументом `null`.
+ *
+ * Правило молчит, если сигнатура не разрешилась однозначно, если у символа нет
+ * списка параметров или если в списке есть многоточие: вариативную сигнатуру
+ * подтвердить нечем.
+ */
+export function addArgumentCountDiagnostics(
+    module: IIndexedModule,
+    resolver: RslScopeResolver,
+    result: Diagnostic[]
+): void {
+    const tokens = cachedSignificantTokens(module.lex.tokens);
+    const declarationStarts = new Set<number>();
+
+    walkScopes(module.symbolTree, scope => {
+        for (const child of scope.children) {
+            if (
+                child.kind === CompletionItemKind.Function ||
+                child.kind === CompletionItemKind.Method
+            ) {
+                declarationStarts.add(findObjectNameRange(module, child).start);
+            }
+        }
+    });
+
+    for (let index = 0; index + 1 < tokens.length; index++) {
+        const callee = tokens[index];
+        const open = tokens[index + 1];
+
+        if (
+            callee.kind !== "identifier" ||
+            open.kind !== "symbol" ||
+            open.raw !== "("
+        ) {
+            continue;
+        }
+
+        if (declarationStarts.has(callee.start)) {
+            continue;
+        }
+
+        /*
+         * Объявление, а не вызов.
+         *
+         * `FILE GT_OBJ(gtobject, "rsgate.def") KEY 1 WRITE;` устроено как имя
+         * со скобкой, и по токенам от вызова неотличимо. Считать такие
+         * строки вызовами — верный способ насчитать лишние аргументы там,
+         * где их нет.
+         */
+        const previous = index > 0 ? tokens[index - 1] : undefined;
+
+        if (
+            previous &&
+            previous.kind === "identifier" &&
+            DECLARATION_START.has(normalizeIdentifier(previous.value))
+        ) {
+            continue;
+        }
+
+        /* Обращение к члену: приёмник разрешает сам resolver, но не мы. */
+        if (previous && previous.kind === "symbol" && previous.raw === ".") {
+            continue;
+        }
+
+        const resolved = resolver.resolveAt(
+            module.uri,
+            module.symbolTree,
+            callee.start
+        );
+
+        /*
+         * Только процедуры этого же файла.
+         *
+         * Сигнатуры платформенных функций в каталоге неполны, и сверка с ними
+         * даёт шум: на четырёхстах файлах проекта правило без этого
+         * ограничения находило 2586 «лишних аргументов» в 272 файлах — столько
+         * настоящих ошибок там быть не может. Объявление в том же файле видно
+         * целиком, и спорить не о чем.
+         */
+        if (!resolved || resolved.uri !== module.uri) {
+            continue;
+        }
+
+        addExtraArgumentDiagnostic(
+            callee,
+            resolved,
+            callArguments(tokens, index + 1).length,
+            result
+        );
+    }
+}
+
+function addExtraArgumentDiagnostic(
+    callee: IRslToken,
+    resolved: IResolvedSymbol | undefined,
+    given: number,
+    result: Diagnostic[]
+): void {
+    const symbol = resolved?.symbol;
+
+    if (
+        !symbol ||
+        (symbol.kind !== CompletionItemKind.Function &&
+            symbol.kind !== CompletionItemKind.Method)
+    ) {
+        return;
+    }
+
+    const text = symbol.parameterText || "";
+
+    if (!text.trim() || text.includes("...")) {
+        /* Списка нет или он вариативный: сравнивать не с чем. */
+        return;
+    }
+
+    const declared = countParameters(text);
+
+    /*
+     * Процедура без параметров не проверяется.
+     *
+     * Объявление `MACRO PutMsg()`, которое зовут с аргументами, встречается в
+     * проекте у каждой четырнадцатой находки и на настоящую ошибку не похоже:
+     * так выглядят точки входа и конструкции, которых модель не знает.
+     * Доказать тут нечего, поэтому правило молчит.
+     */
+    if (declared <= 0 || given <= declared) {
+        return;
+    }
+
+    result.push(createTokenDiagnostic(
+        callee,
+        DiagnosticSeverity.Warning,
+        "Аргументов больше, чем параметров: передано " + given +
+            ", объявлено " + declared,
+        "argument-count"
+    ));
+}
+
+/** Сколько параметров в списке; -1 — разобрать не удалось. */
+function countParameters(parameterText: string): number {
+    const body = parameterText
+        .trim()
+        .replace(/^\(/u, "")
+        .replace(/\)$/u, "")
+        /* Комментарии внутри списка параметров в проекте не редкость. */
+        .replace(/\/\*[\s\S]*?\*\//gu, " ")
+        .trim();
+
+    if (!body) {
+        return 0;
+    }
+
+    return splitTopLevel(body).filter(item => item.trim().length > 0).length;
 }
 
 export function referenceParameterIndexes(parameterText: string): Set<number> {

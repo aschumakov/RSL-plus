@@ -230,6 +230,21 @@ export const RSL_DIAGNOSTIC_RULES: readonly IRslDiagnosticRule[] = [
         produces: true
     },
     {
+        /*
+         * Число аргументов сверяется с однозначно разрешённой сигнатурой,
+         * поэтому проверка зависит от импортов и не кэшируется по единицам:
+         * сигнатура может прийти из другого файла.
+         */
+        id: "argumentCount",
+        phase: "local",
+        settings: ["argumentCount"],
+        requires: ["resolverWarmup"],
+        depends: WITH_IMPORTS,
+        cache: "file",
+        resumable: false,
+        produces: true
+    },
+    {
         id: "coreDialect",
         phase: "local",
         settings: ["structure", "dialect"],

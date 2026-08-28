@@ -128,6 +128,7 @@ import {
     addDocumentedLimitDiagnostic,
     addFileNameLimitDiagnostic,
     addImportPlacementDiagnostics,
+    addArgumentCountDiagnostics,
     addReferenceArgumentDiagnostics,
     addSyntaxParserDiagnostics,
     addUnterminatedTokenDiagnostic,
@@ -177,6 +178,7 @@ export const DEFAULT_DIAGNOSTIC_SETTINGS: Required<IRslDiagnosticSettings> = {
     unknownVariablesKnownGlobalsFile: "",
     unknownVariablesAuditFile: "",
     dialect: "rsBank",
+    argumentCount: true,
     maxProblems: 200,
     /* Уровни правил по умолчанию не переопределяются. */
     rules: {}
@@ -220,6 +222,7 @@ export function normalizeDiagnosticSettings(
             typeof settings?.maxProblems === "number"
                 ? Math.max(0, Math.floor(settings.maxProblems))
                 : DEFAULT_DIAGNOSTIC_SETTINGS.maxProblems,
+        argumentCount: settings?.argumentCount !== false,
         rules: settings?.rules || {}
     };
 }
@@ -647,6 +650,15 @@ function planLocalRslDiagnostics(
                     result
                 )
             )
+        ],
+        [
+            /*
+             * Число аргументов от диалекта не зависит: лишний аргумент никуда
+             * не попадёт ни в базовом RSL, ни в диалекте RS-Bank.
+             */
+            "argumentCount",
+            options.argumentCount,
+            () => addArgumentCountDiagnostics(module, getResolver(), result)
         ],
         [
             "coreDialect",

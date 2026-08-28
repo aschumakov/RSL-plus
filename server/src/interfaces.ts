@@ -66,6 +66,8 @@ export interface IRslDiagnosticSettings {
     debugBreak?: boolean;
     /** Присваивание переменной самой себе. */
     selfAssignment?: boolean;
+    /** Аргументов больше, чем параметров: см. addArgumentCountDiagnostics. */
+    argumentCount?: boolean;
     /** Сравнение значения с самим собой. */
     selfComparison?: boolean;
     /** Заведомо постоянное условие. */
