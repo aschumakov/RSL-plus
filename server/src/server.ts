@@ -55,6 +55,9 @@ import {
 } from "./indexing/watchedFileRouting";
 import { ReferenceIndex } from "./analysis/referenceIndex";
 import {
+    RslReferenceShardStore
+} from "./analysis/referenceShards";
+import {
     PerformanceLogger,
     type IPerformanceFields
 } from "./performanceLogger";
@@ -113,6 +116,15 @@ const diagnosticEngine = new RslDiagnosticEngine({
     }
 });
 const referenceIndex = new ReferenceIndex({ log: logMessage });
+/*
+ * Постоянные записи о разрешённых ссылках.
+ *
+ * Find All References читает и разбирает каждый файл-кандидат заново: на
+ * проверенном проекте популярное имя даёт 2533 кандидата и 4,2 секунды одного
+ * только разбора — при каждом запросе. Записи появляются тогда, когда файл всё
+ * равно пришлось разобрать, и живут до его изменения.
+ */
+const referenceShards = new RslReferenceShardStore({ log: logMessage });
 const performanceLogger = new PerformanceLogger(message => logMessage(message));
 
 let hasWorkspaceFolderCapability = false;
@@ -545,6 +557,7 @@ languageFeatures = new RslLanguageFeatureRegistry({
     resolver: scopeResolver,
     definitionProvider,
     referenceIndex,
+    referenceShards,
     getFastDocumentSnapshot: document =>
         documentAnalysis.getFastSnapshot(document),
     ensureDocumentParsed,
@@ -571,6 +584,7 @@ connection.onInitialize((params: InitializeParams) => {
     const initializationOptions = params.initializationOptions as
         {
             referenceIndexCachePath?: string;
+            referenceShardsPath?: string;
             compactModuleCachePath?: string;
             performanceLogFile?: string;
             initialSettings?: IRslSettings;
@@ -578,6 +592,9 @@ connection.onInitialize((params: InitializeParams) => {
         } | undefined;
     referenceIndex.configurePersistence(
         initializationOptions?.referenceIndexCachePath
+    );
+    referenceShards.configurePersistence(
+        initializationOptions?.referenceShardsPath
     );
     compactModules.configureCache(
         initializationOptions?.compactModuleCachePath
@@ -792,6 +809,7 @@ async function handleWatchedFileChange(
     }
 
     referenceIndex.invalidate(uri);
+    referenceShards.invalidate(uri);
     definitionProvider.invalidateUri(uri);
     /* Транзитивно: см. refreshOpenDependents. */
     const dependents = workspaceIndex.getAffectedUris(uri)
@@ -919,7 +937,10 @@ connection.onShutdown(async () => {
      * сканировал всё, что уже было посчитано. Ошибка записи не должна помешать
      * остановке, поэтому обе операции завершаются независимо.
      */
-    const saved = await Promise.allSettled([referenceIndex.flush()]);
+    const saved = await Promise.allSettled([
+        referenceIndex.flush(),
+        referenceShards.flush()
+    ]);
 
     for (const result of saved) {
         if (result.status === "rejected") {

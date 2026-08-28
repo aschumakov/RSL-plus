@@ -14,6 +14,10 @@ import {
 } from "../lexer";
 import { RslScopeResolver } from "../scopeResolver";
 import { ReferenceIndex } from "./referenceIndex";
+import type {
+    IRslShardReference,
+    RslReferenceShardStore
+} from "./referenceShards";
 import { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 
 const REFERENCE_CPU_SLICE_MS = 8;
@@ -71,7 +75,9 @@ export async function findRslReferencesInWorkspace(
     uri: string,
     offset: number,
     includeDeclaration: boolean,
-    isCancelled: () => boolean = () => false
+    isCancelled: () => boolean = () => false,
+    /* Постоянные записи о ссылках, если сервер их ведёт. */
+    shards?: RslReferenceShardStore
 ): Promise<Location[]> {
     const sourceModule = index.getModule(uri);
 
@@ -92,7 +98,8 @@ export async function findRslReferencesInWorkspace(
         target.uri,
         target.symbol,
         includeDeclaration,
-        isCancelled
+        isCancelled,
+        shards
     );
 }
 
@@ -108,7 +115,9 @@ export async function findRslReferencesForSymbol(
     targetUri: string,
     targetObject: RslSymbol,
     includeDeclaration: boolean,
-    isCancelled: () => boolean = () => false
+    isCancelled: () => boolean = () => false,
+    /* Постоянные записи о ссылках, если сервер их ведёт. */
+    shards?: RslReferenceShardStore
 ): Promise<Location[]> {
     const sourceModule = index.getModule(targetUri);
 
@@ -166,9 +175,54 @@ export async function findRslReferencesForSymbol(
     const externalUris = candidateUniverse.filter(candidateUri =>
         !openUris.has(candidateUri)
     );
+    /*
+     * Файлы, о которых уже есть запись, не читаются вовсе.
+     *
+     * На проверенном проекте популярное имя даёт 2533 файла-кандидата на
+     * 66 МБ, и один только их разбор стоит 4,2 секунды — при каждом запросе.
+     * Запись появилась при первом таком запросе и живёт, пока файл не менялся.
+     */
+    const unknownUris: string[] = [];
+
+    for (const candidateUri of externalUris) {
+        if (isCancelled()) {
+            return [];
+        }
+
+        const recorded = shards
+            ? await shards.lookup(candidateUri, targetName)
+            : undefined;
+
+        if (!recorded) {
+            unknownUris.push(candidateUri);
+            continue;
+        }
+
+        for (const reference of recorded) {
+            if (reference.targetKey !== targetKey) {
+                continue;
+            }
+
+            if (reference.isDeclaration && !includeDeclaration) {
+                continue;
+            }
+
+            addLocation(result, seen, candidateUri, {
+                start: {
+                    line: reference.startLine,
+                    character: reference.startCharacter
+                },
+                end: {
+                    line: reference.endLine,
+                    character: reference.endCharacter
+                }
+            });
+        }
+    }
+
     const candidates = await referenceIndex.findCandidates(
         targetName,
-        externalUris,
+        unknownUris,
         isCancelled
     );
 
@@ -179,6 +233,8 @@ export async function findRslReferencesForSymbol(
             return [];
         }
 
+        const collected: IRslShardReference[] = [];
+
         index.withTransientOpenModule(candidate.uri, candidate.source, module => {
             collectModuleReferences(
                 module,
@@ -188,9 +244,19 @@ export async function findRslReferencesForSymbol(
                 includeDeclaration,
                 result,
                 seen,
-                isCancelled
+                isCancelled,
+                collected
             );
         });
+
+        if (shards && !isCancelled()) {
+            /*
+             * Записывается и пустой ответ: «имя в файле есть, но никуда не
+             * ведёт» — тоже знание, без которого файл перечитывался бы каждый
+             * раз.
+             */
+            await shards.record(candidate.uri, targetName, collected);
+        }
 
         if (performance.now() - sliceStarted >= REFERENCE_CPU_SLICE_MS) {
             await yieldToInteractiveRequests();
@@ -209,7 +275,14 @@ function collectModuleReferences(
     includeDeclaration: boolean,
     result: Location[],
     seen: Set<string>,
-    isCancelled: () => boolean
+    isCancelled: () => boolean,
+    /*
+     * Куда записать ВСЕ разрешённые вхождения имени, а не только совпавшие с
+     * целью. Разбирая файл ради одного символа, мы уже разрешили каждое
+     * вхождение, и следующий вопрос про другой символ с тем же именем
+     * ответится по записи, без чтения файла.
+     */
+    collected?: IRslShardReference[]
 ): void {
     const declarationToken = findDeclarationTokenByKey(
         module,
@@ -235,35 +308,57 @@ function collectModuleReferences(
             token.start
         );
 
-        if (!resolved || symbolKey(resolved.uri, resolved.symbol) !== targetKey) {
-            continue;
-        }
-
         const declaration = !!declarationToken &&
             declarationToken.start === token.start &&
             declarationToken.end === token.end;
-
-        if (declaration && !includeDeclaration) {
-            continue;
-        }
-
         const range: Range = {
             start: { line: token.line, character: token.character },
             end: { line: token.endLine, character: token.endCharacter }
         };
-        const key = [
-            module.uri,
-            range.start.line,
-            range.start.character,
-            range.end.line,
-            range.end.character
-        ].join(":");
 
-        if (!seen.has(key)) {
-            seen.add(key);
-            result.push({ uri: module.uri, range });
+        if (resolved && collected) {
+            collected.push({
+                targetKey: symbolKey(resolved.uri, resolved.symbol),
+                startLine: range.start.line,
+                startCharacter: range.start.character,
+                endLine: range.end.line,
+                endCharacter: range.end.character,
+                isDeclaration: declaration
+            });
         }
+
+        if (!resolved || symbolKey(resolved.uri, resolved.symbol) !== targetKey) {
+            continue;
+        }
+
+        if (declaration && !includeDeclaration) {
+            continue;
+        }
+        addLocation(result, seen, module.uri, range);
     }
+}
+
+/** Кладёт находку, если такой ещё не было. */
+function addLocation(
+    result: Location[],
+    seen: Set<string>,
+    uri: string,
+    range: Range
+): void {
+    const key = [
+        uri,
+        range.start.line,
+        range.start.character,
+        range.end.line,
+        range.end.character
+    ].join(":");
+
+    if (seen.has(key)) {
+        return;
+    }
+
+    seen.add(key);
+    result.push({ uri, range });
 }
 
 function findDeclarationTokenByKey(

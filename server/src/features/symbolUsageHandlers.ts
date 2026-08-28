@@ -20,6 +20,9 @@ import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 import type { ParseWaitMode } from "../services/documentAnalysisService";
 import { findRslReferencesInWorkspace } from "../analysis/references";
 import type { ReferenceIndex } from "../analysis/referenceIndex";
+import type {
+    RslReferenceShardStore
+} from "../analysis/referenceShards";
 import { isBlockedToken, requestIsStale } from "./requestHelpers";
 import { buildRslDocumentHighlights } from "./documentHighlights";
 import {
@@ -44,6 +47,8 @@ export interface IRslSymbolUsageEnvironment {
     index: WorkspaceIndex;
     resolver: RslScopeResolver;
     referenceIndex: ReferenceIndex;
+    /** Постоянные записи о ссылках, если сервер их ведёт. */
+    referenceShards?: RslReferenceShardStore;
     ensureDocumentParsed(
         document: TextDocument,
         mode?: ParseWaitMode
@@ -189,7 +194,8 @@ export function createRslSymbolUsageHandlers(
                 document.uri,
                 at.offset,
                 params.context.includeDeclaration,
-                () => cancellationToken.isCancellationRequested
+                () => cancellationToken.isCancellationRequested,
+                environment.referenceShards
             );
         },
 

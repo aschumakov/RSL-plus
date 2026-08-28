@@ -45,6 +45,9 @@ import {
 import type { IRslSettings } from "../interfaces";
 import { ReferenceIndex } from "../analysis/referenceIndex";
 import type {
+    RslReferenceShardStore
+} from "../analysis/referenceShards";
+import type {
     IFastDocumentSnapshot
 } from "../services/fastDocumentSnapshot";
 import {
@@ -97,6 +100,8 @@ export interface IRslLanguageFeatureEnvironment {
     resolver: RslScopeResolver;
     definitionProvider: RslDefinitionProvider;
     referenceIndex?: ReferenceIndex;
+    /** Постоянные записи о ссылках, если сервер их ведёт. */
+    referenceShards?: RslReferenceShardStore;
     getFastDocumentSnapshot(document: TextDocument): IFastDocumentSnapshot;
     ensureDocumentParsed(
         document: TextDocument,
@@ -167,6 +172,7 @@ export class RslLanguageFeatureRegistry {
             index: environment.index,
             resolver: environment.resolver,
             referenceIndex: this.referenceIndex,
+            referenceShards: environment.referenceShards,
             ensureDocumentParsed: (document, mode) =>
                 environment.ensureDocumentParsed(document, mode),
             noteInteractiveActivity: () =>

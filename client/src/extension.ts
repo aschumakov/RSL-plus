@@ -375,6 +375,13 @@ export function activate(context: ExtensionContext): void {
                 ).fsPath
                 : undefined,
             /*
+             * Каталог постоянных записей о ссылках. Версия в имени: при смене
+             * формата прежние записи не читаются, а не толкуются наугад.
+             */
+            referenceShardsPath: context.storageUri
+                ? Uri.joinPath(context.storageUri, "reference-shards-v1").fsPath
+                : undefined,
+            /*
              * Кэш компактных сводок внешних модулей. Версия в имени файла: при
              * смене формата старый файл просто перестаёт читаться, и его не
              * нужно ни переносить, ни удалять вручную.
