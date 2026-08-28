@@ -6,6 +6,16 @@ export class LruCache<K, V> {
         this.maxEntries = Math.max(0, Math.floor(maxEntries));
     }
 
+    /**
+     * Ключи от самого старого к самому свежему, без изменения порядка.
+     *
+     * Нужен владельцу, который вытесняет не подряд: часть записей может быть
+     * закреплена, и тогда очередь на вытеснение — следующая за ними.
+     */
+    keysOldestFirst(): K[] {
+        return [...this.values.keys()];
+    }
+
     /** Ключ наименее недавно использованного элемента, без изменения порядка. */
     peekOldest(): K | undefined {
         const oldest = this.values.keys().next();

@@ -71,6 +71,26 @@ export class WorkspaceIndex {
     );
     private readonly maxExternalModules: number;
     /**
+     * Что нельзя вытеснять: транзитивное Import-замыкание открытых документов.
+     *
+     * Подсказки, Problems и переходы открытого файла считаются по его
+     * зависимостям. Пока фоновая индексация читает проект, LRU внешних модулей
+     * доходил до предела и выбрасывал в том числе эти зависимости — и ответ
+     * открытому файлу становился неполным ровно тогда, когда пользователь в
+     * нём работает. Замыкание закрепляется и вытеснению не подлежит.
+     */
+    private readonly pinnedModules = new Set<string>();
+    /**
+     * Имена, которых замыканию не хватает.
+     *
+     * Модуль может быть написан в Import, но ещё не загружен. Как только он
+     * появится, закрепление обязано его подхватить — иначе он попадёт в общую
+     * очередь и будет вытеснен раньше, чем понадобится. Пересчёт замыкания на
+     * каждую загрузку стоил бы дорого при обходе проекта, поэтому пересчёт
+     * идёт только на загрузку ожидаемого имени.
+     */
+    private readonly pinnedWantedNames = new Set<string>();
+    /**
      * Объём сводки каждого внешнего модуля и их сумма.
      *
      * Размеры хранятся поимённо, а не одним счётчиком. Счётчик приходилось бы
@@ -189,7 +209,70 @@ export class WorkspaceIndex {
 
     markClosed(uri: string): void {
         const module = this.modules.get(uri);
-        if (module) module.isOpen = false;
+
+        if (!module) {
+            return;
+        }
+
+        module.isOpen = false;
+        /* Закрытый документ больше никого не удерживает. */
+        this.refreshPinnedModules();
+    }
+
+    /**
+     * Пересчитывает закрепление по всем открытым документам.
+     *
+     * Обход идёт по графу Import вширь — тот же обход, что строит
+     * Import-контекст, — и попутно запоминает имена, которые пока никуда не
+     * разрешились: их загрузка расширит закрепление.
+     */
+    private refreshPinnedModules(): void {
+        this.pinnedModules.clear();
+        this.pinnedWantedNames.clear();
+
+        if (!this.importsEnabled) {
+            return;
+        }
+
+        const queue: string[] = [];
+
+        for (const module of this.modules.values()) {
+            if (module.isOpen) {
+                queue.push(module.uri);
+                this.pinnedModules.add(module.uri);
+            }
+        }
+
+        for (let at = 0; at < queue.length; at++) {
+            const current = this.modules.get(queue[at]);
+
+            if (!current) {
+                continue;
+            }
+
+            for (const name of current.imports) {
+                const imported = this.findModuleByName(name);
+
+                if (!imported) {
+                    this.pinnedWantedNames.add(normalizeName(
+                        withMacExtension(name)
+                    ));
+                    continue;
+                }
+
+                if (this.pinnedModules.has(imported.uri)) {
+                    continue;
+                }
+
+                this.pinnedModules.add(imported.uri);
+                queue.push(imported.uri);
+            }
+        }
+    }
+
+    /** Сколько модулей закреплено: для отчёта о памяти и для тестов. */
+    get pinnedModuleCount(): number {
+        return this.pinnedModules.size;
     }
 
     markOpen(uri: string): void {
@@ -539,6 +622,16 @@ export class WorkspaceIndex {
             this.touchExternalModule(uri);
         }
 
+        if (isOpen || this.pinnedWantedNames.has(normalizeName(
+            moduleNameOfUri(uri)
+        ))) {
+            /*
+             * Либо изменился сам открытый документ и его Import, либо
+             * загрузился модуль, которого замыканию не хватало.
+             */
+            this.refreshPinnedModules();
+        }
+
         this.revisionValue++;
         return module;
     }
@@ -558,18 +651,49 @@ export class WorkspaceIndex {
         this.externalModuleOrder.set(uri, true);
         this.setExternalSize(uri, this.modules.get(uri)?.sourceLength ?? 0);
 
+        /*
+         * Очередь на вытеснение — от самых старых, но мимо закреплённых.
+         *
+         * Закреплённое замыкание открытых документов вытеснять нельзя: без
+         * него подсказки и Problems открытого файла становятся неполными. Если
+         * незакреплённых модулей не осталось, вытеснение прекращается —
+         * выбрасывать нужное и тут же читать заново означало бы бесконечный
+         * круг.
+         */
+        let queue: string[] | undefined;
+        let at = 0;
+
         while (
             this.externalModuleOrder.size > this.maxExternalModules ||
             this.externalBytes > this.maxExternalBytes
         ) {
-            const oldest = this.externalModuleOrder.peekOldest();
+            if (!queue) {
+                queue = this.externalModuleOrder.keysOldestFirst();
+            }
 
-            if (oldest === undefined || oldest === uri) {
+            let victim: string | undefined;
+
+            while (at < queue.length) {
+                const candidate = queue[at++];
+
+                if (
+                    candidate === uri ||
+                    this.pinnedModules.has(candidate) ||
+                    !this.externalModuleOrder.get(candidate)
+                ) {
+                    continue;
+                }
+
+                victim = candidate;
                 break;
             }
 
-            this.externalModuleOrder.delete(oldest);
-            this.removeModule(oldest);
+            if (victim === undefined) {
+                break;
+            }
+
+            this.externalModuleOrder.delete(victim);
+            this.removeModule(victim);
         }
     }
 
@@ -653,4 +777,18 @@ export class WorkspaceIndex {
 
 function normalizeName(value: string): string {
     return (value || "").toLowerCase();
+}
+
+/** Имя файла модуля по его URI: то же правило, что и у каталога проекта. */
+function moduleNameOfUri(uri: string): string {
+    const at = uri.lastIndexOf("/");
+
+    return at < 0 ? uri : uri.slice(at + 1);
+}
+
+/** Имя с расширением: в Import его пишут не всегда. */
+function withMacExtension(name: string): string {
+    const value = (name || "").trim();
+
+    return /\.mac$/i.test(value) ? value : value + ".mac";
 }
