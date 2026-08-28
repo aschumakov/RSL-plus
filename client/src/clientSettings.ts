@@ -38,6 +38,11 @@ export interface IRslClientSettings {
         constantCondition: boolean;
         duplicateBranchCondition: boolean;
         unusedExpression: boolean;
+        overwrittenValue: boolean;
+        argumentCount: boolean;
+        incompatibleOverride: boolean;
+        /** Уровень отдельных проверок по их коду; см. rslPlus.diagnostics.rules. */
+        rules: Record<string, string>;
         useBeforeDeclaration: boolean;
         ambiguousReferences: boolean;
         redundantImports: boolean;
@@ -163,6 +168,26 @@ export function readRslSettings(resource?: Uri): IRslClientSettings {
             unusedExpression: readSetting(
                 "diagnostics.unusedExpression",
                 true,
+                resource
+            ),
+            overwrittenValue: readSetting(
+                "diagnostics.overwrittenValue",
+                true,
+                resource
+            ),
+            argumentCount: readSetting(
+                "diagnostics.argumentCount",
+                true,
+                resource
+            ),
+            incompatibleOverride: readSetting(
+                "diagnostics.incompatibleOverride",
+                true,
+                resource
+            ),
+            rules: readSetting(
+                "diagnostics.rules",
+                {} as Record<string, string>,
                 resource
             ),
             useBeforeDeclaration: readSetting(

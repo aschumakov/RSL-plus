@@ -1,4 +1,8 @@
-import { DiagnosticSeverity, type Diagnostic } from "vscode-languageserver";
+import {
+    CompletionItemKind,
+    DiagnosticSeverity,
+    type Diagnostic
+} from "vscode-languageserver";
 
 import {
     BRANCH_KEYWORDS,
@@ -8,6 +12,7 @@ import {
     WORD_OPERATORS
 } from "../language/rslLanguageReference";
 import { normalizeIdentifier, type IRslToken } from "../lexer";
+import type { RslSymbol } from "../symbols/rslSymbol";
 import type { IRslSyntaxNode } from "../syntaxParser";
 import type { IIndexedModule } from "../workspaceIndex";
 import { createOffsetDiagnostic } from "./diagnosticFactory";
@@ -32,6 +37,8 @@ import { createOffsetDiagnostic } from "./diagnosticFactory";
  */
 
 export interface IRslStatementCheckOptions {
+    /** Значение записано и перезаписано без чтения. */
+    overwrittenValue?: boolean;
     selfAssignment: boolean;
     selfComparison: boolean;
     constantCondition: boolean;
@@ -131,6 +138,23 @@ export function createRslStatementScanner(
     let hasCall = false;
     let hasMember = false;
     let hasOperator = false;
+    /*
+     * Записанные значения, которые ещё никто не прочитал.
+     *
+     * Имя -> токен присваивания. Живут только внутри прямолинейного участка:
+     * любое ветвление, цикл, выход и любой вызов участок обрывают, и всё
+     * накопленное забывается. Забыть лишнее — промолчать; не забыть — соврать.
+     */
+    const pending = new Map<string, IRslToken>();
+    /* Есть ли в операторе передача по ссылке: она читает и пишет мимо нас. */
+    let hasReference = false;
+    /* Имена процедур файла: считаются лениво, нужны только этому правилу. */
+    let procedures: Set<string> | undefined;
+    const procedureNames = (): Set<string> => {
+        procedures = procedures || collectProcedureNames(module);
+
+        return procedures;
+    };
 
     const report = (diagnostic: Diagnostic): void => {
         if (result.length < options.maxProblems) {
@@ -168,6 +192,25 @@ export function createRslStatementScanner(
                     report
                 );
             }
+
+            if (options.overwrittenValue) {
+                trackOverwrittenValue(
+                    module,
+                    tokens,
+                    start,
+                    end,
+                    {
+                        assignment,
+                        header,
+                        hasCall,
+                        hasMember,
+                        hasReference
+                    },
+                    pending,
+                    procedureNames,
+                    report
+                );
+            }
         }
 
         start = next;
@@ -177,6 +220,7 @@ export function createRslStatementScanner(
         hasCall = false;
         hasMember = false;
         hasOperator = false;
+        hasReference = false;
     };
 
     return {
@@ -209,6 +253,12 @@ export function createRslStatementScanner(
 
                 if (raw === ".") {
                     hasMember = true;
+
+                    return;
+                }
+
+                if (raw === "@") {
+                    hasReference = true;
 
                     return;
                 }
@@ -282,11 +332,20 @@ export function createRslStatementScanner(
             if (role === "end") {
                 /* END и ELSE заканчивают оператор и своего не начинают. */
                 flush(index, index + 1);
+                pending.clear();
 
                 return;
             }
 
             flush(index, index);
+            /*
+             * Участок кончился на самом слове, а не на операторе с ним.
+             *
+             * У END, ELSE и голого CONTINUE оператора нет вовсе: flush по
+             * пустому промежутку ничего не делает, и ждать очистки от него
+             * значит не заметить ни одной ветви.
+             */
+            pending.clear();
             header = role === "header";
         }
     };
@@ -829,6 +888,162 @@ function checkDuplicateBranch(
 /* ─── Общее ──────────────────────────────────────────────────────────────── */
 
 /** Индекс «=» на нулевой глубине; -1 — присваивания нет. */
+/**
+ * Значение записано и перезаписано, а между ними его никто не прочитал.
+ *
+ *   status = 1;
+ *   status = 2;   // первое присваивание бессмысленно
+ *
+ * Работает только на прямолинейном участке и только с простым именем слева.
+ * Всё, что делает вывод недоказуемым, участок обрывает: заголовок блока,
+ * ветвление, цикл, выход, любой вызов, передача по ссылке и обращение через
+ * точку. Вызов мог прочитать переменную или записать её по ссылке; ветвление
+ * означает, что до второго присваивания могли и не дойти.
+ */
+function trackOverwrittenValue(
+    module: IIndexedModule,
+    tokens: readonly IRslToken[],
+    from: number,
+    to: number,
+    shape: {
+        assignment: number;
+        header: boolean;
+        hasCall: boolean;
+        hasMember: boolean;
+        hasReference: boolean;
+    },
+    pending: Map<string, IRslToken>,
+    procedureNames: () => Set<string>,
+    report: (diagnostic: Diagnostic) => void
+): void {
+    if (
+        shape.header ||
+        shape.hasCall ||
+        shape.hasReference ||
+        shape.hasMember ||
+        /*
+         * Не присваивание — участок кончился.
+         *
+         * Отдельным оператором в RSL стоит и вызов без скобок: «Itogo;» — это
+         * вызов процедуры, а не чтение переменной. Такой оператор читает что
+         * угодно, и разбирать, что именно, нечем.
+         */
+        shape.assignment < 0
+    ) {
+        pending.clear();
+
+        return;
+    }
+
+    const target = shape.assignment === 1 && tokens[from].kind === "identifier"
+        ? tokens[from]
+        : undefined;
+
+    /*
+     * Вызов без скобок бывает и в правой части: «x = Itogo;».
+     *
+     * Имя процедуры этого файла где угодно в операторе — повод забыть всё:
+     * процедура читает переменные файла, и какие именно, здесь не видно.
+     */
+    if (mentionsProcedure(tokens, from, to, procedureNames())) {
+        pending.clear();
+
+        return;
+    }
+
+    /* Правая часть читается раньше, чем срабатывает запись. */
+    forgetRead(tokens, from + shape.assignment + 1, to, pending);
+
+    if (!target) {
+        /*
+         * Слева не простое имя: индекс, член, что-то ещё. Доказать, что старое
+         * значение не понадобится, нечем.
+         */
+        pending.clear();
+
+        return;
+    }
+
+    const name = normalizeIdentifier(target.value);
+    const previous = pending.get(name);
+
+    if (previous) {
+        report(createOffsetDiagnostic(
+            module,
+            previous.start,
+            previous.end,
+            DiagnosticSeverity.Warning,
+            "Значение " + target.value +
+                " перезаписывается, так и не будучи прочитанным",
+            "overwritten-value"
+        ));
+    }
+
+    pending.set(name, target);
+}
+
+/** Названа ли в операторе процедура этого файла. */
+function mentionsProcedure(
+    tokens: readonly IRslToken[],
+    from: number,
+    to: number,
+    procedures: Set<string>
+): boolean {
+    if (procedures.size === 0) {
+        return false;
+    }
+
+    for (let index = from; index < to; index++) {
+        const token = tokens[index];
+
+        if (
+            token.kind === "identifier" &&
+            procedures.has(normalizeIdentifier(token.value))
+        ) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/** Имена всех процедур файла, включая методы классов. */
+function collectProcedureNames(module: IIndexedModule): Set<string> {
+    const names = new Set<string>();
+    const visit = (symbol: RslSymbol): void => {
+        for (const child of symbol.children) {
+            if (
+                child.kind === CompletionItemKind.Method ||
+                child.kind === CompletionItemKind.Function
+            ) {
+                names.add(normalizeIdentifier(child.name));
+            }
+
+            visit(child);
+        }
+    };
+
+    visit(module.symbolTree);
+
+    return names;
+}
+
+/** Прочитанное имя больше не считается забытым значением. */
+function forgetRead(
+    tokens: readonly IRslToken[],
+    from: number,
+    to: number,
+    pending: Map<string, IRslToken>
+): void {
+    for (let index = from; index < to; index++) {
+        const token = tokens[index];
+
+        if (token.kind === "identifier") {
+            pending.delete(normalizeIdentifier(token.value));
+        }
+    }
+}
+
 function topLevelAssignment(tokens: readonly IRslToken[]): number {
     let depth = 0;
 

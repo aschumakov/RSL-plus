@@ -64,6 +64,7 @@ export const RSL_KNOWN_DIAGNOSTIC_CODES: readonly string[] = [
     "missing-end",
     "missing-reference-argument",
     "no-declaration",
+    "overwritten-value",
     "redundant-import",
     "self-assignment",
     "self-comparison",

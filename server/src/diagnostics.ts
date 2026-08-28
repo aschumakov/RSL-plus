@@ -181,6 +181,7 @@ export const DEFAULT_DIAGNOSTIC_SETTINGS: Required<IRslDiagnosticSettings> = {
     dialect: "rsBank",
     argumentCount: true,
     incompatibleOverride: true,
+    overwrittenValue: true,
     maxProblems: 200,
     /* Уровни правил по умолчанию не переопределяются. */
     rules: {}
@@ -226,6 +227,7 @@ export function normalizeDiagnosticSettings(
                 : DEFAULT_DIAGNOSTIC_SETTINGS.maxProblems,
         argumentCount: settings?.argumentCount !== false,
         incompatibleOverride: settings?.incompatibleOverride !== false,
+        overwrittenValue: settings?.overwrittenValue !== false,
         rules: settings?.rules || {}
     };
 }
@@ -1215,6 +1217,7 @@ function createStatementStage(
         constantCondition: options.constantCondition,
         duplicateBranchCondition: options.duplicateBranchCondition,
         unusedExpression: options.unusedExpression,
+        overwrittenValue: options.overwrittenValue,
         maxProblems: options.maxProblems
     };
     /*

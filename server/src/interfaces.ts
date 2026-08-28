@@ -70,6 +70,8 @@ export interface IRslDiagnosticSettings {
     argumentCount?: boolean;
     /** Метод наследника расходится с базовым: см. addOverrideDiagnostics. */
     incompatibleOverride?: boolean;
+    /** Значение записано и перезаписано без чтения. */
+    overwrittenValue?: boolean;
     /** Сравнение значения с самим собой. */
     selfComparison?: boolean;
     /** Заведомо постоянное условие. */

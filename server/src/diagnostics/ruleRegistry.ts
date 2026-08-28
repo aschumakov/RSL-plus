@@ -308,7 +308,8 @@ export const RSL_DIAGNOSTIC_RULES: readonly IRslDiagnosticRule[] = [
             "selfComparison",
             "constantCondition",
             "duplicateBranchCondition",
-            "unusedExpression"
+            "unusedExpression",
+            "overwrittenValue"
         ],
         requires: [],
         depends: TEXT_ONLY,

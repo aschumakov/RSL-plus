@@ -362,6 +362,40 @@
                "default": true,
                "description": "Предупреждать о выражении, результат которого никуда не идёт: amount + commission;. Вызовы, присваивания, обращения к членам и индексам бесполезными не считаются."
             },
+            "rslPlus.diagnostics.overwrittenValue": {
+               "scope": "resource",
+               "type": "boolean",
+               "default": true,
+               "description": "Предупреждать о значении, которое записано и перезаписано, а между записями не прочитано: status = 1; status = 2;. Проверяется только прямолинейный участок: ветвление, цикл, выход и любой вызов проверку обрывают."
+            },
+            "rslPlus.diagnostics.argumentCount": {
+               "scope": "resource",
+               "type": "boolean",
+               "default": true,
+               "description": "Предупреждать, когда аргументов передано больше, чем параметров объявлено. Проверяются только процедуры того же файла: недостаток аргументов в RSL допустим, а каталог платформенных сигнатур неполон."
+            },
+            "rslPlus.diagnostics.incompatibleOverride": {
+               "scope": "resource",
+               "type": "boolean",
+               "default": true,
+               "description": "Предупреждать, когда метод наследника расходится с методом базового класса числом параметров или передачей по ссылке. Если базовый класс не определяется однозначно, проверка молчит."
+            },
+            "rslPlus.diagnostics.rules": {
+               "scope": "resource",
+               "type": "object",
+               "default": {},
+               "additionalProperties": {
+                  "type": "string",
+                  "enum": [
+                     "error",
+                     "warning",
+                     "information",
+                     "hint",
+                     "none"
+                  ]
+               },
+               "markdownDescription": "Уровень отдельных проверок по их коду: `{ \"overwritten-value\": \"information\", \"argument-count\": \"none\" }`. Код проверки виден в панели Problems. Уровень `none` выключает проверку."
+            },
             "rslPlus.diagnostics.useBeforeDeclaration": {
                "scope": "resource",
                "type": "boolean",
