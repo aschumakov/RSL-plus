@@ -121,6 +121,7 @@ import {
     runDiagnosticPlan,
     runDiagnosticPlanChunked
 } from "./diagnostics/stages";
+import { addOverrideDiagnostics } from "./diagnostics/overrideChecks";
 import {
     addCoreDialectDiagnostics,
     addDebugBreakDiagnostic,
@@ -179,6 +180,7 @@ export const DEFAULT_DIAGNOSTIC_SETTINGS: Required<IRslDiagnosticSettings> = {
     unknownVariablesAuditFile: "",
     dialect: "rsBank",
     argumentCount: true,
+    incompatibleOverride: true,
     maxProblems: 200,
     /* Уровни правил по умолчанию не переопределяются. */
     rules: {}
@@ -223,6 +225,7 @@ export function normalizeDiagnosticSettings(
                 ? Math.max(0, Math.floor(settings.maxProblems))
                 : DEFAULT_DIAGNOSTIC_SETTINGS.maxProblems,
         argumentCount: settings?.argumentCount !== false,
+        incompatibleOverride: settings?.incompatibleOverride !== false,
         rules: settings?.rules || {}
     };
 }
@@ -659,6 +662,15 @@ function planLocalRslDiagnostics(
             "argumentCount",
             options.argumentCount,
             () => addArgumentCountDiagnostics(module, getResolver(), result)
+        ],
+        [
+            /*
+             * Сигнатура базового класса может лежать в другом файле, поэтому
+             * проверка зависит от импортов и не кэшируется по единицам.
+             */
+            "incompatibleOverride",
+            options.incompatibleOverride,
+            () => addOverrideDiagnostics(module, index, result)
         ],
         [
             "coreDialect",

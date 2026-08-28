@@ -68,6 +68,8 @@ export interface IRslDiagnosticSettings {
     selfAssignment?: boolean;
     /** Аргументов больше, чем параметров: см. addArgumentCountDiagnostics. */
     argumentCount?: boolean;
+    /** Метод наследника расходится с базовым: см. addOverrideDiagnostics. */
+    incompatibleOverride?: boolean;
     /** Сравнение значения с самим собой. */
     selfComparison?: boolean;
     /** Заведомо постоянное условие. */

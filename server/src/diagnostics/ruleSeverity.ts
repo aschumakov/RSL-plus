@@ -54,6 +54,7 @@ export const RSL_KNOWN_DIAGNOSTIC_CODES: readonly string[] = [
     "identifier-too-long",
     "import-inside-macro",
     "import-resolution",
+    "incompatible-override",
     "incomplete-context",
     "invalid-money-constant",
     "invalid-onerror-context",

@@ -245,6 +245,16 @@ export const RSL_DIAGNOSTIC_RULES: readonly IRslDiagnosticRule[] = [
         produces: true
     },
     {
+        id: "incompatibleOverride",
+        phase: "local",
+        settings: ["incompatibleOverride"],
+        requires: [],
+        depends: WITH_IMPORTS,
+        cache: "file",
+        resumable: false,
+        produces: true
+    },
+    {
         id: "coreDialect",
         phase: "local",
         settings: ["structure", "dialect"],
