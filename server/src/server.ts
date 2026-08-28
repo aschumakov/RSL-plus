@@ -57,6 +57,7 @@ import { ReferenceIndex } from "./analysis/referenceIndex";
 import {
     RslReferenceShardStore
 } from "./analysis/referenceShards";
+import { RslCatalogStore } from "./indexing/catalogStore";
 import {
     PerformanceLogger,
     type IPerformanceFields
@@ -267,9 +268,19 @@ const moduleLoader = new WorkspaceModuleLoader(
  * Implementation и переименование файла, и его полнота не должна зависеть
  * от того, какие файлы пользователь успел задеть в этом сеансе.
  */
+/*
+ * Сохранённый состав проекта между запусками.
+ *
+ * Каталог собирается фоновым обходом всего проекта: на проверенном проекте это
+ * 6165 файлов и 104 МБ чтения, и до конца обхода Ctrl+T видит только
+ * прочитанное. Сохранённый состав даёт полный ответ сразу, а обход идёт следом
+ * и читает только изменившиеся файлы.
+ */
+const catalogStore = new RslCatalogStore({ log: logMessage });
 const catalogWarmup = new RslCatalogWarmupService({
     index: workspaceIndex,
     log: logMessage,
+    store: catalogStore,
     /*
      * Чтение и сканирование — в том же worker, что у фоновой индексации, с
      * фоновым приоритетом: навигация и Import активного файла его
@@ -316,12 +327,55 @@ function scheduleWorkspaceRefreshForOpenDocuments(): void {
     workspaceRefreshTimer.unref?.();
 }
 
+/**
+ * Возвращает в каталог состав проекта, сохранённый прошлым запуском.
+ *
+ * Записи о файлах, которых в проекте больше нет, отбрасываются: показать в
+ * Ctrl+T символы удалённого файла хуже, чем не показать ничего.
+ */
+async function restoreCatalog(uris: readonly string[]): Promise<void> {
+    let restored = 0;
+
+    try {
+        for (const record of await catalogStore.load(uris)) {
+            if (workspaceIndex.getModule(record.uri)?.isOpen) {
+                /* У открытого документа своя модель, и она свежее. */
+                continue;
+            }
+
+            workspaceIndex.catalog.recordDeclarations({
+                uri: record.uri,
+                version: 0,
+                declarations: record.declarations,
+                imports: record.imports,
+                fileReferences: new Set(record.fileReferences)
+            });
+            restored++;
+        }
+    } catch (error) {
+        logMessage("Сохранённый каталог не прочитан: " + String(error));
+
+        return;
+    }
+
+    if (restored > 0) {
+        logMessage(
+            "Каталог проекта восстановлен из сохранённого: файлов " + restored
+        );
+        scheduleWorkspaceRefreshForOpenDocuments();
+    }
+}
+
 const workspaceDiscovery = new WorkspaceFileDiscoveryService({
     log: logMessage,
     performance: performanceLogger,
     onFiles: uris => {
         moduleLoader.registerWorkspaceFiles(uris);
-        catalogWarmup.add(uris);
+        /*
+         * Сначала сохранённый состав, потом обход. Порядок важен: иначе обход
+         * начнёт читать файлы, состав которых уже известен.
+         */
+        void restoreCatalog(uris).finally(() => catalogWarmup.add(uris));
         definitionProvider?.clearCaches();
     }
 });
@@ -585,6 +639,7 @@ connection.onInitialize((params: InitializeParams) => {
         {
             referenceIndexCachePath?: string;
             referenceShardsPath?: string;
+            catalogStorePath?: string;
             compactModuleCachePath?: string;
             performanceLogFile?: string;
             initialSettings?: IRslSettings;
@@ -595,6 +650,9 @@ connection.onInitialize((params: InitializeParams) => {
     );
     referenceShards.configurePersistence(
         initializationOptions?.referenceShardsPath
+    );
+    catalogStore.configurePersistence(
+        initializationOptions?.catalogStorePath
     );
     compactModules.configureCache(
         initializationOptions?.compactModuleCachePath
@@ -810,6 +868,7 @@ async function handleWatchedFileChange(
 
     referenceIndex.invalidate(uri);
     referenceShards.invalidate(uri);
+    catalogStore.invalidate(uri);
     definitionProvider.invalidateUri(uri);
     /* Транзитивно: см. refreshOpenDependents. */
     const dependents = workspaceIndex.getAffectedUris(uri)
@@ -939,7 +998,8 @@ connection.onShutdown(async () => {
      */
     const saved = await Promise.allSettled([
         referenceIndex.flush(),
-        referenceShards.flush()
+        referenceShards.flush(),
+        catalogStore.flush()
     ]);
 
     for (const result of saved) {

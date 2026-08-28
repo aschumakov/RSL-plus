@@ -382,6 +382,14 @@ export function activate(context: ExtensionContext): void {
                 ? Uri.joinPath(context.storageUri, "reference-shards-v1").fsPath
                 : undefined,
             /*
+             * Сохранённый состав проекта. Благодаря ему Ctrl+T отвечает по
+             * всему проекту сразу после запуска, а обход правит только то,
+             * что изменилось.
+             */
+            catalogStorePath: context.storageUri
+                ? Uri.joinPath(context.storageUri, "catalog-store-v1").fsPath
+                : undefined,
+            /*
              * Кэш компактных сводок внешних модулей. Версия в имени файла: при
              * смене формата старый файл просто перестаёт читаться, и его не
              * нужно ни переносить, ни удалять вручную.

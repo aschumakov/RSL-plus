@@ -1,6 +1,9 @@
 import { systemRslClock, type IRslClock } from "../core/clock";
 import type { WorkspaceIndex } from "../workspaceIndex";
 import type { ICompactModuleResponse } from "./compactModuleProtocol";
+import type {
+    IRslDeclarationDescriptor
+} from "../analysis/declarationExtractor";
 
 /**
  * Полный каталог проекта независимо от режима индексации.
@@ -46,6 +49,25 @@ export interface IRslCatalogWarmupOptions {
     onCatalogChanged?(uris: readonly string[]): void;
     /** Отчёт о ходе: для лога и тестов. */
     onProgress?(progress: IRslCatalogWarmupProgress): void;
+    /**
+     * Сохранённый состав проекта, если он ведётся.
+     *
+     * Обход спрашивает его о каждом файле: неизменный файл не читается вовсе,
+     * а прочитанный — записывается, чтобы следующий запуск начал с готового
+     * каталога.
+     */
+    store?: IRslCatalogWarmupStore;
+}
+
+/** Что обходу нужно от сохранённого состава проекта. */
+export interface IRslCatalogWarmupStore {
+    isUnchanged(uri: string): Promise<boolean>;
+    record(
+        uri: string,
+        declarations: readonly IRslDeclarationDescriptor[],
+        imports: readonly string[],
+        fileReferences: readonly string[]
+    ): Promise<void>;
 }
 
 export interface IRslCatalogWarmupProgress {
@@ -67,9 +89,20 @@ export class RslCatalogWarmupService {
     private timer: unknown;
     private idleTimer: unknown;
     private running = false;
+    /**
+     * Текущая порция, если она идёт.
+     *
+     * Порция вынимает файлы из очереди и только потом читает их. Пока она
+     * читает, очередь уже пуста — и второй запуск считает обход законченным,
+     * хотя часть файлов ещё в работе. Ждать надо не пустую очередь, а
+     * закончившуюся порцию.
+     */
+    private current: Promise<void> | undefined;
     private suspended = false;
     private done = 0;
     private skipped = 0;
+    /** Сколько файлов не читалось: их состав уже был сохранён. */
+    private reused = 0;
     private total = 0;
     private readonly clock: IRslClock;
 
@@ -149,8 +182,8 @@ export class RslCatalogWarmupService {
 
     /** Проход до конца: для тестов и batch-режима. */
     async runToCompletion(): Promise<IRslCatalogWarmupProgress> {
-        while (this.queue.length > 0) {
-            await this.processChunk(Number.POSITIVE_INFINITY);
+        while (this.queue.length > 0 || this.current) {
+            await this.runChunk(Number.POSITIVE_INFINITY);
         }
 
         return this.progress;
@@ -193,7 +226,7 @@ export class RslCatalogWarmupService {
     }
 
     private async tick(): Promise<void> {
-        await this.processChunk(this.options.budgetMs ?? DEFAULT_BUDGET_MS);
+        await this.runChunk(this.options.budgetMs ?? DEFAULT_BUDGET_MS);
         this.options.onProgress?.(this.progress);
         this.schedule();
     }
@@ -204,6 +237,24 @@ export class RslCatalogWarmupService {
      * Бюджет считается по работе на основном потоке — записи в каталог, — а не
      * по ожиданию worker: ожидание поток не занимает.
      */
+    /**
+     * Порция обхода, и только одна разом.
+     *
+     * Обход запускается и по таймеру, и явным ожиданием. Две порции сразу не
+     * ускоряют его, а удваивают занятость основного потока — и путают счёт:
+     * файлы одной уже вынуты из очереди, а другая считает очередь пустой.
+     */
+    private runChunk(budgetMs: number): Promise<void> {
+        if (!this.current) {
+            this.current = this.processChunk(budgetMs)
+                .finally(() => {
+                    this.current = undefined;
+                });
+        }
+
+        return this.current;
+    }
+
     private async processChunk(budgetMs: number): Promise<void> {
         this.running = true;
 
@@ -247,9 +298,27 @@ export class RslCatalogWarmupService {
         }
     }
 
+    /** Сколько файлов обход не читал: их состав взят из сохранённого. */
+    get reusedFiles(): number {
+        return this.reused;
+    }
+
     private async readSafely(
         uri: string
     ): Promise<ICompactModuleResponse | undefined> {
+        /*
+         * Неизменный файл не читается.
+         *
+         * Его состав уже в каталоге — он загружен из сохранённого при старте.
+         * Прочитать его значило бы получить ровно то же самое, заплатив за
+         * весь проект: на проверенном проекте это 6165 файлов и 104 МБ.
+         */
+        if (this.options.store && await this.options.store.isUnchanged(uri)) {
+            this.reused++;
+
+            return undefined;
+        }
+
         try {
             return await this.options.read(uri);
         } catch (error) {
@@ -291,6 +360,14 @@ export class RslCatalogWarmupService {
             fileReferences: new Set(response.fileReferences)
         });
         this.done++;
+
+        /* Следующий запуск начнёт с готового каталога, а не с чтения. */
+        void this.options.store?.record(
+            response.uri,
+            response.declarations,
+            response.imports,
+            response.fileReferences
+        );
 
         return true;
     }

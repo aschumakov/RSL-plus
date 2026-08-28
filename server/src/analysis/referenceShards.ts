@@ -65,6 +65,8 @@ export interface IRslReferenceShardOptions {
     log?(message: string): void;
     /** Сколько корзин: по одной на файл было бы слишком много мелких файлов. */
     buckets?: number;
+    /** Через сколько сохранять после изменения: см. catalogStore. */
+    saveDebounceMs?: number;
 }
 
 export interface IRslReferenceShardStats {
@@ -106,9 +108,20 @@ export class RslReferenceShardStore {
     private dirty = new Set<number>();
     private saveTimer: NodeJS.Timeout | undefined;
     private workspaceUris: Set<string> | undefined;
+    /**
+     * Текущее сохранение: следующее ждёт его.
+     *
+     * Отложенное сохранение и явный flush иначе идут одновременно, и то, что
+     * началось раньше со старым снимком, переименовывает свой временный файл
+     * последним — поверх свежего. Терялись при этом ровно те записи, которые
+     * добавились между двумя сохранениями.
+     */
+    private saving: Promise<void> = Promise.resolve();
+    private readonly saveDebounceMs: number;
 
     constructor(private options: IRslReferenceShardOptions = {}) {
         this.buckets = Math.max(1, options.buckets ?? DEFAULT_BUCKETS);
+        this.saveDebounceMs = options.saveDebounceMs ?? SAVE_DEBOUNCE_MS;
     }
 
     configurePersistence(directory: string | undefined): void {
@@ -219,7 +232,13 @@ export class RslReferenceShardStore {
         };
     }
 
-    async flush(): Promise<void> {
+    flush(): Promise<void> {
+        this.saving = this.saving.then(() => this.flushOnce());
+
+        return this.saving;
+    }
+
+    private async flushOnce(): Promise<void> {
         if (this.saveTimer) {
             clearTimeout(this.saveTimer);
             this.saveTimer = undefined;
@@ -402,7 +421,7 @@ export class RslReferenceShardStore {
         this.saveTimer = setTimeout(() => {
             this.saveTimer = undefined;
             void this.flush();
-        }, SAVE_DEBOUNCE_MS);
+        }, this.saveDebounceMs);
         this.saveTimer.unref?.();
     }
 }
