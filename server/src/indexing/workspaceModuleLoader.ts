@@ -77,7 +77,11 @@ export class WorkspaceModuleLoader {
         string,
         Promise<IIndexedModule | undefined>
     >();
-    private exportSearchCache = new Map<string, string[]>();
+    /** Ответ поиска экспорта вместе с ревизией каталога, при которой он верен. */
+    private exportSearchCache = new Map<
+        string,
+        { revision: number; uris: string[] }
+    >();
     /*
      * Версия содержимого файла для загрузчика.
      *
@@ -481,9 +485,10 @@ export class WorkspaceModuleLoader {
             return uniqueKnown.slice(0, maxResults);
         }
 
-        const cachedUris = this.exportSearchCache.get(normalized);
-        if (cachedUris) {
-            return cachedUris
+        const cached = this.exportSearchCache.get(normalized);
+
+        if (cached && cached.revision === this.index.catalog.revision) {
+            return cached.uris
                 .map(uri => this.index.getModule(uri))
                 .filter((module): module is IIndexedModule => !!module)
                 .slice(0, maxResults);
@@ -494,10 +499,56 @@ export class WorkspaceModuleLoader {
             return uniqueKnown.slice(0, maxResults);
         }
 
-        const candidates = Array.from(this.workspaceUris).filter(uri =>
-            !this.index.getModule(uri)
-        );
+        /*
+         * Экспортирующие модули знает каталог проекта, и знает про весь
+         * проект, а не про то, что успело загрузиться.
+         *
+         * Прежде кандидатов искали чтением файлов и останавливались на
+         * пятисотом: на проекте в шесть тысяч файлов экспорт из шестисотого
+         * файла по алфавиту не находился вовсе, и Auto Import про него молчал.
+         * Каталог отвечает на тот же вопрос по записи модуля, без чтения.
+         */
+        const fromCatalog = this.index.catalog
+            .modulesExporting(normalized)
+            .filter(uri => !this.index.getModule(uri));
         const result: IIndexedModule[] = uniqueKnown.slice(0, maxResults);
+
+        for (const uri of fromCatalog) {
+            if (result.length >= maxResults) {
+                break;
+            }
+
+            if (options.isCancelled?.()) {
+                return result;
+            }
+
+            /*
+             * Загружается только то, что каталог уже назвал подходящим:
+             * подробная модель нужна не для отбора, а для самой правки.
+             */
+            const module = await this.inspectExport(uri, normalized);
+
+            if (module) {
+                result.push(module);
+            }
+
+            await yieldToInteractiveRequests();
+        }
+
+        if (result.length >= maxResults || options.isCancelled?.()) {
+            this.rememberExportSearch(normalized, result, options);
+
+            return result;
+        }
+
+        /*
+         * Файловое сканирование — только по тем файлам, которых каталог ещё не
+         * видел. По мере достройки каталога это множество тает само, и никакой
+         * отдельной проверки готовности не нужно.
+         */
+        const candidates = Array.from(this.workspaceUris).filter(uri =>
+            !this.index.getModule(uri) && !this.index.catalog.has(uri)
+        );
         const batchSize = 16;
         const maxScanFiles = 500;
         const scanLimit = Math.min(candidates.length, maxScanFiles);
@@ -538,15 +589,32 @@ export class WorkspaceModuleLoader {
             );
         }
 
+        this.rememberExportSearch(normalized, result, options);
+
+        return result;
+    }
+
+    /**
+     * Запоминает ответ поиска экспорта.
+     *
+     * Отменённый поиск запоминать нельзя: он неполон по построению, а
+     * следующий вызов взял бы его за готовый ответ. Ревизия каталога тоже
+     * входит в память: каталог достраивается фоном, и ответ, посчитанный до
+     * появления нужного модуля, устаревает вместе с ней.
+     */
+    private rememberExportSearch(
+        normalized: string,
+        result: readonly IIndexedModule[],
+        options: IExportSearchOptions
+    ): void {
         if (options.isCancelled?.()) {
-            return result;
+            return;
         }
 
-        this.exportSearchCache.set(
-            normalized,
-            result.map(module => module.uri)
-        );
-        return result;
+        this.exportSearchCache.set(normalized, {
+            revision: this.index.catalog.revision,
+            uris: result.map(module => module.uri)
+        });
     }
 
     async reload(uri: string): Promise<void> {
