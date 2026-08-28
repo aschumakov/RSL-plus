@@ -25,7 +25,10 @@ import {
     type IRslUnknownVariableFinding,
     type IRslUnknownVariableOptions
 } from "./unknownVariableDiagnostics";
-import type { RslDiagnosticStageObserver } from "../diagnostics";
+import {
+    finishRslDiagnostics,
+    type RslDiagnosticStageObserver
+} from "../diagnostics";
 import type { IRslDiagnosticSettings } from "../interfaces";
 import { RslUnitDiagnosticsCache } from "./unitDiagnosticsCache";
 import { RslScopeResolver } from "../scopeResolver";
@@ -389,7 +392,10 @@ export class RslDiagnosticEngine {
                 maxProblems: remaining
             })
             : [];
-        return deduplicate([...local, ...workspace]).slice(0, options.maxProblems);
+        return finishRslDiagnostics(
+        deduplicate([...local, ...workspace]),
+        options.maxProblems
+    );
     }
 
     private buildPhase(
@@ -406,11 +412,20 @@ export class RslDiagnosticEngine {
         }
 
         const diagnostics: Diagnostic[] = [];
+        /*
+         * Правила считают до предела расчёта, а не до предела публикации.
+         *
+         * Обрыв на двухсотом сообщении отменял запись в кэш диагностик, и файл
+         * с двумя сотнями сообщений пересчитывался целиком на каждую правку.
+         * Предел публикации применяется к готовому ответу — см. completePhase.
+         */
+        const computeLimit = computedProblemsLimit(options.maxProblems);
+
         for (const rule of this.rules) {
             if ((rule.phase || "local") !== phase) {
                 continue;
             }
-            const remaining = options.maxProblems - diagnostics.length;
+            const remaining = computeLimit - diagnostics.length;
             if (remaining <= 0) {
                 break;
             }
@@ -449,12 +464,14 @@ export class RslDiagnosticEngine {
 
         const slice = createWorkSlice();
         const diagnostics: Diagnostic[] = [];
+        /* Предел расчёта, а не публикации: см. buildPhase. */
+        const computeLimit = computedProblemsLimit(options.maxProblems);
 
         for (const rule of this.rules) {
             if ((rule.phase || "local") !== phase) {
                 continue;
             }
-            const remaining = options.maxProblems - diagnostics.length;
+            const remaining = computeLimit - diagnostics.length;
             if (remaining <= 0) {
                 break;
             }
@@ -505,7 +522,8 @@ export class RslDiagnosticEngine {
     ): Diagnostic[] {
         const processed = applyProjectDiagnosticRules(module, diagnostics);
         const filtered = filterClosedOutputFormDiagnostics(module, processed);
-        return deduplicate(filtered).slice(0, maxProblems);
+
+        return finishRslDiagnostics(deduplicate(filtered), maxProblems);
     }
 }
 
@@ -516,6 +534,16 @@ export class RslDiagnosticEngine {
  * SQL comment. Therefore a separator like "----------------]" must not hide
  * the closing bracket from diagnostics.
  */
+/*
+ * Страховочный предел расчёта: см. MAX_COMPUTED_PROBLEMS в diagnostics.
+ *
+ * Здесь он повторён числом намеренно: движок не зависит от внутренностей
+ * расчёта, а импорт ради одной константы связал бы их сильнее, чем нужно.
+ */
+function computedProblemsLimit(maxProblems: number): number {
+    return Math.max(maxProblems, 20_000);
+}
+
 export function filterClosedOutputFormDiagnostics(
     module: IIndexedModule,
     diagnostics: readonly Diagnostic[]

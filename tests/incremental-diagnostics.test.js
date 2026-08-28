@@ -424,15 +424,21 @@ testAsync("отменённый расчёт не запоминается", asy
     }
 });
 
-testAsync("расчёт, упёршийся в лимит, не запоминается", async () => {
+testAsync("предел публикации не отменяет запись в кэш", async () => {
+    /*
+     * Прежде расчёт обрывался на пределе Problems, и это отменяло запись:
+     * неполный результат запоминать нельзя. Из-за этого файл, набравший
+     * предел, пересчитывался целиком на каждую правку — и обрыв обходился
+     * дороже полного расчёта: на printdog.mac 92 мс против 71.
+     *
+     * Теперь предел ограничивает вывод, а не анализ: расчёт доходит до конца,
+     * запись сохраняется, а лишние сообщения просто не публикуются. Обрыв
+     * остался у отмены и у страховочного предела расчёта — их путь тот же, и
+     * он проверен выше.
+     */
     const index = new WorkspaceIndex();
     index.registerWorkspaceFiles([EDITED]);
     const cache = new RslUnitDiagnosticsCache();
-    /*
-     * Находки здесь даёт не кэшируемая проверка — недостижимый код.
-     * Именно они упираются в лимит и останавливают расчёт, не дав кэшируемым
-     * проверкам дойти до конца файла.
-     */
     const noisy = [
         "Macro Test()",
         "  DebugBreak;",
@@ -446,8 +452,7 @@ testAsync("расчёт, упёршийся в лимит, не запомина
         ""
     ].join("\n");
     const module = openModule(index, EDITED, noisy, 1);
-
-    await buildLocalRslDiagnosticsChunked(
+    const published = await buildLocalRslDiagnosticsChunked(
         module,
         index,
         { maxProblems: 3 },
@@ -458,9 +463,19 @@ testAsync("расчёт, упёршийся в лимит, не запомина
         cache
     );
 
-    assert.strictEqual(cache.size, 0, "неполный результат не запомнен");
+    assert.strictEqual(
+        published.length,
+        3,
+        "публикуется ровно предел: " + published.length
+    );
+    assert.ok(
+        cache.size >= 1,
+        "полный расчёт обязан попасть в кэш, а не пропасть из-за предела"
+    );
 
+    /* И ничего не потеряно: полный ответ по тому же кэшу находит всё. */
     const full = diagnose(index, EDITED, noisy, 1, cache);
+
     assert.strictEqual(debugBreaks(full), 1, "полный расчёт находит всё");
 });
 

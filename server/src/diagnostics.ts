@@ -307,8 +307,23 @@ function planLocalRslDiagnostics(
     }
 
     const result: Diagnostic[] = [];
-    const hasCapacity = (): boolean =>
-        result.length < options.maxProblems;
+    /*
+     * Расчёт идёт дальше предела публикации.
+     *
+     * Прежде расчёт обрывался на двухсотом сообщении, и это отменяло запись в
+     * кэш: неполный результат запоминать нельзя. Файл, набравший предел, из-за
+     * этого пересчитывался целиком на каждую правку — и обрыв обходился
+     * дороже полного расчёта. На printdog.mac полный расчёт стоит 71 мс против
+     * 92 мс с обрывом, на taxoutmesBody.mac 49 против 73: с обрывом каждый
+     * расчёт холодный, без обрыва второй берёт единицы из кэша.
+     *
+     * Предел публикации остался на месте — он применяется к готовому ответу.
+     * Предел расчёта нужен только как страховка от файла, который найдёт
+     * сообщений на порядки больше: у самого шумного файла проверенного проекта
+     * их 2409.
+     */
+    const computeLimit = Math.max(options.maxProblems, MAX_COMPUTED_PROBLEMS);
+    const hasCapacity = (): boolean => result.length < computeLimit;
     let resolver: RslScopeResolver | undefined = sharedResolver;
     const getResolver = (): RslScopeResolver => {
         if (!resolver) {
@@ -780,13 +795,16 @@ function planLocalRslDiagnostics(
                 importRunValue?.abort();
             }
 
-            return deduplicateDiagnostics([
-                ...result,
-                ...unitResult,
-                ...unitRun.reused,
-                ...importResult,
-                ...(importRunValue?.reused || [])
-            ]).slice(0, options.maxProblems);
+            return finishRslDiagnostics(
+                deduplicateDiagnostics([
+                    ...result,
+                    ...unitResult,
+                    ...unitRun.reused,
+                    ...importResult,
+                    ...(importRunValue?.reused || [])
+                ]),
+                options.maxProblems
+            );
         }
     };
 }
@@ -955,9 +973,13 @@ function planWorkspaceRslDiagnostics(
 
     return {
         stages: enabledStages(stages),
-        hasCapacity: () => result.length < options.maxProblems,
+        hasCapacity: () => result.length <
+            Math.max(options.maxProblems, MAX_COMPUTED_PROBLEMS),
         finish: () =>
-            deduplicateDiagnostics(result).slice(0, options.maxProblems)
+            finishRslDiagnostics(
+                deduplicateDiagnostics(result),
+                options.maxProblems
+            )
     };
 }
 
@@ -967,6 +989,63 @@ function planWorkspaceRslDiagnostics(
  * Только они переиспользуются между правками, и только их завершение решает,
  * можно ли запомнить результат.
  */
+/*
+ * Сколько сообщений расчёт вправе найти, прежде чем остановиться.
+ *
+ * Это страховка, а не рабочий предел: у самого шумного файла проверенного
+ * проекта 2409 сообщений. Остановка по этому порогу означает, что результат
+ * неполон, и запоминать его нельзя — как и всякий оборванный расчёт.
+ */
+const MAX_COMPUTED_PROBLEMS = 20_000;
+
+/**
+ * Порядок ответа перед обрезкой по пределу публикации.
+ *
+ * Сначала важность: предел не имеет права спрятать ошибку ради
+ * предупреждения. Потом положение в файле, потом код — чтобы порядок был один
+ * и тот же при любом составе ответа.
+ *
+ * Без этого состав опубликованных Problems зависел от того, какие единицы
+ * пришли из кэша: находки пересчитанной единицы шли впереди переиспользованных
+ * независимо от того, где они в файле, и у файла с избытком сообщений список
+ * менялся от правки к правке, ничего не меняющей по существу.
+ */
+export function compareRslDiagnostics(
+    left: Diagnostic,
+    right: Diagnostic
+): number {
+    const bySeverity = (left.severity ?? 1) - (right.severity ?? 1);
+
+    if (bySeverity !== 0) {
+        return bySeverity;
+    }
+
+    const byLine = left.range.start.line - right.range.start.line;
+
+    if (byLine !== 0) {
+        return byLine;
+    }
+
+    const byCharacter = left.range.start.character -
+        right.range.start.character;
+
+    if (byCharacter !== 0) {
+        return byCharacter;
+    }
+
+    return String(left.code ?? "").localeCompare(String(right.code ?? ""));
+}
+
+/** Готовый ответ: тот же порядок и тот же предел, откуда бы он ни собрался. */
+export function finishRslDiagnostics(
+    diagnostics: readonly Diagnostic[],
+    maxProblems: number
+): Diagnostic[] {
+    return [...diagnostics]
+        .sort(compareRslDiagnostics)
+        .slice(0, maxProblems);
+}
+
 const CACHEABLE_UNIT_STAGES = new Map<string, RslUnitCacheLane>(
     rslUnitCacheLaneRules("text")
         .map(rule => [rule.id, rslUnitCacheLane(rule)] as const)
