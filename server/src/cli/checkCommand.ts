@@ -10,6 +10,9 @@ import {
     RslUnreadableFileError,
     type IRslAnalyzedFile
 } from "../analysis/projectAnalysis";
+import {
+    normalizeRslRuleSeverity
+} from "../diagnostics/ruleSeverity";
 import type { IRslDiagnosticSettings } from "../interfaces";
 
 /**
@@ -164,8 +167,19 @@ export function loadRslCheckSettings(
             const parsed = JSON.parse(fs.readFileSync(candidate, "utf8")) as {
                 diagnostics?: IRslDiagnosticSettings;
             };
+            const settings = parsed.diagnostics;
 
-            return parsed.diagnostics;
+            /*
+             * Настройка с опечаткой называется вслух. Молча пропущенная, она
+             * выглядит как «уровень правила не работает», и разобраться в этом
+             * по поведению нельзя.
+             */
+            normalizeRslRuleSeverity(
+                settings?.rules,
+                message => output.stderr("Настройки: " + message)
+            );
+
+            return settings;
         } catch (error) {
             output.stderr(
                 "Файл настроек не прочитан: " + candidate + ": " + String(error)

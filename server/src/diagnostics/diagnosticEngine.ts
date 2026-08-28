@@ -25,6 +25,10 @@ import {
     type IRslUnknownVariableFinding,
     type IRslUnknownVariableOptions
 } from "./unknownVariableDiagnostics";
+import { applyRslSuppression } from "./suppression";
+import {
+    normalizeRslRuleSeverity
+} from "./ruleSeverity";
 import {
     finishRslDiagnostics,
     type RslDiagnosticStageObserver
@@ -445,7 +449,12 @@ export class RslDiagnosticEngine {
             }).slice(0, remaining));
         }
 
-        return this.completePhase(module, diagnostics, options.maxProblems);
+        return this.completePhase(
+            module,
+            diagnostics,
+            options.maxProblems,
+            options.rules
+        );
     }
 
     private async buildPhaseAsync(
@@ -512,18 +521,38 @@ export class RslDiagnosticEngine {
             diagnostics.push(...produced.slice(0, remaining));
         }
 
-        return this.completePhase(module, diagnostics, options.maxProblems);
+        return this.completePhase(
+            module,
+            diagnostics,
+            options.maxProblems,
+            options.rules
+        );
     }
 
     private completePhase(
         module: IIndexedModule,
         diagnostics: Diagnostic[],
-        maxProblems: number
+        maxProblems: number,
+        /* Настроенные уровни правил: применяются перед сортировкой. */
+        rules?: Record<string, string>
     ): Diagnostic[] {
         const processed = applyProjectDiagnosticRules(module, diagnostics);
         const filtered = filterClosedOutputFormDiagnostics(module, processed);
+        /*
+         * Подавление применяется до уровней и до предела публикации:
+         * подавленное сообщение не должно ни занимать место в двухстах, ни
+         * попадать в счётчики.
+         */
+        const suppressed = applyRslSuppression(
+            deduplicate(filtered),
+            module.lex.tokens
+        );
 
-        return finishRslDiagnostics(deduplicate(filtered), maxProblems);
+        return finishRslDiagnostics(
+            [...suppressed.diagnostics, ...suppressed.notices],
+            maxProblems,
+            normalizeRslRuleSeverity(rules)
+        );
     }
 }
 

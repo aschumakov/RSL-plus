@@ -287,6 +287,15 @@
                "default": "",
                "description": "Абсолютный путь к JSONL-файлу профилирования. Пустое значение полностью отключает замеры. После изменения перезапустите окно VS Code."
             },
+            "rslPlus.diagnostics.rules": {
+               "type": "object",
+               "default": {},
+               "markdownDescription": "Уровень отдельных правил: код диагностики → `none`, `hint`, `information`, `warning` или `error`. Применяется одинаково в редакторе и в `rsl-plus check`. Прежние галочки продолжают работать: они решают, считать ли проверку, а это — как её показать.",
+               "additionalProperties": {
+                  "type": "string",
+                  "enum": ["none", "hint", "information", "warning", "error"]
+               }
+            },
             "rslPlus.diagnostics.enabled": {
                "scope": "resource",
                "type": "boolean",

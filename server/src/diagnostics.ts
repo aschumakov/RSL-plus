@@ -15,6 +15,11 @@ import {
     CompletionItemKind,
     Diagnostic
 } from "vscode-languageserver";
+import {
+    applyRslRuleSeverity,
+    normalizeRslRuleSeverity,
+    type RslRuleSeverityMap
+} from "./diagnostics/ruleSeverity";
 
 import { RslSymbol } from "./symbols/rslSymbol";
 import type {
@@ -172,7 +177,9 @@ export const DEFAULT_DIAGNOSTIC_SETTINGS: Required<IRslDiagnosticSettings> = {
     unknownVariablesKnownGlobalsFile: "",
     unknownVariablesAuditFile: "",
     dialect: "rsBank",
-    maxProblems: 200
+    maxProblems: 200,
+    /* Уровни правил по умолчанию не переопределяются. */
+    rules: {}
 };
 
 export function normalizeDiagnosticSettings(
@@ -212,7 +219,8 @@ export function normalizeDiagnosticSettings(
         maxProblems:
             typeof settings?.maxProblems === "number"
                 ? Math.max(0, Math.floor(settings.maxProblems))
-                : DEFAULT_DIAGNOSTIC_SETTINGS.maxProblems
+                : DEFAULT_DIAGNOSTIC_SETTINGS.maxProblems,
+        rules: settings?.rules || {}
     };
 }
 
@@ -803,7 +811,8 @@ function planLocalRslDiagnostics(
                     ...importResult,
                     ...(importRunValue?.reused || [])
                 ]),
-                options.maxProblems
+                options.maxProblems,
+                normalizeRslRuleSeverity(options.rules)
             );
         }
     };
@@ -978,7 +987,8 @@ function planWorkspaceRslDiagnostics(
         finish: () =>
             finishRslDiagnostics(
                 deduplicateDiagnostics(result),
-                options.maxProblems
+                options.maxProblems,
+                normalizeRslRuleSeverity(options.rules)
             )
     };
 }
@@ -1039,9 +1049,11 @@ export function compareRslDiagnostics(
 /** Готовый ответ: тот же порядок и тот же предел, откуда бы он ни собрался. */
 export function finishRslDiagnostics(
     diagnostics: readonly Diagnostic[],
-    maxProblems: number
+    maxProblems: number,
+    /* Настроенные уровни правил, если они заданы. */
+    rules?: RslRuleSeverityMap
 ): Diagnostic[] {
-    return [...diagnostics]
+    return applyRslRuleSeverity(diagnostics, rules)
         .sort(compareRslDiagnostics)
         .slice(0, maxProblems);
 }

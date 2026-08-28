@@ -49,6 +49,15 @@ export interface IToken {
  * Настройки диагностик language server.
  */
 export interface IRslDiagnosticSettings {
+    /**
+     * Уровень отдельных правил: код диагностики -> none | hint |
+     * information | warning | error.
+     *
+     * Применяется после расчёта и до сортировки, одинаково в редакторе и в
+     * командной строке. Прежние булевы настройки продолжают работать: они
+     * решают, считать ли проверку вообще, а это — как её показать.
+     */
+    rules?: Record<string, string>;
     enabled?: boolean;
     deprecatedDeclarations?: boolean;
     structure?: boolean;
