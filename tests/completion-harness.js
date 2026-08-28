@@ -51,6 +51,7 @@ function createConnection(handlers) {
         onReferences: register("references"),
         onWorkspaceSymbol: register("workspaceSymbol"),
         onCodeAction: register("codeAction"),
+        onCodeActionResolve: register("codeActionResolve"),
         onSelectionRanges: register("selectionRanges"),
         onExecuteCommand: register("executeCommand"),
         onPrepareRename: register("prepareRename"),

@@ -37,6 +37,12 @@ const {
     RSL_FIX_ALL_KIND
 } = require("../server/out/features/sourceCodeActions");
 const {
+    createRslRefactorRegistry
+} = require("../server/out/features/refactorRegistry");
+const {
+    RSL_IMPORT_REFACTORS
+} = require("../server/out/features/importSourceActions");
+const {
     findRslWorkspaceSymbols
 } = require("../server/out/features/workspaceSymbolProvider");
 const {
@@ -284,7 +290,7 @@ function applyTextEdit(document, edit) {
         assert.strictEqual(symbols[0].location.uri, "file:///workspace/library.mac");
     });
 
-    await test("Organize Imports удаляет только повторы и сохраняет порядок", () => {
+    await test("Organize Imports считает правку только по требованию", () => {
         const index = new WorkspaceIndex();
         const source = [
             "Import first, first, second;",
@@ -293,20 +299,26 @@ function applyTextEdit(document, edit) {
             "End;"
         ].join("\n");
         const module = createModule(index, "file:///workspace/main.mac", source);
-        const actions = buildRslSourceCodeActions(module, {
-            textDocument: { uri: module.uri },
-            range: {
-                start: { line: 0, character: 0 },
-                end: { line: 0, character: 0 }
-            },
-            context: {
-                diagnostics: [],
-                only: ["source.organizeImports"]
-            }
-        });
-        assert.strictEqual(actions.length, 1);
+        const registry = createRslRefactorRegistry(RSL_IMPORT_REFACTORS);
+        const context = {
+            module,
+            index,
+            start: 0,
+            end: 0,
+            options: {},
+            isCancelled: () => false
+        };
+        const actions = registry.build(context, ["source.organizeImports"]);
+        assert.strictEqual(actions.length, 1, "одно действие на этот вид");
+        assert.strictEqual(
+            actions[0].edit,
+            undefined,
+            "правки при показе нет: её считает codeAction/resolve"
+        );
+
+        const resolved = registry.resolve(actions[0], () => module, index, {});
         const document = TextDocument.create(module.uri, "rsl", 1, source);
-        const edits = actions[0].edit.changes[module.uri].slice().sort(
+        const edits = resolved.edit.changes[module.uri].slice().sort(
             (left, right) => document.offsetAt(right.range.start) -
                 document.offsetAt(left.range.start)
         );

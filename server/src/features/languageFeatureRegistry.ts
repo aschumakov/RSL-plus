@@ -1,5 +1,6 @@
 import {
     CancellationToken,
+    CodeAction,
     CodeActionKind,
     CodeActionParams,
     CodeActionTriggerKind,
@@ -34,6 +35,11 @@ import {
 } from "./symbolUsageHandlers";
 import { RslDefinitionProvider } from "./definitionProvider";
 import { buildEnhancedRslCodeActions } from "./enhancedCodeActions";
+import { RSL_IMPORT_REFACTORS } from "./importSourceActions";
+import {
+    createRslRefactorRegistry,
+    type IRslRefactorOptions
+} from "./refactorRegistry";
 import {
     buildBlockNavigationActions,
     buildSelectionRanges,
@@ -42,7 +48,7 @@ import {
     resolveCurrentBlockRange,
     resolveBlockNavigationPosition
 } from "./blockNavigation";
-import type { IRslSettings } from "../interfaces";
+import type { IRslFormatSettings, IRslSettings } from "../interfaces";
 import { ReferenceIndex } from "../analysis/referenceIndex";
 import type {
     RslReferenceShardStore
@@ -163,6 +169,47 @@ export class RslLanguageFeatureRegistry {
     private semanticTokensFeatures: SemanticTokensFeatureRegistry;
     /** Файлы, которым отдали пустые подсказки: модель тогда не была готова. */
     private pendingInlayHints = new Set<string>();
+    /**
+     * Реестр рефакторингов и Source Actions.
+     *
+     * Действия отвечают без правок, а правка считается в codeAction/resolve:
+     * редактор спрашивает действия на каждое движение курсора.
+     */
+    private readonly refactors = createRslRefactorRegistry([
+        ...RSL_IMPORT_REFACTORS
+    ]);
+
+    /** Настройки, влияющие на текст, который дописывает рефакторинг. */
+    private refactorOptions(uri: string): IRslRefactorOptions {
+        const format = this.environment.getSettings(uri).format;
+
+        return { keywordCase: format?.keywordCase, indent: indentOf(format) };
+    }
+
+    /** Действия реестра — без правок: их досчитает codeAction/resolve. */
+    private buildRefactorActions(
+        module: IIndexedModule,
+        params: CodeActionParams,
+        cancellationToken: CancellationToken
+    ): CodeAction[] {
+        const document = this.environment.documents.get(module.uri);
+
+        if (!document) {
+            return [];
+        }
+
+        return this.refactors.build(
+            {
+                module,
+                index: this.environment.index,
+                start: document.offsetAt(params.range.start),
+                end: document.offsetAt(params.range.end),
+                options: this.refactorOptions(module.uri),
+                isCancelled: () => cancellationToken.isCancellationRequested
+            },
+            params.context.only
+        );
+    }
     private inlayRefreshTimer: NodeJS.Timeout | undefined;
 
     constructor(private environment: IRslLanguageFeatureEnvironment) {
@@ -384,7 +431,10 @@ export class RslLanguageFeatureRegistry {
             }
 
             this.environment.noteInteractiveActivity?.();
-            const sourceActions = buildRslSourceCodeActions(module, params);
+            const sourceActions = [
+                ...buildRslSourceCodeActions(module, params),
+                ...this.buildRefactorActions(module, params, cancellationToken)
+            ];
             if (isSourceActionRequest(params)) {
                 return sourceActions;
             }
@@ -426,6 +476,33 @@ export class RslLanguageFeatureRegistry {
                 ...autoImports,
                 ...sourceActions
             ];
+        });
+
+        /*
+         * Правка считается здесь, а не при показе списка.
+         *
+         * Между показом и выбором документ могли изменить, поэтому reсolve
+         * берёт текущую модель и сверяет версию: правка по диапазонам старого
+         * текста применилась бы не туда и молча.
+         */
+        connection.onCodeActionResolve?.((action, cancellationToken) => {
+            this.environment.noteInteractiveActivity?.();
+
+            return this.refactors.resolve(
+                action,
+                uri => {
+                    const document = documents.get(uri);
+
+                    return document
+                        ? index.getCurrentModule(uri, document.version)
+                        : undefined;
+                },
+                index,
+                this.refactorOptions(String(
+                    (action.data as { uri?: string } | undefined)?.uri || ""
+                )),
+                cancellationToken
+            );
         });
 
         connection.onWorkspaceSymbol((params, cancellationToken) => {
@@ -805,6 +882,15 @@ export class RslLanguageFeatureRegistry {
         return [...lines].sort((left, right) => left - right);
     }
 
+}
+
+/** Отступ одного уровня по настройкам форматирования. */
+function indentOf(format: IRslFormatSettings | undefined): string {
+    if (!format || format.indentStyle === "tab") {
+        return format?.indentStyle === "tab" ? "\t" : "    ";
+    }
+
+    return " ".repeat(format.indentSize > 0 ? format.indentSize : 4);
 }
 
 function supportsRefactorActions(params: CodeActionParams): boolean {

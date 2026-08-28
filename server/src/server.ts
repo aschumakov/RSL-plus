@@ -30,6 +30,7 @@ import {
     UnknownVariableAudit
 } from "./diagnostics/unknownVariableAudit";
 import { RslLanguageFeatureRegistry } from "./features/languageFeatureRegistry";
+import { RSL_IMPORT_ACTION_KINDS } from "./features/importSourceActions";
 import {
     GO_TO_BLOCK_END_COMMAND,
     GO_TO_BLOCK_START_COMMAND
@@ -728,10 +729,23 @@ connection.onInitialize((params: InitializeParams) => {
                 codeActionKinds: [
                     CodeActionKind.QuickFix,
                     CodeActionKind.Refactor,
+                    CodeActionKind.RefactorExtract,
+                    CodeActionKind.RefactorInline,
+                    CodeActionKind.RefactorRewrite,
                     CodeActionKind.SourceOrganizeImports,
+                    RSL_IMPORT_ACTION_KINDS.sort,
+                    RSL_IMPORT_ACTION_KINDS.removeUnused,
+                    RSL_IMPORT_ACTION_KINDS.addMissing,
                     CodeActionKind.SourceFixAll,
                     `${CodeActionKind.SourceFixAll}.rsl`
-                ]
+                ],
+                /*
+                 * Правка рефакторинга считается по требованию.
+                 *
+                 * Редактор спрашивает действия на каждое движение курсора, а
+                 * Extract Macro обходит область видимости и собирает текст.
+                 */
+                resolveProvider: true
             },
             semanticTokensProvider: {
                 legend: RSL_SEMANTIC_TOKENS_LEGEND,
