@@ -271,11 +271,57 @@ export function beginIncrementalRslParse(
      * возвращает управление редактору.
      */
     let cursorIndex = 0;
+    /*
+     * Незакрытые поддеревья: по ним перенос и продолжается после паузы.
+     *
+     * Порция кончалась на границе единицы верхнего уровня, а единица в
+     * настоящем проекте — это процедура на 238-424 КБ. Перенос её поддерева
+     * шёл одним куском и держал поток пятнадцать миллисекунд подряд, сколько
+     * бы ни был бюджет порции. Теперь пауза приходится на любой узел.
+     */
+    const pending: IRslShiftFrame[] = [];
 
     const shiftTail = (budgetMs: number): boolean => {
         const started = process.hrtime.bigint();
+        let untilCheck = SHIFT_NODES_PER_CHECK;
+        const overBudget = (): boolean => {
+            if (--untilCheck > 0) {
+                return false;
+            }
 
-        while (cursorIndex < units.length) {
+            untilCheck = SHIFT_NODES_PER_CHECK;
+
+            return Number(process.hrtime.bigint() - started) / 1e6 >= budgetMs;
+        };
+
+        for (;;) {
+            while (pending.length > 0) {
+                const frame = pending[pending.length - 1];
+
+                if (frame.next >= frame.source.children.length) {
+                    pending.pop();
+                    continue;
+                }
+
+                const at = frame.next++;
+                const child = frame.source.children[at];
+                const shell = shiftShell(child, shift, cursor, miss);
+
+                frame.shifted.children[at] = shell;
+
+                if (child.children.length > 0) {
+                    pending.push({ source: child, shifted: shell, next: 0 });
+                }
+
+                if (overBudget()) {
+                    return true;
+                }
+            }
+
+            if (cursorIndex >= units.length) {
+                return false;
+            }
+
             const index = cursorIndex++;
 
             if (index < unitIndex) {
@@ -288,16 +334,19 @@ export function beginIncrementalRslParse(
                 continue;
             }
 
-            children[index] = shiftNode(units[index], shift, cursor, miss);
+            const source = units[index];
+            const shell = shiftShell(source, shift, cursor, miss);
 
-            if (
-                Number(process.hrtime.bigint() - started) / 1e6 >= budgetMs
-            ) {
-                return cursorIndex < units.length;
+            children[index] = shell;
+
+            if (source.children.length > 0) {
+                pending.push({ source, shifted: shell, next: 0 });
+            }
+
+            if (overBudget()) {
+                return true;
             }
         }
-
-        return false;
     };
 
     const finishParse = (): IRslIncrementalParse | undefined => {
@@ -526,14 +575,38 @@ function createTokenCursor(
  * Копия, а не правка на месте: прежнее дерево может держаться чьим-то кэшем, и
  * менять его смещения нельзя.
  */
-function shiftNode(
+/*
+ * Через сколько узлов сверяться с бюджетом порции.
+ *
+ * Часы стоят дороже самого переноса одного узла, и спрашивать их на каждом
+ * значило бы мерить вместо работы. Двести пятьдесят шесть узлов — это доли
+ * миллисекунды даже на узлах с длинными списками токенов.
+ */
+const SHIFT_NODES_PER_CHECK = 256;
+
+/** Незаконченное поддерево переноса: узел-источник и его копия. */
+interface IRslShiftFrame {
+    source: IRslSyntaxNode;
+    shifted: IRslSyntaxNode;
+    /** Сколько детей уже перенесено. */
+    next: number;
+}
+
+/**
+ * Копия узла без спуска в детей.
+ *
+ * Дети переносятся вызывающим по явному стеку: рекурсия по поддереву не
+ * прерывается, а поддерево одной процедуры в настоящем проекте — это
+ * несколько тысяч узлов и десяток миллисекунд занятого потока.
+ */
+function shiftShell(
     node: IRslSyntaxNode,
     shift: IRslParseShift,
     cursor: (start: number, kind: string) => IRslToken | undefined,
     miss: { happened: boolean }
 ): IRslSyntaxNode {
     const children = node.children.length > 0
-        ? node.children.map(child => shiftNode(child, shift, cursor, miss))
+        ? new Array<IRslSyntaxNode>(node.children.length)
         : node.children;
     const shifted: IRslSyntaxNode = {
         ...node,

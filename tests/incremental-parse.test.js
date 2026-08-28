@@ -12,7 +12,8 @@
 const assert = require("assert");
 
 const {
-    fullRslParse
+    fullRslParse,
+    beginIncrementalRslParse
 } = require("../server/out/services/incrementalParse");
 const {
     createRslModelState,
@@ -254,6 +255,143 @@ function compare(previousText, nextText) {
 
     return { decision, applied: true };
 }
+
+
+/*
+ * Перенос хвоста обязан прерываться внутри поддерева процедуры.
+ *
+ * Порция кончалась на границе единицы верхнего уровня, а единица в настоящем
+ * проекте — это процедура на 238-424 КБ: перенос её поддерева шёл одним куском
+ * и держал поток пятнадцать миллисекунд подряд, каким бы малым ни был бюджет
+ * порции. Здесь проверяется и прерываемость, и то, что от неё не меняется
+ * ответ.
+ */
+
+/**
+ * Файл из нескольких огромных процедур.
+ *
+ * Правка идёт в первой, а переносятся поддеревья остальных: именно так устроен
+ * настоящий крупный файл, где на 705 КБ приходится два десятка процедур, и
+ * самая большая из них — 238 КБ.
+ */
+function hugeMacros(count, statements) {
+    const lines = ["Import common;", ""];
+
+    for (let macro = 0; macro < count; macro++) {
+        lines.push("Macro Huge" + macro + "(document, options)");
+
+        for (let index = 0; index < statements; index++) {
+            lines.push(
+                "  if (options == " + index + ")",
+                "    document.Value" + index + " = " + index + ";",
+                "    total = total + document.Value" + index + ";",
+                "  end;"
+            );
+        }
+
+        lines.push("  return total;", "End;", "");
+    }
+
+    return lines.join("\n");
+}
+
+test("перенос хвоста прерывается внутри поддерева процедуры", () => {
+    const previousText = hugeMacros(4, 1500);
+
+    assert.ok(
+        previousText.length > 200_000,
+        "образец обязан быть сравним с настоящей процедурой: " +
+            previousText.length
+    );
+
+    /* Правка в самом начале огромной процедуры: хвост переносится весь. */
+    const at = previousText.indexOf("document.Value0");
+    const nextText = previousText.slice(0, at) +
+        "document.Other" + previousText.slice(at + 14);
+    const previousParse = fullRslParse(previousText);
+    const nextLex = lexRsl(nextText, { includeTrivia: true });
+    const build = beginIncrementalRslParse(
+        previousText,
+        previousParse,
+        nextText,
+        nextLex
+    );
+
+    assert.ok(build, "правка внутри процедуры обязана идти точечно");
+
+    /* Порция в одну миллисекунду: перенос обязан пройти много шагов. */
+    let steps = 0;
+
+    while (build.step(1)) {
+        steps++;
+
+        assert.ok(
+            steps < 100_000,
+            "перенос обязан продвигаться, а не топтаться на месте"
+        );
+    }
+
+    assert.ok(
+        steps > 1,
+        "перенос обязан прерываться, а не идти одним куском: шагов " + steps
+    );
+
+    const incremental = build.result();
+
+    assert.ok(incremental, "точечный разбор обязан завершиться");
+
+    const full = fullRslParse(nextText);
+
+    assertSameSignature(
+        treeSignature(incremental.parse.root),
+        treeSignature(full.root),
+        "дерево после порционного переноса"
+    );
+    assertSameSignature(
+        tokenSignature(incremental.parse.tokens),
+        tokenSignature(full.tokens),
+        "токены после порционного переноса"
+    );
+    assert.deepStrictEqual(
+        incremental.parse.diagnostics,
+        full.diagnostics,
+        "диагностики после порционного переноса"
+    );
+});
+
+test("порционный и сплошной перенос дают одно и то же дерево", () => {
+    const previousText = hugeMacros(3, 600);
+    const at = previousText.indexOf("document.Value0");
+    const nextText = previousText.slice(0, at) +
+        "document.Other" + previousText.slice(at + 14);
+    const previousParse = fullRslParse(previousText);
+    const nextLex = lexRsl(nextText, { includeTrivia: true });
+
+    /* Один и тот же перенос: порциями по миллисекунде и без пауз. */
+    const sliced = beginIncrementalRslParse(
+        previousText,
+        previousParse,
+        nextText,
+        nextLex
+    );
+
+    while (sliced.step(1)) {
+        /* Пустое тело: шаг сам двигает перенос. */
+    }
+
+    const whole = beginIncrementalRslParse(
+        previousText,
+        previousParse,
+        nextText,
+        nextLex
+    );
+
+    assertSameSignature(
+        treeSignature(sliced.result().parse.root),
+        treeSignature(whole.result().parse.root),
+        "порционный перенос против сплошного"
+    );
+});
 
 const BASE = sample(400);
 
