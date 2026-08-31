@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
-import { pathToFileURL } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 
 import type { Diagnostic } from "vscode-languageserver";
 
@@ -220,7 +220,7 @@ export class RslProjectAnalysis {
 
         try {
             source = decodeRslSourceText(
-                fs.readFileSync(fileOf(uri))
+                fs.readFileSync(rslPathFromUri(uri))
             );
         } catch (error) {
             /*
@@ -309,10 +309,17 @@ export class RslProjectAnalysis {
     }
 }
 
-function fileOf(uri: string): string {
-    return decodeURIComponent(
-        uri.replace(/^file:\/\/\//u, "").replace(/^file:\/\//u, "")
-    ).replace(/\//gu, path.sep);
+/**
+ * Путь к файлу по его URI.
+ *
+ * Стандартной функцией, а не разбором строки. Ручное срезание `file:///`
+ * уносило вместе с ним корень пути: `file:///tmp/lib.mac` превращался в
+ * `tmp/lib.mac`, и на Linux зависимость читалась относительно текущего
+ * каталога, то есть не читалась вовсе. На Windows та же ошибка не видна —
+ * `file:///d:/lib.mac` даёт `d:/lib.mac`, и путь остаётся годным.
+ */
+export function rslPathFromUri(uri: string): string {
+    return fileURLToPath(uri);
 }
 
 function compare(left: string, right: string): number {
@@ -331,7 +338,7 @@ function dedupe(diagnostics: readonly Diagnostic[]): Diagnostic[] {
             item.range.end.line,
             item.range.end.character,
             item.message
-        ].join(" ");
+        ].join("\0");
 
         if (seen.has(key)) {
             continue;

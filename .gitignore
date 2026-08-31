@@ -36,3 +36,6 @@ pnpm-debug.log*
 # OS files
 .DS_Store
 Thumbs.db
+
+# Bundle командной строки: собирается npm run bundle
+bin/rsl-plus-cli.js

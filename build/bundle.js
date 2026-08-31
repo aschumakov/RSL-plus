@@ -47,6 +47,22 @@ const TARGETS = [
         entry: "server/src/indexing/compactModuleWorker.ts",
         outfile: "server/out/indexing/compactModuleWorker.js",
         external: []
+    },
+    /*
+     * Командная строка — единственный bundle, который пишется НЕ поверх
+     * tsc-сборки, а рядом с тонким файлом в bin.
+     *
+     * Причина в поставке. В VSIX из server/out попадают только entry-файлы
+     * (см. .vscodeignore), поэтому `require("../server/out/cli/main")` внутри
+     * пакета указывал в пустоту: в рабочем дереве CLI запускался, из
+     * опубликованного артефакта — нет. Собранный рядом файл ни от чего вне
+     * себя не зависит, и bin/rsl-plus.js предпочитает его.
+     */
+    {
+        name: "cli",
+        entry: "server/src/cli/main.ts",
+        outfile: "bin/rsl-plus-cli.js",
+        external: []
     }
 ];
 
@@ -87,6 +103,19 @@ async function build(target) {
     return { name: target.name, file: target.outfile, bytes: output.bytes };
 }
 
+/** Собрать одну цель по имени: нужно проверке поставки. */
+async function buildRslBundle(name) {
+    const target = TARGETS.find(item => item.name === name);
+
+    if (!target) {
+        throw new Error("Неизвестная цель сборки: " + name);
+    }
+
+    return build(target);
+}
+
+module.exports = { buildRslBundle, TARGETS };
+
 async function main() {
     const built = [];
     for (const target of TARGETS) {
@@ -104,7 +133,9 @@ async function main() {
     console.log(`${String(Math.round(total / 1024)).padStart(5)} KB  всего`);
 }
 
-main().catch(error => {
-    console.error(error);
-    process.exitCode = 1;
-});
+if (require.main === module) {
+    main().catch(error => {
+        console.error(error);
+        process.exitCode = 1;
+    });
+}

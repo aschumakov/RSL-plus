@@ -146,48 +146,87 @@ export function parseRslCheckArguments(
  * Настройки редактора из профиля пользователя не читаются намеренно: результат
  * команды не должен зависеть от того, кто и как настроил свой VS Code.
  */
+/**
+ * Итог чтения настроек.
+ *
+ * Отдельный признак неудачи нужен потому, что «настроек нет» и «настройки
+ * задали, а прочитать их не вышло» — разные события. Первое нормально:
+ * проверки идут со значениями по умолчанию. Второе обязано останавливать
+ * работу: молча пойти с умолчаниями значит незаметно включить или выключить
+ * правила в CI, и увидеть это будет негде.
+ */
+export type RslCheckSettingsResult =
+    | { ok: true; settings?: IRslDiagnosticSettings }
+    | { ok: false };
+
 export function loadRslCheckSettings(
     args: IRslCheckArguments,
     output: IRslCheckOutput
-): IRslDiagnosticSettings | undefined {
-    const candidates = args.configPath
-        ? [path.resolve(args.contextRoot, args.configPath)]
-        : [path.join(args.contextRoot, "rsl-plus.json")];
+): RslCheckSettingsResult {
+    const explicit = !!args.configPath;
+    const candidate = explicit
+        ? path.resolve(args.contextRoot, args.configPath as string)
+        : path.join(args.contextRoot, "rsl-plus.json");
 
-    for (const candidate of candidates) {
-        if (!fs.existsSync(candidate)) {
-            if (args.configPath) {
-                output.stderr("Файл настроек не найден: " + candidate);
-            }
+    if (!fs.existsSync(candidate)) {
+        if (explicit) {
+            output.stderr("Файл настроек не найден: " + candidate);
 
-            continue;
+            return { ok: false };
         }
 
-        try {
-            const parsed = JSON.parse(fs.readFileSync(candidate, "utf8")) as {
-                diagnostics?: IRslDiagnosticSettings;
-            };
-            const settings = parsed.diagnostics;
-
-            /*
-             * Настройка с опечаткой называется вслух. Молча пропущенная, она
-             * выглядит как «уровень правила не работает», и разобраться в этом
-             * по поведению нельзя.
-             */
-            normalizeRslRuleSeverity(
-                settings?.rules,
-                message => output.stderr("Настройки: " + message)
-            );
-
-            return settings;
-        } catch (error) {
-            output.stderr(
-                "Файл настроек не прочитан: " + candidate + ": " + String(error)
-            );
-        }
+        return { ok: true };
     }
 
-    return undefined;
+    let parsed: unknown;
+
+    try {
+        parsed = JSON.parse(fs.readFileSync(candidate, "utf8"));
+    } catch (error) {
+        output.stderr(
+            "Файл настроек не прочитан: " + candidate + ": " + String(error)
+        );
+
+        return { ok: false };
+    }
+
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        output.stderr(
+            "Файл настроек " + candidate + ": ожидается объект"
+        );
+
+        return { ok: false };
+    }
+
+    const diagnostics = (parsed as { diagnostics?: unknown }).diagnostics;
+
+    if (
+        diagnostics !== undefined &&
+        (!diagnostics ||
+            typeof diagnostics !== "object" ||
+            Array.isArray(diagnostics))
+    ) {
+        output.stderr(
+            "Файл настроек " + candidate + ": diagnostics обязан быть объектом"
+        );
+
+        return { ok: false };
+    }
+
+    const settings = diagnostics as IRslDiagnosticSettings | undefined;
+    let broken = false;
+
+    /*
+     * Настройка с опечаткой называется вслух и останавливает работу. Молча
+     * пропущенная, она выглядит как «уровень правила не работает», и
+     * разобраться в этом по поведению нельзя.
+     */
+    normalizeRslRuleSeverity(settings?.rules, message => {
+        output.stderr("Настройки: " + message);
+        broken = true;
+    });
+
+    return broken ? { ok: false } : { ok: true, settings };
 }
 
 export function runRslCheck(
@@ -204,7 +243,15 @@ export function runRslCheck(
         return RSL_CHECK_EXIT.badArguments;
     }
 
-    const settings = loadRslCheckSettings(args, output);
+    const loaded = loadRslCheckSettings(args, output);
+
+    if (!loaded.ok) {
+        output.stderr("rsl-plus check: настройки непригодны, анализ не начат");
+
+        return RSL_CHECK_EXIT.badArguments;
+    }
+
+    const settings = loaded.settings;
     let analyzed: IRslAnalyzedFile[];
     let analysis: RslProjectAnalysis;
 

@@ -2,11 +2,20 @@
 "use strict";
 
 /*
- * Запуск анализатора RSL из командной строки.
+ * Точка входа `rsl-plus check`.
  *
- * Файл нарочно тонкий: он только находит собранный сервер и передаёт ему
- * управление. Вся работа — в server/out/cli, и её же вызывают тесты, минуя
- * запуск процесса: так проверяется поведение, а не умение Node запустить файл.
+ * Рядом ищется собранный bundle, и только если его нет — сборка tsc. Порядок
+ * именно такой из-за поставки: в VSIX из server/out попадают лишь entry-файлы,
+ * и обращение к server/out/cli/main внутри пакета указывало в пустоту. В
+ * рабочем дереве bundle обычно не собран, там берётся tsc.
  */
 
-require("../server/out/cli/main").runRslCliProcess();
+const fs = require("fs");
+const path = require("path");
+
+const bundled = path.join(__dirname, "rsl-plus-cli.js");
+const entry = fs.existsSync(bundled)
+    ? bundled
+    : path.join(__dirname, "..", "server", "out", "cli", "main.js");
+
+require(entry).runRslCliProcess();

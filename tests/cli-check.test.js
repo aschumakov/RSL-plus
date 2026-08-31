@@ -16,6 +16,7 @@ const assert = require("assert");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const url = require("url");
 
 const serverModulePath = require.resolve("../server/out/server");
 
@@ -33,6 +34,9 @@ const { runRslCli } = require("../server/out/cli/main");
 const {
     RSL_CHECK_EXIT
 } = require("../server/out/cli/checkCommand");
+const {
+    rslPathFromUri
+} = require("../server/out/analysis/projectAnalysis");
 
 let passed = 0;
 let failed = 0;
@@ -41,6 +45,41 @@ const tests = [];
 function test(name, action) {
     tests.push({ name, action });
 }
+
+/*
+ * Путь из URI обязан остаться абсолютным.
+ *
+ * Проверка выглядит формальной, но ловит настоящую ошибку, которую на Windows
+ * не видно через файловую систему. Ручное срезание `file:///` уносило вместе с
+ * ним корень: `file:///tmp/lib.mac` превращался в `tmp/lib.mac`, и на Linux
+ * зависимость искалась относительно текущего каталога. На Windows та же
+ * строка давала `d:/lib.mac` и работала, поэтому полный набор здесь молчал, а
+ * на Linux падал.
+ */
+test("путь из URI остаётся абсолютным", () => {
+    /*
+     * Разбор URI по правилам POSIX — явно, а не «как получится на этой
+     * машине». Иначе проверка молчала бы на Windows: `file:///d:/lib.mac`
+     * даёт годный путь даже при неверном разборе.
+     */
+    assert.strictEqual(
+        url.fileURLToPath("file:///tmp/project/lib.mac", { windows: false }),
+        "/tmp/project/lib.mac",
+        "корень пути обязан сохраниться"
+    );
+
+    /* Круговой путь на своей платформе: то, чем ядро пользуется на деле. */
+    const sample = path.resolve(os.tmpdir(), "проект каталог", "lib.mac");
+
+    assert.strictEqual(
+        rslPathFromUri(url.pathToFileURL(sample).toString()),
+        sample,
+        "пробелы и не-ASCII обязаны пережить дорогу туда и обратно"
+    );
+    assert.ok(path.isAbsolute(rslPathFromUri(
+        url.pathToFileURL(sample).toString()
+    )));
+});
 
 /** Проект на диске: контекст, зависимости и проверяемые файлы. */
 async function createProject(files) {
