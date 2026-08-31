@@ -31,9 +31,7 @@ import {
 } from "./diagnostics/unknownVariableAudit";
 import { RslLanguageFeatureRegistry } from "./features/languageFeatureRegistry";
 import { RSL_IMPORT_ACTION_KINDS } from "./features/importSourceActions";
-import {
-    restoreRslCatalogRecords
-} from "./indexing/catalogRestore";
+import { RslCatalogRestore } from "./indexing/catalogRestore";
 import {
     GO_TO_BLOCK_END_COMMAND,
     GO_TO_BLOCK_START_COMMAND
@@ -351,13 +349,16 @@ async function restoreCatalog(uris: readonly string[]): Promise<void> {
     let restored = 0;
 
     try {
-        restored = await restoreRslCatalogRecords(
-            workspaceIndex.catalog,
-            await catalogStore.load(uris),
-            {
-                isOpen: uri => workspaceIndex.getModule(uri)?.isOpen === true
-            }
-        );
+        /*
+         * Состав идёт из хранилища по одной записи и в памяти не копится:
+         * второй экземпляр состава проекта стоил около 16 МиБ.
+         */
+        const restore = new RslCatalogRestore(workspaceIndex.catalog, {
+            isOpen: uri => workspaceIndex.getModule(uri)?.isOpen === true
+        });
+
+        await catalogStore.load(uris, record => restore.add(record));
+        restored = restore.count;
     } catch (error) {
         logMessage("Сохранённый каталог не прочитан: " + String(error));
 
@@ -838,7 +839,7 @@ connection.onInitialized(() => {
             },
             catalogStore: () => ({
                 files: catalogStore.stats.files,
-                declarations: catalogStore.stats.declarations,
+                pendingDeclarations: catalogStore.stats.pendingDeclarations,
                 loaded: catalogStore.stats.loaded
             }),
             importContexts: () => workspaceIndex.importCacheSize,

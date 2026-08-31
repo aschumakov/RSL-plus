@@ -149,6 +149,47 @@ test("перенос уступает поток и укладывается в 
     );
 });
 
+test("один патологически большой файл переносится по частям", async () => {
+    /*
+     * Уступка между файлами не спасает от одного огромного. На проверенном
+     * проекте худший файл — 4140 объявлений и 3,7 мс, но 25 000 объявлений в
+     * одном файле держат поток 40 мс при бюджете 25, а 100 000 — 190 мс.
+     * Поэтому крупный файл заводится в каталог порциями.
+     */
+    const huge = records(1, 50_000);
+    const catalog = new WorkspaceCatalog();
+    const gaps = [];
+    let last = process.hrtime.bigint();
+
+    const restored = await restoreRslCatalogRecords(catalog, huge, {
+        isOpen: () => false,
+        onYield: () => {
+            gaps.push(Number(process.hrtime.bigint() - last) / 1e6);
+            last = process.hrtime.bigint();
+        }
+    });
+
+    gaps.push(Number(process.hrtime.bigint() - last) / 1e6);
+
+    assert.strictEqual(restored, 1, "файл перенесён");
+    assert.ok(
+        gaps.length > 1,
+        "перенос одного файла обязан уступать поток: порций " + gaps.length
+    );
+
+    /* Состав обязан попасть в каталог целиком, а не первой порцией. */
+    assert.deepStrictEqual(
+        catalog.modulesExporting("Sym0_49999"),
+        ["file:///d:/p/m0.mac"],
+        "последнее объявление обязано быть в каталоге"
+    );
+    assert.deepStrictEqual(
+        catalog.modulesExporting("Sym0_0"),
+        ["file:///d:/p/m0.mac"],
+        "и первое тоже"
+    );
+});
+
 test("пустой список переносить нечего", async () => {
     const catalog = new WorkspaceCatalog();
 

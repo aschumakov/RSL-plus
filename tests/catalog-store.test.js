@@ -71,6 +71,22 @@ async function createProject() {
 }
 
 /** Обход проекта с сохранением состава: как на сервере. */
+/**
+ * Собрать записи, которые хранилище отдаёт при чтении.
+ *
+ * load больше не возвращает массив: состав идёт по одной записи и в памяти
+ * хранилища не остаётся — второй экземпляр состава проекта стоил около 16 МиБ.
+ */
+async function loadRecords(store, uris) {
+    const records = [];
+
+    await store.load(uris, record => {
+        records.push(record);
+    });
+
+    return records;
+}
+
 function createWarmup(project, store, reads) {
     const index = new WorkspaceIndex();
 
@@ -156,7 +172,8 @@ test("сохранённый состав возвращается в катал
 
         const secondReads = [];
         const second = createWarmup(project, secondStore, secondReads);
-        const restored = await secondStore.load(
+        const restored = await loadRecords(
+            secondStore,
             project.files.map(item => item.uri)
         );
 
@@ -318,7 +335,7 @@ test("удалённый файл не возвращается в катало�
 
         nextStore.configurePersistence(storeDirectory);
 
-        const restored = await nextStore.load(remaining);
+        const restored = await loadRecords(nextStore, remaining);
 
         assert.strictEqual(
             restored.length,
@@ -376,7 +393,8 @@ test("повреждённая запись пропускается, а не р
 
         nextStore.configurePersistence(storeDirectory);
 
-        const restored = await nextStore.load(
+        const restored = await loadRecords(
+            nextStore,
             project.files.map(item => item.uri)
         );
 

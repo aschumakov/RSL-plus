@@ -47,8 +47,6 @@ export interface IRslCatalogRecord {
     declarations: IRslDeclarationDescriptor[];
     imports: string[];
     fileReferences: string[];
-    /** Запись сделана в этой сессии по прочитанному файлу; на диск не идёт. */
-    confirmed?: boolean;
 }
 
 interface ISerializedCatalogBucket {
@@ -71,8 +69,8 @@ export interface IRslCatalogStoreOptions {
 export interface IRslCatalogStoreStats {
     /** Сколько файлов описано. */
     files: number;
-    /** Сколько объявлений держат записи: второй экземпляр состава проекта. */
-    declarations: number;
+    /** Сколько объявлений ждёт записи на диск; всё прочее в памяти не живёт. */
+    pendingDeclarations: number;
     /** Сколько корзин ждёт записи. */
     dirtyBuckets: number;
     /** Прочитано ли хранилище с диска. */
@@ -97,10 +95,33 @@ function bucketOf(uri: string, buckets: number): number {
     return Math.abs(hash) % buckets;
 }
 
+/** Что известно о файле между сохранениями: без состава. */
+interface IRslCatalogEntry {
+    stamp: IRslCatalogStamp;
+    /** Запись сделана в этой сессии по прочитанному файлу. */
+    confirmed: boolean;
+}
+
 export class RslCatalogStore {
     private readonly buckets: number;
     private directory: string | undefined;
-    private records = new Map<string, IRslCatalogRecord>();
+    /**
+     * Что известно о файлах: только отпечаток и признак сверки.
+     *
+     * Состав файла здесь НЕ живёт. Рабочий каталог держит свой экземпляр, и
+     * второй, лежавший тут ради следующего сохранения, стоил на проекте из
+     * 6165 модулей и 98 640 объявлений около 16 МиБ — при том, что нужен он
+     * ровно в момент записи корзины.
+     */
+    private entries = new Map<string, IRslCatalogEntry>();
+    /**
+     * Состав, ещё не дошедший до диска.
+     *
+     * null — файл удалён и должен исчезнуть из корзины. Живёт до ближайшего
+     * сохранения: корзина читается с диска, правится этими записями и пишется
+     * обратно.
+     */
+    private pending = new Map<string, IRslCatalogRecord | null>();
     private dirty = new Set<number>();
     private saveTimer: NodeJS.Timeout | undefined;
     private loadedFromDisk = false;
@@ -124,7 +145,8 @@ export class RslCatalogStore {
 
     configurePersistence(directory: string | undefined): void {
         this.directory = directory ? path.resolve(directory) : undefined;
-        this.records.clear();
+        this.entries.clear();
+        this.pending.clear();
         this.dirty.clear();
         this.loadedFromDisk = false;
     }
@@ -136,16 +158,20 @@ export class RslCatalogStore {
      * файл могли удалить или переименовать, пока сервер не работал, и
      * показывать его символы в Ctrl+T было бы враньём.
      */
-    async load(workspaceUris: readonly string[]): Promise<IRslCatalogRecord[]> {
-        this.records.clear();
+    async load(
+        workspaceUris: readonly string[],
+        onRecord?: (record: IRslCatalogRecord) => void | Promise<void>
+    ): Promise<number> {
+        this.entries.clear();
+        this.pending.clear();
         this.loadedFromDisk = true;
 
         if (!this.directory) {
-            return [];
+            return 0;
         }
 
         const known = new Set(workspaceUris);
-        const result: IRslCatalogRecord[] = [];
+        let restored = 0;
 
         for (let bucket = 0; bucket < this.buckets; bucket++) {
             let raw: string;
@@ -181,12 +207,24 @@ export class RslCatalogStore {
                     continue;
                 }
 
-                this.records.set(record.uri, record);
-                result.push(record);
+                this.entries.set(record.uri, {
+                    stamp: record.stamp,
+                    confirmed: false
+                });
+                restored++;
+
+                /*
+                 * Состав отдаётся вызывающему и здесь не остаётся. Он нужен
+                 * один раз — чтобы наполнить рабочий каталог, — и держать его
+                 * ради этого всю сессию незачем. Отдаётся по одной записи, а
+                 * не массивом: иначе в памяти всё равно оказался бы весь
+                 * состав проекта разом.
+                 */
+                await onRecord?.(record);
             }
         }
 
-        return result;
+        return restored;
     }
 
     /**
@@ -200,7 +238,7 @@ export class RslCatalogStore {
      * сессия уже подтвердила чтением, — см. IRslCatalogRecord.confirmed.
      */
     async isUnchanged(uri: string): Promise<boolean> {
-        const record = this.records.get(uri);
+        const record = this.entries.get(uri);
 
         /*
          * Несверенная запись неизменности не доказывает: см. IRslCatalogStamp.
@@ -252,14 +290,14 @@ export class RslCatalogStore {
             return;
         }
 
-        this.records.set(uri, {
+        /* Запись этой сессии: файл только что прочитали. */
+        this.entries.set(uri, { stamp, confirmed: true });
+        this.pending.set(uri, {
             uri,
             stamp,
             declarations: [...declarations],
             imports: [...imports],
-            fileReferences: [...fileReferences],
-            /* Запись этой сессии: файл только что прочитали. */
-            confirmed: true
+            fileReferences: [...fileReferences]
         });
         this.dirty.add(bucketOf(uri, this.buckets));
         this.scheduleSave();
@@ -267,17 +305,21 @@ export class RslCatalogStore {
 
     /** Файл изменился или удалён: запись о нём больше не годится. */
     invalidate(uri: string): void {
-        if (this.records.delete(uri)) {
-            this.dirty.add(bucketOf(uri, this.buckets));
-            this.scheduleSave();
+        if (!this.entries.delete(uri) && !this.pending.has(uri)) {
+            return;
         }
+
+        /* Удаление тоже ждёт сохранения: иначе оно не дойдёт до корзины. */
+        this.pending.set(uri, null);
+        this.dirty.add(bucketOf(uri, this.buckets));
+        this.scheduleSave();
     }
 
     /** Проект сменился: записи о чужих файлах не нужны. */
     retainWorkspaceFiles(uris: readonly string[]): void {
         const known = new Set(uris);
 
-        for (const uri of [...this.records.keys()]) {
+        for (const uri of [...this.entries.keys()]) {
             if (!known.has(uri)) {
                 this.invalidate(uri);
             }
@@ -286,8 +328,8 @@ export class RslCatalogStore {
 
     get stats(): IRslCatalogStoreStats {
         return {
-            files: this.records.size,
-            declarations: this.declarationCount(),
+            files: this.entries.size,
+            pendingDeclarations: this.declarationCount(),
             dirtyBuckets: this.dirty.size,
             loaded: this.loadedFromDisk
         };
@@ -307,8 +349,8 @@ export class RslCatalogStore {
     private declarationCount(): number {
         let count = 0;
 
-        for (const record of this.records.values()) {
-            count += record.declarations.length;
+        for (const record of this.pending.values()) {
+            count += record ? record.declarations.length : 0;
         }
 
         return count;
@@ -362,31 +404,93 @@ export class RslCatalogStore {
             return;
         }
 
-        const byBucket = new Map<number, IRslCatalogRecord[]>();
+        /* Что изменилось, разложено по корзинам: остальное лежит на диске. */
+        const changes = new Map<number, Map<string, IRslCatalogRecord | null>>();
 
-        for (const record of this.records.values()) {
-            const bucket = bucketOf(record.uri, this.buckets);
+        for (const [uri, record] of this.pending) {
+            const bucket = bucketOf(uri, this.buckets);
 
             if (!pending.includes(bucket)) {
                 continue;
             }
 
-            const list = byBucket.get(bucket) || [];
+            const list = changes.get(bucket) || new Map();
 
-            list.push(record);
-            byBucket.set(bucket, list);
+            list.set(uri, record);
+            changes.set(bucket, list);
         }
 
         for (const bucket of pending) {
-            await this.saveBucket(bucket, byBucket.get(bucket) || []);
+            const applied = changes.get(bucket);
+
+            await this.saveBucket(bucket, applied || new Map());
+
+            for (const uri of applied?.keys() || []) {
+                this.pending.delete(uri);
+            }
         }
+    }
+
+    /**
+     * Переписать корзину, применив к ней изменения.
+     *
+     * Корзина читается с диска и правится, а не собирается из памяти: состав
+     * неизменившихся файлов в памяти больше не живёт. Читается ровно та
+     * корзина, которой изменения касаются, — их 32, и правка одного файла
+     * трогает одну.
+     */
+    /** Состав корзины на диске с наложенными изменениями. */
+    private async mergeBucket(
+        bucket: number,
+        changes: Map<string, IRslCatalogRecord | null>
+    ): Promise<IRslCatalogRecord[]> {
+        const known = new Map<string, IRslCatalogRecord>();
+
+        try {
+            const raw = await fs.promises.readFile(
+                this.bucketPath(bucket),
+                "utf8"
+            );
+            const parsed = JSON.parse(raw) as ISerializedCatalogBucket;
+
+            if (parsed && parsed.version === STORE_VERSION) {
+                for (const record of parsed.files || []) {
+                    known.set(record.uri, record);
+                }
+            }
+        } catch {
+            /* Корзины ещё нет или она повреждена: перепишем целиком. */
+        }
+
+        for (const [uri, record] of changes) {
+            if (record) {
+                known.set(uri, record);
+            } else {
+                known.delete(uri);
+            }
+        }
+
+        /*
+         * Файлы, выбывшие из проекта, в корзине не остаются: retainWorkspaceFiles
+         * снимает их из entries, но на диск это доходит только здесь.
+         */
+        for (const uri of [...known.keys()]) {
+            if (!this.entries.has(uri) && !changes.has(uri)) {
+                known.delete(uri);
+            }
+        }
+
+        /* Порядок задан: иначе один и тот же состав давал бы разные файлы. */
+        return [...known.values()].sort((left, right) =>
+            left.uri < right.uri ? -1 : (left.uri > right.uri ? 1 : 0));
     }
 
     private async saveBucket(
         bucket: number,
-        files: IRslCatalogRecord[]
+        changes: Map<string, IRslCatalogRecord | null>
     ): Promise<void> {
         const target = this.bucketPath(bucket);
+        const files = await this.mergeBucket(bucket, changes);
 
         try {
             if (files.length === 0) {
@@ -397,15 +501,7 @@ export class RslCatalogStore {
 
             /* Через временный файл: оборванная запись оставила бы огрызок. */
             const temporary = target + ".tmp";
-            const payload: ISerializedCatalogBucket = {
-                version: STORE_VERSION,
-                /*
-                 * Признак сверки на диск не идёт: после перезапуска доверять
-                 * прежней сверке нельзя, а записанный он превратил бы
-                 * восстановленную запись в подтверждённую.
-                 */
-                files: files.map(({ confirmed: _confirmed, ...rest }) => rest)
-            };
+            const payload: ISerializedCatalogBucket = { version: STORE_VERSION, files };
 
             await fs.promises.writeFile(
                 temporary,

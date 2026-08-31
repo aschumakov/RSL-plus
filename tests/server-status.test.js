@@ -61,7 +61,7 @@ function sources(overrides = {}) {
         referenceShards: () => ({ files: 12, names: 30, buckets: 2 }),
         catalogStore: () => ({
             files: 6165,
-            declarations: 98640,
+            pendingDeclarations: 0,
             loaded: true
         }),
         importContexts: () => 8,

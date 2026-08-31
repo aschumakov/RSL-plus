@@ -298,6 +298,72 @@ export class WorkspaceCatalog {
      * lineStarts = [0], и символ с третьей строки открывался как символ
      * первой.
      */
+    /**
+     * Дописать объявления к уже записанному файлу.
+     *
+     * Нужно ровно одному месту — переносу сохранённого каталога, — и только
+     * ради непрерывности занятости потока: recordDeclarations заменяет состав
+     * файла целиком, а один файл на 25 000 объявлений держит поток 40 мс при
+     * бюджете 25. Порции идут через это дополнение, поэтому смысл записи не
+     * меняется: тот же состав, разложенный на части.
+     */
+    appendDeclarations(
+        uri: string,
+        declarations: readonly IRslDeclarationDescriptor[]
+    ): void {
+        const previous = this.modules.get(uri);
+
+        if (!previous) {
+            return;
+        }
+
+        const symbols: IRslCatalogSymbol[] = [];
+        const exports = new Set(previous.exports);
+        const rootId = moduleSymbolId();
+        const occurrences = new Map<string, number>();
+
+        for (const descriptor of declarations) {
+            const added = appendDescriptor(
+                symbols,
+                uri,
+                descriptor,
+                "",
+                rootId,
+                occurrences
+            );
+
+            if (added && descriptor.visibility !== "private") {
+                exports.add(added.normalized);
+            }
+
+            if (descriptor.kind !== "class" || !added) {
+                continue;
+            }
+
+            const members = new Map<string, number>();
+
+            for (const member of descriptor.children) {
+                appendDescriptor(
+                    symbols,
+                    uri,
+                    member,
+                    descriptor.name,
+                    added.symbolId,
+                    members
+                );
+            }
+        }
+
+        this.modules.set(uri, {
+            ...previous,
+            symbols: [...previous.symbols, ...symbols],
+            exports
+        });
+        this.indexSymbols(uri, symbols);
+        this.attachExports(uri, exports);
+        this.revisionValue++;
+    }
+
     recordDeclarations(source: {
         uri: string;
         version: number;

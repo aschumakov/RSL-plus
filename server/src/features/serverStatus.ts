@@ -53,7 +53,7 @@ export interface IRslStatusSources {
     referenceShards(): { files: number; names: number; buckets: number };
     catalogStore(): {
         files: number;
-        declarations: number;
+        pendingDeclarations: number;
         loaded: boolean;
     };
     importContexts(): number;
@@ -123,12 +123,12 @@ export function collectRslServerStatus(
             },
             {
                 /*
-                 * Второй экземпляр состава: рабочий каталог держит свой.
-                 * В отчёте назывались только файлы, и эта память была не
-                 * видна вовсе — на 6165 модулях около 16 МиБ.
+                 * Только то, что ещё не дошло до диска. Полного второго
+                 * экземпляра состава в памяти больше нет: прежде он стоил
+                 * около 16 МиБ на 6165 модулях.
                  */
-                name: "Сохранённый состав: объявления",
-                count: store.declarations,
+                name: "Сохранённый состав: ждёт записи",
+                count: store.pendingDeclarations,
                 unit: "объявлений"
             },
             {
