@@ -243,6 +243,9 @@ export class WorkspaceIndex {
         this.pinnedWantedNames.clear();
 
         if (!this.importsEnabled) {
+            /* Закреплять нечего, но освободившееся обязано вытесниться. */
+            this.enforceExternalLimits();
+
             return;
         }
 
@@ -579,6 +582,14 @@ export class WorkspaceIndex {
         if (this.importsEnabled === enabled) return;
         this.importsEnabled = enabled;
         this.importContexts.clear();
+        /*
+         * Закрепление пересчитывается в обе стороны.
+         *
+         * Выключение Import обязано отпустить прежнее замыкание, иначе оно
+         * остаётся закреплённым и держит проект над пределом. Включение —
+         * построить новое сразу, а не ждать следующей правки документа.
+         */
+        this.refreshPinnedModules();
         this.revisionValue++;
     }
 

@@ -117,8 +117,28 @@ async function buildRslBundle(name) {
 module.exports = { buildRslBundle, TARGETS };
 
 async function main() {
+    /*
+     * Без аргументов собирается всё; с именами — только они.
+     *
+     * Именно поэтому prepack просит один cli: сборка остальных целей пишется
+     * ПОВЕРХ выхода tsc, и проверки, которые смотрят на server/out, начинают
+     * видеть bundle вместо обычных модулей.
+     */
+    const wanted = process.argv.slice(2);
+    const targets = wanted.length > 0
+        ? wanted.map(name => {
+            const target = TARGETS.find(item => item.name === name);
+
+            if (!target) {
+                throw new Error("Неизвестная цель сборки: " + name);
+            }
+
+            return target;
+        })
+        : TARGETS;
     const built = [];
-    for (const target of TARGETS) {
+
+    for (const target of targets) {
         built.push(await build(target));
     }
 

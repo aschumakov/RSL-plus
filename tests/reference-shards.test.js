@@ -390,6 +390,80 @@ test("подменённый файл той же длины и даты не о
     }
 });
 
+test("пересчёт одного имени не оставляет другое от старого текста", async () => {
+    /*
+     * Подмена той же длины с восстановленной датой, а пересчитано только одно
+     * имя. Прежде запись переиспользовалась по дате и размеру, поэтому второе
+     * имя оставалось от старого текста — и после record запись считалась
+     * сверенной, то есть содержимое больше никто не проверял.
+     */
+    const project = await createProject(1);
+    const store = new RslReferenceShardStore({
+        log: () => undefined,
+        buckets: 2,
+        saveDebounceMs: 600_000
+    });
+
+    store.configurePersistence(path.join(project.directory, "shards"));
+
+    try {
+        const file = project.userPaths[0];
+        const uri = project.userUris[0];
+        const before = await fs.promises.readFile(file, "utf8");
+        const reference = {
+            targetKey: "target",
+            startLine: 3,
+            startCharacter: 2,
+            endLine: 3,
+            endCharacter: 14,
+            isDeclaration: false
+        };
+
+        await store.record(uri, "alpha", [reference], before);
+        await store.record(uri, "bravo", [reference], before);
+
+        assert.strictEqual(
+            (await store.lookup(uri, "bravo"))?.length,
+            1,
+            "оба имени записаны"
+        );
+
+        const pinned = new Date(Math.floor(Date.now() / 1000) * 1000);
+        const after = before.replace("SharedHelper(0);", "OtherHelperX(0);");
+
+        assert.strictEqual(
+            after.length,
+            before.length,
+            "подмена обязана сохранить длину"
+        );
+
+        await fs.promises.writeFile(file, after, "utf8");
+        await fs.promises.utimes(file, pinned, pinned);
+
+        /* Пересчитано только alpha. */
+        await store.record(uri, "alpha", [reference], after);
+
+        assert.strictEqual(
+            await store.lookup(uri, "bravo"),
+            undefined,
+            "имя от старого текста обязано исчезнуть, а не остаться ссылкой"
+        );
+        assert.strictEqual(
+            (await store.lookup(uri, "alpha"))?.length,
+            1,
+            "пересчитанное имя остаётся"
+        );
+    } finally {
+        await store.flush();
+        await fs.promises.rm(project.directory, {
+            recursive: true,
+            force: true,
+            maxRetries: 20,
+            retryDelay: 25
+        });
+    }
+});
+
 test("запись переживает перезапуск", async () => {
     const project = await createProject();
     const shardDirectory = path.join(project.directory, "shards");

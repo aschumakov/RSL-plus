@@ -1,0 +1,58 @@
+# Состав npm-пакета.
+#
+# Файл нужен в первую очередь ради самого своего существования: без .npmignore
+# npm берёт исключения из .gitignore, а тот скрывает собранное — и
+# bin/rsl-plus-cli.js, и весь out/. В пакет тогда попадали 95 проверок и 149
+# исходников, а ни одного собранного файла в нём не было: распакованный tarball
+# падал на Cannot find module.
+#
+# Исключения, а не список files в package.json: VSIX собирается vsce по своему
+# .vscodeignore, а признаёт ли vsce ещё и files — проверить здесь нечем.
+# Ошибка в эту сторону обошлась бы дорого: VSIX без client/out просто не
+# работает.
+
+# npm-пакет несёт только командную строку.
+#
+# bin/rsl-plus-cli.js самодостаточен, и этого достаточно: расширение для
+# редактора ставится из VSIX, а не из tarball. Сборка tsc в пакет не идёт
+# намеренно — она требует node_modules, а запускающий файл предпочитает её,
+# когда видит. В пакете без зависимостей это означало бы падение на первом
+# require там, где рядом лежит готовый bundle.
+server/out/**
+client/out/**
+
+# Вложенные node_modules: сам npm убирает только корневой.
+#
+# Их код вшит в bundle, а в пакете это 4,4 МиБ, которые ничего не делают.
+client/node_modules/**
+server/node_modules/**
+
+# Исходники и сборочная обвязка.
+server/src/**
+client/src/**
+build/**
+tests/**
+docs/**
+patches/**
+**/*.ts
+**/*.map
+**/*.tsbuildinfo
+**/tsconfig*.json
+tslint.json
+
+# Служебное окружение разработки.
+.github/**
+.vscode/**
+.claude/**
+.vscodeignore
+package-lock.json
+client/package-lock.json
+server/package-lock.json
+
+# Артефакты и архивы.
+*.vsix
+*.tgz
+*.zip
+*.patch
+coverage/**
+.nyc_output/**

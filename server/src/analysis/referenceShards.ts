@@ -268,11 +268,23 @@ export class RslReferenceShardStore {
             return;
         }
 
+        /*
+         * Прежние имена достаются новой записи только при том же содержимом.
+         *
+         * Сравнивается отпечаток, а не дата с размером. Иначе подмена той же
+         * длины с восстановленной датой оставляла бы в записи имена от старого
+         * текста: пересчитали имя A — имя B осталось прежним, а запись после
+         * record считается сверенной, и содержимое больше никто не проверит.
+         */
         const known = entries.get(uri);
-        const entry = known && sameStamp(known.stamp, stamp)
+        const reusable = known &&
+            known.stamp.fingerprint === stamp.fingerprint;
+        const entry = reusable
             ? known
             : { stamp, names: new Map<string, IRslShardReference[]>() };
 
+        /* Дата могла измениться при том же содержимом: она тоже обновляется. */
+        entry.stamp = stamp;
         /* Запись этой сессии сверена по построению: текст только что читали. */
         entry.confirmed = true;
         entry.names.set(name, [...references]);

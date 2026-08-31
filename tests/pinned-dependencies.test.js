@@ -225,6 +225,38 @@ test("закрытие в порядке сервера сразу возвра�
     );
 });
 
+test("выключение и включение Import пересчитывают закрепление", () => {
+    const board = project({ limit: 2 });
+
+    board.index.updateExternalModule(A, "Macro FromA()\nEnd;\n", 1);
+    board.index.updateOpenModule(MAIN, "Import a;\nMacro Run()\nEnd;\n", 1);
+
+    const pinned = board.index.pinnedModuleCount;
+
+    assert.ok(pinned > 0, "зависимость открытого файла закреплена");
+
+    /*
+     * Выключение обязано отпустить прежнее замыкание сразу. Прежде оно
+     * оставалось закреплённым и держало проект над пределом, а включение не
+     * строило новое до следующей правки документа.
+     */
+    board.index.setImportsEnabled(false);
+
+    assert.strictEqual(
+        board.index.pinnedModuleCount,
+        0,
+        "при выключенных Import закреплять нечего"
+    );
+
+    board.index.setImportsEnabled(true);
+
+    assert.strictEqual(
+        board.index.pinnedModuleCount,
+        pinned,
+        "включение строит замыкание заново, не дожидаясь правки"
+    );
+});
+
 test("смена Import отпускает прежнюю зависимость", () => {
     const board = project();
 

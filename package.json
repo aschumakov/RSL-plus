@@ -480,6 +480,8 @@
       "onCommand:rsl.smartEnter"
    ],
    "scripts": {
+      "prepack": "npm run bundle:cli",
+      "bundle:cli": "node build/bundle.js cli",
       "vscode:prepublish": "npm test && npm run bundle",
       "bundle": "node build/bundle.js",
       "bench": "npm run compile && node build/benchmark-parse.js",

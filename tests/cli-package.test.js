@@ -1,24 +1,37 @@
 "use strict";
 
 /**
- * Поставка командной строки.
+ * Поставка командной строки — по настоящему пакету.
  *
  * Проверяется не «запускается ли CLI из рабочего дерева» — это делает
- * cli-check.test.js, — а «запустится ли он из того, что попадёт в пакет».
- * Разница оказалась настоящей: `bin/rsl-plus.js` требовал
- * `../server/out/cli/main`, а .vscodeignore оставляет в пакете из server/out
- * только entry-файлы. В рабочем дереве всё работало, из опубликованного
- * артефакта — нет.
+ * cli-check.test.js, — а «запустится ли он из того, что уйдёт пользователю».
+ * Разница дважды оказывалась настоящей, и оба раза рабочее дерево работало:
  *
- * Поэтому bundle копируется ОДИН, в чужой каталог, и запускается там же:
- * если у него остались внешние зависимости, запуск это покажет.
+ *   bin/rsl-plus.js требовал ../server/out/cli/main, а .vscodeignore оставляет
+ *   в VSIX из server/out только entry-файлы;
+ *
+ *   у npm не было .npmignore, поэтому исключения он брал из .gitignore — а тот
+ *   скрывает собранное. В tarball попадали 95 проверок и 149 исходников и ни
+ *   одного собранного файла; распакованный пакет падал на Cannot find module.
+ *
+ * Поэтому здесь собирается настоящий tarball, распаковывается и запускается
+ * package/bin/rsl-plus.js. Проверка списком файлов рядом: она работает даже
+ * там, где нет tar.
  */
 
 const assert = require("assert");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { execFileSync } = require("child_process");
+const zlib = require("zlib");
+const { execFileSync, spawnSync } = require("child_process");
+
+/*
+ * npm на Windows — это npm.cmd, а .cmd без оболочки не запускается: spawnSync
+ * отдаёт EINVAL. Поэтому вызовы npm идут через оболочку.
+ */
+const NPM = process.platform === "win32" ? "npm.cmd" : "npm";
+const NPM_OPTIONS = { shell: process.platform === "win32" };
 
 let passed = 0;
 let failed = 0;
@@ -29,184 +42,194 @@ function test(name, action) {
 }
 
 const ROOT = path.join(__dirname, "..");
-const BUNDLE = path.join(ROOT, "bin", "rsl-plus-cli.js");
 
-/** Файлы, которые .vscodeignore оставляет в пакете. */
-function packagedPatterns() {
-    return fs.readFileSync(path.join(ROOT, ".vscodeignore"), "utf8")
-        .split(/\r?\n/u)
-        .map(line => line.trim())
-        .filter(line => line && !line.startsWith("#"));
+/** Каталог для временных файлов проверки. */
+function scratch(prefix) {
+    return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
-test("тонкий файл в bin не тянет исключённое из пакета", () => {
-    const launcher = fs.readFileSync(
-        path.join(ROOT, "bin", "rsl-plus.js"),
-        "utf8"
+function removeTree(directory) {
+    fs.rmSync(directory, {
+        recursive: true,
+        force: true,
+        maxRetries: 20,
+        retryDelay: 25
+    });
+}
+
+/**
+ * Распаковать tarball средствами Node.
+ *
+ * Не внешним tar: GNU tar на Windows принимает `C:\...` за адрес удалённой
+ * машины и отвечает «Cannot connect to C:». Формат простой — заголовок в 512
+ * байт, за ним содержимое, выровненное по 512, — и разобрать его надёжнее, чем
+ * угадывать, какой tar стоит на машине.
+ */
+function extractTarball(tarball, target) {
+    const raw = zlib.gunzipSync(fs.readFileSync(tarball));
+    const BLOCK = 512;
+
+    for (let at = 0; at + BLOCK <= raw.length;) {
+        const header = raw.subarray(at, at + BLOCK);
+
+        if (header[0] === 0) {
+            /* Два нулевых блока — конец архива. */
+            break;
+        }
+
+        const name = header.subarray(0, 100).toString("utf8")
+            .replace(/\0.*$/u, "");
+        const size = parseInt(
+            header.subarray(124, 136).toString("utf8")
+                .replace(/\0.*$/u, "").trim(),
+            8
+        ) || 0;
+        const type = String.fromCharCode(header[156]);
+        const from = at + BLOCK;
+
+        at = from + Math.ceil(size / BLOCK) * BLOCK;
+
+        if (type !== "0" && type !== "\0") {
+            /* Каталоги и прочие записи создаются вместе с файлами. */
+            continue;
+        }
+
+        const file = path.join(target, name);
+
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, raw.subarray(from, from + size));
+    }
+}
+
+/** Состав пакета по мнению самого npm. */
+function packedFiles() {
+    const raw = execFileSync(
+        NPM,
+        ["pack", "--dry-run", "--json", "--ignore-scripts"],
+        {
+            ...NPM_OPTIONS,
+            cwd: ROOT,
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "ignore"]
+        }
     );
-    const patterns = packagedPatterns();
+    const info = Object.values(JSON.parse(raw))[0];
 
-    assert.ok(
-        patterns.includes("server/out/**"),
-        "проверка рассчитана на то, что server/out исключён целиком"
-    );
-    assert.ok(
-        launcher.includes("rsl-plus-cli.js"),
-        "запуск обязан предпочитать собранный рядом bundle"
-    );
-});
+    return info.files.map(item => item.path);
+}
 
-test("bundle командной строки собирается", async () => {
-    const { buildRslBundle } = require("../build/bundle");
-    const built = await buildRslBundle("cli");
+test("в пакет попадают и запускающий файл, и bundle", () => {
+    const names = packedFiles();
 
-    assert.strictEqual(built.file, "bin/rsl-plus-cli.js");
-    assert.ok(built.bytes > 100000, "bundle обязан нести в себе анализ");
-    assert.ok(fs.existsSync(BUNDLE), "файл обязан появиться на диске");
-});
-
-test("bundle работает в чужом каталоге сам по себе", async () => {
-    if (!fs.existsSync(BUNDLE)) {
-        await require("../build/bundle").buildRslBundle("cli");
+    for (const required of ["bin/rsl-plus.js", "bin/rsl-plus-cli.js"]) {
+        assert.ok(
+            names.includes(required),
+            required + " обязан быть в пакете; в нём: " + names.join(", ")
+        );
     }
 
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "rsl-package-"));
+    /*
+     * И ничего лишнего: исходники и проверки в пакете означали бы, что
+     * список files снова не действует.
+     */
+    assert.deepStrictEqual(
+        names.filter(name =>
+            name.startsWith("tests/") || name.startsWith("server/src/")),
+        []
+    );
+});
+
+test("распакованный пакет запускается и находит зависимости", () => {
+    const directory = scratch("rsl-package-");
 
     try {
-        /* Только bundle: ни node_modules, ни server/out рядом нет. */
-        const copy = path.join(directory, "rsl-plus-cli.js");
+        /* Настоящий tarball: prepack собирает bundle сам. */
+        const packed = execFileSync(
+            NPM,
+            ["pack", "--pack-destination", directory],
+            {
+                ...NPM_OPTIONS,
+                cwd: ROOT,
+                encoding: "utf8",
+                stdio: ["ignore", "pipe", "ignore"]
+            }
+        ).trim().split(/\r?\n/u).pop();
+        const tarball = path.join(directory, packed);
 
-        fs.copyFileSync(BUNDLE, copy);
+        assert.ok(fs.existsSync(tarball), "tarball обязан быть собран");
 
+        const unpacked = path.join(directory, "unpacked");
+
+        fs.mkdirSync(unpacked, { recursive: true });
+
+        extractTarball(tarball, unpacked);
+
+        const launcher = path.join(unpacked, "package", "bin", "rsl-plus.js");
+
+        assert.ok(
+            fs.existsSync(launcher),
+            "package/bin/rsl-plus.js обязан существовать"
+        );
+        assert.ok(
+            fs.existsSync(
+                path.join(unpacked, "package", "bin", "rsl-plus-cli.js")
+            ),
+            "и bundle рядом с ним"
+        );
+
+        /* Проект с прямой и транзитивной зависимостью. */
         const project = path.join(directory, "project");
-        const nested = path.join(project, "src");
 
-        fs.mkdirSync(nested, { recursive: true });
+        fs.mkdirSync(project, { recursive: true });
         fs.writeFileSync(
-            path.join(project, "common.mac"),
-            "Macro Shared(value)\n  return value;\nEnd;\n",
+            path.join(project, "deep.mac"),
+            "Macro Deep()\n  return 1;\nEnd;\n",
             "utf8"
         );
         fs.writeFileSync(
             path.join(project, "middle.mac"),
-            "Import common;\nMacro Middle()\n  return Shared(1);\nEnd;\n",
+            "Import deep;\nMacro Middle()\n  return Deep();\nEnd;\n",
             "utf8"
         );
         fs.writeFileSync(
-            path.join(nested, "entry.mac"),
+            path.join(project, "entry.mac"),
             "Import middle;\nMacro Entry()\n  return Middle();\nEnd;\n",
             "utf8"
         );
 
-        const launcher = path.join(directory, "run.js");
-
-        fs.writeFileSync(
-            launcher,
-            "require(\"./rsl-plus-cli.js\").runRslCliProcess();\n",
-            "utf8"
-        );
-
-        const output = execFileSync(
+        /* Запуск из чужого каталога: так ломался разбор URI на Linux. */
+        const run = spawnSync(
             process.execPath,
             [
                 launcher, "check",
                 "--context", project,
                 "--summary",
-                "src/entry.mac"
-            ],
-            { cwd: directory, encoding: "utf8", stdio: "pipe" }
-        );
-
-        assert.ok(
-            output.includes("Итого: файлов 1"),
-            "bundle обязан отработать сам по себе: " + output
-        );
-    } finally {
-        fs.rmSync(directory, {
-            recursive: true,
-            force: true,
-            /*
-             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
-             * файл в каталоге создан только что — дескриптор ещё держится.
-             */
-            maxRetries: 20,
-            retryDelay: 25
-        });
-    }
-});
-
-test("прямая и транзитивная зависимость грузятся из пакета", async () => {
-    if (!fs.existsSync(BUNDLE)) {
-        await require("../build/bundle").buildRslBundle("cli");
-    }
-
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "rsl-package-"));
-
-    try {
-        fs.writeFileSync(
-            path.join(directory, "deep.mac"),
-            "Macro Deep()\n  return 1;\nEnd;\n",
-            "utf8"
-        );
-        fs.writeFileSync(
-            path.join(directory, "middle.mac"),
-            "Import deep;\nMacro Middle()\n  return Deep();\nEnd;\n",
-            "utf8"
-        );
-        fs.writeFileSync(
-            path.join(directory, "entry.mac"),
-            "Import middle;\nMacro Entry()\n  return Middle();\nEnd;\n",
-            "utf8"
-        );
-
-        /*
-         * Запуск из другого каталога — именно то, на чём ломался разбор URI:
-         * зависимость искалась относительно текущего каталога, а не корня.
-         */
-        /* Раскладка как в пакете: тонкий файл и bundle рядом, больше ничего. */
-        const binDirectory = path.join(directory, "bin");
-
-        fs.mkdirSync(binDirectory, { recursive: true });
-        fs.copyFileSync(BUNDLE, path.join(binDirectory, "rsl-plus-cli.js"));
-        fs.copyFileSync(
-            path.join(ROOT, "bin", "rsl-plus.js"),
-            path.join(binDirectory, "rsl-plus.js")
-        );
-
-        /* Отчёт о зависимостях идёт в stderr: он про работу, а не про находки. */
-        const spawned = require("child_process").spawnSync(
-            process.execPath,
-            [
-                path.join(binDirectory, "rsl-plus.js"), "check",
-                "--context", directory,
-                "--summary",
-                path.join(directory, "entry.mac")
+                path.join(project, "entry.mac")
             ],
             { cwd: os.tmpdir(), encoding: "utf8" }
         );
-        const result = spawned.stdout + spawned.stderr;
+        const output = run.stdout + run.stderr;
 
-        assert.strictEqual(spawned.status, 0, "команда обязана отработать");
+        assert.strictEqual(
+            run.status,
+            0,
+            "команда обязана отработать: " + output
+        );
+        assert.ok(
+            /Итого: файлов 1/u.test(output),
+            "итог обязан быть напечатан: " + output
+        );
         /* Три: сам проверяемый файл, прямая зависимость и транзитивная. */
         assert.ok(
-            /Загружено зависимостей: 3/u.test(result),
-            "обе зависимости обязаны загрузиться: " + result
+            /Загружено зависимостей: 3/u.test(output),
+            "обе зависимости обязаны загрузиться: " + output
         );
         assert.ok(
-            !/неполный контекст: 1/u.test(result),
-            "контекст обязан быть полным: " + result
+            !/неполный контекст: 1/u.test(output),
+            "контекст обязан быть полным: " + output
         );
     } finally {
-        fs.rmSync(directory, {
-            recursive: true,
-            force: true,
-            /*
-             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
-             * файл в каталоге создан только что — дескриптор ещё держится.
-             */
-            maxRetries: 20,
-            retryDelay: 25
-        });
+        removeTree(directory);
     }
 });
 

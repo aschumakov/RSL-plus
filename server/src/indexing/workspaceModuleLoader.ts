@@ -319,6 +319,52 @@ export class WorkspaceModuleLoader {
         this.enqueue(chosen, priority, generation);
     }
 
+    /**
+     * Ставит в очередь зависимости уже известного модуля, которых нет в индексе.
+     *
+     * Обход вширь по загруженным модулям, поэтому visited обязателен: цепочка
+     * Import бывает циклической, и без него обход не кончится. Дальше
+     * незагруженного узла обход не идёт — его импорты разберёт сама загрузка.
+     */
+    private enqueueMissingImports(
+        uri: string,
+        priority: ModuleLoadPriority,
+        generation: number
+    ): void {
+        const visited = new Set<string>([uri]);
+        const queue = [uri];
+
+        for (let at = 0; at < queue.length; at++) {
+            const module = this.index.getModule(queue[at]);
+
+            if (!module) {
+                continue;
+            }
+
+            for (const name of module.imports) {
+                const resolution = this.index.resolveWorkspaceFile(name);
+
+                if (resolution.kind !== "resolved") {
+                    continue;
+                }
+
+                const target = resolution.value;
+
+                if (visited.has(target)) {
+                    continue;
+                }
+
+                visited.add(target);
+
+                if (this.index.getModule(target)) {
+                    queue.push(target);
+                } else {
+                    this.enqueue(target, priority, generation);
+                }
+            }
+        }
+    }
+
     enqueue(
         uri: string,
         priority: ModuleLoadPriority,
@@ -326,7 +372,22 @@ export class WorkspaceModuleLoader {
             ? this.foregroundGeneration
             : 0
     ): void {
-        if (!uri || this.index.getModule(uri)) {
+        if (!uri) {
+            return;
+        }
+
+        if (this.index.getModule(uri)) {
+            /*
+             * Модуль уже в индексе — но его зависимости могли не дожить.
+             *
+             * Раньше здесь стоял просто выход, и цепочка достраивалась только
+             * при загрузке самого модуля. Если Deep успел вытесниться, пока
+             * грузились B и A, то при открытии Main загрузчик видел B готовым
+             * и до Deep больше не доходил: состав ответа зависел от того, в
+             * каком порядке фоновая индексация прочитала проект.
+             */
+            this.enqueueMissingImports(uri, priority, generation);
+
             return;
         }
 
