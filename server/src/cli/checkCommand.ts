@@ -141,13 +141,10 @@ export function parseRslCheckArguments(
 }
 
 /**
- * Настройки диагностик для запуска.
+ * Итог чтения настроек.
  *
  * Настройки редактора из профиля пользователя не читаются намеренно: результат
  * команды не должен зависеть от того, кто и как настроил свой VS Code.
- */
-/**
- * Итог чтения настроек.
  *
  * Отдельный признак неудачи нужен потому, что «настроек нет» и «настройки
  * задали, а прочитать их не вышло» — разные события. Первое нормально:
@@ -287,7 +284,7 @@ export function runRslCheck(
     );
 
     if (args.format === "jsonl") {
-        writeJsonl(args, analyzed, output);
+        writeJsonl(analyzed, output);
     } else {
         writeText(args, analyzed, output);
     }
@@ -424,14 +421,21 @@ function describeIssues(file: IRslAnalyzedFile): string {
 const SCHEMA_VERSION = 1;
 
 function writeJsonl(
-    args: IRslCheckArguments,
     analyzed: readonly IRslAnalyzedFile[],
     output: IRslCheckOutput
 ): void {
+    /*
+     * Корня контекста в записи нет намеренно.
+     *
+     * Это абсолютный путь, и один и тот же проект, проверенный в двух рабочих
+     * каталогах, давал разный вывод — то есть построчное сравнение ответов
+     * внешним инструментом показывало различие там, где его нет. Человеку
+     * корень по-прежнему называется, но в stderr: это сведения о запуске, а не
+     * о находках.
+     */
     output.stdout(JSON.stringify({
         schemaVersion: SCHEMA_VERSION,
         record: "run",
-        context: args.contextRoot.split(path.sep).join("/"),
         requestedFiles: analyzed.length
     }));
 

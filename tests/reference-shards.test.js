@@ -208,12 +208,22 @@ test("изменение файла отменяет его запись", async
 
         await stand.find();
 
-        /* Правка одного файла: дата и размер меняются. */
+        /*
+         * Правка одного файла и сообщение о ней.
+         *
+         * Внутри сессии о правках сообщает наблюдатель за файлами — он и зовёт
+         * invalidate. Проверять дату на каждое обращение стоило бы stat на
+         * каждый файл-кандидат: на популярном имени это 2533 обращения к
+         * файловой системе при каждом повторном поиске. Правку, сделанную при
+         * выключенном сервере, ловит отпечаток содержимого — см. отдельную
+         * проверку ниже.
+         */
         await fs.promises.writeFile(
             project.userPaths[0],
             "Import library;\n\nMacro Use0()\n  SharedHelper(0);\nEnd;\n",
             "utf8"
         );
+        stand.shards.invalidate(project.userUris[0]);
 
         const after = await stand.find();
 
@@ -229,6 +239,83 @@ test("изменение файла отменяет его запись", async
         assert.ok(
             stand.reads.count <= 2,
             "а остальные — нет: прочитано " + stand.reads.count
+        );
+    } finally {
+        await fs.promises.rm(project.directory, {
+            recursive: true,
+            force: true
+        });
+    }
+});
+
+test("подменённый файл той же длины и даты не отвечает по старой записи", async () => {
+    const project = await createProject();
+    const shardDirectory = path.join(project.directory, "shards");
+
+    try {
+        /*
+         * Дата выставляется целым числом миллисекунд заранее.
+         *
+         * utimes не восстанавливает доли миллисекунды, и без этого подмена
+         * отличалась бы по дате — то есть отсеивалась бы дешёвой проверкой, а
+         * отпечаток так и остался бы непроверенным.
+         */
+        const target = project.userPaths[0];
+        const pinned = new Date(Math.floor(Date.now() / 1000) * 1000);
+
+        await fs.promises.utimes(target, pinned, pinned);
+
+        const first = createStand(project, shardDirectory);
+
+        await first.find();
+        await first.shards.flush();
+
+        /*
+         * Ровно та подмена, от которой дата и размер не защищают: содержимое
+         * другое, длина прежняя, дата восстановлена. Так выглядит переключение
+         * ветки при выключенном сервере — наблюдатель за файлами такого не
+         * видит вовсе.
+         */
+        const before = await fs.promises.stat(target);
+        const original = await fs.promises.readFile(target, "utf8");
+        const replaced = original.replace("SharedHelper(0);", "OtherHelperX(0);");
+
+        assert.strictEqual(
+            replaced.length,
+            original.length,
+            "подмена обязана сохранить длину, иначе проверка ничего не значит"
+        );
+
+        await fs.promises.writeFile(target, replaced, "utf8");
+        await fs.promises.utimes(target, pinned, pinned);
+
+        const after = await fs.promises.stat(target);
+
+        assert.strictEqual(after.size, before.size, "размер прежний");
+        assert.strictEqual(after.mtimeMs, before.mtimeMs, "дата прежняя");
+
+        /* Новый стенд — новый запуск сервера: в памяти ничего нет. */
+        const restarted = createStand(project, shardDirectory);
+        const found = await restarted.find();
+
+        /*
+         * В подменённом файле осталась одна встреча имени вместо двух.
+         * Старая запись говорила «две»; если ответ показывает одну, значит
+         * она отброшена по отпечатку, а файл прочитан заново.
+         */
+        const fromReplaced = signature(found)
+            .filter(item => item.includes("user0.mac"));
+
+        assert.strictEqual(
+            fromReplaced.length,
+            1,
+            "устаревшая запись обязана быть отброшена: " +
+                fromReplaced.join(", ")
+        );
+        assert.strictEqual(
+            found.length,
+            11,
+            "всего на одну ссылку меньше, чем было"
         );
     } finally {
         await fs.promises.rm(project.directory, {
@@ -257,10 +344,25 @@ test("запись переживает перезапуск", async () => {
             signature(expected),
             "после перезапуска ответ обязан совпасть"
         );
+
+        /*
+         * Первый поиск после перезапуска сверяет записи с диском: одно чтение
+         * на файл. Разбор и разрешение имён — то, ради чего запись и заведена,
+         * — при этом не повторяются, а второй поиск не читает уже ничего.
+         */
+        const confirming = restarted.reads.count;
+
+        assert.ok(
+            confirming > 0 && confirming <= project.userPaths.length + 1,
+            "сверка стоит одного чтения на файл: прочитано " + confirming
+        );
+
+        await restarted.find();
+
         assert.strictEqual(
             restarted.reads.count,
             0,
-            "после перезапуска файлы не перечитываются: прочитано " +
+            "сверенная запись больше не читается: прочитано " +
                 restarted.reads.count
         );
     } finally {

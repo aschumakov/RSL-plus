@@ -176,6 +176,55 @@ test("закрытие документа снимает закрепление"
     );
 });
 
+test("закрытие в порядке сервера сразу возвращает проект в предел", () => {
+    /*
+     * Порядок вызовов ровно как на сервере: сначала compactModule из
+     * DocumentAnalysisService.close, потом markClosed.
+     *
+     * Проверяется итог, а не механизм: после закрытия ничего не закреплено и
+     * проект в пределе. Пересчёт пределов вынесен в отдельный метод и зовётся
+     * при любой смене закрепления — прежде он жил только внутри загрузки
+     * модуля, и снятие закрепления пределов не пересчитывало.
+     *
+     * Состояния «осталось больше предела» на этом стенде воспроизвести не
+     * удалось: compactModule успевает снять закрепление сам. Проверка стоит
+     * как страховка на итог, а не как воспроизведение ошибки.
+     */
+    const board = project({ limit: 2 });
+
+    /* От конца цепочки к началу: так сводка каждого модуля видит свой Import. */
+    board.index.updateExternalModule(DEEP, "Macro FromDeep()\nEnd;\n", 1);
+    board.index.updateExternalModule(
+        B,
+        "Import deep;\nMacro FromB()\nEnd;\n",
+        1
+    );
+    board.index.updateExternalModule(A, "Import b;\nMacro FromA()\nEnd;\n", 1);
+    board.index.updateOpenModule(MAIN, "Import a;\nMacro Run()\nEnd;\n", 1);
+
+    assert.strictEqual(
+        board.index.pinnedModuleCount,
+        3,
+        "вся цепочка закреплена, и её больше предела"
+    );
+
+    board.index.compactModule(MAIN);
+    board.index.markClosed(MAIN);
+
+    const alive = [MAIN, A, B, DEEP].filter(uri => board.sees(uri)).length;
+
+    assert.strictEqual(
+        board.index.pinnedModuleCount,
+        0,
+        "закрытый документ никого не удерживает"
+    );
+    assert.ok(
+        alive <= board.index.externalModuleLimit,
+        "предел " + board.index.externalModuleLimit +
+            ", а осталось сводок " + alive
+    );
+});
+
 test("смена Import отпускает прежнюю зависимость", () => {
     const board = project();
 

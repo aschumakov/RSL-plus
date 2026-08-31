@@ -2,6 +2,9 @@ import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
 
+import { decodeRslSourceText } from "../core/textDecoding";
+import { contentFingerprint } from "./contentFingerprint";
+
 /**
  * Постоянные записи о ссылках: что и куда ссылается в закрытых файлах.
  *
@@ -43,12 +46,31 @@ export interface IRslShardReference {
 interface IRslShardStamp {
     mtimeMs: number;
     size: number;
+    /**
+     * Отпечаток содержимого; см. contentFingerprint.
+     *
+     * Дата и размер — не основание считать файл прежним: их сохраняют системы
+     * контроля версий и утилиты копирования, а правка одинаковой длины не
+     * меняет ни того ни другого. Для Rename цена такой ошибки — правка по
+     * устаревшим диапазонам, то есть испорченный файл.
+     */
+    fingerprint: string;
 }
 
 interface IRslShardEntry {
     stamp: IRslShardStamp;
     /** Имя -> все его разрешённые вхождения в этом файле. */
     names: Map<string, IRslShardReference[]>;
+    /**
+     * Отпечаток сверен с диском в этой сессии.
+     *
+     * На диск не пишется: после перезапуска доверять прежней сверке нельзя.
+     * Записи, сделанной в этой сессии, сверка не нужна — файл только что
+     * прочитали. Восстановленную сверяет первое же обращение, и стоит это
+     * одного чтения на файл за сессию: разбор и разрешение имён — то, ради
+     * чего запись и заведена, — не повторяются.
+     */
+    confirmed?: boolean;
 }
 
 interface ISerializedShard {
@@ -57,6 +79,7 @@ interface ISerializedShard {
         uri: string;
         mtimeMs: number;
         size: number;
+        fingerprint?: string;
         names: Array<{ name: string; refs: IRslShardReference[] }>;
     }>;
 }
@@ -148,30 +171,93 @@ export class RslReferenceShardStore {
             return undefined;
         }
 
-        const stamp = await stampOf(uri);
+        /*
+         * Сверенная запись отвечает сразу.
+         *
+         * Ни stat, ни чтения: правки этой сессии снимают запись через
+         * наблюдателя за файлами, а между сессиями её сверяет первое
+         * обращение. Прежде здесь был stat на каждый файл-кандидат — на
+         * популярном имени это 2533 обращения к файловой системе при каждом
+         * повторном поиске.
+         */
+        if (entry.confirmed) {
+            return entry.names.get(name);
+        }
 
-        if (!stamp || !sameStamp(stamp, entry.stamp)) {
-            /* Файл изменился мимо наблюдателя: запись больше не годится. */
-            this.forgetEntry(uri);
-
+        if (!await this.confirm(uri, entry)) {
             return undefined;
         }
 
         return entry.names.get(name);
     }
 
-    /** Запомнить разрешённые ссылки имени в файле. */
+    /**
+     * Сверить восстановленную запись с содержимым файла.
+     *
+     * Дата и размер проверяются первыми: они дешевле и отсеивают обычную
+     * правку. Совпали — читается содержимое, потому что правка одинаковой
+     * длины с восстановленной датой их не меняет, а Rename по устаревшим
+     * диапазонам портит файл молча.
+     */
+    private async confirm(
+        uri: string,
+        entry: IRslShardEntry
+    ): Promise<boolean> {
+        const stamp = await stampOf(uri);
+
+        if (!stamp || !sameStamp(stamp, entry.stamp)) {
+            this.forgetEntry(uri);
+
+            return false;
+        }
+
+        let content: Buffer;
+
+        try {
+            content = await fs.promises.readFile(fileURLToPath(uri));
+        } catch {
+            this.forgetEntry(uri);
+
+            return false;
+        }
+
+        if (
+            contentFingerprint(decodeRslSourceText(content)) !==
+            entry.stamp.fingerprint
+        ) {
+            this.forgetEntry(uri);
+
+            return false;
+        }
+
+        entry.confirmed = true;
+
+        return true;
+    }
+
+    /**
+     * Запомнить разрешённые ссылки имени в файле.
+     *
+     * Текст берётся у вызывающего: он его только что прочитал и разобрал, а
+     * отпечаток по готовой строке ничего не стоит. Читать файл здесь ещё раз
+     * значило бы удвоить ту работу, ради которой запись и заводится.
+     */
     async record(
         uri: string,
         name: string,
-        references: readonly IRslShardReference[]
+        references: readonly IRslShardReference[],
+        source: string
     ): Promise<void> {
-        const stamp = await stampOf(uri);
+        const stat = await stampOf(uri);
 
-        if (!stamp) {
+        if (!stat) {
             return;
         }
 
+        const stamp: IRslShardStamp = {
+            ...stat,
+            fingerprint: contentFingerprint(source)
+        };
         const bucket = bucketOf(uri, this.buckets);
 
         await this.ensureBucket(bucket);
@@ -187,6 +273,8 @@ export class RslReferenceShardStore {
             ? known
             : { stamp, names: new Map<string, IRslShardReference[]>() };
 
+        /* Запись этой сессии сверена по построению: текст только что читали. */
+        entry.confirmed = true;
         entry.names.set(name, [...references]);
         entries.set(uri, entry);
         this.dirty.add(bucket);
@@ -352,8 +440,17 @@ export class RslReferenceShardStore {
                 continue;
             }
 
+            if (!file.fingerprint) {
+                /* Запись прежнего формата: сверять её нечем. */
+                continue;
+            }
+
             entries.set(file.uri, {
-                stamp: { mtimeMs: file.mtimeMs, size: file.size },
+                stamp: {
+                    mtimeMs: file.mtimeMs,
+                    size: file.size,
+                    fingerprint: file.fingerprint
+                },
                 names: new Map(
                     (file.names || []).map(item => [item.name, item.refs])
                 )
@@ -374,6 +471,7 @@ export class RslReferenceShardStore {
                 uri,
                 mtimeMs: entry.stamp.mtimeMs,
                 size: entry.stamp.size,
+                fingerprint: entry.stamp.fingerprint,
                 names: [...entry.names.entries()].map(([name, refs]) => ({
                     name,
                     refs
@@ -426,12 +524,17 @@ export class RslReferenceShardStore {
     }
 }
 
-function sameStamp(left: IRslShardStamp, right: IRslShardStamp): boolean {
+function sameStamp(
+    left: { mtimeMs: number; size: number },
+    right: { mtimeMs: number; size: number }
+): boolean {
     return left.size === right.size && left.mtimeMs === right.mtimeMs;
 }
 
 /** Дата и размер файла: без чтения содержимого. */
-async function stampOf(uri: string): Promise<IRslShardStamp | undefined> {
+async function stampOf(
+    uri: string
+): Promise<{ mtimeMs: number; size: number } | undefined> {
     let filePath: string;
 
     try {

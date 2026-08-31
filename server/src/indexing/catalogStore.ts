@@ -26,6 +26,20 @@ export interface IRslCatalogStamp {
     size: number;
 }
 
+/**
+ * Запись, восстановленная с диска, считается несверенной.
+ *
+ * Дата и размер не доказывают, что файл прежний: их сохраняют системы контроля
+ * версий и утилиты копирования, а правка одинаковой длины не меняет ни того ни
+ * другого. Пока сессия не прочитала файл сама, её запись — предположение.
+ *
+ * Полный Ctrl+T сразу после запуска от этого не страдает: восстановленный
+ * каталог доступен немедленно, а сверяет его фоновый обход, читая файлы в
+ * рабочем потоке. Плата — обход проходит проект один раз за сессию, как и до
+ * появления постоянного каталога; выигрышем же был не быстрый обход, а
+ * готовый Ctrl+T с первой секунды.
+ */
+
 /** Состав одного файла, каким его знает каталог. */
 export interface IRslCatalogRecord {
     uri: string;
@@ -33,6 +47,8 @@ export interface IRslCatalogRecord {
     declarations: IRslDeclarationDescriptor[];
     imports: string[];
     fileReferences: string[];
+    /** Запись сделана в этой сессии по прочитанному файлу; на диск не идёт. */
+    confirmed?: boolean;
 }
 
 interface ISerializedCatalogBucket {
@@ -183,7 +199,12 @@ export class RslCatalogStore {
     async isUnchanged(uri: string): Promise<boolean> {
         const record = this.records.get(uri);
 
-        if (!record) {
+        /*
+         * Несверенная запись неизменности не доказывает: см. IRslCatalogStamp.
+         * Так фоновый обход читает восстановленный проект один раз за сессию,
+         * а повторные обходы — уже нет.
+         */
+        if (!record || !record.confirmed) {
             return false;
         }
 
@@ -233,7 +254,9 @@ export class RslCatalogStore {
             stamp,
             declarations: [...declarations],
             imports: [...imports],
-            fileReferences: [...fileReferences]
+            fileReferences: [...fileReferences],
+            /* Запись этой сессии: файл только что прочитали. */
+            confirmed: true
         });
         this.dirty.add(bucketOf(uri, this.buckets));
         this.scheduleSave();
@@ -338,7 +361,12 @@ export class RslCatalogStore {
             const temporary = target + ".tmp";
             const payload: ISerializedCatalogBucket = {
                 version: STORE_VERSION,
-                files
+                /*
+                 * Признак сверки на диск не идёт: после перезапуска доверять
+                 * прежней сверке нельзя, а записанный он превратил бы
+                 * восстановленную запись в подтверждённую.
+                 */
+                files: files.map(({ confirmed: _confirmed, ...rest }) => rest)
             };
 
             await fs.promises.writeFile(

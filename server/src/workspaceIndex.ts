@@ -280,6 +280,14 @@ export class WorkspaceIndex {
                 queue.push(imported.uri);
             }
         }
+
+        /*
+         * Закрепление изменилось — пределы пересчитываются здесь.
+         *
+         * Закрытие документа снимает закрепление именно через этот метод, и
+         * без пересчёта проект остаётся над пределом до следующего чтения.
+         */
+        this.enforceExternalLimits();
     }
 
     /** Сколько модулей закреплено: для отчёта о памяти и для тестов. */
@@ -676,7 +684,24 @@ export class WorkspaceIndex {
     private touchExternalModule(uri: string): void {
         this.externalModuleOrder.set(uri, true);
         this.setExternalSize(uri, this.modules.get(uri)?.sourceLength ?? 0);
+        this.enforceExternalLimits(uri);
+    }
 
+    /**
+     * Приводит число и объём external-модулей к пределам.
+     *
+     * Отдельным методом, а не хвостом загрузки. Вытеснение упирается в
+     * закрепление, и снятие закрепления — такое же основание пересчитать
+     * пределы, как и загрузка нового модуля. Пока это жило внутри загрузки,
+     * закрытие документа оставляло проект над пределом до следующего чтения:
+     * порядок на сервере — сначала compactModule (замыкание ещё закреплено, и
+     * вытеснение упирается в него), потом markClosed (закрепление снято, но
+     * пересчитывать пределы было уже некому).
+     *
+     * protectedUri — модуль, который только что понадобился: выбрасывать его
+     * тут же значило бы прочитать его заново следующим действием.
+     */
+    private enforceExternalLimits(protectedUri?: string): void {
         /*
          * Очередь на вытеснение — от самых старых, но мимо закреплённых.
          *
@@ -703,7 +728,7 @@ export class WorkspaceIndex {
                 const candidate = queue[at++];
 
                 if (
-                    candidate === uri ||
+                    candidate === protectedUri ||
                     this.pinnedModules.has(candidate) ||
                     !this.externalModuleOrder.get(candidate)
                 ) {

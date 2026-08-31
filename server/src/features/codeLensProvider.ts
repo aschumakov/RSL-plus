@@ -121,13 +121,38 @@ function ownerAt(
     return found && offset <= found.range.end ? found : undefined;
 }
 
-/** Сколько раз имя встречается в файле и в скольких процедурах. */
+const LOCAL_KINDS = new Set<number>([
+    CompletionItemKind.Variable,
+    CompletionItemKind.Constant
+]);
+
+/** Объявляет ли процедура своё имя с таким же написанием. */
+function shadows(procedure: RslSymbol, name: string): boolean {
+    return procedure.children.some(child =>
+        LOCAL_KINDS.has(child.kind) &&
+        normalizeIdentifier(child.name) === name);
+}
+
+/**
+ * Сколько раз имя встречается в файле и в скольких процедурах.
+ *
+ * Вхождения в процедурах, объявивших своё имя с тем же написанием, не
+ * считаются: там это имя значит переменную, а не процедуру. Без этого
+ * `Var Foo = 1; Foo = 2; return Foo;` внутри чужой процедуры показывалось
+ * как три использования процедуры Foo.
+ *
+ * Разрешать каждое вхождение резолвером было бы точнее, но именно этого
+ * строка позволить себе не может: точный проектный ответ на одно объявление
+ * стоит от 40 мс до 3,4 с, а строка запрашивается сразу для всех видимых.
+ * Поэтому и в заголовке написано «вхождений», а не «ссылок».
+ */
 function countInFile(
     symbol: RslSymbol,
     occurrences: ReadonlyMap<string, number[]>,
     procedures: readonly RslSymbol[]
 ): { uses: number; callers: number } {
-    const found = occurrences.get(normalizeIdentifier(symbol.name)) || [];
+    const name = normalizeIdentifier(symbol.name);
+    const found = occurrences.get(name) || [];
     const owners = new Set<RslSymbol>();
     let uses = 0;
 
@@ -140,9 +165,13 @@ function countInFile(
             continue;
         }
 
-        uses++;
-
         const owner = ownerAt(procedures, offset);
+
+        if (owner && owner !== symbol && shadows(owner, name)) {
+            continue;
+        }
+
+        uses++;
 
         if (owner && owner !== symbol) {
             owners.add(owner);
@@ -179,8 +208,8 @@ export function buildRslCodeLenses(module: IIndexedModule): CodeLens[] {
             range,
             command: {
                 title: counts.uses === 0
-                    ? "в этом файле не используется"
-                    : "в файле: " + counts.uses +
+                    ? "в этом файле не встречается"
+                    : "вхождений в файле: " + counts.uses +
                         (counts.callers > 0
                             ? ", процедур: " + counts.callers
                             : ""),

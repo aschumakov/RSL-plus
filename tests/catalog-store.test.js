@@ -249,10 +249,38 @@ test("изменившийся файл перечитывается, остал
         next.start();
         await next.service.runToCompletion();
 
+        /*
+         * Первый обход после перезапуска читает проект целиком.
+         *
+         * Восстановленная запись неизменности не доказывает: дату и размер
+         * сохраняют системы контроля версий, а правка одинаковой длины их не
+         * меняет. Полный Ctrl+T от этого не страдает — каталог доступен сразу,
+         * — а сверяет его этот обход, в рабочем потоке.
+         */
         assert.deepStrictEqual(
-            reads,
-            [project.files[3].uri],
-            "прочитан обязан быть только изменённый файл"
+            [...reads].sort(),
+            project.files.map(item => item.uri).sort(),
+            "первый обход после перезапуска сверяет все файлы"
+        );
+
+        /* Второй обход в той же сессии читает только изменившееся. */
+        await fs.promises.writeFile(
+            project.files[2].file,
+            "Macro Renamed2(value)\n  return value;\nEnd;\n",
+            "utf8"
+        );
+
+        const secondReads = [];
+        const again = createWarmup(project, nextStore, secondReads);
+
+        again.start();
+        await again.service.runToCompletion();
+
+        assert.deepStrictEqual(
+            secondReads,
+            [project.files[2].uri],
+            "сверенные записи больше не перечитываются: " +
+                secondReads.join(", ")
         );
     } finally {
         /*

@@ -255,7 +255,12 @@ export async function findRslReferencesForSymbol(
              * ведёт» — тоже знание, без которого файл перечитывался бы каждый
              * раз.
              */
-            await shards.record(candidate.uri, targetName, collected);
+            await shards.record(
+                candidate.uri,
+                targetName,
+                collected,
+                candidate.source
+            );
         }
 
         if (performance.now() - sliceStarted >= REFERENCE_CPU_SLICE_MS) {
