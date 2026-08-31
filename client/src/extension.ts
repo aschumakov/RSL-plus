@@ -8,6 +8,9 @@ import {
     StatusBarItem,
     StatusBarAlignment,
     QuickPickItem,
+    Position,
+    Range,
+    Selection,
     Uri,
     TextEditor
 } from "vscode";
@@ -501,6 +504,47 @@ export function activate(context: ExtensionContext): void {
                 }
             );
         })
+    );
+
+    /*
+     * Куда ведёт строка над объявлением.
+     *
+     * Панель References и Call Hierarchy — встроенные представления VS Code, и
+     * считают они сами. Если их команд в этой сборке редактора нет, остаётся
+     * обычный переход к ссылкам: он есть всегда.
+     */
+    const revealAt = async (
+        uriText: string,
+        position: { line: number; character: number },
+        preferred: string
+    ): Promise<void> => {
+        const uri = Uri.parse(uriText);
+        const at = new Position(position.line, position.character);
+        const editor = await window.showTextDocument(uri, { preview: false });
+
+        editor.selection = new Selection(at, at);
+        editor.revealRange(new Range(at, at));
+
+        const available = await commands.getCommands(true);
+
+        await commands.executeCommand(
+            available.includes(preferred) ? preferred : "editor.action.goToReferences",
+            uri,
+            at
+        );
+    };
+
+    context.subscriptions.push(
+        commands.registerCommand(
+            "rsl.showReferences",
+            (uriText: string, position: { line: number; character: number }) =>
+                revealAt(uriText, position, "references-view.findReferences")
+        ),
+        commands.registerCommand(
+            "rsl.showCallHierarchy",
+            (uriText: string, position: { line: number; character: number }) =>
+                revealAt(uriText, position, "references-view.showCallHierarchy")
+        )
     );
 
     const showMacrosCommand = "rsl.showMacroFiles";

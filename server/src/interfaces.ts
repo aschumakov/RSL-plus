@@ -166,6 +166,7 @@ export interface IRslSettings {
         parameterNames: boolean;
     };
     format: IRslFormatSettings;
+    codeLens?: IRslCodeLensSettings;
     diagnostics?: IRslDiagnosticSettings;
 }
 
@@ -177,6 +178,11 @@ export interface IRslSettings {
  * финальный EOL не настраиваются вовсе — форматтер сохраняет их такими,
  * какие они в файле.
  */
+export interface IRslCodeLensSettings {
+    /** Строка над Macro и Class со счётом по файлу. */
+    references: boolean;
+}
+
 export interface IRslFormatSettings {
     /** Регистр ключевых слов, которые вставляет плагин. */
     keywordCase: "asIs" | "lower" | "upper" | "capitalize";

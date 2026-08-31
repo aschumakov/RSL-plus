@@ -41,6 +41,7 @@ import {
     inlineVariableRefactor
 } from "./extractRefactors";
 import { extractMacroRefactor } from "./extractMacro";
+import { buildRslCodeLenses } from "./codeLensProvider";
 import { generateOverrideRefactor } from "./generateOverride";
 import {
     createRslRefactorRegistry,
@@ -518,6 +519,27 @@ export class RslLanguageFeatureRegistry {
                 )),
                 cancellationToken
             );
+        });
+
+        /*
+         * Строка над объявлением: считается по этому файлу и только по нему.
+         * Почему не по проекту — см. codeLensProvider.
+         */
+        connection.onCodeLens?.(params => {
+            if (!this.environment.getSettings(params.textDocument.uri)
+                .codeLens?.references) {
+                return [];
+            }
+
+            const document = documents.get(params.textDocument.uri);
+            const module = document
+                ? index.getCurrentModule(
+                    params.textDocument.uri,
+                    document.version
+                )
+                : undefined;
+
+            return module ? buildRslCodeLenses(module) : [];
         });
 
         connection.onWorkspaceSymbol((params, cancellationToken) => {

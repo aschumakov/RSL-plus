@@ -17,6 +17,9 @@ export interface IRslClientSettings {
         indentStyle: string;
         indentSize: number;
     };
+    codeLens: {
+        references: boolean;
+    };
     /*
      * Раздел обязан перечислять ВСЕ настройки диагностик из package.json.
      *
@@ -92,6 +95,13 @@ export function readRslSettings(resource?: Uri): IRslClientSettings {
             parameterNames: readSetting(
                 "inlayHints.parameterNames",
                 true,
+                resource
+            )
+        },
+        codeLens: {
+            references: readSetting(
+                "codeLens.references",
+                false,
                 resource
             )
         },

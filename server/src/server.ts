@@ -99,6 +99,7 @@ const defaultSettings: IRslSettings = {
         indentStyle: "editor",
         indentSize: 0
     },
+    codeLens: { references: false },
     diagnostics: DEFAULT_DIAGNOSTIC_SETTINGS
 };
 const settingsService = new RslSettingsService(defaultSettings);
@@ -725,6 +726,7 @@ connection.onInitialize((params: InitializeParams) => {
                     GO_TO_BLOCK_END_COMMAND
                 ]
             },
+            codeLensProvider: { resolveProvider: false },
             codeActionProvider: {
                 codeActionKinds: [
                     CodeActionKind.QuickFix,
