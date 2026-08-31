@@ -446,6 +446,16 @@ function getImportReferencesFromTokens(
 }
 
 export interface IRslImportReferenceScanner {
+    /*
+     * Поток, по которому сканер считает индексы шагов.
+     *
+     * Отдаёт его сам сканер, а не тот, кто его обходит. Прежде поток выбирал
+     * вызывающий, и один из двух этапов диагностики подавал полный поток вместо
+     * потока значимых токенов. Индексы разъезжались, имена файлов склеивались из
+     * чужих токенов, и этот мусор оставался в кэше ссылок Import — после чего
+     * Ctrl+Click по `Import "имя.mac";` перестаёт работать до следующего lex.
+     */
+    readonly tokens: readonly IRslToken[];
     step(token: IRslToken, index: number): void;
     finish(): IImportDefinitionTarget[];
 }
@@ -511,6 +521,7 @@ export function createImportReferenceScanner(
     };
 
     return {
+        tokens,
         step,
         finish: () => {
             importReferencesCache.set(sourceTokens, result);

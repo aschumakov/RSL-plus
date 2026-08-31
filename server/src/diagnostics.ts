@@ -72,7 +72,6 @@ import {
     type IRslWorkSlice
 } from "./core/timeSlice";
 import {
-    cachedSignificantTokens,
     createSignificantTokenFilter,
     IRslToken,
     normalizeIdentifier
@@ -594,7 +593,7 @@ function planLocalRslDiagnostics(
                 };
 
                 return createScanStage(
-                    () => cachedSignificantTokens(module.lex.tokens),
+                    () => ensure().tokens,
                     (token, index) => ensure().step(token, index),
                     () => {
                         ensure().finish();
@@ -936,7 +935,7 @@ function planWorkspaceRslDiagnostics(
                 };
 
                 return createScanStage(
-                    () => module.lex.tokens,
+                    () => ensure().tokens,
                     (token, tokenIndex) => ensure().step(token, tokenIndex),
                     () => {
                         ensure().finish();

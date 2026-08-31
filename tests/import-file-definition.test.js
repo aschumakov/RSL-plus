@@ -41,7 +41,13 @@ const {
 const {
     createFastDocumentSnapshot
 } = require("../server/out/services/fastDocumentSnapshot");
-const { buildLocalRslDiagnostics } = require("../server/out/diagnostics");
+const {
+    buildLocalRslDiagnostics,
+    buildRslDiagnostics
+} = require("../server/out/diagnostics");
+const {
+    GetImportDefinitionTargetsFromTokens
+} = require("../server/out/execMacroDefinition");
 
 let passed = 0;
 let failed = 0;
@@ -96,6 +102,7 @@ function stand(source, options = {}) {
 
     return {
         index,
+        module,
         /** Переход из позиции offset. */
         at(offset) {
             const context = createRslInteractiveContext(
@@ -276,6 +283,113 @@ test("несколько имён в одном Import", () => {
         board.at(source.indexOf("other") + 2),
         undefined,
         "второе имя без файла в проекте перехода не даёт"
+    );
+});
+
+/*
+ * Настоящий файл, а не одна директива: комментарий с кириллицей, пустые строки,
+ * обычные Import и только потом строковые.
+ *
+ * Так выглядел файл, на котором переход не работал в редакторе, хотя работал во
+ * всех проверках: диагностика к тому времени успевала пройти. Список ссылок
+ * Import запоминается на версию потока токенов, и этап диагностики подавал
+ * сканеру полный поток вместо потока значимых токенов. Индексы разъезжались,
+ * имена файлов склеивались из чужих токенов, и этот мусор оставался в кэше:
+ * `Import "checkaml.mac";` превращался в `Import"checkaml.mac".mac`, а из
+ * объявления `private file ci_doc_file ("ci_doc.dbt")` получался несуществующий
+ * модуль. Переход по строковому Import умирал до следующего lex — то есть до
+ * первой правки файла.
+ */
+const REAL_FILE = [
+    "/* RSBD-3101 Автоматическое подтверждение операций */",
+    "",
+    "import DeprIntr, globals;",
+    "import fm_defs;",
+    "",
+    "//проверка на ИПДЛ",
+    'import "ipdlrtllib.mac";',
+    'Import "checkaml.mac";',
+    "",
+    'private file ci_doc_file ( "ci_doc.dbt" );',
+    "",
+    "Macro Run()",
+    "End;",
+    ""
+].join("\n");
+
+/*
+ * Проверки, которые ищут директивы Import, включены: именно они и трогают кэш
+ * ссылок. С настройками по умолчанию оба этапа «importReferences» не запускались
+ * бы, и проверка прошла бы даже на сломанном коде.
+ */
+const REAL_SETTINGS = {
+    enabled: true,
+    structure: true,
+    unusedImports: true,
+    redundantImports: true,
+    maxProblems: 50
+};
+
+const REAL_FILES = [
+    MAIN,
+    TARGET,
+    "file:///d:/project/deprintr.mac",
+    "file:///d:/project/globals.mac",
+    "file:///d:/project/fm_defs.mac",
+    "file:///d:/project/ipdlrtllib.mac"
+];
+
+test("переход работает и после диагностики того же модуля", () => {
+    const board = stand(REAL_FILE, { registered: REAL_FILES });
+
+    /* Порядок как в редакторе: сначала диагностика, потом Ctrl+Click. */
+    buildRslDiagnostics(board.module, board.index, REAL_SETTINGS);
+
+    /*
+     * Проверяются все директивы образца, а не одна.
+     *
+     * От сдвига индексов страдают не все имена сразу: какое уцелеет, зависит от
+     * того, сколько пробелов и комментариев стоит перед ним. На этом образце
+     * `checkaml.mac` уцелевал, а `ipdlrtllib.mac` пропадал — и переход по нему
+     * молчал ровно так, как в редакторе.
+     */
+    for (const [name, uri] of [
+        ["DeprIntr", "file:///d:/project/deprintr.mac"],
+        ["globals", "file:///d:/project/globals.mac"],
+        ["fm_defs", "file:///d:/project/fm_defs.mac"],
+        ["ipdlrtllib.mac", "file:///d:/project/ipdlrtllib.mac"],
+        ["checkaml.mac", TARGET]
+    ]) {
+        const target = board.at(REAL_FILE.indexOf(name) + 2);
+
+        assert.ok(
+            target,
+            "после диагностики переход по " + name + " обязан работать"
+        );
+        assert.strictEqual(
+            target.uri,
+            uri,
+            name + ": переход обязан вести в свой файл"
+        );
+    }
+});
+
+test("диагностика не портит список ссылок Import", () => {
+    const board = stand(REAL_FILE, { registered: REAL_FILES });
+
+    buildRslDiagnostics(board.module, board.index, REAL_SETTINGS);
+
+    assert.deepStrictEqual(
+        GetImportDefinitionTargetsFromTokens(board.module.lex.tokens)
+            .map(item => item.moduleName),
+        [
+            "DeprIntr.mac",
+            "globals.mac",
+            "fm_defs.mac",
+            "ipdlrtllib.mac",
+            "checkaml.mac"
+        ],
+        "в списке обязаны остаться все директивы Import и только они"
     );
 });
 
