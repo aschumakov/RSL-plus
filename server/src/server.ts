@@ -32,6 +32,9 @@ import {
 import { RslLanguageFeatureRegistry } from "./features/languageFeatureRegistry";
 import { RSL_IMPORT_ACTION_KINDS } from "./features/importSourceActions";
 import {
+    restoreRslCatalogRecords
+} from "./indexing/catalogRestore";
+import {
     GO_TO_BLOCK_END_COMMAND,
     GO_TO_BLOCK_START_COMMAND
 } from "./features/blockNavigation";
@@ -338,26 +341,23 @@ function scheduleWorkspaceRefreshForOpenDocuments(): void {
  *
  * Записи о файлах, которых в проекте больше нет, отбрасываются: показать в
  * Ctrl+T символы удалённого файла хуже, чем не показать ничего.
+ *
+ * Перенос идёт порциями с уступкой потоку. Одним куском он занимал поток на
+ * 52–94 мс при 98 640 символах — это дольше установленного бюджета
+ * отзывчивости в 25 мс, и приходится это ровно на запуск, когда пользователь
+ * уже набирает текст.
  */
 async function restoreCatalog(uris: readonly string[]): Promise<void> {
     let restored = 0;
 
     try {
-        for (const record of await catalogStore.load(uris)) {
-            if (workspaceIndex.getModule(record.uri)?.isOpen) {
-                /* У открытого документа своя модель, и она свежее. */
-                continue;
+        restored = await restoreRslCatalogRecords(
+            workspaceIndex.catalog,
+            await catalogStore.load(uris),
+            {
+                isOpen: uri => workspaceIndex.getModule(uri)?.isOpen === true
             }
-
-            workspaceIndex.catalog.recordDeclarations({
-                uri: record.uri,
-                version: 0,
-                declarations: record.declarations,
-                imports: record.imports,
-                fileReferences: new Set(record.fileReferences)
-            });
-            restored++;
-        }
+        );
     } catch (error) {
         logMessage("Сохранённый каталог не прочитан: " + String(error));
 

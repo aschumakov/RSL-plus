@@ -106,6 +106,17 @@ export class WorkspaceCatalog {
     private byName = new Map<string, Map<string, IRslCatalogSymbol[]>>();
     /** Имя файла -> файлы, которые упоминают его строкой. */
     private byFileReference = new Map<string, Set<string>>();
+    /**
+     * Публичное имя верхнего уровня -> файлы, где оно объявлено.
+     *
+     * Обратный индекс, а не перебор модулей. Через modulesExporting отвечает
+     * подбор недостающих Import, и там имён столько же, сколько неизвестных
+     * слов в файле: на 6165 модулях перебор стоил 62,3 мс на 500 имён.
+     *
+     * byName для этого не годится: он держит и члены классов, и приватные
+     * объявления, а экспортом считается только публичное имя верхнего уровня.
+     */
+    private byExport = new Map<string, Set<string>>();
     private revisionValue = 0;
     /** Готовый ответ на пустой запрос: см. firstSymbols. */
     private firstSymbolsCache: {
@@ -159,7 +170,33 @@ export class WorkspaceCatalog {
         this.attachFileReferences(module.uri, previousReferences);
 
         this.indexSymbols(module.uri, symbols);
+        this.attachExports(module.uri, exports);
         this.revisionValue++;
+    }
+
+    private attachExports(uri: string, exports: ReadonlySet<string>): void {
+        for (const name of exports) {
+            const uris = this.byExport.get(name) || new Set<string>();
+
+            uris.add(uri);
+            this.byExport.set(name, uris);
+        }
+    }
+
+    private detachExports(uri: string, exports: ReadonlySet<string>): void {
+        for (const name of exports) {
+            const uris = this.byExport.get(name);
+
+            if (!uris) {
+                continue;
+            }
+
+            uris.delete(uri);
+
+            if (uris.size === 0) {
+                this.byExport.delete(name);
+            }
+        }
     }
 
     private indexSymbols(
@@ -319,6 +356,7 @@ export class WorkspaceCatalog {
             fileReferences: references
         });
         this.indexSymbols(source.uri, symbols);
+        this.attachExports(source.uri, exports);
         this.attachFileReferences(source.uri, references);
         this.revisionValue++;
     }
@@ -345,6 +383,7 @@ export class WorkspaceCatalog {
             }
         }
 
+        this.detachExports(uri, previous.exports);
         this.detachFileReferences(uri, previous.fileReferences);
         this.modules.delete(uri);
         this.revisionValue++;
@@ -407,6 +446,7 @@ export class WorkspaceCatalog {
     clear(): void {
         this.modules.clear();
         this.byName.clear();
+        this.byExport.clear();
         this.byFileReference.clear();
         this.revisionValue++;
     }
@@ -619,16 +659,9 @@ export class WorkspaceCatalog {
 
     /** Файлы, экспортирующие имя: кандидаты для адресной загрузки. */
     modulesExporting(name: string): string[] {
-        const wanted = normalizeIdentifier(name);
-        const result: string[] = [];
-
-        for (const module of this.modules.values()) {
-            if (module.exports.has(wanted)) {
-                result.push(module.uri);
-            }
-        }
-
-        return result.sort();
+        return [
+            ...(this.byExport.get(normalizeIdentifier(name)) || [])
+        ].sort();
     }
 
     /** Классы, унаследованные от базового: основа Go to Implementation. */
