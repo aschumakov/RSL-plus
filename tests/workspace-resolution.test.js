@@ -514,7 +514,13 @@ async function testWorkspaceLoaderUsesActiveImports() {
     } finally {
         await fs.promises.rm(directory, {
             recursive: true,
-            force: true
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
         });
     }
 }
@@ -565,7 +571,13 @@ async function testActiveDocumentPreemptsQueuedModules() {
     } finally {
         await fs.promises.rm(directory, {
             recursive: true,
-            force: true
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
         });
     }
 }
@@ -1268,7 +1280,16 @@ async function testReferenceIndexDetectsSameLengthEdit() {
             "Имени, которого в файле уже нет, находиться не должно"
         );
     } finally {
-        fs.rmSync(directory, { recursive: true, force: true });
+        fs.rmSync(directory, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
     }
 }
 
@@ -1434,7 +1455,13 @@ async function testReferenceIndexIsLazyPersistentAndTargeted() {
         fs.promises.readFile = originalReadFile;
         await fs.promises.rm(directory, {
             recursive: true,
-            force: true
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
         });
     }
 }
@@ -1483,7 +1510,13 @@ async function testImportedSymbolLoadsOnDemand() {
     } finally {
         await fs.promises.rm(directory, {
             recursive: true,
-            force: true
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
         });
     }
 }
@@ -1552,7 +1585,13 @@ async function testAutoImportSearchLoadsOnlyExporter() {
     } finally {
         await fs.promises.rm(directory, {
             recursive: true,
-            force: true
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
         });
     }
 }
@@ -1588,7 +1627,16 @@ async function testServerSideWorkspaceDiscovery() {
         assert.deepStrictEqual(names, ["lib.MAC", "main.mac"]);
         service.dispose();
     } finally {
-        await fs.promises.rm(directory, { recursive: true, force: true });
+        await fs.promises.rm(directory, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
     }
 }
 

@@ -351,7 +351,16 @@ test("CLI и редактор применяют уровни и подавле�
             "подавленная строка не публикуется: " + fromCli.join(", ")
         );
     } finally {
-        await fs.promises.rm(directory, { recursive: true, force: true });
+        await fs.promises.rm(directory, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
     }
 });
 

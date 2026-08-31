@@ -133,7 +133,13 @@ test("экспорт за пределом сканирования находи
     } finally {
         await fs.promises.rm(project.directory, {
             recursive: true,
-            force: true
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
         });
     }
 });
@@ -158,7 +164,13 @@ test("без каталога работает прежнее сканирова
     } finally {
         await fs.promises.rm(project.directory, {
             recursive: true,
-            force: true
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
         });
     }
 });
@@ -184,7 +196,13 @@ test("частично достроенный каталог не отменяе
     } finally {
         await fs.promises.rm(project.directory, {
             recursive: true,
-            force: true
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
         });
     }
 });
@@ -221,7 +239,13 @@ test("ответ отменённого поиска не запоминаетс
     } finally {
         await fs.promises.rm(project.directory, {
             recursive: true,
-            force: true
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
         });
     }
 });

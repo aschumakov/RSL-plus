@@ -280,7 +280,16 @@ test("ближний .editorconfig важнее дальнего", () => {
         "в корне действует корневая секция"
     );
 
-    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(root, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
 });
 
 test("без .editorconfig ответ пустой, а не выдуманный", () => {

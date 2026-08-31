@@ -597,7 +597,16 @@ test("подсказка параметров показывает правле�
         }
     }
 
-    fs.rmSync(WORKSPACE, { recursive: true, force: true });
+    fs.rmSync(WORKSPACE, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
     console.log("\nПройдено: " + passed + ", провалено: " + failed);
 
     if (failed > 0) {

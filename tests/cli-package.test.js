@@ -122,7 +122,16 @@ test("bundle работает в чужом каталоге сам по себ�
             "bundle обязан отработать сам по себе: " + output
         );
     } finally {
-        fs.rmSync(directory, { recursive: true, force: true });
+        fs.rmSync(directory, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
     }
 });
 
@@ -188,7 +197,16 @@ test("прямая и транзитивная зависимость грузя
             "контекст обязан быть полным: " + result
         );
     } finally {
-        fs.rmSync(directory, { recursive: true, force: true });
+        fs.rmSync(directory, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
     }
 });
 

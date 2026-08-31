@@ -322,7 +322,16 @@ test("спецпеременные модуля: имя со скобками, �
     assert.strictEqual(parsed[2].typeName, "");
 });
 
-fs.rmSync(directory, { recursive: true, force: true });
+fs.rmSync(directory, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
 
 console.log("\nПройдено: " + passed + ", провалено: " + failed);
 

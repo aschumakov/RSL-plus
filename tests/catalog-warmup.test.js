@@ -148,7 +148,16 @@ test("каталог знает имена файлов, которые нико
         "достройка не загружает модель в хранилище"
     );
 
-    fs.rmSync(project.directory, { recursive: true, force: true });
+    fs.rmSync(project.directory, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
 });
 
 test("позиция символа в каталоге — настоящая строка, а не первая", async () => {
@@ -170,7 +179,16 @@ test("позиция символа в каталоге — настоящая �
     assert.strictEqual(field.line, 5, "поле класса — на шестой строке");
     assert.strictEqual(field.container, "Base", "владелец записан");
 
-    fs.rmSync(project.directory, { recursive: true, force: true });
+    fs.rmSync(project.directory, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
 });
 
 test("у записи каталога есть устойчивое тождество", async () => {
@@ -203,7 +221,16 @@ test("у записи каталога есть устойчивое тожде�
         "идентификатор не зависит от того, каким путём файл попал в каталог"
     );
 
-    fs.rmSync(project.directory, { recursive: true, force: true });
+    fs.rmSync(project.directory, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
 });
 
 test("файл без строковых ссылок перечитывается, а прочитанный — нет", async () => {
@@ -238,7 +265,16 @@ test("файл без строковых ссылок перечитываетс
         "второй раз те же файлы не читаются"
     );
 
-    fs.rmSync(project.directory, { recursive: true, force: true });
+    fs.rmSync(project.directory, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
 });
 
 test("открытый файл фоновым чтением не перезаписывается", async () => {
@@ -266,7 +302,16 @@ test("открытый файл фоновым чтением не переза�
         "версия с диска не вытеснила версию редактора"
     );
 
-    fs.rmSync(project.directory, { recursive: true, force: true });
+    fs.rmSync(project.directory, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
 });
 
 /* ─── Строковые ссылки ───────────────────────────────────────────────────── */
@@ -334,7 +379,16 @@ test("переименование правит ExecMacroFile и не трога
         "правится строка ExecMacroFile, а не MsgBox"
     );
 
-    fs.rmSync(project.directory, { recursive: true, force: true });
+    fs.rmSync(project.directory, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
 });
 
 test("путь в ссылке сохраняется при переименовании", async () => {
@@ -371,7 +425,16 @@ test("путь в ссылке сохраняется при переимено�
         "каталог в ссылке остался: " + JSON.stringify(changes[0].newText)
     );
 
-    fs.rmSync(project.directory, { recursive: true, force: true });
+    fs.rmSync(project.directory, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
 });
 
 test("удалённый файл уходит из ссылок", async () => {
@@ -394,7 +457,16 @@ test("удалённый файл уходит из ссылок", async () => {
         "запись ушла вместе с файлом"
     );
 
-    fs.rmSync(project.directory, { recursive: true, force: true });
+    fs.rmSync(project.directory, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
 });
 
 test("смена проекта очищает каталог", async () => {
@@ -411,7 +483,16 @@ test("смена проекта очищает каталог", async () => {
     assert.strictEqual(index.catalog.stats.modules, 0, "каталог очищен");
     assert.deepStrictEqual(index.catalog.findByName("LibraryHelper"), []);
 
-    fs.rmSync(project.directory, { recursive: true, force: true });
+    fs.rmSync(project.directory, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
 });
 
 /* ─── Порционность и бюджет ──────────────────────────────────────────────── */
@@ -485,7 +566,16 @@ test("порция не занимает основной поток дольш�
         "непрерывная занятость потока: " + longest.toFixed(0) + " мс"
     );
 
-    fs.rmSync(project.directory, { recursive: true, force: true });
+    fs.rmSync(project.directory, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
 });
 
 test("правка приостанавливает обход, тишина возвращает", async () => {
@@ -541,7 +631,16 @@ test("правка приостанавливает обход, тишина в�
     );
 
     service.stop();
-    fs.rmSync(project.directory, { recursive: true, force: true });
+    fs.rmSync(project.directory, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
 });
 
 (async () => {

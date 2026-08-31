@@ -64,7 +64,16 @@ function withWorkspace(action) {
     const service = new CompactModuleWorkerService({ log: () => undefined });
     return action({ directory, service }).finally(async () => {
         await service.dispose();
-        fs.rmSync(directory, { recursive: true, force: true });
+        fs.rmSync(directory, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
     });
 }
 
@@ -463,7 +472,16 @@ function writeModule(directory, name, source) {
                 );
             })().finally(async () => {
                 await service.dispose();
-                fs.rmSync(directory, { recursive: true, force: true });
+                fs.rmSync(directory, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
             });
         }
     );
@@ -490,7 +508,16 @@ function writeModule(directory, name, source) {
                     assert.strictEqual(response.status, "failed");
                 })
                 .finally(() => {
-                    fs.rmSync(directory, { recursive: true, force: true });
+                    fs.rmSync(directory, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
                 });
         }
     );

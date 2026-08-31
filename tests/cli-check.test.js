@@ -154,7 +154,16 @@ test("один файл и несколько файлов", async () => {
             "чистый файл с полным контекстом не выводится: " + both.out
         );
     } finally {
-        await fs.promises.rm(project, { recursive: true, force: true });
+        await fs.promises.rm(project, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
     }
 });
 
@@ -186,7 +195,16 @@ test("порядок аргументов и дубли не меняют отв
             "повторённый файл не имеет права удвоить ответ"
         );
     } finally {
-        await fs.promises.rm(project, { recursive: true, force: true });
+        await fs.promises.rm(project, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
     }
 });
 
@@ -221,7 +239,16 @@ test("абсолютные пути, относительные и пробел�
             "путь с пробелами обязан работать: " + spaced.out
         );
     } finally {
-        await fs.promises.rm(project, { recursive: true, force: true });
+        await fs.promises.rm(project, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
     }
 });
 
@@ -266,7 +293,16 @@ test("отказы: без контекста, без файлов, вне ко�
             );
         }
     } finally {
-        await fs.promises.rm(project, { recursive: true, force: true });
+        await fs.promises.rm(project, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
     }
 });
 
@@ -285,7 +321,16 @@ test("нечитаемый проверяемый файл даёт свой к�
             "в stdout не имеет права попасть ничего"
         );
     } finally {
-        await fs.promises.rm(project, { recursive: true, force: true });
+        await fs.promises.rm(project, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
     }
 });
 
@@ -331,7 +376,16 @@ test("зависимости грузятся, но их сообщения не
             "сообщения зависимости не публикуются: " + result.out
         );
     } finally {
-        await fs.promises.rm(project, { recursive: true, force: true });
+        await fs.promises.rm(project, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
     }
 });
 
@@ -370,7 +424,16 @@ test("транзитивная и общая зависимость грузят
             }
         }
     } finally {
-        await fs.promises.rm(project, { recursive: true, force: true });
+        await fs.promises.rm(project, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
     }
 });
 
@@ -388,7 +451,16 @@ test("циклический импорт не зацикливает анали
 
         assert.strictEqual(result.code, RSL_CHECK_EXIT.ok);
     } finally {
-        await fs.promises.rm(project, { recursive: true, force: true });
+        await fs.promises.rm(project, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
     }
 });
 
@@ -438,7 +510,16 @@ test("отсутствующая и неоднозначная зависимо�
             "неоднозначный импорт обязан быть назван своей причиной"
         );
     } finally {
-        await fs.promises.rm(project, { recursive: true, force: true });
+        await fs.promises.rm(project, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
     }
 });
 
@@ -496,9 +577,24 @@ test("объявление зависимости влияет на диагно
     } finally {
         await fs.promises.rm(withDependency, {
             recursive: true,
-            force: true
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
         });
-        await fs.promises.rm(without, { recursive: true, force: true });
+        await fs.promises.rm(without, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
     }
 });
 
@@ -547,7 +643,16 @@ test("текстовый вывод компактен и считает вер�
             "итог обязан совпадать с числом сообщений: " + total
         );
     } finally {
-        await fs.promises.rm(project, { recursive: true, force: true });
+        await fs.promises.rm(project, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
     }
 });
 
@@ -580,7 +685,16 @@ test("краткий режим не выводит отдельных сооб�
             "отдельные сообщения в кратком режиме не выводятся"
         );
     } finally {
-        await fs.promises.rm(project, { recursive: true, force: true });
+        await fs.promises.rm(project, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
     }
 });
 
@@ -651,7 +765,16 @@ test("JSONL разбирается построчно и стабилен", asyn
             "счётчики итога обязаны сойтись с числом записей"
         );
     } finally {
-        await fs.promises.rm(project, { recursive: true, force: true });
+        await fs.promises.rm(project, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
     }
 });
 
@@ -692,7 +815,16 @@ test("кириллица и кавычки в сообщении не ломаю
             "сообщение не имеет права занимать несколько строк"
         );
     } finally {
-        await fs.promises.rm(project, { recursive: true, force: true });
+        await fs.promises.rm(project, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
     }
 });
 
@@ -739,7 +871,16 @@ test("каталог без .git анализируется как обычны�
             "в ответе не имеет права быть сведений о репозитории"
         );
     } finally {
-        await fs.promises.rm(project, { recursive: true, force: true });
+        await fs.promises.rm(project, {
+            recursive: true,
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
+        });
     }
 });
 

@@ -89,6 +89,15 @@ async function createProject(users = 6) {
  * Именно их и должна снять запись, поэтому считаются они, а не время: время на
  * шести файлах ничего не покажет, а чтение видно точно.
  */
+/** Дождаться, пока созданные стенды перестанут писать на диск. */
+const opened = [];
+
+async function settle() {
+    while (opened.length > 0) {
+        await opened.pop().flush();
+    }
+}
+
 function createStand(project, shardDirectory) {
     const index = new WorkspaceIndex();
     const uris = [project.libraryUri, ...project.userUris];
@@ -102,6 +111,7 @@ function createStand(project, shardDirectory) {
     });
 
     shards.configurePersistence(shardDirectory);
+    opened.push(shards);
 
     const referenceIndex = new ReferenceIndex({ log: () => undefined });
 
@@ -201,9 +211,24 @@ test("повторный поиск не читает неизменившиес
                 stand.reads.count
         );
     } finally {
+        /*
+         * Хранилища утихают до удаления каталога.
+         *
+         * Отложенное сохранение срабатывает через несколько секунд после
+         * последней записи и создаёт файл корзины в каталоге, который тест в
+         * это время удаляет: rm падал с ENOTEMPTY. Именно это и было тем
+         * миганием, а не подмена readFile.
+         */
+        await settle();
         await fs.promises.rm(project.directory, {
             recursive: true,
-            force: true
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
         });
     }
 });
@@ -251,9 +276,24 @@ test("изменение файла отменяет его запись", async
             "а остальные — нет: прочитано " + stand.reads.count
         );
     } finally {
+        /*
+         * Хранилища утихают до удаления каталога.
+         *
+         * Отложенное сохранение срабатывает через несколько секунд после
+         * последней записи и создаёт файл корзины в каталоге, который тест в
+         * это время удаляет: rm падал с ENOTEMPTY. Именно это и было тем
+         * миганием, а не подмена readFile.
+         */
+        await settle();
         await fs.promises.rm(project.directory, {
             recursive: true,
-            force: true
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
         });
     }
 });
@@ -328,9 +368,24 @@ test("подменённый файл той же длины и даты не о
             "всего на одну ссылку меньше, чем было"
         );
     } finally {
+        /*
+         * Хранилища утихают до удаления каталога.
+         *
+         * Отложенное сохранение срабатывает через несколько секунд после
+         * последней записи и создаёт файл корзины в каталоге, который тест в
+         * это время удаляет: rm падал с ENOTEMPTY. Именно это и было тем
+         * миганием, а не подмена readFile.
+         */
+        await settle();
         await fs.promises.rm(project.directory, {
             recursive: true,
-            force: true
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
         });
     }
 });
@@ -382,9 +437,24 @@ test("запись переживает перезапуск", async () => {
                 restarted.reads.count
         );
     } finally {
+        /*
+         * Хранилища утихают до удаления каталога.
+         *
+         * Отложенное сохранение срабатывает через несколько секунд после
+         * последней записи и создаёт файл корзины в каталоге, который тест в
+         * это время удаляет: rm падал с ENOTEMPTY. Именно это и было тем
+         * миганием, а не подмена readFile.
+         */
+        await settle();
         await fs.promises.rm(project.directory, {
             recursive: true,
-            force: true
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
         });
     }
 });
@@ -425,9 +495,24 @@ test("отсутствие ссылок тоже запоминается", asyn
                 stand.reads.count
         );
     } finally {
+        /*
+         * Хранилища утихают до удаления каталога.
+         *
+         * Отложенное сохранение срабатывает через несколько секунд после
+         * последней записи и создаёт файл корзины в каталоге, который тест в
+         * это время удаляет: rm падал с ENOTEMPTY. Именно это и было тем
+         * миганием, а не подмена readFile.
+         */
+        await settle();
         await fs.promises.rm(project.directory, {
             recursive: true,
-            force: true
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
         });
     }
 });
@@ -466,9 +551,24 @@ test("отменённый поиск ничего не запоминает", a
             "следующий поиск обязан найти всё: " + found.length
         );
     } finally {
+        /*
+         * Хранилища утихают до удаления каталога.
+         *
+         * Отложенное сохранение срабатывает через несколько секунд после
+         * последней записи и создаёт файл корзины в каталоге, который тест в
+         * это время удаляет: rm падал с ENOTEMPTY. Именно это и было тем
+         * миганием, а не подмена readFile.
+         */
+        await settle();
         await fs.promises.rm(project.directory, {
             recursive: true,
-            force: true
+            force: true,
+            /*
+             * Повторы обязательны на Windows: rm падает с ENOTEMPTY, если
+             * файл в каталоге создан только что — дескриптор ещё держится.
+             */
+            maxRetries: 20,
+            retryDelay: 25
         });
     }
 });

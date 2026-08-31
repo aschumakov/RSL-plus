@@ -320,7 +320,20 @@ export class RslReferenceShardStore {
         };
     }
 
+    /**
+     * Записать всё немедленно.
+     *
+     * Отложенное сохранение при этом снимается: оно записало бы то же самое,
+     * но уже после того, как вызывающий счёл работу законченной. Именно так
+     * проверки ловили ENOTEMPTY — отложенная запись создавала файл в каталоге,
+     * который тест в этот момент удалял.
+     */
     flush(): Promise<void> {
+        if (this.saveTimer) {
+            clearTimeout(this.saveTimer);
+            this.saveTimer = undefined;
+        }
+
         this.saving = this.saving.then(() => this.flushOnce());
 
         return this.saving;
