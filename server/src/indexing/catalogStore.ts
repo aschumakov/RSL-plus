@@ -315,6 +315,16 @@ export class RslCatalogStore {
         this.scheduleSave();
     }
 
+    /**
+     * Сверена ли запись чтением в ЭТОЙ сессии.
+     *
+     * Синхронно и без обращения к диску: обход спрашивает это на каждый файл
+     * проекта, решая, ставить ли его в очередь.
+     */
+    isConfirmed(uri: string): boolean {
+        return this.entries.get(uri)?.confirmed === true;
+    }
+
     /** Проект сменился: записи о чужих файлах не нужны. */
     retainWorkspaceFiles(uris: readonly string[]): void {
         const known = new Set(uris);
@@ -421,12 +431,34 @@ export class RslCatalogStore {
         }
 
         for (const bucket of pending) {
-            const applied = changes.get(bucket);
+            const applied = changes.get(bucket) || new Map();
+            const written = await this.saveBucket(bucket, applied);
 
-            await this.saveBucket(bucket, applied || new Map());
+            if (!written) {
+                /*
+                 * Запись не удалась — изменения остаются несохранёнными.
+                 * Забыть их значило бы потерять состав молча: на диске старое,
+                 * в памяти ничего, и никаких признаков незаконченной работы.
+                 */
+                this.dirty.add(bucket);
 
-            for (const uri of applied?.keys() || []) {
-                this.pending.delete(uri);
+                continue;
+            }
+
+            for (const [uri, snapshot] of applied) {
+                /*
+                 * Снимается только то, что и записали.
+                 *
+                 * Пока корзина писалась, обход мог прислать более свежий
+                 * состав того же файла. Безусловное удаление стирало эту
+                 * запись: на диске оставалась прежняя версия, в памяти —
+                 * пусто, и следующий запуск возвращал старое.
+                 */
+                if (this.pending.get(uri) === snapshot) {
+                    this.pending.delete(uri);
+                } else {
+                    this.dirty.add(bucket);
+                }
             }
         }
     }
@@ -488,7 +520,7 @@ export class RslCatalogStore {
     private async saveBucket(
         bucket: number,
         changes: Map<string, IRslCatalogRecord | null>
-    ): Promise<void> {
+    ): Promise<boolean> {
         const target = this.bucketPath(bucket);
         const files = await this.mergeBucket(bucket, changes);
 
@@ -496,7 +528,7 @@ export class RslCatalogStore {
             if (files.length === 0) {
                 await fs.promises.rm(target, { force: true });
 
-                return;
+                return true;
             }
 
             /* Через временный файл: оборванная запись оставила бы огрызок. */
@@ -509,10 +541,15 @@ export class RslCatalogStore {
                 "utf8"
             );
             await fs.promises.rename(temporary, target);
+
+            return true;
         } catch (error) {
             this.options.log?.(
                 "Не удалось сохранить состав проекта: " + error
             );
+
+            /* Вызывающий вернёт корзину в очередь: см. flushOnce. */
+            return false;
         }
     }
 

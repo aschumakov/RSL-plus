@@ -28,6 +28,7 @@ const {
 } = require("../server/out/indexing/workspaceCatalog");
 const {
     restoreRslCatalogRecords,
+    RslCatalogRestore,
     RSL_CATALOG_RESTORE_SLICE_MS
 } = require("../server/out/indexing/catalogRestore");
 
@@ -187,6 +188,52 @@ test("один патологически большой файл перенос
         catalog.modulesExporting("Sym0_0"),
         ["file:///d:/p/m0.mac"],
         "и первое тоже"
+    );
+});
+
+test("порции не ломают тождество одноимённых объявлений", async () => {
+    /*
+     * Тождество символа — пара {uri, symbolId}, и номер повторения
+     * одноимённых объявлений считается по всему файлу. Пока дробление жило
+     * снаружи каталога, каждая порция начинала счёт заново, и объявления по
+     * разные стороны границы получали один и тот же symbolId.
+     */
+    const declarations = [];
+
+    for (let number = 0; number < 5; number++) {
+        declarations.push({
+            name: "same",
+            kind: "macro",
+            visibility: "public",
+            line: number,
+            character: 0,
+            children: []
+        });
+    }
+
+    const catalog = new WorkspaceCatalog();
+    const restore = new RslCatalogRestore(catalog, {
+        isOpen: () => false,
+        /* Порция меньше числа объявлений: граница обязана пройти внутри. */
+        batch: 2
+    });
+
+    await restore.add({
+        uri: "file:///d:/p/same.mac",
+        stamp: { mtimeMs: 1, size: 1 },
+        declarations,
+        imports: [],
+        fileReferences: []
+    });
+
+    const found = catalog.findByName("same");
+
+    assert.strictEqual(found.length, 5, "все объявления попали в каталог");
+    assert.strictEqual(
+        new Set(found.map(item => item.symbolId)).size,
+        5,
+        "у каждого свой symbolId: " +
+            found.map(item => item.symbolId).join(", ")
     );
 });
 

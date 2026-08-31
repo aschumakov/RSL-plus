@@ -101,8 +101,17 @@ function extractTarball(tarball, target) {
     }
 }
 
-/** Состав пакета по мнению самого npm. */
-function packedFiles() {
+/**
+ * Состав пакета по мнению самого npm.
+ *
+ * Сборка запускается заранее, а скрипты у самого npm выключены. Иначе
+ * получается ловушка: `--ignore-scripts` не даёт prepack собрать bundle, но
+ * состав уже проверяется — и на чистом checkout, где bundle ещё нет, проверка
+ * падает, а на дереве после первого `npm pack` проходит.
+ */
+async function packedFiles() {
+    await require("../build/bundle").buildRslBundle("cli");
+
     const raw = execFileSync(
         NPM,
         ["pack", "--dry-run", "--json", "--ignore-scripts"],
@@ -118,8 +127,8 @@ function packedFiles() {
     return info.files.map(item => item.path);
 }
 
-test("в пакет попадают и запускающий файл, и bundle", () => {
-    const names = packedFiles();
+test("в пакет попадают и запускающий файл, и bundle", async () => {
+    const names = await packedFiles();
 
     for (const required of ["bin/rsl-plus.js", "bin/rsl-plus-cli.js"]) {
         assert.ok(

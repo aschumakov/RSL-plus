@@ -81,27 +81,24 @@ export class RslCatalogRestore {
         }
 
         /*
-         * Крупный файл заводится порциями и дополняется, а не переписывается:
-         * recordDeclarations заменяет состав файла целиком, поэтому первая
-         * порция создаёт запись, а остальные к ней добавляются.
+         * Крупный файл записывается порциями самим каталогом.
+         *
+         * Дробить его снаружи нельзя: тождество символа считается по всему
+         * файлу — номер повторения одноимённых объявлений и идентификатор
+         * модуля общие, — и отдельными вызовами записи одинаковые объявления
+         * по разные стороны границы порции получали бы один symbolId.
          */
-        for (let at = 0; at < declarations.length; at += this.batch) {
-            await this.yieldIfNeeded();
-
-            const part = declarations.slice(at, at + this.batch);
-
-            if (at === 0) {
-                this.catalog.recordDeclarations({
-                    uri: record.uri,
-                    version: 0,
-                    declarations: part,
-                    imports: record.imports,
-                    fileReferences: new Set(record.fileReferences)
-                });
-            } else {
-                this.catalog.appendDeclarations(record.uri, part);
-            }
-        }
+        await this.catalog.recordDeclarationsInBatches(
+            {
+                uri: record.uri,
+                version: 0,
+                declarations,
+                imports: record.imports,
+                fileReferences: new Set(record.fileReferences)
+            },
+            this.batch,
+            () => this.yieldIfNeeded()
+        );
 
         this.restored++;
     }

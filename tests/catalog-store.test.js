@@ -39,6 +39,9 @@ const {
 const {
     extractCompactDeclarations
 } = require("../server/out/analysis/declarationExtractor");
+const {
+    RslCatalogRestore
+} = require("../server/out/indexing/catalogRestore");
 
 let passed = 0;
 let failed = 0;
@@ -193,29 +196,45 @@ test("сохранённый состав возвращается в катал
             "каталог обязан быть полным до начала обхода"
         );
 
-        /* И обход не читает ничего: файлы не менялись. */
+        /*
+         * Обход сверяет восстановленное — по одному чтению на файл.
+         *
+         * Прежде здесь стояло «не читает ничего», и это было ошибкой: у
+         * восстановленной записи есть строковые ссылки, обход считал по ним
+         * файл полностью известным и не ставил его в очередь. Сверка не
+         * выполнялась ни разу, а символ из подменённого между запусками файла
+         * оставался в Ctrl+T до конца сессии.
+         */
         second.start();
         await second.service.runToCompletion();
 
         assert.strictEqual(
             secondReads.length,
-            0,
-            "неизменившиеся файлы не читаются: прочитано " + secondReads.length
-        );
-        /*
-         * Файлы не просто не читаются — они и в очередь не попадают: обход
-         * достраивает каталог, а достраивать в нём нечего.
-         */
-        assert.strictEqual(
-            second.service.progress.done,
-            0,
-            "обходу нечего делать: обработано " +
-                second.service.progress.done
+            FILES,
+            "обход обязан сверить каждый восстановленный файл"
         );
         assert.strictEqual(
             symbolCount(second.index),
             expected,
             "и каталог остался полным"
+        );
+
+        /*
+         * Сверенное второй раз не читается: записи уже подтверждены.
+         *
+         * flush обязателен: обход зовёт запись, не дожидаясь её, и у
+         * последних файлов она ещё не дошла до хранилища. На сервере между
+         * обходами проходит куда больше времени, здесь его надо дождаться.
+         */
+        await secondStore.flush();
+        secondReads.length = 0;
+        second.service.add(project.files.map(item => item.uri));
+        await second.service.runToCompletion();
+
+        assert.deepStrictEqual(
+            secondReads,
+            [],
+            "подтверждённые записи не перечитываются"
         );
     } finally {
         /*
@@ -227,6 +246,98 @@ test("сохранённый состав возвращается в катал
             force: true,
             maxRetries: 10,
             retryDelay: 50
+        });
+    }
+});
+
+test("восстановленный каталог сверяется обходом в порядке сервера", async () => {
+    /*
+     * Точный порядок сервера: load → restore.add → warmup.add →
+     * runToCompletion. Прежние проверки читали хранилище, но НЕ клали состав в
+     * каталог, и потому не видели главного: у восстановленной записи есть
+     * строковые ссылки, а обход считал по ним файл полностью известным и не
+     * ставил его в очередь вовсе. Сверка «один раз за сессию» не выполнялась
+     * ни разу, и символ из файла, изменённого между запусками, оставался в
+     * Ctrl+T до конца сессии.
+     */
+    const project = await createProject();
+    const storeDirectory = path.join(project.directory, "store");
+    let next;
+
+    try {
+        const first = new RslCatalogStore({
+            buckets: 4,
+            saveDebounceMs: 600_000
+        });
+
+        first.configurePersistence(storeDirectory);
+
+        const firstBoard = createWarmup(project, first, []);
+
+        firstBoard.start();
+        await firstBoard.service.runToCompletion();
+        await first.flush();
+
+        /* Файл подменён, пока сервер не работал. */
+        const changed = project.files[3];
+
+        await fs.promises.writeFile(
+            changed.file,
+            "Macro RenamedThree(value)\n  return value;\nEnd;\n",
+            "utf8"
+        );
+
+        next = new RslCatalogStore({ buckets: 4, saveDebounceMs: 600_000 });
+
+        next.configurePersistence(storeDirectory);
+
+        const reads = [];
+        const board = createWarmup(project, next, reads);
+        const restore = new RslCatalogRestore(board.index.catalog, {
+            isOpen: () => false
+        });
+
+        await next.load(
+            project.files.map(item => item.uri),
+            record => restore.add(record)
+        );
+
+        assert.strictEqual(
+            restore.count,
+            FILES,
+            "каталог восстановлен целиком: он и нужен сразу"
+        );
+        assert.deepStrictEqual(
+            board.index.catalog.modulesExporting("Symbol3"),
+            [changed.uri],
+            "до обхода в каталоге ещё прежний символ — так и задумано"
+        );
+
+        board.start();
+        await board.service.runToCompletion();
+
+        assert.deepStrictEqual(
+            [...reads].sort(),
+            project.files.map(item => item.uri).sort(),
+            "обход обязан сверить каждый восстановленный файл"
+        );
+        assert.deepStrictEqual(
+            board.index.catalog.modulesExporting("Symbol3"),
+            [],
+            "прежний символ обязан уйти из каталога"
+        );
+        assert.deepStrictEqual(
+            board.index.catalog.modulesExporting("RenamedThree"),
+            [changed.uri],
+            "а новый — появиться"
+        );
+    } finally {
+        await next?.flush?.();
+        await fs.promises.rm(project.directory, {
+            recursive: true,
+            force: true,
+            maxRetries: 20,
+            retryDelay: 25
         });
     }
 });
@@ -309,6 +420,97 @@ test("изменившийся файл перечитывается, остал
             force: true,
             maxRetries: 10,
             retryDelay: 50
+        });
+    }
+});
+
+test("правка во время сохранения не теряется", async () => {
+    /*
+     * Пока корзина пишется, обход присылает более свежий состав того же файла.
+     * Прежде flush снимал несохранённое безусловно: на диске оставалась
+     * прежняя версия, в памяти — пусто, и никаких признаков незаконченной
+     * работы. Следующий запуск возвращал старое.
+     */
+    const project = await createProject();
+    const storeDirectory = path.join(project.directory, "store");
+    const store = new RslCatalogStore({ buckets: 4, saveDebounceMs: 600_000 });
+
+    store.configurePersistence(storeDirectory);
+
+    const target = project.files[0];
+    const declare = name => [{
+        name,
+        kind: "macro",
+        visibility: "public",
+        line: 0,
+        character: 6,
+        children: []
+    }];
+
+    /* Переименование задерживается: в эту щель и попадает вторая запись. */
+    const originalRename = fs.promises.rename;
+    let releaseRename = () => undefined;
+    const renameReached = new Promise(resolve => {
+        fs.promises.rename = async (...args) => {
+            resolve();
+
+            await new Promise(next => {
+                releaseRename = next;
+            });
+
+            return originalRename(...args);
+        };
+    });
+
+    try {
+        await store.record(target.uri, declare("V1"), [], []);
+
+        const saving = store.flush();
+
+        await renameReached;
+
+        /* Второй состав того же файла приходит посреди записи. */
+        await store.record(target.uri, declare("V2"), [], []);
+
+        releaseRename();
+        await saving;
+
+        fs.promises.rename = originalRename;
+
+        assert.ok(
+            store.stats.pendingDeclarations > 0,
+            "свежая запись обязана остаться несохранённой, а не исчезнуть"
+        );
+        assert.ok(
+            store.stats.dirtyBuckets > 0,
+            "и её корзина обязана остаться в очереди на запись"
+        );
+
+        /* Досохранение и перезапуск: на диске обязана оказаться V2. */
+        await store.flush();
+
+        const restarted = new RslCatalogStore({
+            buckets: 4,
+            saveDebounceMs: 600_000
+        });
+
+        restarted.configurePersistence(storeDirectory);
+
+        const records = await loadRecords(restarted, [target.uri]);
+
+        assert.deepStrictEqual(
+            records.map(item => item.declarations.map(one => one.name)),
+            [["V2"]],
+            "после перезапуска обязана вернуться свежая версия"
+        );
+    } finally {
+        fs.promises.rename = originalRename;
+        await store.flush();
+        await fs.promises.rm(project.directory, {
+            recursive: true,
+            force: true,
+            maxRetries: 20,
+            retryDelay: 25
         });
     }
 });

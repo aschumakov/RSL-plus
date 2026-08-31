@@ -299,41 +299,118 @@ export class WorkspaceCatalog {
      * первой.
      */
     /**
-     * Дописать объявления к уже записанному файлу.
+     * Записать состав файла порциями, уступая поток между ними.
      *
      * Нужно ровно одному месту — переносу сохранённого каталога, — и только
-     * ради непрерывности занятости потока: recordDeclarations заменяет состав
-     * файла целиком, а один файл на 25 000 объявлений держит поток 40 мс при
-     * бюджете 25. Порции идут через это дополнение, поэтому смысл записи не
-     * меняется: тот же состав, разложенный на части.
+     * ради непрерывности занятости: 25 000 объявлений в одном файле держат
+     * поток 40 мс при бюджете 25, а 100 000 — 190 мс. На проверенном проекте
+     * худший файл — 4140 объявлений и 3,7 мс, то есть запас шестикратный, но
+     * патология обязана не ломать отзывчивость, а не «встречаться редко».
+     *
+     * Дробление живёт ЗДЕСЬ, а не у вызывающего, потому что тождество символа
+     * считается по всему файлу: номер повторения одноимённых объявлений и
+     * идентификатор модуля общие для всех порций. Разложить это на отдельные
+     * вызовы записи нельзя — одинаковые объявления по разные стороны границы
+     * порции получали бы один и тот же symbolId.
      */
-    appendDeclarations(
-        uri: string,
-        declarations: readonly IRslDeclarationDescriptor[]
-    ): void {
-        const previous = this.modules.get(uri);
+    async recordDeclarationsInBatches(
+        source: {
+            uri: string;
+            version: number;
+            declarations: readonly IRslDeclarationDescriptor[];
+            imports: readonly string[];
+            fileReferences?: ReadonlySet<string>;
+        },
+        batchSize: number,
+        onBatch?: () => void | Promise<void>
+    ): Promise<void> {
+        const size = Math.max(1, batchSize);
+        const declarations = source.declarations;
+        const built = this.buildSymbols(source.uri, []);
 
-        if (!previous) {
-            return;
+        for (let at = 0; at < declarations.length; at += size) {
+            if (at > 0) {
+                await onBatch?.();
+            }
+
+            this.buildSymbols(
+                source.uri,
+                declarations.slice(at, at + size),
+                built
+            );
         }
 
-        const symbols: IRslCatalogSymbol[] = [];
-        const exports = new Set(previous.exports);
-        const rootId = moduleSymbolId();
-        const occurrences = new Map<string, number>();
+        const references = source.fileReferences ||
+            this.modules.get(source.uri)?.fileReferences;
+
+        this.remove(source.uri);
+        this.modules.set(source.uri, {
+            uri: source.uri,
+            version: source.version,
+            symbols: built.symbols,
+            exports: built.exports,
+            imports: source.imports.slice(),
+            fileReferences: references
+        });
+        this.attachExports(source.uri, built.exports);
+        this.attachFileReferences(source.uri, references);
+
+        /* Индексация тоже порциями: на 50 000 символов она не мгновенна. */
+        for (let at = 0; at < built.symbols.length; at += size) {
+            if (at > 0) {
+                await onBatch?.();
+            }
+
+            this.indexSymbols(
+                source.uri,
+                built.symbols.slice(at, at + size)
+            );
+        }
+
+        this.revisionValue++;
+    }
+
+    /**
+     * Разбор дескрипторов в символы каталога.
+     *
+     * Состояние — номера повторений и идентификатор модуля — живёт в
+     * возвращаемом объекте, поэтому одну и ту же сборку можно продолжать
+     * несколькими вызовами: см. recordDeclarationsInBatches.
+     */
+    private buildSymbols(
+        uri: string,
+        declarations: readonly IRslDeclarationDescriptor[],
+        state?: {
+            symbols: IRslCatalogSymbol[];
+            exports: Set<string>;
+            rootId: SymbolId;
+            occurrences: Map<string, number>;
+        }
+    ): {
+        symbols: IRslCatalogSymbol[];
+        exports: Set<string>;
+        rootId: SymbolId;
+        occurrences: Map<string, number>;
+    } {
+        const built = state || {
+            symbols: [],
+            exports: new Set<string>(),
+            rootId: moduleSymbolId(),
+            occurrences: new Map<string, number>()
+        };
 
         for (const descriptor of declarations) {
             const added = appendDescriptor(
-                symbols,
+                built.symbols,
                 uri,
                 descriptor,
                 "",
-                rootId,
-                occurrences
+                built.rootId,
+                built.occurrences
             );
 
             if (added && descriptor.visibility !== "private") {
-                exports.add(added.normalized);
+                built.exports.add(added.normalized);
             }
 
             if (descriptor.kind !== "class" || !added) {
@@ -344,7 +421,7 @@ export class WorkspaceCatalog {
 
             for (const member of descriptor.children) {
                 appendDescriptor(
-                    symbols,
+                    built.symbols,
                     uri,
                     member,
                     descriptor.name,
@@ -354,14 +431,7 @@ export class WorkspaceCatalog {
             }
         }
 
-        this.modules.set(uri, {
-            ...previous,
-            symbols: [...previous.symbols, ...symbols],
-            exports
-        });
-        this.indexSymbols(uri, symbols);
-        this.attachExports(uri, exports);
-        this.revisionValue++;
+        return built;
     }
 
     recordDeclarations(source: {

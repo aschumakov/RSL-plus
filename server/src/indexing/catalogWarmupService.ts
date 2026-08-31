@@ -62,6 +62,8 @@ export interface IRslCatalogWarmupOptions {
 /** Что обходу нужно от сохранённого состава проекта. */
 export interface IRslCatalogWarmupStore {
     isUnchanged(uri: string): Promise<boolean>;
+    /** Сверена ли запись чтением в этой сессии; см. RslCatalogStore. */
+    isConfirmed(uri: string): boolean;
     record(
         uri: string,
         declarations: readonly IRslDeclarationDescriptor[],
@@ -203,7 +205,20 @@ export class RslCatalogWarmupService {
      * переименование файла не нашло бы ссылку в нём.
      */
     private isComplete(uri: string): boolean {
-        return this.options.index.catalog.hasFileReferences(uri);
+        if (!this.options.index.catalog.hasFileReferences(uri)) {
+            return false;
+        }
+
+        /*
+         * Восстановленная запись — ещё не прочитанный файл.
+         *
+         * Строковые ссылки у неё есть, потому что их сохранили прошлым
+         * запуском, и по одному их наличию файл выглядел полностью известным:
+         * обход не ставил его в очередь вовсе. Обещанная сверка «один раз за
+         * сессию» при этом не выполнялась ни разу, и символ из файла,
+         * изменённого между запусками, оставался в Ctrl+T до конца сессии.
+         */
+        return !this.options.store || this.options.store.isConfirmed(uri);
     }
 
     private schedule(): void {
