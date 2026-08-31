@@ -59,7 +59,11 @@ function sources(overrides = {}) {
             persisted: 6000
         }),
         referenceShards: () => ({ files: 12, names: 30, buckets: 2 }),
-        catalogStore: () => ({ files: 6165, loaded: true }),
+        catalogStore: () => ({
+            files: 6165,
+            declarations: 98640,
+            loaded: true
+        }),
         importContexts: () => 8,
         diagnosticCache: () => ({ entries: 5, bytes: 4096 }),
         semanticTokens: () => 7,

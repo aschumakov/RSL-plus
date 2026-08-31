@@ -113,6 +113,7 @@ function createStand(project, shardDirectory) {
     return {
         index,
         shards,
+        referenceIndex,
         reads,
         /** Поиск ссылок на SharedHelper из библиотеки. */
         async find() {
@@ -121,12 +122,21 @@ function createStand(project, shardDirectory) {
 
             reads.count = 0;
             fs.promises.readFile = (...args) => {
+                const target = String(args[0]);
+
                 /*
-                 * Считаются только исходники: чтение самих записей — это и
-                 * есть та работа, ради которой они заведены, и записывать её
-                 * в расход бессмысленно.
+                 * Считаются только исходники ЭТОГО проекта.
+                 *
+                 * Подмена глобальная, а поиск асинхронный: без проверки
+                 * каталога поиску засчиталось бы любое чтение .mac, случившееся
+                 * в это время в том же процессе, — например фоновая работа
+                 * предыдущего стенда. Чтение самих записей не считается: это и
+                 * есть та работа, ради которой они заведены.
                  */
-                if (/\.mac$/iu.test(String(args[0]))) {
+                if (
+                    target.startsWith(project.directory) &&
+                    /\.mac$/iu.test(target)
+                ) {
                     reads.count++;
                 }
 
@@ -334,6 +344,12 @@ test("запись переживает перезапуск", async () => {
         const expected = await first.find();
 
         await first.shards.flush();
+        /*
+         * Прежний стенд обязан утихнуть до создания нового: его индекс
+         * идентификаторов дочитывает файлы того же каталога отложенно, и на
+         * загруженной машине это чтение попадало в расход уже новому стенду.
+         */
+        await first.referenceIndex.flush();
 
         /* Новый стенд — как новый запуск сервера: в памяти ничего нет. */
         const restarted = createStand(project, shardDirectory);

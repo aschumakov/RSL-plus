@@ -51,7 +51,11 @@ export interface IRslStatusSources {
     catalog(): { modules: number; symbols: number; bytes: number };
     referenceIndex(): { files: number; identifiers: number; persisted: number };
     referenceShards(): { files: number; names: number; buckets: number };
-    catalogStore(): { files: number; loaded: boolean };
+    catalogStore(): {
+        files: number;
+        declarations: number;
+        loaded: boolean;
+    };
     importContexts(): number;
     diagnosticCache(): { entries: number; bytes: number };
     semanticTokens(): number;
@@ -116,6 +120,16 @@ export function collectRslServerStatus(
                 name: "Сохранённый состав проекта",
                 count: store.files,
                 unit: store.loaded ? "файлов" : "файлов (не читался)"
+            },
+            {
+                /*
+                 * Второй экземпляр состава: рабочий каталог держит свой.
+                 * В отчёте назывались только файлы, и эта память была не
+                 * видна вовсе — на 6165 модулях около 16 МиБ.
+                 */
+                name: "Сохранённый состав: объявления",
+                count: store.declarations,
+                unit: "объявлений"
             },
             {
                 name: "Индекс идентификаторов",

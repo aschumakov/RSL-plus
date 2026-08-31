@@ -838,6 +838,7 @@ connection.onInitialized(() => {
             },
             catalogStore: () => ({
                 files: catalogStore.stats.files,
+                declarations: catalogStore.stats.declarations,
                 loaded: catalogStore.stats.loaded
             }),
             importContexts: () => workspaceIndex.importCacheSize,
