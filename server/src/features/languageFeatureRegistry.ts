@@ -37,6 +37,12 @@ import { RslDefinitionProvider } from "./definitionProvider";
 import { buildEnhancedRslCodeActions } from "./enhancedCodeActions";
 import { RSL_IMPORT_REFACTORS } from "./importSourceActions";
 import {
+    extractVariableRefactor,
+    inlineVariableRefactor
+} from "./extractRefactors";
+import { extractMacroRefactor } from "./extractMacro";
+import { generateOverrideRefactor } from "./generateOverride";
+import {
     createRslRefactorRegistry,
     type IRslRefactorOptions
 } from "./refactorRegistry";
@@ -176,7 +182,11 @@ export class RslLanguageFeatureRegistry {
      * редактор спрашивает действия на каждое движение курсора.
      */
     private readonly refactors = createRslRefactorRegistry([
-        ...RSL_IMPORT_REFACTORS
+        ...RSL_IMPORT_REFACTORS,
+        extractVariableRefactor,
+        extractMacroRefactor,
+        inlineVariableRefactor,
+        generateOverrideRefactor
     ]);
 
     /** Настройки, влияющие на текст, который дописывает рефакторинг. */
@@ -431,6 +441,11 @@ export class RslLanguageFeatureRegistry {
             }
 
             this.environment.noteInteractiveActivity?.();
+            /*
+             * Реестр отбирает свои действия по `only` сам, поэтому его ответ
+             * годится и запросу Source Actions, и обычному: в первом случае в
+             * нём окажутся только source.*, во втором — ещё и refactor.*.
+             */
             const sourceActions = [
                 ...buildRslSourceCodeActions(module, params),
                 ...this.buildRefactorActions(module, params, cancellationToken)
