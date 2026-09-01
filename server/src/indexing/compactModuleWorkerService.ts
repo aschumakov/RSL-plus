@@ -28,9 +28,20 @@ export interface ICompactModuleWorkerOptions {
  * Куда отдать ответ.
  *
  * Ждущих у одного запроса бывает несколько: объединяются только те, кто
- * спросил ровно одно и то же — см. coalescingKey, — поэтому ответ у них общий.
+ * спросил ровно одно и то же — см. coalescingKey, — поэтому СОДЕРЖИМОЕ ответа
+ * у них общее.
+ *
+ * Номер запроса и поколение при этом у каждого свои. Они не про содержимое, а
+ * про самого спросившего: поколение решает, нужен ли результат ещё, а номер
+ * сопоставляет ответ с запросом. Присоединившемуся доставался номер того, к
+ * кому он присоединился, — то есть ответ был про чужой запрос. Пользовательской
+ * ошибки из этого не выросло: сегодняшние потребители сверяются со своим
+ * состоянием, а не с этими полями. Но поле, которое молча врёт, — ловушка для
+ * первого, кто ему поверит.
  */
 interface IWaiter {
+    id: number;
+    generation: number;
     resolve(response: ICompactModuleResponse): void;
 }
 
@@ -204,7 +215,11 @@ export class CompactModuleWorkerService {
             this.promote(waiting, request.priority);
 
             return new Promise<ICompactModuleResponse>(resolve => {
-                waiting.waiters.push({ resolve });
+                waiting.waiters.push({
+                    id,
+                    generation: request.generation,
+                    resolve
+                });
             });
         }
 
@@ -234,7 +249,11 @@ export class CompactModuleWorkerService {
             const entry: IPendingRequest = {
                 request,
                 priority: priority ?? "foreground",
-                waiters: [{ resolve }],
+                waiters: [{
+                    id: request.id,
+                    generation: request.generation,
+                    resolve
+                }],
                 resolve: response => this.answer(key, entry, response)
             };
 
@@ -261,10 +280,21 @@ export class CompactModuleWorkerService {
         }
 
         /*
-         * Ответ один на всех: спрашивали они одно и то же — см. coalescingKey.
+         * Содержимое одно на всех — спрашивали они одно и то же, см.
+         * coalescingKey, — а номер запроса и поколение у каждого свои.
+         * Копия делается только тем, кому она нужна.
          */
         for (const waiter of entry.waiters) {
-            waiter.resolve(response);
+            waiter.resolve(
+                waiter.id === response.id &&
+                waiter.generation === response.generation
+                    ? response
+                    : {
+                        ...response,
+                        id: waiter.id,
+                        generation: waiter.generation
+                    }
+            );
         }
     }
 

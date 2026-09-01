@@ -112,6 +112,47 @@ test("два потребителя одного URI дают один запр�
         assert.strictEqual(service.stats.coalesced, 1);
     }));
 
+test("присоединившийся получает ответ про СВОЙ запрос", () =>
+    withWorkspace(async ({ directory, service }) => {
+        /*
+         * Содержимое у объединённых общее, а номер запроса и поколение — свои.
+         * Они не про файл, а про спросившего: поколение решает, нужен ли
+         * результат ещё, номер сопоставляет ответ с запросом.
+         */
+        const busy = occupyWorker(directory, service, "busy.mac");
+        const { uri } = writeModule(directory, "shared-ids.mac", SOURCE);
+        const before = service.stats.dispatched;
+        const [first, second, third] = await Promise.all([
+            service.index({ uri, generation: 7, priority: "background" }),
+            service.index({ uri, generation: 42, priority: "background" }),
+            service.index({ uri, generation: 42, priority: "foreground" }),
+            busy
+        ]);
+
+        assert.strictEqual(
+            service.stats.dispatched - before,
+            1,
+            "спрашивали одно и то же: запрос обязан быть один"
+        );
+        assert.deepStrictEqual(
+            [first.generation, second.generation, third.generation],
+            [7, 42, 42],
+            "каждому — его поколение, а не поколение соседа"
+        );
+        assert.strictEqual(
+            new Set([first.id, second.id, third.id]).size,
+            3,
+            "и свой номер запроса у каждого"
+        );
+        assert.deepStrictEqual(
+            second.declarations.map(item => item.name),
+            first.declarations.map(item => item.name),
+            "а содержимое общее"
+        );
+        assert.strictEqual(second.uri, first.uri);
+        assert.strictEqual(second.status, first.status);
+    }));
+
 test("фоновый запрос повышается пришедшим интерактивным", () =>
     withWorkspace(async ({ directory, service }) => {
         const { uri: busy } = writeModule(directory, "busy.mac", SOURCE);
