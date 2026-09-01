@@ -65,7 +65,7 @@ function removeTree(directory) {
  * и именно они уходят дальше в индекс References — тот самый путь, где файл
  * читался второй раз.
  */
-async function createProject(users = 6) {
+async function createProject(users = 6, padBytes = 0) {
     const directory = await fs.promises.mkdtemp(
         path.join(os.tmpdir(), "rsl-read-count-")
     );
@@ -90,6 +90,15 @@ async function createProject(users = 6) {
             " + OtherHelper(" + number + ");\nEnd;\n",
             "utf8"
         );
+        if (padBytes > 0) {
+            /* Наполнитель: кандидаты должны переполнить кэш прочитанного. */
+            fs.appendFileSync(
+                file,
+                "\n/* " + "x".repeat(padBytes) + " */\n",
+                "utf8"
+            );
+        }
+
         userPaths.push(file);
     }
 
@@ -216,6 +225,48 @@ test("холодная сессия: каждый файл читается не
             twice,
             [],
             "файлы, прочитанные больше одного раза: " + twice.join(", ")
+        );
+    } finally {
+        removeTree(project.directory);
+    }
+});
+
+test("кандидатов больше, чем помещается в кэш чтений", async () => {
+    /*
+     * Кэш прочитанного ограничен по объёму, а кандидатов бывает много: на
+     * проверенном проекте популярное имя даёт 2533 файла на 66 МБ. Если обе
+     * фазы идут по всему списку подряд, к моменту добора через индекс кэш уже
+     * не держит начало списка, и файлы читаются по второму разу.
+     *
+     * Здесь файлы крупные и их достаточно, чтобы предел кэша был пройден.
+     */
+    const project = await createProject(80, 400_000);
+    const shardsDirectory = path.join(project.directory, "shards");
+
+    try {
+        const first = session(project, shardsDirectory);
+
+        await first.find();
+        await first.shards.flush();
+
+        const second = session(project, shardsDirectory);
+        const watch = countReads(project.directory);
+
+        try {
+            await second.find("OtherHelper");
+        } finally {
+            var reads = watch.stop();
+        }
+
+        const twice = [...reads.entries()]
+            .filter(([, count]) => count > 1)
+            .map(([file, count]) => path.basename(file) + ": " + count);
+
+        assert.deepStrictEqual(
+            twice,
+            [],
+            "объём кандидатов не оправдывает второе чтение: " +
+            twice.join(", ")
         );
     } finally {
         removeTree(project.directory);

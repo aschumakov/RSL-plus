@@ -21,6 +21,20 @@ import type {
 } from "./referenceShards";
 import { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 
+/*
+ * Сколько кандидатов проходит обе фазы за раз и сколько им отведено памяти.
+ *
+ * Пакет обязан помещаться в свой кэш прочитанного целиком: иначе часть файлов
+ * вытесняется до того, как до них дойдёт вторая фаза, и читается второй раз.
+ * Отсюда и числа: самый крупный файл проверенного проекта — 770 КБ, тридцать
+ * два таких дают 24 МБ, и предел взят с запасом. Обычный файл там 17 КБ, то
+ * есть настоящий пакет весит около полумегабайта.
+ *
+ * Кэш живёт ровно пакет и освобождается вместе с ним.
+ */
+const REFERENCE_CANDIDATE_BATCH = 32;
+const REFERENCE_BATCH_CACHE_BYTES = 32 * 1024 * 1024;
+
 const REFERENCE_CPU_SLICE_MS = 8;
 
 /** Совместимый быстрый поиск только по уже открытым полным моделям. */
@@ -190,101 +204,120 @@ export async function findRslReferencesForSymbol(
      * Запись появилась при первом таком запросе и живёт, пока файл не менялся.
      */
     /*
-     * Прочитанное за этот запрос — общее для обоих хранилищ.
+     * Кандидаты обрабатываются пакетами.
      *
-     * Записи о ссылках сверяют восстановленную запись чтением, а индекс
-     * References проверяет актуальность своей — тоже чтением. В холодной
-     * сессии это один и тот же файл дважды. См. RslRequestSourceCache.
+     * Обе фазы — проверка записей о ссылках и добор через индекс —
+     * читают одни и те же файлы, и общий кэш прочитанного избавляет от
+     * второго чтения. Но кэш ограничен по объёму, а популярное имя даёт
+     * на проверенном проекте 2533 файла на 66 МБ: к моменту, когда до
+     * файла дойдёт индекс, кэш его уже не держит.
+     *
+     * Поэтому пакет проходит обе фазы целиком и только потом уступает
+     * место следующему. Кэш живёт ровно пакет — расширять общий предел
+     * ради этого не нужно.
      */
-    const sources = new RslRequestSourceCache();
-    const unknownUris: string[] = [];
+    for (
+        let from = 0;
+        from < externalUris.length;
+        from += REFERENCE_CANDIDATE_BATCH
+    ) {
+        const batch = externalUris.slice(
+            from,
+            from + REFERENCE_CANDIDATE_BATCH
+        );
+        const sources = new RslRequestSourceCache(
+            REFERENCE_BATCH_CACHE_BYTES
+        );
+        const unknownUris: string[] = [];
 
-    for (const candidateUri of externalUris) {
-        if (isCancelled()) {
-            return [];
-        }
+        for (const candidateUri of batch) {
+            if (isCancelled()) {
+                return [];
+            }
 
-        const recorded = shards
-            ? await shards.lookup(candidateUri, targetName, sources)
-            : undefined;
+            const recorded = shards
+                ? await shards.lookup(candidateUri, targetName, sources)
+                : undefined;
 
-        if (!recorded) {
-            unknownUris.push(candidateUri);
-            continue;
-        }
-
-        for (const reference of recorded) {
-            if (reference.targetKey !== targetKey) {
+            if (!recorded) {
+                unknownUris.push(candidateUri);
                 continue;
             }
 
-            if (reference.isDeclaration && !includeDeclaration) {
-                continue;
-            }
-
-            addLocation(result, seen, candidateUri, {
-                start: {
-                    line: reference.startLine,
-                    character: reference.startCharacter
-                },
-                end: {
-                    line: reference.endLine,
-                    character: reference.endCharacter
+            for (const reference of recorded) {
+                if (reference.targetKey !== targetKey) {
+                    continue;
                 }
+
+                if (reference.isDeclaration && !includeDeclaration) {
+                    continue;
+                }
+
+                addLocation(result, seen, candidateUri, {
+                    start: {
+                        line: reference.startLine,
+                        character: reference.startCharacter
+                    },
+                    end: {
+                        line: reference.endLine,
+                        character: reference.endCharacter
+                    }
+                });
+            }
+        }
+
+        const candidates = await referenceIndex.findCandidates(
+            targetName,
+            unknownUris,
+            isCancelled,
+            sources
+        );
+
+        let sliceStarted = performance.now();
+
+        for (const candidate of candidates) {
+            if (isCancelled()) {
+                return [];
+            }
+
+            const collected: IRslShardReference[] = [];
+
+            index.withTransientOpenModule(candidate.uri, candidate.source, module => {
+                collectModuleReferences(
+                    module,
+                    resolver,
+                    targetKey,
+                    targetName,
+                    targetUri,
+                    targetObject.selectionRange,
+                    includeDeclaration,
+                    result,
+                    seen,
+                    isCancelled,
+                    collected
+                );
             });
-        }
-    }
 
-    const candidates = await referenceIndex.findCandidates(
-        targetName,
-        unknownUris,
-        isCancelled,
-        sources
-    );
+            if (shards && !isCancelled()) {
+                /*
+                 * Записывается и пустой ответ: «имя в файле есть, но никуда не
+                 * ведёт» — тоже знание, без которого файл перечитывался бы каждый
+                 * раз.
+                 */
+                await shards.record(
+                    candidate.uri,
+                    targetName,
+                    collected,
+                    candidate.source
+                );
+            }
 
-    let sliceStarted = performance.now();
-
-    for (const candidate of candidates) {
-        if (isCancelled()) {
-            return [];
-        }
-
-        const collected: IRslShardReference[] = [];
-
-        index.withTransientOpenModule(candidate.uri, candidate.source, module => {
-            collectModuleReferences(
-                module,
-                resolver,
-                targetKey,
-                targetName,
-                targetUri,
-                targetObject.selectionRange,
-                includeDeclaration,
-                result,
-                seen,
-                isCancelled,
-                collected
-            );
-        });
-
-        if (shards && !isCancelled()) {
-            /*
-             * Записывается и пустой ответ: «имя в файле есть, но никуда не
-             * ведёт» — тоже знание, без которого файл перечитывался бы каждый
-             * раз.
-             */
-            await shards.record(
-                candidate.uri,
-                targetName,
-                collected,
-                candidate.source
-            );
+            if (performance.now() - sliceStarted >= REFERENCE_CPU_SLICE_MS) {
+                await yieldToInteractiveRequests();
+                sliceStarted = performance.now();
+            }
         }
 
-        if (performance.now() - sliceStarted >= REFERENCE_CPU_SLICE_MS) {
-            await yieldToInteractiveRequests();
-            sliceStarted = performance.now();
-        }
     }
 
     return result.sort(compareLocations);
