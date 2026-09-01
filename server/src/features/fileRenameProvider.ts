@@ -7,11 +7,21 @@ import type { TextDocument } from "vscode-languageserver-textdocument";
 
 import { decodeRslSourceText } from "../core/textDecoding";
 import {
+    GetImportDefinitionTargetsFromTokens,
     GetMacroFileReferencesFromTokens,
+    type IImportDefinitionTarget,
     type IRslMacroFileReference
 } from "../execMacroDefinition";
 import { lexRsl, normalizeIdentifier, type IRslToken } from "../lexer";
+import { rangeAtOffsets } from "../core/documentPosition";
 import type { WorkspaceIndex } from "../workspaceIndex";
+
+/** Текст файла и, если они уже есть, токены и начала строк той же версии. */
+interface IRenameSource {
+    text: string;
+    tokens?: readonly IRslToken[];
+    lineStarts?: readonly number[];
+}
 
 /**
  * Переименование macro-файла: правки ссылок на него.
@@ -61,13 +71,13 @@ export function buildRslFileRenameEdit(
                 continue;
             }
 
-            const text = readSource(environment, uri);
+            const source = readSource(environment, uri);
 
-            if (!text) {
+            if (!source) {
                 continue;
             }
 
-            const edits = renameEditsIn(text, oldName, newName);
+            const edits = renameEditsIn(source, oldName, newName);
 
             if (edits.length === 0) {
                 continue;
@@ -112,10 +122,24 @@ function candidateUris(
         }
 
         for (const token of module.lex?.tokens || []) {
-            if (
-                token.kind === "string" &&
-                token.raw.slice(1, -1).trim().toLowerCase() === fileName
-            ) {
+            if (token.kind !== "string") {
+                continue;
+            }
+
+            /*
+             * Сравнивается имя файла, а не вся строка.
+             *
+             * `Import "sub/lib.mac";` ссылается на тот же файл, что и
+             * `Import "lib.mac";`, но по целой строке не совпадал — и такой
+             * файл в кандидаты не попадал вовсе.
+             */
+            const written = token.raw.slice(1, -1).trim().toLowerCase();
+            const separator = Math.max(
+                written.lastIndexOf("/"),
+                written.lastIndexOf("\\")
+            );
+
+            if (written.slice(separator + 1) === fileName) {
                 result.add(module.uri);
                 break;
             }
@@ -136,24 +160,43 @@ function moduleNameOf(uri: string): string {
     }
 }
 
+/**
+ * Текст файла и токены ТОЙ ЖЕ версии, если они уже есть.
+ *
+ * Открытый документ обычно уже разобран, и его поток токенов лежит в
+ * модели. Лексировать тот же текст заново незачем: на файле 700 КБ это
+ * несколько миллисекунд на каждый переименованный файл.
+ *
+ * Токены берутся только к своему тексту: модель отстающей версии сюда не
+ * годится, поэтому сравнивается сам текст, а не номер версии.
+ */
 function readSource(
     environment: IRslRenameEnvironment,
     uri: string
-): string | undefined {
+): IRenameSource | undefined {
     const document = environment.getDocument(uri);
-
-    if (document) {
-        return document.getText();
-    }
-
     const module = environment.index.getModule(uri);
 
+    if (document) {
+        const text = document.getText();
+
+        return module?.source === text
+            ? { text, tokens: module.lex.tokens, lineStarts: module.lex.lineStarts }
+            : { text };
+    }
+
     if (module?.source) {
-        return module.source;
+        return {
+            text: module.source,
+            tokens: module.lex.tokens,
+            lineStarts: module.lex.lineStarts
+        };
     }
 
     try {
-        return decodeRslSourceText(fs.readFileSync(fileURLToPath(uri)));
+        return {
+            text: decodeRslSourceText(fs.readFileSync(fileURLToPath(uri)))
+        };
     } catch (error) {
         environment.log?.(
             `Не удалось прочитать ${uri} для переименования: ${String(error)}`
@@ -172,17 +215,23 @@ function readSource(
  * менять работающий код при переименовании файла.
  */
 function renameEditsIn(
-    text: string,
+    source: IRenameSource,
     oldName: string,
     newName: string
 ): TextEdit[] {
-    const lex = lexRsl(text, { includeTrivia: true });
+    /* Готовые токены той же версии, иначе — лексируем сами. */
+    const lex = source.tokens && source.lineStarts
+        ? undefined
+        : lexRsl(source.text, { includeTrivia: true });
+    const tokens = source.tokens || lex!.tokens;
+    const lineStarts = source.lineStarts || lex!.lineStarts;
     const wanted = normalizeIdentifier(oldName);
     const edits: TextEdit[] = [];
-    let inImport = false;
 
     /* Строковые ссылки: только первый аргумент ExecMacroFile. */
-    for (const reference of GetMacroFileReferencesFromTokens(lex.tokens)) {
+    for (const reference of GetMacroFileReferencesFromTokens(
+        tokens as IRslToken[]
+    )) {
         const edit = fileReferenceEdit(reference, oldName, newName);
 
         if (edit) {
@@ -190,28 +239,67 @@ function renameEditsIn(
         }
     }
 
-    for (const token of lex.tokens) {
-        if (token.kind === "identifier") {
-            const word = normalizeIdentifier(token.value);
+    /*
+     * Директивы Import разбирает общий механизм.
+     *
+     * Здесь была своя упрощённая машина состояний: «встретили слово
+     * import — до точки с запятой правим совпавшие идентификаторы». Она
+     * не видела строковую форму `Import "lib.mac";` и не знала про пути,
+     * а поддерживаемый синтаксис Import с тех пор ушёл вперёд.
+     */
+    for (const target of GetImportDefinitionTargetsFromTokens(
+        tokens as IRslToken[]
+    )) {
+        const edit = importNameEdit(
+            source.text,
+            lineStarts,
+            target,
+            wanted,
+            newName
+        );
 
-            if (word === "import") {
-                inImport = true;
-                continue;
-            }
-
-            if (inImport && word === wanted) {
-                edits.push(replacement(token, newName));
-            }
-
-            continue;
-        }
-
-        if (token.kind === "symbol" && token.raw === ";") {
-            inImport = false;
+        if (edit) {
+            edits.push(edit);
         }
     }
 
     return edits;
+}
+
+/**
+ * Правка имени модуля в директиве Import.
+ *
+ * Меняется только само имя: путь, расширение и кавычки остаются как написаны.
+ * Диапазон имени даёт общий разбор — в него кавычки не входят, поэтому
+ * `Import "sub/lib.mac";` превращается в `Import "sub/other.mac";`, а не
+ * теряет путь.
+ */
+function importNameEdit(
+    text: string,
+    lineStarts: readonly number[],
+    target: IImportDefinitionTarget,
+    wantedName: string,
+    newName: string
+): TextEdit | undefined {
+    const written = text.slice(target.nameStart, target.nameEnd);
+    const separator = Math.max(
+        written.lastIndexOf("/"),
+        written.lastIndexOf("\\")
+    );
+    const directory = written.slice(0, separator + 1);
+    const fileName = written.slice(separator + 1);
+    const dot = fileName.lastIndexOf(".");
+    const stem = dot < 0 ? fileName : fileName.slice(0, dot);
+    const extension = dot < 0 ? "" : fileName.slice(dot);
+
+    if (normalizeIdentifier(stem) !== wantedName) {
+        return undefined;
+    }
+
+    return TextEdit.replace(
+        rangeAtOffsets(lineStarts, target.nameStart, target.nameEnd),
+        directory + newName + extension
+    );
 }
 
 /**
@@ -253,13 +341,4 @@ function fileReferenceEdit(
     };
 }
 
-function replacement(token: IRslToken, newName: string): TextEdit {
-    return {
-        range: {
-            start: { line: token.line, character: token.character },
-            end: { line: token.endLine, character: token.endCharacter }
-        },
-        newText: newName
-    };
-}
 
