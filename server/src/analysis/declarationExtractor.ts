@@ -75,6 +75,14 @@ export interface IRslDeclarationSnapshot {
      * Сам сканер объявлений их не собирает: это не объявление.
      */
     fileReferences?: readonly string[];
+    /**
+     * Хэши уникальных идентификаторов файла для поиска ссылок.
+     *
+     * Считает их тот же, кто держит текст, — компактное чтение файла.
+     * Раньше их собирал ReferenceIndex, читая тот же файл во второй раз
+     * уже на основном потоке.
+     */
+    identifierHashes?: Uint32Array;
 }
 
 interface IBlockFrame {

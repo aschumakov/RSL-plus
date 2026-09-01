@@ -107,6 +107,8 @@ export class ReferenceIndex {
     private persistedFiles = 0;
     private readBatchSize: number;
     private importGraphValidated = false;
+    /** Сколько записей пришло готовыми от компактного чтения. */
+    private acceptedFacts = 0;
 
     constructor(private options: IReferenceIndexOptions = {}) {
         this.readBatchSize = Math.max(
@@ -149,6 +151,49 @@ export class ReferenceIndex {
         if (this.entries.delete(uri)) {
             this.scheduleSave();
         }
+    }
+
+    /**
+     * Принять факты, посчитанные тем, кто уже прочитал файл.
+     *
+     * Компактное чтение файла держит текст в руках и считает и
+     * отпечаток, и хэши идентификаторов. Без этого индекс читал тот же
+     * файл во второй раз — на основном потоке и в тот момент, когда
+     * пользователь ждёт ответа на поиск ссылок.
+     *
+     * Запись помечается сверенной: отпечаток посчитан по фактическому
+     * содержимому, а не восстановлен из хранилища.
+     */
+    acceptScannedFacts(
+        uri: string,
+        fingerprint: string,
+        hashes: Uint32Array,
+        imports: readonly string[]
+    ): void {
+        if (!uri || !fingerprint) {
+            return;
+        }
+
+        const existing = this.entries.get(uri);
+
+        if (existing?.validated && existing.fingerprint === fingerprint) {
+            return;
+        }
+
+        this.entries.set(uri, {
+            fingerprint,
+            hashes,
+            imports: normalizeReferenceImports(imports),
+            validated: true
+        });
+        this.importGraphValidated = false;
+        this.acceptedFacts++;
+        this.scheduleSave();
+    }
+
+    /** Сколько раз факты пришли готовыми; для проверок и лога. */
+    get acceptedScannedFacts(): number {
+        return this.acceptedFacts;
     }
 
     indexSource(

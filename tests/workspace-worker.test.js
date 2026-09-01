@@ -141,8 +141,9 @@ function writeModule(directory, name, source) {
                 Object.keys(response).sort(),
                 [
                     "declarations", "exportsRequestedName", "fileReferences",
-                    "fingerprint", "generation", "id", "imports", "mtimeMs",
-                    "reused", "sourceLength", "status", "uri"
+                    "fingerprint", "generation", "id", "identifierHashes",
+                    "imports", "mtimeMs", "reused", "sourceLength", "status",
+                    "uri"
                 ],
                 "Состав ответа расширился — проверьте, не попал ли в него " +
                     "текст, дерево или токены"
@@ -160,6 +161,20 @@ function writeModule(directory, name, source) {
             assert.ok(
                 !/"tokens"|"root"|"lex"/.test(serialized),
                 "В ответе не должно быть token stream и синтаксического дерева"
+            );
+            /*
+             * Хэши идентификаторов — единственное добавленное поле, и оно
+             * компактно по устройству: одно число на уникальное имя, без
+             * самих имён.
+             */
+            assert.ok(
+                response.identifierHashes instanceof Uint32Array,
+                "хэши обязаны прийти типизированным массивом"
+            );
+            assert.ok(
+                response.identifierHashes.length > 0 &&
+                    response.identifierHashes.length < 200,
+                "уникальных имён немного: " + response.identifierHashes.length
             );
         })
     );

@@ -109,7 +109,16 @@ export function normalizeReferenceModuleName(value: string): string {
     return value ? normalizeModuleName(value) : "";
 }
 
-function collectIdentifierHashes(source: string): Uint32Array {
+/**
+ * Хэши уникальных идентификаторов файла — отсортированные.
+ *
+ * Обход идёт по сырому тексту, а не по токенам, и это существенно.
+ * Набор нужен как ОТСЕЧКА для поиска ссылок: пропустить файл, в котором
+ * имени нет. Имя может лежать в строке — `R2M(obj, "Method")`,
+ * `ExecMacroFile("lib.mac")` — и в комментарии; по токенам такие
+ * вхождения пропали бы, и поиск перестал бы их находить.
+ */
+export function collectIdentifierHashes(source: string): Uint32Array {
     const hashes = new Set<number>();
     let position = 0;
 

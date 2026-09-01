@@ -10,6 +10,9 @@ import {
     GetMacroFileReferenceNamesFromTokens
 } from "../execMacroDefinition";
 import { lexRsl, normalizeIdentifier } from "../lexer";
+import {
+    collectIdentifierHashes
+} from "../analysis/referenceSourceFacts";
 import { CompactModuleCache } from "./compactModuleCache";
 import type {
     ICompactModuleRequest,
@@ -228,7 +231,15 @@ export async function readCompactModule(
                 includeCallableParameters: false,
                 tokens
             }),
-            fileReferences: GetMacroFileReferenceNamesFromTokens(tokens)
+            fileReferences: GetMacroFileReferenceNamesFromTokens(tokens),
+            /*
+             * Хэши идентификаторов — тем же чтением.
+             *
+             * Их набор нужен поиску ссылок как отсечка, и собирал его
+             * ReferenceIndex сам: читал тот же файл во второй раз, уже
+             * на основном потоке. Здесь текст уже в руках.
+             */
+            identifierHashes: collectIdentifierHashes(source)
         };
         remember(fingerprint, { snapshot, sourceLength: source.length });
         diskCache.set(request.uri, {
@@ -295,6 +306,7 @@ function indexed(
         declarations: snapshot.declarations,
         imports: snapshot.imports,
         fileReferences: snapshot.fileReferences || [],
+        identifierHashes: snapshot.identifierHashes,
         reused,
         exportsRequestedName: expected === undefined
             ? undefined

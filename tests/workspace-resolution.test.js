@@ -1386,6 +1386,7 @@ async function testReferenceIndexIsLazyPersistentAndTargeted() {
         );
 
         let eagerReferenceScans = 0;
+        let factsFromCompactRead = 0;
         const loader = new WorkspaceModuleLoader(
             new WorkspaceIndex(),
             {
@@ -1398,6 +1399,13 @@ async function testReferenceIndexIsLazyPersistentAndTargeted() {
                 invalidate: () => undefined,
                 indexSource: () => {
                     eagerReferenceScans++;
+                },
+                /*
+                 * Факты приходят готовыми от компактного чтения: файл при
+                 * этом не открывается второй раз и не сканируется заново.
+                 */
+                acceptScannedFacts: () => {
+                    factsFromCompactRead++;
                 }
             }
         );
@@ -1407,6 +1415,11 @@ async function testReferenceIndexIsLazyPersistentAndTargeted() {
             eagerReferenceScans,
             0,
             "Загрузка Import не должна сканировать файл ради References"
+        );
+        assert.strictEqual(
+            factsFromCompactRead,
+            1,
+            "но факты, посчитанные тем же чтением, обязаны дойти"
         );
 
         const hashes = referenceIndexTesting.collectIdentifierHashes(

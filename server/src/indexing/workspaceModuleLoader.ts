@@ -103,6 +103,8 @@ export class WorkspaceModuleLoader {
     private backgroundResumeTimer: IRslTimerHandle | undefined;
 
     private referenceIndex: ReferenceIndex;
+    /** Сколько раз открытый документ не отправили в worker; для проверок. */
+    private skippedOpenDocuments = 0;
 
     constructor(
         private index: WorkspaceIndex,
@@ -122,6 +124,11 @@ export class WorkspaceModuleLoader {
             this.interactivePauseMs,
             this.clock
         );
+    }
+
+    /** Счётчики загрузчика: сколько работы не сделано. */
+    get loaderCounters(): { skippedOpenDocuments: number } {
+        return { skippedOpenDocuments: this.skippedOpenDocuments };
     }
 
     registerWorkspaceFiles(uris: readonly string[]): void {
@@ -870,6 +877,27 @@ export class WorkspaceModuleLoader {
             })
             : undefined;
         const known = this.index.getModule(uri);
+
+        /*
+         * Открытый документ у worker'а не спрашивают.
+         *
+         * В индексе уже лежит его полная модель из буфера редактора — более
+         * полная, чем компактная сводка, и по тому тексту, который видит
+         * пользователь. Прежде запрос всё равно уходил: файл читался с диска
+         * и сканировался, а ответ отбрасывался проверкой staleReason как
+         * documentOpened. На открытом файле в сотни килобайт это заметная
+         * работа, и достаётся она тому файлу, в котором сейчас работают.
+         */
+        if (known?.isOpen) {
+            this.skippedOpenDocuments++;
+
+            if (loadSpan) {
+                performance.end(loadSpan, { outcome: "documentOpened" });
+            }
+
+            return known;
+        }
+
         /* Номер фиксируется ДО запроса: сравнивать будем с ним. */
         const epoch = this.epochOf(uri);
         const response = await this.readCompactModule({
@@ -935,6 +963,23 @@ export class WorkspaceModuleLoader {
             });
         }
         this.indexedUris.add(uri);
+
+        /*
+         * Факты для поиска ссылок приходят тем же чтением.
+         *
+         * Иначе первый же поиск ссылок читал те же файлы во второй раз — на
+         * основном потоке и ровно тогда, когда пользователь ждёт ответа.
+         * Хэшей нет у ответа, поднятого из дискового кэша: там их не хранят,
+         * и запись индекса ссылок остаётся прежней.
+         */
+        if (response.identifierHashes) {
+            this.referenceIndex.acceptScannedFacts(
+                uri,
+                response.fingerprint,
+                response.identifierHashes,
+                response.imports
+            );
+        }
 
         const keepForeground = item?.priority === "foreground" &&
             item.generation === this.foregroundGeneration;
