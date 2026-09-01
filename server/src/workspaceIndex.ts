@@ -17,6 +17,7 @@ import type { RslSymbol } from "./symbols/rslSymbol";
 import { FileCatalog } from "./indexing/fileCatalog";
 import { WorkspaceCatalog } from "./indexing/workspaceCatalog";
 import { ImportGraph } from "./indexing/importGraph";
+import { computeRslModuleInterface } from "./indexing/moduleInterface";
 import { ModuleStore } from "./indexing/moduleStore";
 import { SymbolIndex } from "./indexing/symbolIndex";
 import type {
@@ -132,6 +133,19 @@ export class WorkspaceIndex {
     private readonly semanticRevisionByUri = new Map<string, number>();
     private semanticRevisionCounter = 0;
     private pinnedRebuildCount = 0;
+    /**
+     * Номер последнего выданного интерфейса и счётчики.
+     *
+     * Счётчики нужны проверкам и логу: разницу здесь видно не
+     * секундомером, а тем, сколько работы не сделано.
+     */
+    private interfaceRevisionCounter = 0;
+    private interfaceStats = {
+        modules: 0,
+        interfaceChanges: 0,
+        dependentInvalidations: 0,
+        skippedDependentInvalidations: 0
+    };
     private catalogValue = new WorkspaceCatalog();
 
     constructor(options: IWorkspaceIndexOptions = {}) {
@@ -248,6 +262,21 @@ export class WorkspaceIndex {
     }
 
     /** Сколько раз замыкание перестраивалось целиком; для проверок и лога. */
+    /** Счётчики интерфейсов: сколько межфайловой работы не сделано. */
+    get interfaceCounters(): {
+        modules: number;
+        interfaceChanges: number;
+        dependentInvalidations: number;
+        skippedDependentInvalidations: number;
+    } {
+        return { ...this.interfaceStats };
+    }
+
+    /** Ревизия внешнего интерфейса модуля; 0, если модуля нет. */
+    getInterfaceRevision(uri: string): number {
+        return this.modules.get(uri)?.interfaceRevision ?? 0;
+    }
+
     get pinnedRebuilds(): number {
         return this.pinnedRebuildCount;
     }
@@ -450,8 +479,16 @@ export class WorkspaceIndex {
             return "imports-disabled";
         }
 
+        /*
+         * Ключ собирается из ревизии ИНТЕРФЕЙСА, а не версии модуля.
+         *
+         * Потребителей этого ключа волнует не то, что сосед изменился,
+         * а то, изменилось ли в нём что-то видимое снаружи. Версия
+         * растёт от любой правки чужого тела и от каждого фонового
+         * перечитывания файла, и ключ устаревал без всякой причины.
+         */
         return this.getImportContext(uri).modules
-            .map(item => item.uri + "@" + item.version)
+            .map(item => item.uri + "@i" + item.interfaceRevision)
             .sort()
             .join("|");
     }
@@ -634,7 +671,14 @@ export class WorkspaceIndex {
             uri,
             ...model,
             version: previous?.version ?? 0,
-            isOpen: true
+            isOpen: true,
+            /*
+             * Временная модель живёт один вызов и в индексе не остаётся:
+             * ревизия интерфейса берётся прежняя, чтобы ключи замыкания
+             * соседних файлов от неё не дрогнули.
+             */
+            interfaceFingerprint: previous?.interfaceFingerprint ?? "",
+            interfaceRevision: previous?.interfaceRevision ?? 0
         };
         const cached = this.importContexts.get(uri);
         this.importContexts.delete(uri);
@@ -670,12 +714,30 @@ export class WorkspaceIndex {
             this.symbols.remove(previous);
             this.imports.remove(previous);
         }
+        /*
+         * Интерфейс считается по уже построенной модели: ни разбора,
+         * ни сканирования текста здесь нет.
+         */
+        const declared = computeRslModuleInterface(model);
+        const interfaceChanged =
+            previous?.interfaceFingerprint !== declared.fingerprint;
+
+        this.interfaceStats.modules++;
+
+        if (interfaceChanged) {
+            this.interfaceStats.interfaceChanges++;
+        }
+
         const module: IIndexedModule = {
             uri,
             ...model,
             version,
             isOpen,
-            fingerprint
+            fingerprint,
+            interfaceFingerprint: declared.fingerprint,
+            interfaceRevision: interfaceChanged
+                ? ++this.interfaceRevisionCounter
+                : previous!.interfaceRevision
         };
         this.modules.set(module);
         this.catalogValue.record(module);
@@ -685,6 +747,13 @@ export class WorkspaceIndex {
         this.collectAffectedUris(uri).forEach(value => affected.add(value));
         affected.add(uri);
         this.invalidateImportContexts(affected);
+
+        if (interfaceChanged) {
+            this.interfaceStats.dependentInvalidations += affected.size - 1;
+        } else {
+            this.interfaceStats.skippedDependentInvalidations +=
+                affected.size - 1;
+        }
 
         if (isOpen) {
             /*

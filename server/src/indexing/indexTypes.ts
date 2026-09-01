@@ -13,6 +13,21 @@ export interface IIndexedModule extends IRslModuleModel {
      * загрузка сослалась бы на снимок, которого в индексе уже нет.
      */
     fingerprint?: string;
+    /**
+     * Отпечаток внешнего интерфейса: Import и публичные объявления.
+     *
+     * Правка тела Macro его не меняет — см. moduleInterface.
+     */
+    interfaceFingerprint: string;
+    /**
+     * Номер, меняющийся ровно тогда, когда изменился интерфейс.
+     *
+     * Версия модуля растёт от любой правки, и ключи, собранные из неё,
+     * устаревали у соседних файлов от чужого набора текста. Здесь номер
+     * переживает правку тела и меняется от подписи, Import, класса и
+     * видимости.
+     */
+    interfaceRevision: number;
 }
 
 export interface IIndexedSymbol {
