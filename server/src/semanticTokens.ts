@@ -10,10 +10,7 @@ import {
     type IRslWorkSlice
 } from "./core/timeSlice";
 import { isNonSymbolIdentifier } from "./language/rslLanguageReference";
-import {
-    IRslToken,
-    normalizeIdentifier
-} from "./lexer";
+import { IRslToken } from "./lexer";
 import { RslScopeResolver } from "./scopeResolver";
 import {
     collectFormatSpecifierTokenStarts,
@@ -208,26 +205,16 @@ function* semanticTokenSteps(
     }
     const objectInfoByObject = new Map<RslSymbol, IObjectInfo>();
     const declarationByRange = new Map<string, IObjectInfo>();
+
     /*
-     * Оба подготовительных обхода тоже отдают управление по бюджету, а не
-     * целиком: каждый идёт по всему файлу, и вместе они занимали поток дольше
-     * любой порции основного цикла.
+     * Диапазон объявления берётся из дерева, а не ищется в потоке заново.
+     *
+     * Прежде здесь был отдельный проход по ВСЕМУ потоку токенов: он строил
+     * карту «имя -> все его вхождения», и по ней для каждого символа заново
+     * отыскивался тот идентификатор, который дерево уже описало полем
+     * selectionRange. Инвариант проверен на всех видах объявлений — см.
+     * declaration-selection-range.test.js.
      */
-    const identifiersByName = new Map<string, IRslToken[]>();
-
-    for (let index = 0; index < tokens.length; index++) {
-        if (index % CANCEL_CHECK_INTERVAL === 0 && index > 0 &&
-            (shouldYield === undefined || shouldYield())) {
-            yield;
-
-            if (isCancelled()) {
-                return { data: [] };
-            }
-        }
-
-        addToIdentifiersByName(identifiersByName, tokens[index]);
-    }
-
     for (let index = 0; index < objects.length; index++) {
         if (index % CANCEL_CHECK_INTERVAL === 0 && index > 0 &&
             (shouldYield === undefined || shouldYield())) {
@@ -239,15 +226,15 @@ function* semanticTokenSteps(
         }
 
         const info = objects[index];
-        objectInfoByObject.set(info.symbol, info);
-        const token = findDeclarationToken(identifiersByName, info.symbol);
 
-        if (token) {
-            declarationByRange.set(
-                rangeKey(token.start, token.end),
-                info
-            );
-        }
+        objectInfoByObject.set(info.symbol, info);
+        declarationByRange.set(
+            rangeKey(
+                info.symbol.selectionRange.start,
+                info.symbol.selectionRange.end
+            ),
+            info
+        );
     }
 
     /*
@@ -788,54 +775,7 @@ function findSignatureRange(
     return undefined;
 }
 
-
-/**
- * Вхождения каждого имени по всему файлу, по одному проходу.
- *
- * Нужен для поиска токена объявления. Прежде тот поиск шёл перебором от начала
- * символа до его КОНЦА, а у Macro и Class конец — это конец тела: на модуле
- * 700 КБ обход всех объектов складывался в 50 мс непрерывной работы, и это была
- * самая долгая порция подсветки. С индексом на объект приходится двоичный поиск.
- */
-function addToIdentifiersByName(
-    result: Map<string, IRslToken[]>,
-    token: IRslToken
-): void {
-    if (token.kind !== "identifier") {
-        return;
-    }
-
-    const name = normalizeIdentifier(token.value);
-    const list = result.get(name);
-
-    if (list) {
-        list.push(token);
-    } else {
-        result.set(name, [token]);
-    }
-}
-
-function findDeclarationToken(
-    identifiersByName: Map<string, IRslToken[]>,
-    symbol: RslSymbol
-): IRslToken | undefined {
-    const occurrences = identifiersByName.get(
-        normalizeIdentifier(symbol.name)
-    );
-
-    if (!occurrences) {
-        return undefined;
-    }
-
-    /* Первое вхождение имени внутри символа — то же, что находил перебор. */
-    const first = lowerBoundByStart(occurrences, symbol.range.start);
-
-    return first < occurrences.length &&
-        occurrences[first].start <= symbol.range.end
-        ? occurrences[first]
-        : undefined;
-}
-
+/** Первый токен, начинающийся не раньше смещения. */
 function lowerBoundByStart(tokens: IRslToken[], offset: number): number {
     let left = 0;
     let right = tokens.length;
@@ -852,7 +792,6 @@ function lowerBoundByStart(tokens: IRslToken[], offset: number): number {
 
     return left;
 }
-
 
 function isTokenBeforeRange(
     token: IRslToken,

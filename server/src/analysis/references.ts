@@ -55,6 +55,8 @@ export function findRslReferences(
             resolver,
             targetKey,
             targetName,
+            target.uri,
+            target.symbol.selectionRange,
             includeDeclaration,
             result,
             seen,
@@ -137,6 +139,8 @@ export async function findRslReferencesForSymbol(
             resolver,
             targetKey,
             targetName,
+            targetUri,
+            targetObject.selectionRange,
             includeDeclaration,
             result,
             seen,
@@ -153,6 +157,8 @@ export async function findRslReferencesForSymbol(
             resolver,
             targetKey,
             targetName,
+            targetUri,
+            targetObject.selectionRange,
             includeDeclaration,
             result,
             seen,
@@ -251,6 +257,8 @@ export async function findRslReferencesForSymbol(
                 resolver,
                 targetKey,
                 targetName,
+                targetUri,
+                targetObject.selectionRange,
                 includeDeclaration,
                 result,
                 seen,
@@ -287,6 +295,9 @@ function collectModuleReferences(
     resolver: RslScopeResolver,
     targetKey: string,
     targetName: string,
+    /* Где объявлена цель: URI модуля и точный диапазон её имени. */
+    targetUri: string,
+    targetSelection: { start: number; end: number },
     includeDeclaration: boolean,
     result: Location[],
     seen: Set<string>,
@@ -299,11 +310,16 @@ function collectModuleReferences(
      */
     collected?: IRslShardReference[]
 ): void {
-    const declarationToken = findDeclarationTokenByKey(
-        module,
-        targetName,
-        targetKey
-    );
+    /*
+     * Токен объявления не ищется: он уже известен.
+     *
+     * Прежде перед основным обходом шёл ещё один: он проходил дерево
+     * символов, отбирал объект по ключу и снова шёл по всему потоку
+     * токенов, чтобы найти тот идентификатор, который дерево уже описало
+     * полем selectionRange. Инвариант проверен на всех видах объявлений —
+     * см. declaration-selection-range.test.js.
+     */
+    const declarationHere = module.uri === targetUri;
 
     for (const token of module.syntax.tokens) {
         if (isCancelled()) {
@@ -323,9 +339,9 @@ function collectModuleReferences(
             token.start
         );
 
-        const declaration = !!declarationToken &&
-            declarationToken.start === token.start &&
-            declarationToken.end === token.end;
+        const declaration = declarationHere &&
+            targetSelection.start === token.start &&
+            targetSelection.end === token.end;
         const range: Range = {
             start: { line: token.line, character: token.character },
             end: { line: token.endLine, character: token.endCharacter }
@@ -376,57 +392,7 @@ function addLocation(
     result.push({ uri, range });
 }
 
-function findDeclarationTokenByKey(
-    module: IIndexedModule,
-    normalizedName: string,
-    targetKey: string
-): { start: number; end: number } | undefined {
-    const objects = findObjectsByName(module.symbolTree, normalizedName)
-        .filter(symbol => symbolKey(module.uri, symbol) === targetKey);
 
-    if (objects.length === 0) {
-        return undefined;
-    }
-
-    for (const token of module.syntax.tokens) {
-        if (
-            token.kind !== "identifier" ||
-            normalizeReferenceIdentifier(token.value) !== normalizedName
-        ) {
-            continue;
-        }
-
-        if (objects.some(symbol =>
-            symbol.range.start <= token.start && token.end <= symbol.range.end
-        )) {
-            return token;
-        }
-    }
-
-    return undefined;
-}
-
-function findObjectsByName(root: RslSymbol, name: string): RslSymbol[] {
-    const result: RslSymbol[] = [];
-    const queue: RslSymbol[] = [root];
-    let position = 0;
-
-    while (position < queue.length) {
-        const current = queue[position++];
-
-        for (const child of getReferenceTreeChildren(current)) {
-            if (normalizeIdentifier(child.name) === name) {
-                result.push(child);
-            }
-
-            if (child.isContainer) {
-                queue.push(child);
-            }
-        }
-    }
-
-    return result;
-}
 
 /** Символ внутри Macro/Method не может иметь использования в другом файле. */
 export function isLocalReferenceTarget(root: RslSymbol, target: RslSymbol): boolean {
