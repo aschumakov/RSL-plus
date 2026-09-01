@@ -156,24 +156,13 @@ export class WorkspaceCatalog {
             }
         }
 
-        const previousReferences = this.modules.get(module.uri)
-            ?.fileReferences;
-
-        this.remove(module.uri);
-        this.modules.set(module.uri, {
+        this.commitRecord({
             uri: module.uri,
             version: module.version,
             symbols,
             exports,
-            imports: module.imports.slice(),
-            /* Ссылки живут своей записью: см. recordFileReferences. */
-            fileReferences: previousReferences
+            imports: module.imports
         });
-        this.attachFileReferences(module.uri, previousReferences);
-
-        this.indexSymbols(module.uri, symbols);
-        this.attachExports(module.uri, exports);
-        this.revisionValue++;
     }
 
     private attachExports(uri: string, exports: ReadonlySet<string>): void {
@@ -315,6 +304,26 @@ export class WorkspaceCatalog {
      * вызовы записи нельзя — одинаковые объявления по разные стороны границы
      * порции получали бы один и тот же symbolId.
      */
+    /**
+     * То же, что recordDeclarations, но порциями — и с видимым промежутком.
+     *
+     * Между порциями поток отдаётся: иначе один крупный файл занимает его
+     * целиком. Поэтому запрос может прийти в середину, и вот что он увидит:
+     *
+     *   запись файла уже стоит — has(uri) и versionOf(uri) отвечают по новой
+     *   версии, а прежние символы этого файла уже сняты;
+     *
+     *   имена индексируются порциями, поэтому Ctrl+T и поиск по имени видят
+     *   часть символов файла, а не все;
+     *
+     *   ревизия каталога поднимается только в конце, поэтому кэши, привязанные
+     *   к ревизии, промежуточное состояние не подхватят и пересчитаются по
+     *   готовому.
+     *
+     * Делать промежуток невидимым — значит собирать второй экземпляр индекса
+     * имён и подменять его целиком; на файле с 50 000 символов это заметная
+     * память ради состояния, которое живёт миллисекунды.
+     */
     async recordDeclarationsInBatches(
         source: {
             uri: string;
@@ -342,20 +351,16 @@ export class WorkspaceCatalog {
             );
         }
 
-        const references = source.fileReferences ||
-            this.modules.get(source.uri)?.fileReferences;
-
-        this.remove(source.uri);
-        this.modules.set(source.uri, {
+        this.commitRecord({
             uri: source.uri,
             version: source.version,
             symbols: built.symbols,
             exports: built.exports,
-            imports: source.imports.slice(),
-            fileReferences: references
+            imports: source.imports,
+            fileReferences: source.fileReferences,
+            /* Имена индексируются ниже порциями, а не одним куском. */
+            deferIndexing: true
         });
-        this.attachExports(source.uri, built.exports);
-        this.attachFileReferences(source.uri, references);
 
         /* Индексация тоже порциями: на 50 000 символов она не мгновенна. */
         for (let at = 0; at < built.symbols.length; at += size) {
@@ -443,60 +448,66 @@ export class WorkspaceCatalog {
         imports: readonly string[];
         fileReferences?: ReadonlySet<string>;
     }): void {
-        const symbols: IRslCatalogSymbol[] = [];
-        const exports = new Set<string>();
-        const rootId = moduleSymbolId();
-        const occurrences = new Map<string, number>();
+        const built = this.buildSymbols(source.uri, source.declarations);
 
-        for (const descriptor of source.declarations) {
-            const added = appendDescriptor(
-                symbols,
-                source.uri,
-                descriptor,
-                "",
-                rootId,
-                occurrences
-            );
-
-            if (added && descriptor.visibility !== "private") {
-                exports.add(added.normalized);
-            }
-
-            if (descriptor.kind !== "class" || !added) {
-                continue;
-            }
-
-            const members = new Map<string, number>();
-
-            for (const member of descriptor.children) {
-                appendDescriptor(
-                    symbols,
-                    source.uri,
-                    member,
-                    descriptor.name,
-                    added.symbolId,
-                    members
-                );
-            }
-        }
-
-        const previousReferences = this.modules.get(source.uri)
-            ?.fileReferences;
-        const references = source.fileReferences || previousReferences;
-
-        this.remove(source.uri);
-        this.modules.set(source.uri, {
+        this.commitRecord({
             uri: source.uri,
             version: source.version,
-            symbols,
-            exports,
-            imports: source.imports.slice(),
+            symbols: built.symbols,
+            exports: built.exports,
+            imports: source.imports,
+            fileReferences: source.fileReferences
+        });
+    }
+
+    /**
+     * Запись файла в каталог: одна на все три входа.
+     *
+     * Собрать символы можно по-разному — из готового дерева, из компактных
+     * объявлений, из объявлений порциями, — а положить их в каталог надо
+     * одинаково. Прежде порядок из шести шагов был выписан в каждом входе
+     * своими словами: снять прежнюю запись, поставить модуль, проиндексовать
+     * имена, подцепить экспорт, подцепить ссылки на файлы, поднять ревизию.
+     * Три копии одного порядка — три места, где можно забыть шаг.
+     *
+     * Возвращает список символов: порционному входу он нужен, чтобы
+     * проиндексовать их не одним куском.
+     */
+    private commitRecord(record: {
+        uri: string;
+        version: number;
+        symbols: IRslCatalogSymbol[];
+        exports: Set<string>;
+        imports: readonly string[];
+        fileReferences?: ReadonlySet<string>;
+        /** Проиндексовать имена отдельно: порциями, а не одним куском. */
+        deferIndexing?: boolean;
+    }): IRslCatalogSymbol[] {
+        /*
+         * Ссылки на файлы живут своей записью и переживают перезапись
+         * объявлений: их приносит recordFileReferences, а не разбор модуля.
+         */
+        const references = record.fileReferences ||
+            this.modules.get(record.uri)?.fileReferences;
+
+        this.remove(record.uri);
+        this.modules.set(record.uri, {
+            uri: record.uri,
+            version: record.version,
+            symbols: record.symbols,
+            exports: record.exports,
+            imports: record.imports.slice(),
             fileReferences: references
         });
-        this.indexSymbols(source.uri, symbols);
-        this.attachExports(source.uri, exports);
-        this.attachFileReferences(source.uri, references);
-        this.revisionValue++;
+        this.attachExports(record.uri, record.exports);
+        this.attachFileReferences(record.uri, references);
+
+        if (!record.deferIndexing) {
+            this.indexSymbols(record.uri, record.symbols);
+            this.revisionValue++;
+        }
+
+        return record.symbols;
     }
 
     /** Файла больше нет в проекте: запись уходит вместе с ним. */

@@ -1,3 +1,4 @@
+import { InteractiveActivityGate } from "../core/interactiveActivityGate";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 import { ReferenceIndex } from "../analysis/referenceIndex";
 import type { PerformanceLogger } from "../performanceLogger";
@@ -97,7 +98,8 @@ export class WorkspaceModuleLoader {
     private readonly clock: IRslClock;
     private idleDelayMs: number;
     private interactivePauseMs: number;
-    private interactiveUntilMs = 0;
+    /* Окно тишины после действия пользователя: см. InteractiveActivityGate. */
+    private interactive!: InteractiveActivityGate;
     private backgroundResumeTimer: IRslTimerHandle | undefined;
 
     private referenceIndex: ReferenceIndex;
@@ -115,6 +117,10 @@ export class WorkspaceModuleLoader {
         this.interactivePauseMs = Math.max(
             0,
             options.interactivePauseMs ?? 350
+        );
+        this.interactive = new InteractiveActivityGate(
+            this.interactivePauseMs,
+            this.clock
         );
     }
 
@@ -222,7 +228,7 @@ export class WorkspaceModuleLoader {
 
     /** Фоновая индексация уступает короткому всплеску запросов редактора. */
     noteInteractiveActivity(): void {
-        this.interactiveUntilMs = this.clock.now() + this.interactivePauseMs;
+        this.interactive.note();
 
         if (this.indexingMode === "workspaceIdle") {
             this.clearIdleTimer();
@@ -787,7 +793,7 @@ export class WorkspaceModuleLoader {
         if (
             !foreground &&
             this.backgroundQueue.length > 0 &&
-            this.clock.now() < this.interactiveUntilMs
+            this.interactive.isBusy()
         ) {
             this.scheduleBackgroundResume();
             return;
@@ -827,7 +833,7 @@ export class WorkspaceModuleLoader {
             this.clock.clearTimeout(this.backgroundResumeTimer);
         }
 
-        const delay = Math.max(1, this.interactiveUntilMs - this.clock.now());
+        const delay = Math.max(1, this.interactive.remainingMs());
         this.backgroundResumeTimer = this.clock.setTimeout(() => {
             this.backgroundResumeTimer = undefined;
             this.processQueue();

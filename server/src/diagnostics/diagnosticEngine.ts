@@ -26,6 +26,7 @@ import {
     type IRslUnknownVariableOptions
 } from "./unknownVariableDiagnostics";
 import { applyRslSuppression } from "./suppression";
+import { deduplicateDiagnostics } from "./diagnosticFactory";
 import {
     normalizeRslRuleSeverity
 } from "./ruleSeverity";
@@ -397,9 +398,9 @@ export class RslDiagnosticEngine {
             })
             : [];
         return finishRslDiagnostics(
-        deduplicate([...local, ...workspace]),
-        options.maxProblems
-    );
+            deduplicateDiagnostics([...local, ...workspace]),
+            options.maxProblems
+        );
     }
 
     private buildPhase(
@@ -544,7 +545,7 @@ export class RslDiagnosticEngine {
          * попадать в счётчики.
          */
         const suppressed = applyRslSuppression(
-            deduplicate(filtered),
+            deduplicateDiagnostics(filtered),
             module.lex.tokens
         );
 
@@ -615,23 +616,3 @@ export function filterClosedOutputFormDiagnostics(
 }
 
 
-function deduplicate(items: Diagnostic[]): Diagnostic[] {
-    const result: Diagnostic[] = [];
-    const seen = new Set<string>();
-
-    for (const item of items) {
-        const key = [
-            item.code || "",
-            item.range.start.line,
-            item.range.start.character,
-            item.range.end.line,
-            item.range.end.character,
-            item.message
-        ].join(":");
-        if (!seen.has(key)) {
-            seen.add(key);
-            result.push(item);
-        }
-    }
-    return result;
-}

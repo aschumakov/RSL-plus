@@ -1,3 +1,4 @@
+import { InteractiveActivityGate } from "../core/interactiveActivityGate";
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
@@ -37,7 +38,8 @@ export class WorkspaceFileDiscoveryService {
     private timer: NodeJS.Timeout | undefined;
     private generation = 0;
     private running = false;
-    private interactiveUntilMs = 0;
+    /* Окно тишины после действия пользователя: см. InteractiveActivityGate. */
+    private interactive: InteractiveActivityGate;
     private initialDelayMs: number;
     private interactivePauseMs: number;
 
@@ -47,6 +49,7 @@ export class WorkspaceFileDiscoveryService {
             0,
             options.interactivePauseMs ?? 500
         );
+        this.interactive = new InteractiveActivityGate(this.interactivePauseMs);
     }
 
     configure(params: InitializeParams): void {
@@ -88,10 +91,7 @@ export class WorkspaceFileDiscoveryService {
     }
 
     noteInteractiveActivity(): void {
-        this.interactiveUntilMs = Math.max(
-            this.interactiveUntilMs,
-            Date.now() + this.interactivePauseMs
-        );
+        this.interactive.note();
     }
 
     dispose(): void {
@@ -170,9 +170,9 @@ export class WorkspaceFileDiscoveryService {
     private async waitForInteractiveWindow(generation: number): Promise<void> {
         while (
             generation === this.generation &&
-            Date.now() < this.interactiveUntilMs
+            this.interactive.isBusy()
         ) {
-            await delay(Math.min(100, this.interactiveUntilMs - Date.now()));
+            await delay(Math.min(100, this.interactive.remainingMs()));
         }
     }
 }

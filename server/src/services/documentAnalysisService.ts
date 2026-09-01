@@ -1,3 +1,4 @@
+import { InteractiveActivityGate } from "../core/interactiveActivityGate";
 import type { TextDocuments } from "vscode-languageserver/node";
 import type { TextDocument } from "vscode-languageserver-textdocument";
 
@@ -227,7 +228,8 @@ export class DocumentAnalysisService {
      * работы в другом файле и отбирает у неё процессор. Поэтому фоновая работа
      * ждёт не срок, а паузу: пока идёт ввод или навигация, она переносится.
      */
-    private interactiveUntilMs = 0;
+    /* Окно тишины после действия пользователя: см. InteractiveActivityGate. */
+    private interactive!: InteractiveActivityGate;
     private backgroundQuietMs: number;
     private activeDocumentUri: string | undefined;
     /**
@@ -263,6 +265,10 @@ export class DocumentAnalysisService {
         this.initialParseDelayMs = options.initialParseDelayMs ?? 50;
         this.inactiveParseDelayMs = options.inactiveParseDelayMs ?? 400;
         this.backgroundQuietMs = options.backgroundQuietMs ?? 1500;
+        this.interactive = new InteractiveActivityGate(
+            this.backgroundQuietMs,
+            this.clock
+        );
     }
 
     /**
@@ -272,12 +278,12 @@ export class DocumentAnalysisService {
      * задевает: у него своя очередь и свой приоритет.
      */
     noteInteractiveActivity(): void {
-        this.interactiveUntilMs = this.clock.now() + this.backgroundQuietMs;
+        this.interactive.note();
     }
 
     /** Сколько ещё ждать тишины; 0 — можно работать. */
     private quietDelayMs(): number {
-        return Math.max(0, this.interactiveUntilMs - this.clock.now());
+        return this.interactive.remainingMs();
     }
 
     /**
