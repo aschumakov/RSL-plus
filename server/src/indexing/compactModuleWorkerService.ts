@@ -24,9 +24,55 @@ export interface ICompactModuleWorkerOptions {
     cachePath?: string;
 }
 
+/**
+ * Куда отдать ответ.
+ *
+ * Ждущих у одного запроса бывает несколько: объединяются только те, кто
+ * спросил ровно одно и то же — см. coalescingKey, — поэтому ответ у них общий.
+ */
+interface IWaiter {
+    resolve(response: ICompactModuleResponse): void;
+}
+
 interface IPendingRequest {
     request: ICompactModuleRequest;
+    waiters: IWaiter[];
+    priority: CompactModulePriority;
     resolve(response: ICompactModuleResponse): void;
+}
+
+/** Счётчики повторной работы: сколько запросов удалось не делать. */
+export interface ICompactModuleWorkerStats {
+    /** Сколько раз потребители просили индексацию. */
+    requests: number;
+    /** Сколько запросов ушло worker'у. */
+    dispatched: number;
+    /** Сколько запросов присоединились к уже идущему или стоящему в очереди. */
+    coalesced: number;
+    /** Сколько раз ожидающий запрос повысили в приоритете. */
+    promoted: number;
+}
+
+/** Ключ объединения: URI и то, что меняет состав ответа. */
+function coalescingKey(
+    request: Omit<ICompactModuleRequest, "id">
+): string {
+    /*
+     * В ключе всё, от чего зависит СОСТАВ ответа.
+     *
+     * Адресная проверка экспорта: запрос с expectedExport просит ответ по
+     * конкретному имени, и одним вызовом два разных имени не обслужить.
+     *
+     * Известный отпечаток: с ним worker вправе ответить unchanged, а в таком
+     * ответе нет ни объявлений, ни импортов. Присоединить к нему того, кто
+     * отпечатка не присылал, значит отдать ему пустоту. Объединять их можно
+     * было бы, отправив запрос без отпечатка и дочитав остальным, — но тогда
+     * каждый неизменившийся файл сканировался бы заново: 33 мс против 1 мс на
+     * файле 550 КБ. Пропуск сканирования дороже редкого объединения.
+     */
+    return request.uri +
+        "|export:" + (request.expectedExport || "") +
+        "|print:" + (request.knownFingerprint || "");
 }
 
 /**
@@ -58,6 +104,14 @@ export class CompactModuleWorkerService {
     private searchQueue: IPendingRequest[] = [];
     private backgroundQueue: IPendingRequest[] = [];
     private nextId = 1;
+    /* Ждущие по ключу объединения: один файл — один запрос worker. */
+    private readonly pendingByKey = new Map<string, IPendingRequest>();
+    private readonly statsValue: ICompactModuleWorkerStats = {
+        requests: 0,
+        dispatched: 0,
+        coalesced: 0,
+        promoted: 0
+    };
     private disposed = false;
 
     constructor(private options: ICompactModuleWorkerOptions) {}
@@ -116,7 +170,6 @@ export class CompactModuleWorkerService {
         request: Omit<ICompactModuleRequest, "id">
     ): Promise<ICompactModuleResponse> {
         const id = this.nextId++;
-        const full: ICompactModuleRequest = { ...request, id };
 
         if (this.disposed) {
             return Promise.resolve({
@@ -128,10 +181,121 @@ export class CompactModuleWorkerService {
             });
         }
 
+        this.statsValue.requests++;
+
+        /*
+         * Служебный сброс кэша не объединяется: он не про файл.
+         */
+        if (request.flushCache) {
+            return this.dispatch({ ...request, id }, request.priority);
+        }
+
+        const key = coalescingKey(request);
+        const waiting = this.pendingByKey.get(key);
+
+        if (waiting) {
+            /*
+             * Тот же файл уже читается или стоит в очереди.
+             *
+             * Второй раз его читать и сканировать незачем: ответ придёт один и
+             * тот же. Спросивший становится ещё одним ждущим.
+             */
+            this.statsValue.coalesced++;
+            this.promote(waiting, request.priority);
+
+            return new Promise<ICompactModuleResponse>(resolve => {
+                waiting.waiters.push({ resolve });
+            });
+        }
+
+        return this.dispatch({ ...request, id }, request.priority);
+    }
+
+    /** Счётчики повторной работы; для лога и проверок. */
+    get stats(): ICompactModuleWorkerStats {
+        return this.statsValue;
+    }
+
+    /**
+     * Поставить новый запрос в очередь.
+     *
+     * Отпечаток из запроса не передаётся worker'у, когда файл может
+     * понадобиться другому потребителю целиком: ответ unchanged содержит
+     * только отпечаток, и присоединившемуся достанется пустота. Поэтому
+     * отпечаток остаётся у ждущего, а сравнивает его уже сервис.
+     */
+    private dispatch(
+        request: ICompactModuleRequest,
+        priority: CompactModulePriority | undefined
+    ): Promise<ICompactModuleResponse> {
+        const key = coalescingKey(request);
+
         return new Promise<ICompactModuleResponse>(resolve => {
-            this.queueFor(request.priority).push({ request: full, resolve });
+            const entry: IPendingRequest = {
+                request,
+                priority: priority ?? "foreground",
+                waiters: [{ resolve }],
+                resolve: response => this.answer(key, entry, response)
+            };
+
+            this.statsValue.dispatched++;
+            this.pendingByKey.set(key, entry);
+            this.queueFor(priority).push(entry);
             this.pump();
         });
+    }
+
+    /**
+     * Раздать ответ всем, кто его ждал.
+     *
+     * Тому, чей отпечаток совпал с фактическим, отдаётся unchanged: он просил
+     * именно этого, и его код рассчитан на такой ответ.
+     */
+    private answer(
+        key: string,
+        entry: IPendingRequest,
+        response: ICompactModuleResponse
+    ): void {
+        if (this.pendingByKey.get(key) === entry) {
+            this.pendingByKey.delete(key);
+        }
+
+        /*
+         * Ответ один на всех: спрашивали они одно и то же — см. coalescingKey.
+         */
+        for (const waiter of entry.waiters) {
+            waiter.resolve(response);
+        }
+    }
+
+    /**
+     * Поднять ожидающий запрос в очереди повыше.
+     *
+     * Файл, поставленный фоновой индексацией, не должен заставлять
+     * интерактивный запрос ждать всю фоновую очередь.
+     */
+    private promote(
+        entry: IPendingRequest,
+        priority: CompactModulePriority | undefined
+    ): void {
+        const wanted = priority ?? "foreground";
+
+        if (rankOf(wanted) >= rankOf(entry.priority)) {
+            return;
+        }
+
+        const from = this.queueFor(entry.priority);
+        const at = from.indexOf(entry);
+
+        if (at < 0) {
+            /* Уже у worker'а: обгонять нечего. */
+            return;
+        }
+
+        from.splice(at, 1);
+        entry.priority = wanted;
+        this.queueFor(wanted).push(entry);
+        this.statsValue.promoted++;
     }
 
     async dispose(): Promise<void> {
@@ -323,4 +487,13 @@ function errorToString(error: unknown): string {
     return error instanceof Error
         ? `${error.name}: ${error.message}`
         : String(error);
+}
+
+/** Порядок очередей: меньше — раньше. */
+function rankOf(priority: CompactModulePriority): number {
+    if (priority === "foreground") {
+        return 0;
+    }
+
+    return priority === "search" ? 1 : 2;
 }
