@@ -8,6 +8,7 @@ import {
     extractCompactDeclarations,
     extractDeclarationsFromSyntax,
     type IRslDeclarationSnapshot,
+    type IExternalLocationRange,
     type IRslDefinitionRanges
 } from "./analysis/declarationExtractor";
 import { CompletionItemKind } from "vscode-languageserver";
@@ -133,15 +134,35 @@ export function createExternalModuleSummaryFromDeclarations(
 export function createExternalModuleSummaryFromOpenModel(
     model: IRslModuleModel
 ): IRslModuleModel {
+    /*
+     * Диапазоны объявлений ключуются самим объектом символа.
+     *
+     * Обрезка дерева создаёт новые экземпляры RslSymbol там, где состав детей
+     * изменился, — и прежняя карта на них не отвечала. Переход к Macro или
+     * Class закрытого файла возвращал undefined, и Definition читал файл с
+     * диска запасным путём; заодно карта держала выброшенные объекты старого
+     * дерева и мешала их освободить.
+     *
+     * Карта строится заново тем же обходом, что и дерево: повторного разбора
+     * или сканирования текста здесь нет.
+     */
+    const definitionRanges = model.definitionRanges
+        ? new Map<RslSymbol, IExternalLocationRange>()
+        : undefined;
+
     return {
         kind: "external",
         source: "",
         sourceLength: model.sourceLength,
-        symbolTree: withoutCallableParameters(model.symbolTree),
+        symbolTree: withoutCallableParameters(
+            model.symbolTree,
+            model.definitionRanges,
+            definitionRanges
+        ),
         syntax: EMPTY_PARSE_RESULT,
         lex: EMPTY_LEX_RESULT,
         imports: model.imports,
-        definitionRanges: model.definitionRanges
+        definitionRanges
     };
 }
 
@@ -152,7 +173,12 @@ export function createExternalModuleSummaryFromOpenModel(
  * дерева по имени и месту в родителе, а не сквозным счётчиком, поэтому
  * отбрасывание детей у Macro не сдвигает идентификаторы соседей.
  */
-function withoutCallableParameters(symbol: RslSymbol): RslSymbol {
+function withoutCallableParameters(
+    symbol: RslSymbol,
+    /* Диапазоны прежнего дерева и карта, которую заполняет обход. */
+    source: IRslDefinitionRanges | undefined,
+    target: Map<RslSymbol, IExternalLocationRange> | undefined
+): RslSymbol {
     const children = isCallableKind(symbol.kind)
         ? []
         : symbol.children
@@ -165,15 +191,11 @@ function withoutCallableParameters(symbol: RslSymbol): RslSymbol {
              * заодно держать в памяти лишнее.
              */
             .filter(child => !child.isPrivate)
-            .map(withoutCallableParameters);
+            .map(child => withoutCallableParameters(child, source, target));
     const sameChildren = children.length === symbol.children.length &&
         children.every((child, at) => child === symbol.children[at]);
 
-    if (sameChildren) {
-        return symbol;
-    }
-
-    return new RslSymbol({
+    const compacted = sameChildren ? symbol : new RslSymbol({
         id: symbol.id,
         name: symbol.name,
         kind: symbol.kind,
@@ -189,6 +211,17 @@ function withoutCallableParameters(symbol: RslSymbol): RslSymbol {
         baseClassName: symbol.baseClassName,
         children
     });
+    const range = source?.get(symbol);
+
+    /*
+     * Отброшенные дети сюда не попадают: обход их не посещает, и ключами
+     * новой карты они не становятся.
+     */
+    if (range && target) {
+        target.set(compacted, range);
+    }
+
+    return compacted;
 }
 
 function isCallableKind(kind: CompletionItemKind): boolean {

@@ -82,6 +82,24 @@ const SOURCE = [
     ""
 ].join("\n");
 
+/** Диапазон каждого объявления дерева: путь имён -> диапазон. */
+function definitionRangesOf(model) {
+    const found = [];
+    const walk = (symbol, path) => {
+        const here = path ? path + "." + symbol.name : symbol.name;
+        const range = model.definitionRanges?.get(symbol);
+
+        if (range) {
+            found.push([here, JSON.stringify(range)]);
+        }
+        symbol.children.forEach(child => walk(child, here));
+    };
+
+    model.symbolTree.children.forEach(symbol => walk(symbol, ""));
+
+    return found.sort((left, right) => left[0].localeCompare(right[0]));
+}
+
 /** Всё, что видно снаружи, в сравнимом виде. */
 function describe(model) {
     const walk = (symbol, into) => ({
@@ -104,9 +122,13 @@ function describe(model) {
         imports: model.imports,
         source: model.source,
         tokens: model.lex.tokens.length,
-        definitionRanges: model.definitionRanges
-            ? Object.keys(model.definitionRanges).length
-            : 0,
+        /*
+         * Диапазоны сравниваются настоящим поиском по символам дерева.
+         *
+         * Прежде здесь стоял Object.keys по Map — он всегда даёт пустой
+         * массив, и проверка сравнивала ноль с нулём.
+         */
+        definitionRanges: definitionRangesOf(model),
         tree: model.symbolTree.children.map(item => walk(item, true))
     };
 }

@@ -199,9 +199,20 @@ export function extractCompactDeclarations(
         if (word === "end") {
             const closed = blocks.pop();
             if (closed?.descriptor) {
+                /*
+                 * До END растягивается только смещение: из него строится
+                 * range символа, то есть занятый объявлением кусок текста.
+                 *
+                 * Строка и колонка остаются на имени. Из них строится
+                 * definitionRanges — куда прыгает переход, — и растянутые до
+                 * END они означали, что Ctrl+Click по Macro в НИКОГДА не
+                 * открывавшемся файле выделяет весь Macro целиком, а в
+                 * закрытом ранее — только имя: тот же файл вёл себя
+                 * по-разному в зависимости от того, открывали ли его.
+                 * Разбор открытого документа и запасное чтение с диска оба
+                 * дают имя, и это правильный ответ.
+                 */
                 closed.descriptor.end = token.end;
-                closed.descriptor.endLine = token.endLine;
-                closed.descriptor.endCharacter = token.endCharacter;
             }
             canStartStatement = false;
             continue;
