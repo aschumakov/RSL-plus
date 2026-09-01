@@ -116,6 +116,21 @@ export class WorkspaceIndex {
     private externalBytes = 0;
     private importsEnabled = true;
     private revisionValue = 0;
+    /**
+     * Ревизия окружения документа: меняется только от того, что его касается.
+     *
+     * Общая ревизия индекса растёт от любого модуля проекта. Кэши resolver
+     * сверялись именно с ней, и фоновая индексация постороннего файла сбрасывала
+     * горячие кэши открытого документа — при том, что ни сам документ, ни его
+     * Import, ни их замыкание не менялись. В режимах workspaceIdle и full в
+     * фоне читаются тысячи модулей, и кэш обнулялся тысячи раз подряд.
+     *
+     * Здесь у каждого документа своё число. Оно не пересчитывается, а
+     * назначается заново, когда запись сбрасывают: сброс идёт по зависимым
+     * рёбрам Import-графа — тем же путём, что и сброс Import-контекста.
+     */
+    private readonly semanticRevisionByUri = new Map<string, number>();
+    private semanticRevisionCounter = 0;
     private catalogValue = new WorkspaceCatalog();
 
     constructor(options: IWorkspaceIndexOptions = {}) {
@@ -340,6 +355,7 @@ export class WorkspaceIndex {
         this.imports.clear();
         this.files.clear();
         this.importContexts.clear();
+        this.semanticRevisionByUri.clear();
         this.externalModuleOrder.clear();
         this.externalSizeByUri.clear();
         /* Каталог — часть индекса: без этого он отвечал бы про прежний проект. */
@@ -350,12 +366,18 @@ export class WorkspaceIndex {
 
     registerWorkspaceFiles(uris: readonly string[]): void {
         this.files.registerAll(uris);
+        /* Состав файлов изменился: имя могло начать разрешаться или стать неоднозначным. */
+        this.semanticRevisionByUri.clear();
     }
-    registerWorkspaceFile(uri: string): void { this.files.register(uri); }
+    registerWorkspaceFile(uri: string): void {
+        this.files.register(uri);
+        this.semanticRevisionByUri.clear();
+    }
     unregisterWorkspaceFile(uri: string): void {
         /* Файла нет в проекте — записи о нём тоже быть не должно. */
         this.catalogValue.remove(uri);
         this.files.unregister(uri);
+        this.semanticRevisionByUri.clear();
     }
     getWorkspaceFileUris(): string[] { return this.files.values(); }
     hasWorkspaceFile(uri: string): boolean { return this.files.has(uri); }
@@ -582,6 +604,7 @@ export class WorkspaceIndex {
         if (this.importsEnabled === enabled) return;
         this.importsEnabled = enabled;
         this.importContexts.clear();
+        this.semanticRevisionByUri.clear();
         /*
          * Закрепление пересчитывается в обе стороны.
          *
@@ -840,7 +863,40 @@ export class WorkspaceIndex {
     }
 
     private invalidateImportContexts(uris: Iterable<string>): void {
-        for (const uri of uris) this.importContexts.delete(uri);
+        for (const uri of uris) {
+            this.importContexts.delete(uri);
+            /* Окружение этих документов изменилось: их ревизия больше не та. */
+            this.semanticRevisionByUri.delete(uri);
+        }
+    }
+
+    /**
+     * Ревизия семантического окружения документа.
+     *
+     * Меняется, если изменилось то, от чего зависит разрешение имён в этом
+     * документе: он сам, любой модуль его транзитивного Import-замыкания, или
+     * состав файлов проекта — от него зависит, разрешится ли имя вообще и не
+     * стало ли оно неоднозначным.
+     *
+     * Не меняется от чужого модуля. Именно ради этого она и заведена.
+     *
+     * Сброс идёт по обратным рёбрам Import-графа, а они ключуются ИМЕНЕМ, а не
+     * URI: документ, чей Import пока никуда не разрешается, всё равно числится
+     * зависимым от этого имени и получит сброс, как только файл с таким именем
+     * появится или будет прочитан.
+     */
+    getSemanticRevision(uri: string): number {
+        const known = this.semanticRevisionByUri.get(uri);
+
+        if (known !== undefined) {
+            return known;
+        }
+
+        const value = ++this.semanticRevisionCounter;
+
+        this.semanticRevisionByUri.set(uri, value);
+
+        return value;
     }
 }
 

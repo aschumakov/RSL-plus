@@ -294,8 +294,12 @@ export class RslScopeResolver {
          * Актуальность — по ревизиям, а не по ключу Import-контекста: ключ
          * собирает Import-замыкание в строку, а вызывался он здесь на каждый
          * идентификатор файла. На файле 379 КБ это 37 627 сборок ключа.
+         *
+         * Ревизия берётся документа, а не всего индекса. Общая росла от любого
+         * модуля проекта, и фоновая индексация постороннего файла обнуляла этот
+         * кэш — тысячи раз подряд в режимах workspaceIdle и full.
          */
-        const revision = this.index.revision;
+        const revision = this.index.getSemanticRevision(module.uri);
         const platformRevision = this.platformModules?.revision ?? 0;
         let cache = this.resolutionByModule.get(module);
 
@@ -364,7 +368,7 @@ export class RslScopeResolver {
      * контекст не complete, «не нашли» и «нет» — разные утверждения.
      */
     getImportContextState(uri: string): IRslImportContextState {
-        const revision = `${this.index.revision}:` +
+        const revision = `${this.index.getSemanticRevision(uri)}:` +
             `${this.platformModules?.revision ?? 0}`;
         const cached = this.importContextStateByUri.get(uri);
 
@@ -808,9 +812,10 @@ export class RslScopeResolver {
          * кэша звала его на каждое разрешение имени и на каждую запись: 75 288
          * вызовов на файл вместо 37 627 разрешений, и кэш вышел дороже того,
          * что он экономил. Ревизии индекса и каталога меняются ровно тогда же,
-         * когда изменился бы ключ, а стоят одно сравнение.
+         * когда изменился бы ключ, а стоят одно сравнение. Ревизия — документа,
+         * а не всего индекса: см. getSemanticRevision.
          */
-        const revision = this.index.revision;
+        const revision = this.index.getSemanticRevision(module.uri);
         const platformRevision = this.platformModules?.revision ?? 0;
         let cache = this.namesByModule.get(module);
 
