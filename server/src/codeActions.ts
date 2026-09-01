@@ -3,7 +3,6 @@ import {
     CodeActionKind,
     CodeActionParams,
     Diagnostic,
-    Position,
     Range,
     TextEdit,
     WorkspaceEdit
@@ -17,6 +16,12 @@ import {
     buildRslUndeclaredVariableFixes
 } from "./features/undeclaredVariableFixes";
 import { IIndexedModule } from "./workspaceIndex";
+import {
+    offsetInModule
+} from "./core/documentPosition";
+import {
+    positionInModule
+} from "./core/documentPosition";
 
 /**
  * Одиночное объявление VAR или CONST на всю строку.
@@ -433,7 +438,7 @@ function getStatementOrLineRange(
     start: number,
     end: number
 ): { start: number; end: number } {
-    const lineNumber = positionAt(module, start).line;
+    const lineNumber = positionInModule(module, start).line;
     const line = getLineOffsets(module, lineNumber);
     const before = module.source.substring(line.start, start).trim();
     const after = module.source.substring(end, line.end).trim();
@@ -494,10 +499,10 @@ function getDiagnosticOffsets(
     return {
         start: typeof data?.start === "number"
             ? data.start
-            : offsetAt(module, diagnostic.range.start),
+            : offsetInModule(module, diagnostic.range.start),
         end: typeof data?.end === "number"
             ? data.end
-            : offsetAt(module, diagnostic.range.end)
+            : offsetInModule(module, diagnostic.range.end)
     };
 }
 
@@ -528,46 +533,9 @@ function offsetRange(
     end: number
 ): Range {
     return {
-        start: positionAt(module, start),
-        end: positionAt(module, end)
+        start: positionInModule(module, start),
+        end: positionInModule(module, end)
     };
 }
 
-function positionAt(module: IIndexedModule, offset: number): Position {
-    const starts = module.lex.lineStarts;
-    let left = 0;
-    let right = starts.length - 1;
-    let line = 0;
 
-    while (left <= right) {
-        const middle = Math.floor((left + right) / 2);
-
-        if (starts[middle] <= offset) {
-            line = middle;
-            left = middle + 1;
-        } else {
-            right = middle - 1;
-        }
-    }
-
-    return {
-        line,
-        character: Math.max(0, offset - starts[line])
-    };
-}
-
-function offsetAt(module: IIndexedModule, position: Position): number {
-    const line = Math.max(
-        0,
-        Math.min(position.line, module.lex.lineStarts.length - 1)
-    );
-    const lineStart = module.lex.lineStarts[line];
-    const lineEnd = line + 1 < module.lex.lineStarts.length
-        ? module.lex.lineStarts[line + 1]
-        : module.source.length;
-
-    return Math.max(
-        lineStart,
-        Math.min(lineStart + position.character, lineEnd)
-    );
-}

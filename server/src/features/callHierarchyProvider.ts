@@ -20,10 +20,16 @@ import type { ReferenceIndex } from "../analysis/referenceIndex";
 import type {
     RslReferenceShardStore
 } from "../analysis/referenceShards";
-import { normalizeIdentifier } from "../lexer";
+import { normalizeIdentifier , lowerBoundTokenIndex, tokenIndexAtOffset } from "../lexer";
 import type { RslScopeResolver } from "../scopeResolver";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 import { decodeRslSourceText } from "../core/textDecoding";
+import {
+    offsetInModule
+} from "../core/documentPosition";
+import {
+    positionInModule
+} from "../core/documentPosition";
 
 interface ICallHierarchyData {
     uri: string;
@@ -108,7 +114,7 @@ export class RslCallHierarchyProvider {
 
             await this.withFullModule(uri, module => {
                 for (const location of locations) {
-                    const offset = offsetAt(module, location.range.start);
+                    const offset = offsetInModule(module, location.range.start);
                     const tokenIndex = findTokenIndexAt(module, offset);
 
                     if (
@@ -386,9 +392,11 @@ function findNameRange(
     }
 
     const offset = nameOffset(module, symbol);
-    const token = module.syntax.tokens.find(candidate =>
-        candidate.start === offset
-    );
+    const tokens = module.syntax.tokens;
+    const at = lowerBoundTokenIndex(tokens, offset);
+    const token = at < tokens.length && tokens[at].start === offset
+        ? tokens[at]
+        : undefined;
 
     return token
         ? tokenRange(token)
@@ -397,23 +405,33 @@ function findNameRange(
 
 function nameOffset(module: IIndexedModule, symbol: RslSymbol): number {
     const normalized = normalizeIdentifier(symbol.name);
-    const token = module.syntax.tokens.find(candidate =>
-        candidate.kind === "identifier" &&
-        symbol.range.start <= candidate.start &&
-        candidate.end <= symbol.range.end &&
-        normalizeIdentifier(candidate.value) === normalized
-    );
+    /* Имя ищется внутри объявления, а не по всему файлу. */
+    const tokens = module.syntax.tokens;
 
-    return token?.start ?? symbol.range.start;
+    for (
+        let at = lowerBoundTokenIndex(tokens, symbol.range.start);
+        at < tokens.length && tokens[at].start <= symbol.range.end;
+        at++
+    ) {
+        const candidate = tokens[at];
+
+        if (
+            candidate.kind === "identifier" &&
+            candidate.end <= symbol.range.end &&
+            normalizeIdentifier(candidate.value) === normalized
+        ) {
+            return candidate.start;
+        }
+    }
+
+    return symbol.range.start;
 }
 
 function findTokenIndexAt(
     module: IIndexedModule,
     offset: number
 ): number {
-    return module.syntax.tokens.findIndex(token =>
-        token.start <= offset && offset <= token.end
-    );
+    return tokenIndexAtOffset(module.syntax.tokens, offset);
 }
 
 function isCallToken(
@@ -483,49 +501,12 @@ function offsetRange(
     end: number
 ): Range {
     return {
-        start: positionAt(module, start),
-        end: positionAt(module, end)
+        start: positionInModule(module, start),
+        end: positionInModule(module, end)
     };
 }
 
-function positionAt(
-    module: IIndexedModule,
-    offset: number
-): { line: number; character: number } {
-    const starts = module.lex.lineStarts;
-    let left = 0;
-    let right = starts.length - 1;
-    let line = 0;
 
-    while (left <= right) {
-        const middle = (left + right) >>> 1;
-        if (starts[middle] <= offset) {
-            line = middle;
-            left = middle + 1;
-        } else {
-            right = middle - 1;
-        }
-    }
-
-    return {
-        line,
-        character: Math.max(0, offset - starts[line])
-    };
-}
-
-function offsetAt(
-    module: IIndexedModule,
-    position: { line: number; character: number }
-): number {
-    const line = Math.max(
-        0,
-        Math.min(position.line, module.lex.lineStarts.length - 1)
-    );
-    return Math.min(
-        module.source.length,
-        module.lex.lineStarts[line] + Math.max(0, position.character)
-    );
-}
 
 function displayFile(uri: string): string {
     try {

@@ -5,7 +5,7 @@ import {
 } from "vscode-languageserver";
 
 import { LITERAL_KEYWORDS, WORD_OPERATORS } from "../language/rslLanguageReference";
-import { normalizeIdentifier, type IRslToken } from "../lexer";
+import { normalizeIdentifier, type IRslToken , tokenIndexAtOffset } from "../lexer";
 import type { IIndexedModule } from "../workspaceIndex";
 import {
     freeRslName,
@@ -304,10 +304,9 @@ function prepareInlineVariable(
 ): IInlineVariablePlan | undefined {
     const { module } = context;
     const tokens = module.syntax.tokens;
-    const at = tokens.findIndex(token =>
-        token.kind === "identifier" &&
-        token.start <= context.start &&
-        context.start <= token.end);
+    /* Бинарный поиск токена под курсором вместо прохода по всему потоку. */
+    const found = tokenIndexAtOffset(tokens, context.start);
+    const at = found >= 0 && tokens[found].kind === "identifier" ? found : -1;
 
     if (at < 0) {
         return undefined;

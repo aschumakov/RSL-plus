@@ -12,6 +12,9 @@ import {
     visibleRslVariableNames
 } from "../diagnostics/nameCheckScopes";
 import type { IIndexedModule } from "../workspaceIndex";
+import {
+    positionInModule
+} from "../core/documentPosition";
 
 /**
  * Исправления для «переменная не объявлена в текущей области».
@@ -201,7 +204,7 @@ function declarationEdit(
         lineStart,
         source.length
     ).match(/^[ \t]*/u)?.[0] ?? "    ";
-    const position = positionAt(module, lineStart);
+    const position = positionInModule(module, lineStart);
 
     /*
      * Перевод строки — как в файле.
@@ -240,26 +243,6 @@ function enclosingCallable(
     }
 }
 
-function positionAt(
-    module: IIndexedModule,
-    offset: number
-): { line: number; character: number } {
-    const starts = module.lex.lineStarts;
-    let low = 0;
-    let high = starts.length - 1;
-
-    while (low < high) {
-        const middle = (low + high + 1) >> 1;
-
-        if (starts[middle] <= offset) {
-            low = middle;
-        } else {
-            high = middle - 1;
-        }
-    }
-
-    return { line: low, character: Math.max(0, offset - starts[low]) };
-}
 
 function createAction(
     title: string,

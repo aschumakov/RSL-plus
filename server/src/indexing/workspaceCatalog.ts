@@ -1,5 +1,7 @@
 import { CompletionItemKind } from "vscode-languageserver";
 
+import { positionAtOffset } from "../core/documentPosition";
+
 import {
     descriptorKind,
     type IRslDeclarationDescriptor
@@ -1026,22 +1028,10 @@ function compare(left: string, right: string): number {
     return left < right ? -1 : 1;
 }
 
+/* Перевод координат один на всех: см. core/documentPosition. */
 function positionAt(
     lineStarts: readonly number[],
     offset: number
 ): { line: number; character: number } {
-    let low = 0;
-    let high = lineStarts.length - 1;
-
-    while (low < high) {
-        const middle = (low + high + 1) >> 1;
-
-        if (lineStarts[middle] <= offset) {
-            low = middle;
-        } else {
-            high = middle - 1;
-        }
-    }
-
-    return { line: low, character: Math.max(0, offset - lineStarts[low]) };
+    return positionAtOffset(lineStarts, offset);
 }

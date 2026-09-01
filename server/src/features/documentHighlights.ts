@@ -5,8 +5,10 @@ import {
 
 import { collectFormatSpecifierTokenStarts } from "../parsing/outputFormParser";
 import {
+    lowerBoundTokenIndex,
     normalizeIdentifier,
     normalizeReferenceIdentifier,
+    tokenAtOffset,
     type IRslToken
 } from "../lexer";
 import type { RslScopeResolver } from "../scopeResolver";
@@ -21,9 +23,7 @@ export function buildRslDocumentHighlights(
     const formatSpecifierStarts = collectFormatSpecifierTokenStarts(
         module.lex.tokens
     );
-    const selectedToken = module.syntax.tokens.find(token =>
-        token.start <= offset && offset <= token.end
-    );
+    const selectedToken = tokenAtOffset(module.syntax.tokens, offset);
     if (selectedToken && formatSpecifierStarts.has(selectedToken.start)) {
         return [];
     }
@@ -94,12 +94,26 @@ function findDeclarationStart(
         return undefined;
     }
 
-    return module.syntax.tokens.find(token =>
-        token.kind === "identifier" &&
-        start <= token.start &&
-        token.end <= end &&
-        normalizeReferenceIdentifier(token.value) === normalizedName
-    )?.start;
+    /* Обход участка от нижней границы, а не всего потока с начала. */
+    const tokens = module.syntax.tokens;
+
+    for (
+        let at = lowerBoundTokenIndex(tokens, start);
+        at < tokens.length && tokens[at].start <= end;
+        at++
+    ) {
+        const token = tokens[at];
+
+        if (
+            token.kind === "identifier" &&
+            token.end <= end &&
+            normalizeReferenceIdentifier(token.value) === normalizedName
+        ) {
+            return token.start;
+        }
+    }
+
+    return undefined;
 }
 
 function isAssignmentTarget(

@@ -14,6 +14,7 @@ import {
 import { cachedSignificantTokens, type IRslToken } from "../lexer";
 import type { RslScopeResolver } from "../scopeResolver";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
+import { positionInModule } from "../core/documentPosition";
 
 interface ICallContext {
     name: string;
@@ -459,20 +460,12 @@ function stringContentRange(
 ) {
     const quoteOffset = token.raw.length >= 2 ? 1 : 0;
     return {
-        start: positionAt(module, token.start + quoteOffset),
-        end: positionAt(module, Math.max(
+        start: positionInModule(module, token.start + quoteOffset),
+        end: positionInModule(module, Math.max(
             token.start + quoteOffset,
             token.end - quoteOffset
         ))
     };
 }
 
-function positionAt(module: IIndexedModule, offset: number) {
-    const starts = module.lex.lineStarts;
-    let line = 0;
-    while (line + 1 < starts.length && starts[line + 1] <= offset) {
-        line++;
-    }
-    return { line, character: Math.max(0, offset - starts[line]) };
-}
 

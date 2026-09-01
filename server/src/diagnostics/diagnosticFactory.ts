@@ -1,3 +1,4 @@
+import { positionInModule } from "../core/documentPosition";
 import {
     IImportDefinitionTarget
 } from "../execMacroDefinition";
@@ -534,30 +535,12 @@ export function createOffsetDiagnostic(
     return diagnostic;
 }
 
+/* Перевод координат один на всех: см. core/documentPosition. */
 export function positionAt(
     module: IIndexedModule,
     offset: number
 ): { line: number; character: number } {
-    const starts = module.lex.lineStarts;
-    let left = 0;
-    let right = starts.length - 1;
-    let line = 0;
-
-    while (left <= right) {
-        const middle = Math.floor((left + right) / 2);
-
-        if (starts[middle] <= offset) {
-            line = middle;
-            left = middle + 1;
-        } else {
-            right = middle - 1;
-        }
-    }
-
-    return {
-        line,
-        character: Math.max(0, offset - starts[line])
-    };
+    return positionInModule(module, offset);
 }
 
 export function deduplicateDiagnostics(items: Diagnostic[]): Diagnostic[] {

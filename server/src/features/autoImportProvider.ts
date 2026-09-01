@@ -5,7 +5,6 @@ import {
     CodeAction,
     CodeActionKind,
     CompletionItem,
-    Position,
     Range,
     TextEdit,
     WorkspaceEdit
@@ -21,6 +20,7 @@ import type {
     WorkspaceIndex
 } from "../workspaceIndex";
 import { completionLabelMatchesPrefix } from "./completionRanking";
+import { offsetInModule, positionInModule } from "../core/documentPosition";
 
 /* Ключевое слово Import-ом не исправляется: см. справочник языка. */
 const NON_IMPORT_IDENTIFIERS = new Set(KEYWORDS);
@@ -197,7 +197,7 @@ export async function buildMissingImportActions(
         return [];
     }
 
-    const offset = offsetAt(module, range.start);
+    const offset = offsetInModule(module, range.start);
     const token = tokenAtOffset(module.lex.tokens, offset, true);
 
     if (
@@ -287,7 +287,7 @@ export function buildImportEdit(
 
     if (imports.length === 0) {
         const offset = module.lex.hasBom ? 1 : 0;
-        const position = positionAt(module, offset);
+        const position = positionInModule(module, offset);
         return TextEdit.insert(position, `Import ${name};${eol}`);
     }
 
@@ -300,7 +300,7 @@ export function buildImportEdit(
     const prefix = hasLineBreakBefore ? "" : eol;
 
     return TextEdit.insert(
-        positionAt(module, insertionOffset),
+        positionInModule(module, insertionOffset),
         `${prefix}Import ${name};${eol}`
     );
 }
@@ -344,38 +344,7 @@ function followingLineStart(source: string, offset: number): number {
     return source.length;
 }
 
-function positionAt(module: IIndexedModule, offset: number): Position {
-    const starts = module.lex.lineStarts;
-    let left = 0;
-    let right = starts.length - 1;
-    let line = 0;
 
-    while (left <= right) {
-        const middle = (left + right) >>> 1;
-        if (starts[middle] <= offset) {
-            line = middle;
-            left = middle + 1;
-        } else {
-            right = middle - 1;
-        }
-    }
-
-    return {
-        line,
-        character: Math.max(0, offset - starts[line])
-    };
-}
-
-function offsetAt(module: IIndexedModule, position: Position): number {
-    const line = Math.max(
-        0,
-        Math.min(position.line, module.lex.lineStarts.length - 1)
-    );
-    return Math.min(
-        module.source.length,
-        module.lex.lineStarts[line] + Math.max(0, position.character)
-    );
-}
 
 function displayModule(uri: string): string {
     try {

@@ -7,6 +7,9 @@ import {
 
 import type { IIndexedModule } from "../workspaceIndex";
 import { buildEnhancedRslCodeActions } from "./enhancedCodeActions";
+import {
+    offsetInModule
+} from "../core/documentPosition";
 
 export const RSL_FIX_ALL_KIND = `${CodeActionKind.SourceFixAll}.rsl`;
 
@@ -81,15 +84,15 @@ function nonOverlappingEdits(
     edits: readonly TextEdit[]
 ): TextEdit[] {
     const sorted = edits.slice().sort((left, right) =>
-        offsetAt(module, right.range.start) -
-        offsetAt(module, left.range.start)
+        offsetInModule(module, right.range.start) -
+        offsetInModule(module, left.range.start)
     );
     const result: TextEdit[] = [];
     let nearestStart = module.source.length + 1;
 
     for (const edit of sorted) {
-        const start = offsetAt(module, edit.range.start);
-        const end = offsetAt(module, edit.range.end);
+        const start = offsetInModule(module, edit.range.start);
+        const end = offsetInModule(module, edit.range.end);
         if (end > nearestStart) {
             continue;
         }
@@ -99,16 +102,3 @@ function nonOverlappingEdits(
     return result;
 }
 
-function offsetAt(
-    module: IIndexedModule,
-    position: { line: number; character: number }
-) {
-    const line = Math.max(
-        0,
-        Math.min(position.line, module.lex.lineStarts.length - 1)
-    );
-    return Math.min(
-        module.source.length,
-        module.lex.lineStarts[line] + Math.max(0, position.character)
-    );
-}

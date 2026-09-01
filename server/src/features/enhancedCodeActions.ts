@@ -18,6 +18,13 @@ import type { IRslSyntaxNode } from "../syntaxParser";
 import type { IIndexedModule } from "../workspaceIndex";
 import { RSL_BLOCK_END } from "../language/rslLanguageReference";
 import { applyRslKeywordCase } from "./formatOptions";
+import {
+    offsetInModule
+} from "../core/documentPosition";
+import { lowerBoundTokenIndex } from "../lexer";
+import {
+    positionInModule
+} from "../core/documentPosition";
 
 interface IDiagnosticData {
     start?: number;
@@ -343,10 +350,10 @@ function createSplitLongStringAction(
     }
     const start = typeof data.start === "number"
         ? data.start
-        : offsetAt(module, diagnostic.range.start);
+        : offsetInModule(module, diagnostic.range.start);
     const end = typeof data.end === "number"
         ? data.end
-        : offsetAt(module, diagnostic.range.end);
+        : offsetInModule(module, diagnostic.range.end);
     return {
         title: "Разбить строковый литерал на допустимые части",
         kind: CodeActionKind.QuickFix,
@@ -380,7 +387,7 @@ function createRemoveUnusedDeclarationAction(
 
     const start = typeof data?.start === "number"
         ? data.start
-        : offsetAt(module, diagnostic.range.start);
+        : offsetInModule(module, diagnostic.range.start);
     const match = findVariableDeclaration(module.syntax.root, start);
 
     if (!match) {
@@ -551,16 +558,22 @@ function findComma(
     start: number,
     end: number
 ): { start: number; end: number } | undefined {
-    const token = module.lex.tokens.find(item =>
-        start <= item.start &&
-        item.end <= end &&
-        item.kind === "symbol" &&
-        item.raw === ","
-    );
+    /* Обход участка от нижней границы, а не всего потока с начала. */
+    const tokens = module.lex.tokens;
 
-    return token
-        ? { start: token.start, end: token.end }
-        : undefined;
+    for (
+        let at = lowerBoundTokenIndex(tokens, start);
+        at < tokens.length && tokens[at].start <= end;
+        at++
+    ) {
+        const item = tokens[at];
+
+        if (item.end <= end && item.kind === "symbol" && item.raw === ",") {
+            return { start: item.start, end: item.end };
+        }
+    }
+
+    return undefined;
 }
 
 function includeLeadingIndent(source: string, start: number): number {
@@ -589,46 +602,9 @@ function offsetRange(
     end: number
 ): Range {
     return {
-        start: positionAt(module, start),
-        end: positionAt(module, end)
+        start: positionInModule(module, start),
+        end: positionInModule(module, end)
     };
 }
 
-function positionAt(module: IIndexedModule, offset: number): Position {
-    const starts = module.lex.lineStarts;
-    let left = 0;
-    let right = starts.length - 1;
-    let line = 0;
 
-    while (left <= right) {
-        const middle = Math.floor((left + right) / 2);
-
-        if (starts[middle] <= offset) {
-            line = middle;
-            left = middle + 1;
-        } else {
-            right = middle - 1;
-        }
-    }
-
-    return {
-        line,
-        character: Math.max(0, offset - starts[line])
-    };
-}
-
-function offsetAt(module: IIndexedModule, position: Position): number {
-    const line = Math.max(
-        0,
-        Math.min(position.line, module.lex.lineStarts.length - 1)
-    );
-    const lineStart = module.lex.lineStarts[line];
-    const lineEnd = line + 1 < module.lex.lineStarts.length
-        ? module.lex.lineStarts[line + 1]
-        : module.source.length;
-
-    return Math.max(
-        lineStart,
-        Math.min(lineStart + position.character, lineEnd)
-    );
-}

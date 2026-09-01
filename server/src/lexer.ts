@@ -442,20 +442,30 @@ export function codeTokens(tokens: IRslToken[]): IRslToken[] {
     );
 }
 
-export function tokenAtOffset(
-    tokens: IRslToken[],
+/**
+ * Номер токена под смещением, или -1.
+ *
+ * Тот же поиск, что и у tokenAtOffset, но отдаёт номер: соседей токена ищут
+ * почти все, кто его нашёл, и без номера приходится искать второй раз.
+ *
+ * Бинарный, а не перебором. Перебор по всему потоку стоил своего на каждый
+ * интерактивный запрос: подсветка вхождений, иерархия вызовов и переход по
+ * блоку искали токен под курсором проходом по всем токенам файла, а их в
+ * крупном модуле проекта до 175 тысяч.
+ */
+export function tokenIndexAtOffset(
+    tokens: readonly IRslToken[],
     offset: number,
     includeRightBoundary: boolean = true
-): IRslToken | undefined {
+): number {
     let left = 0;
     let right = tokens.length - 1;
     let candidate = -1;
 
     while (left <= right) {
-        const middle = Math.floor((left + right) / 2);
-        const token = tokens[middle];
+        const middle = (left + right) >>> 1;
 
-        if (token.start <= offset) {
+        if (tokens[middle].start <= offset) {
             candidate = middle;
             left = middle + 1;
         } else {
@@ -464,7 +474,7 @@ export function tokenAtOffset(
     }
 
     if (candidate < 0) {
-        return undefined;
+        return -1;
     }
 
     const token = tokens[candidate];
@@ -481,14 +491,49 @@ export function tokenAtOffset(
             tokens[candidate - 1].kind === "string"
         )
     ) {
-        return tokens[candidate - 1];
+        return candidate - 1;
     }
 
     const inside = includeRightBoundary
         ? offset <= token.end
         : offset < token.end;
 
-    return inside ? token : undefined;
+    return inside ? candidate : -1;
+}
+
+/**
+ * Первый токен, начинающийся не раньше смещения.
+ *
+ * Нижняя граница: ею начинают обход участка текста, не проходя поток с начала.
+ */
+export function lowerBoundTokenIndex(
+    tokens: readonly IRslToken[],
+    start: number
+): number {
+    let low = 0;
+    let high = tokens.length;
+
+    while (low < high) {
+        const middle = (low + high) >>> 1;
+
+        if (tokens[middle].start < start) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+
+    return low;
+}
+
+export function tokenAtOffset(
+    tokens: IRslToken[],
+    offset: number,
+    includeRightBoundary: boolean = true
+): IRslToken | undefined {
+    const at = tokenIndexAtOffset(tokens, offset, includeRightBoundary);
+
+    return at < 0 ? undefined : tokens[at];
 }
 
 export function getTokensOnLine(

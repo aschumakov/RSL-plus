@@ -8,7 +8,7 @@ import {
     BLOCK_BOUNDARY_KEYWORDS,
     BLOCK_START_KEYWORDS
 } from "../language/rslLanguageReference";
-import { normalizeIdentifier, type IRslToken } from "../lexer";
+import { normalizeIdentifier, type IRslToken , lowerBoundTokenIndex } from "../lexer";
 import type { RslSymbol } from "../symbols/rslSymbol";
 import type { IIndexedModule } from "../workspaceIndex";
 import {
@@ -304,7 +304,12 @@ function constructSpan(
     end: number
 ): { start: number; end: number } | undefined {
     const tokens = module.syntax.tokens;
-    const firstIndex = tokens.findIndex(token => token.start >= start);
+    /* Нижняя граница участка бинарным поиском, а не проходом с начала. */
+    const firstIndex = lowerBoundTokenIndex(tokens, start);
+
+    if (firstIndex >= tokens.length) {
+        return undefined;
+    }
 
     if (firstIndex < 0) {
         return undefined;

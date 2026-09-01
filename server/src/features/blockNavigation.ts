@@ -9,6 +9,8 @@ import {
 import type { IRslSyntaxNode } from "../syntaxParser";
 import { parseOutputForms } from "../parsing/outputFormParser";
 import type { IIndexedModule } from "../workspaceIndex";
+import { offsetInModule, positionInModule } from "../core/documentPosition";
+import { tokenAtOffset } from "../lexer";
 
 export const GO_TO_BLOCK_START_COMMAND = "rsl.goToBlockStart";
 export const GO_TO_BLOCK_END_COMMAND = "rsl.goToBlockEnd";
@@ -28,7 +30,7 @@ export function buildSelectionRanges(
     positions: readonly Position[]
 ): SelectionRange[] {
     return positions.map(position => {
-        const offset = offsetAt(module, position);
+        const offset = offsetInModule(module, position);
         const ranges: Range[] = [];
         const token = tokenAt(module, offset);
         if (token && token.kind !== "comment" && token.kind !== "square") {
@@ -59,7 +61,7 @@ export function buildBlockNavigationActions(
     module: IIndexedModule,
     range: Range
 ): CodeAction[] {
-    const offset = offsetAt(module, range.start);
+    const offset = offsetInModule(module, range.start);
     const block = findCurrentBlock(module.syntax.root, offset);
     if (!block) {
         return [];
@@ -93,20 +95,20 @@ export function resolveBlockNavigationPosition(
     position: Position,
     direction: "start" | "end"
 ): Position | undefined {
-    const block = findCurrentBlock(module.syntax.root, offsetAt(module, position));
+    const block = findCurrentBlock(module.syntax.root, offsetInModule(module, position));
     if (!block) {
         return undefined;
     }
 
     if (direction === "start") {
-        return positionAt(module, block.start);
+        return positionInModule(module, block.start);
     }
 
     if (block.kind === "OnErrorClause") {
         const lastToken = [...module.syntax.tokens].reverse().find(token =>
             block.start <= token.start && token.end <= block.end
         );
-        return positionAt(module, lastToken ? lastToken.start : block.end);
+        return positionInModule(module, lastToken ? lastToken.start : block.end);
     }
 
     const endKeyword = [...module.syntax.tokens].reverse().find(token =>
@@ -115,7 +117,7 @@ export function resolveBlockNavigationPosition(
         block.start <= token.start &&
         token.end <= block.end
     );
-    return positionAt(module, endKeyword ? endKeyword.start : block.end);
+    return positionInModule(module, endKeyword ? endKeyword.start : block.end);
 }
 
 /**
@@ -128,19 +130,19 @@ export function resolveCurrentBlockRange(
     position: Position,
     currentRange?: Range
 ): Range | undefined {
-    const offset = offsetAt(module, position);
+    const offset = offsetInModule(module, position);
     const hasSelection = !!currentRange && !rangesAreEmpty(currentRange);
     const selectionStart = currentRange
-        ? offsetAt(module, currentRange.start)
+        ? offsetInModule(module, currentRange.start)
         : offset;
     const selectionEnd = currentRange
-        ? offsetAt(module, currentRange.end)
+        ? offsetInModule(module, currentRange.end)
         : offset;
     const blocks = (hasSelection
         ? collectBlockNodes(module.syntax.root).filter(node => {
             const range = fullLineRange(module, node);
-            return offsetAt(module, range.start) <= selectionStart &&
-                selectionEnd <= offsetAt(module, range.end);
+            return offsetInModule(module, range.start) <= selectionStart &&
+                selectionEnd <= offsetInModule(module, range.end);
         })
         : collectContainingNodes(module.syntax.root, offset)
             .filter(node => BLOCK_KINDS.has(node.kind)))
@@ -156,8 +158,8 @@ export function resolveCurrentBlockRange(
 
     for (const block of blocks) {
         const range = fullLineRange(module, block);
-        const start = offsetAt(module, range.start);
-        const end = offsetAt(module, range.end);
+        const start = offsetInModule(module, range.start);
+        const end = offsetInModule(module, range.end);
         if (
             start <= selectionStart &&
             selectionEnd <= end &&
@@ -187,8 +189,8 @@ function rangesAreEmpty(range: Range): boolean {
 }
 
 function fullLineRange(module: IIndexedModule, node: IRslSyntaxNode): Range {
-    const startPosition = positionAt(module, node.start);
-    const endPosition = positionAt(module, Math.max(node.start, node.end));
+    const startPosition = positionInModule(module, node.start);
+    const endPosition = positionInModule(module, Math.max(node.start, node.end));
     const lineStart = module.lex.lineStarts[startPosition.line] || 0;
     const nextLineStart = endPosition.line + 1 < module.lex.lineStarts.length
         ? module.lex.lineStarts[endPosition.line + 1]
@@ -248,7 +250,7 @@ function appendOutputSelectionRanges(
 }
 
 function statementRange(module: IIndexedModule, offset: number): Range {
-    const line = positionAt(module, offset).line;
+    const line = positionInModule(module, offset).line;
     const start = module.lex.lineStarts[line] || 0;
     const end = line + 1 < module.lex.lineStarts.length
         ? module.lex.lineStarts[line + 1]
@@ -264,7 +266,8 @@ function trimLineEnd(source: string, start: number, end: number): number {
 }
 
 function tokenAt(module: IIndexedModule, offset: number) {
-    return module.lex.tokens.find(token => token.start <= offset && offset <= token.end);
+    /* Бинарный поиск: проход по всему потоку стоил своего на каждый запрос. */
+    return tokenAtOffset(module.lex.tokens, offset);
 }
 
 function deduplicateRanges(ranges: readonly Range[]): Range[] {
@@ -280,7 +283,7 @@ function deduplicateRanges(ranges: readonly Range[]): Range[] {
 }
 
 function rangeSpan(module: IIndexedModule, range: Range): number {
-    return offsetAt(module, range.end) - offsetAt(module, range.start);
+    return offsetInModule(module, range.end) - offsetInModule(module, range.start);
 }
 
 function span(node: IRslSyntaxNode): number {
@@ -288,31 +291,7 @@ function span(node: IRslSyntaxNode): number {
 }
 
 function offsetRange(module: IIndexedModule, start: number, end: number): Range {
-    return { start: positionAt(module, start), end: positionAt(module, end) };
+    return { start: positionInModule(module, start), end: positionInModule(module, end) };
 }
 
-function positionAt(module: IIndexedModule, offset: number): Position {
-    const starts = module.lex.lineStarts;
-    let left = 0;
-    let right = starts.length - 1;
-    let line = 0;
-    while (left <= right) {
-        const middle = (left + right) >>> 1;
-        if (starts[middle] <= offset) {
-            line = middle;
-            left = middle + 1;
-        } else {
-            right = middle - 1;
-        }
-    }
-    return { line, character: Math.max(0, offset - starts[line]) };
-}
 
-function offsetAt(module: IIndexedModule, position: Position): number {
-    const line = Math.max(0, Math.min(position.line, module.lex.lineStarts.length - 1));
-    const start = module.lex.lineStarts[line];
-    const end = line + 1 < module.lex.lineStarts.length
-        ? module.lex.lineStarts[line + 1]
-        : module.source.length;
-    return Math.max(start, Math.min(start + position.character, end));
-}
