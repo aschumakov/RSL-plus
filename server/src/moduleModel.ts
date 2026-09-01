@@ -10,7 +10,8 @@ import {
     type IRslDeclarationSnapshot,
     type IRslDefinitionRanges
 } from "./analysis/declarationExtractor";
-import type { RslSymbol } from "./symbols/rslSymbol";
+import { CompletionItemKind } from "vscode-languageserver";
+import { RslSymbol } from "./symbols/rslSymbol";
 
 export type RslModuleModelKind = "open" | "external";
 
@@ -117,12 +118,91 @@ export function createExternalModuleSummaryFromDeclarations(
     };
 }
 
+/**
+ * Внешняя сводка из уже разобранной открытой модели.
+ *
+ * Закрытие файла не повод сканировать его заново. Полная модель уже содержит
+ * дерево символов, импорты и диапазоны объявлений — всё, что нужно внешней
+ * сводке. Прежде здесь звался extractCompactDeclarations по исходному тексту,
+ * то есть только что разобранный файл разбирался ещё раз.
+ *
+ * Тяжёлое состояние не удерживается: исходник, AST и поток токенов остаются в
+ * закрытой модели пустыми, а параметры Macro отбрасываются — читать их из
+ * другого файла некому, а в дескрипторах они и составляют основной объём.
+ */
+export function createExternalModuleSummaryFromOpenModel(
+    model: IRslModuleModel
+): IRslModuleModel {
+    return {
+        kind: "external",
+        source: "",
+        sourceLength: model.sourceLength,
+        symbolTree: withoutCallableParameters(model.symbolTree),
+        syntax: EMPTY_PARSE_RESULT,
+        lex: EMPTY_LEX_RESULT,
+        imports: model.imports,
+        definitionRanges: model.definitionRanges
+    };
+}
+
+/**
+ * Дерево без параметров вызываемых объявлений.
+ *
+ * Идентификаторы символов при этом сохраняются: их назначает построение
+ * дерева по имени и месту в родителе, а не сквозным счётчиком, поэтому
+ * отбрасывание детей у Macro не сдвигает идентификаторы соседей.
+ */
+function withoutCallableParameters(symbol: RslSymbol): RslSymbol {
+    const children = isCallableKind(symbol.kind)
+        ? []
+        : symbol.children
+            /*
+             * Непубличное во внешнюю сводку не входит.
+             *
+             * Из другого файла такие имена не видны, и компактное сканирование
+             * их не собирает: см. includePrivate. Оставить их значило бы
+             * показать соседнему файлу то, чего он видеть не должен, — и
+             * заодно держать в памяти лишнее.
+             */
+            .filter(child => !child.isPrivate)
+            .map(withoutCallableParameters);
+    const sameChildren = children.length === symbol.children.length &&
+        children.every((child, at) => child === symbol.children[at]);
+
+    if (sameChildren) {
+        return symbol;
+    }
+
+    return new RslSymbol({
+        id: symbol.id,
+        name: symbol.name,
+        kind: symbol.kind,
+        visibility: symbol.visibility,
+        range: symbol.range,
+        selectionRange: symbol.selectionRange,
+        typeName: symbol.typeName,
+        typeVariant: symbol.isTypeVariant,
+        value: symbol.value,
+        documentation: symbol.documentation,
+        builtin: symbol.isBuiltin,
+        parameterText: symbol.parameterText,
+        baseClassName: symbol.baseClassName,
+        children
+    });
+}
+
+function isCallableKind(kind: CompletionItemKind): boolean {
+    return kind === CompletionItemKind.Function ||
+        kind === CompletionItemKind.Method ||
+        kind === CompletionItemKind.Constructor;
+}
+
 export function compactOpenModuleModel(
     model: IRslModuleModel
 ): IRslModuleModel {
     return model.kind === "external"
         ? model
-        : createExternalModuleSummary(model.source);
+        : createExternalModuleSummaryFromOpenModel(model);
 }
 
 export function isOpenModuleModel(model: IRslModuleModel): boolean {
