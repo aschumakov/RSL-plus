@@ -1,3 +1,4 @@
+import { RslRequestSourceCache } from "./requestSourceCache";
 import { performance } from "perf_hooks";
 
 import {
@@ -182,6 +183,14 @@ export async function findRslReferencesForSymbol(
      * 66 МБ, и один только их разбор стоит 4,2 секунды — при каждом запросе.
      * Запись появилась при первом таком запросе и живёт, пока файл не менялся.
      */
+    /*
+     * Прочитанное за этот запрос — общее для обоих хранилищ.
+     *
+     * Записи о ссылках сверяют восстановленную запись чтением, а индекс
+     * References проверяет актуальность своей — тоже чтением. В холодной
+     * сессии это один и тот же файл дважды. См. RslRequestSourceCache.
+     */
+    const sources = new RslRequestSourceCache();
     const unknownUris: string[] = [];
 
     for (const candidateUri of externalUris) {
@@ -190,7 +199,7 @@ export async function findRslReferencesForSymbol(
         }
 
         const recorded = shards
-            ? await shards.lookup(candidateUri, targetName)
+            ? await shards.lookup(candidateUri, targetName, sources)
             : undefined;
 
         if (!recorded) {
@@ -223,7 +232,8 @@ export async function findRslReferencesForSymbol(
     const candidates = await referenceIndex.findCandidates(
         targetName,
         unknownUris,
-        isCancelled
+        isCancelled,
+        sources
     );
 
     let sliceStarted = performance.now();

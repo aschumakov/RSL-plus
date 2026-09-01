@@ -4,6 +4,10 @@ import { fileURLToPath } from "url";
 
 import { decodeRslSourceText } from "../core/textDecoding";
 import { contentFingerprint } from "./contentFingerprint";
+import {
+    RslRequestSourceCache,
+    type IRslReadSource
+} from "./requestSourceCache";
 
 /**
  * Постоянные записи о ссылках: что и куда ссылается в закрытых файлах.
@@ -163,7 +167,9 @@ export class RslReferenceShardStore {
      */
     async lookup(
         uri: string,
-        name: string
+        name: string,
+        /* Прочитанное за этот запрос: чтобы файл не читался дважды. */
+        sources?: RslRequestSourceCache
     ): Promise<IRslShardReference[] | undefined> {
         const entry = await this.entryOf(uri);
 
@@ -184,7 +190,7 @@ export class RslReferenceShardStore {
             return entry.names.get(name);
         }
 
-        if (!await this.confirm(uri, entry)) {
+        if (!await this.confirm(uri, entry, sources)) {
             return undefined;
         }
 
@@ -201,7 +207,8 @@ export class RslReferenceShardStore {
      */
     private async confirm(
         uri: string,
-        entry: IRslShardEntry
+        entry: IRslShardEntry,
+        sources?: RslRequestSourceCache
     ): Promise<boolean> {
         const stamp = await stampOf(uri);
 
@@ -211,20 +218,24 @@ export class RslReferenceShardStore {
             return false;
         }
 
-        let content: Buffer;
+        /*
+         * Чтение общее с индексом References: см. RslRequestSourceCache.
+         *
+         * Оба проверяют актуальность одних и тех же файлов, и в холодной сессии
+         * один файл читался, декодировался и хешировался по два раза за один
+         * запрос: сперва здесь, потом в индексе.
+         */
+        const read = sources
+            ? await sources.read(uri)
+            : await readOwnSource(uri);
 
-        try {
-            content = await fs.promises.readFile(fileURLToPath(uri));
-        } catch {
+        if (!read) {
             this.forgetEntry(uri);
 
             return false;
         }
 
-        if (
-            contentFingerprint(decodeRslSourceText(content)) !==
-            entry.stamp.fingerprint
-        ) {
+        if (read.fingerprint !== entry.stamp.fingerprint) {
             this.forgetEntry(uri);
 
             return false;
@@ -589,6 +600,21 @@ async function stampOf(
         const stat = await fs.promises.stat(filePath);
 
         return { mtimeMs: stat.mtimeMs, size: stat.size };
+    } catch {
+        return undefined;
+    }
+}
+
+/** Своё чтение, когда общего кэша запроса нет: см. RslRequestSourceCache. */
+async function readOwnSource(
+    uri: string
+): Promise<IRslReadSource | undefined> {
+    try {
+        const source = decodeRslSourceText(
+            await fs.promises.readFile(fileURLToPath(uri))
+        );
+
+        return { source, fingerprint: contentFingerprint(source) };
     } catch {
         return undefined;
     }

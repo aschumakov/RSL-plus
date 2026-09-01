@@ -9,6 +9,10 @@ import {
 } from "./referenceImportGraph";
 import { contentFingerprint } from "./contentFingerprint";
 import {
+    RslRequestSourceCache,
+    type IRslReadSource
+} from "./requestSourceCache";
+import {
     containsReferenceIdentifier,
     containsSortedIdentifierHash,
     hashReferenceIdentifier,
@@ -224,7 +228,9 @@ export class ReferenceIndex {
     async findCandidates(
         normalizedName: string,
         uris: readonly string[],
-        isCancelled: () => boolean = () => false
+        isCancelled: () => boolean = () => false,
+        /* Прочитанное за этот запрос: см. RslRequestSourceCache. */
+        sources?: RslRequestSourceCache
     ): Promise<IReferenceCandidateSource[]> {
         await this.ensureLoaded();
 
@@ -248,7 +254,7 @@ export class ReferenceIndex {
 
             const batch = uniqueUris.slice(start, start + this.readBatchSize);
             const candidates = await Promise.all(batch.map(uri =>
-                this.inspectFile(uri, target, targetHash)
+                this.inspectFile(uri, target, targetHash, sources)
             ));
 
             for (const candidate of candidates) {
@@ -321,7 +327,8 @@ export class ReferenceIndex {
     private async inspectFile(
         uri: string,
         normalizedName: string,
-        targetHash: number
+        targetHash: number,
+        sources?: RslRequestSourceCache
     ): Promise<IReferenceCandidateSource | undefined> {
         let filePath: string;
 
@@ -354,17 +361,25 @@ export class ReferenceIndex {
             return undefined;
         }
 
-        let source: string;
-        try {
-            source = decodeRslSourceText(
-                await fs.promises.readFile(filePath)
-            );
-        } catch (_error) {
+        /*
+         * Чтение общее с записями о ссылках: см. RslRequestSourceCache.
+         *
+         * Оба хранилища проверяют актуальность одних и тех же файлов, и в
+         * холодной сессии один файл читался, декодировался и хешировался по два
+         * раза за один запрос References.
+         */
+        const read = sources
+            ? await sources.read(uri)
+            : await readOwnSource(filePath);
+
+        if (!read) {
             this.invalidate(uri);
             return undefined;
         }
 
-        if (!entry || entry.fingerprint !== contentFingerprint(source)) {
+        const source = read.source;
+
+        if (!entry || entry.fingerprint !== read.fingerprint) {
             /* Содержимое разошлось с записью — пересканируем. */
             this.indexSource(uri, source, {});
             entry = this.entries.get(uri);
@@ -570,3 +585,18 @@ function errorToString(error: unknown): string {
 }
 
 export const referenceIndexTesting = referenceSourceFactsTesting;
+
+/** Своё чтение, когда общего кэша запроса нет: см. RslRequestSourceCache. */
+async function readOwnSource(
+    filePath: string
+): Promise<IRslReadSource | undefined> {
+    try {
+        const source = decodeRslSourceText(
+            await fs.promises.readFile(filePath)
+        );
+
+        return { source, fingerprint: contentFingerprint(source) };
+    } catch {
+        return undefined;
+    }
+}
