@@ -462,10 +462,20 @@ export class RslCompletionProvider {
              */
             memberCandidates: () => receiver ? names() : undefined,
             visibleCandidates: names,
-            ambientCandidates: () => deduplicateCompletionItems(
-                this.defaultCompletionItems,
-                this.knownImportCompletions(document)
-            ),
+            /*
+             * Только встроенные значения: импортированные приходят из resolver.
+             *
+             * getCompletions уже добавляет getImportedCompletionItems, а
+             * visibleCandidates идёт первым — значит одноимённые элементы
+             * второго сбора всё равно отбрасывались дедупликацией. Работа при
+             * этом делалась полностью: второй обход цепочки Import, второй
+             * проход по публичным символам каждого модуля и создание элементов,
+             * которые тут же выбрасывались.
+             *
+             * Быстрому пути этот сбор по-прежнему нужен: там полной модели
+             * текущей версии ещё нет, и брать импортированные символы неоткуда.
+             */
+            ambientCandidates: () => this.defaultCompletionItems,
             searchCandidates: () => this.workspaceSearchCandidates(
                 document,
                 module,
