@@ -131,6 +131,7 @@ export class WorkspaceIndex {
      */
     private readonly semanticRevisionByUri = new Map<string, number>();
     private semanticRevisionCounter = 0;
+    private pinnedRebuildCount = 0;
     private catalogValue = new WorkspaceCatalog();
 
     constructor(options: IWorkspaceIndexOptions = {}) {
@@ -246,6 +247,11 @@ export class WorkspaceIndex {
         this.refreshPinnedModules();
     }
 
+    /** Сколько раз замыкание перестраивалось целиком; для проверок и лога. */
+    get pinnedRebuilds(): number {
+        return this.pinnedRebuildCount;
+    }
+
     /**
      * Пересчитывает закрепление по всем открытым документам.
      *
@@ -254,6 +260,7 @@ export class WorkspaceIndex {
      * разрешились: их загрузка расширит закрепление.
      */
     private refreshPinnedModules(): void {
+        this.pinnedRebuildCount++;
         this.pinnedModules.clear();
         this.pinnedWantedNames.clear();
 
@@ -690,13 +697,26 @@ export class WorkspaceIndex {
             this.touchExternalModule(uri);
         }
 
-        if (isOpen || this.pinnedWantedNames.has(normalizeName(
-            moduleNameOfUri(uri)
-        ))) {
-            /*
-             * Либо изменился сам открытый документ и его Import, либо
-             * загрузился модуль, которого замыканию не хватало.
-             */
+        /*
+         * Замыкание пересчитывается по изменению Import, а не по факту
+         * замены модуля.
+         *
+         * Прежде оно перестраивалось на КАЖДУЮ правку открытого документа:
+         * `a = 1` -> `a = 2` тоже запускало полный обход Import-графа, хотя
+         * подключённые модули те же самые. При наборе текста это происходило
+         * на каждое нажатие клавиши.
+         */
+        const importsChanged = !sameImportSet(previous?.imports, module.imports);
+        const openChanged = (previous?.isOpen === true) !== isOpen;
+
+        if (
+            openChanged ||
+            (isOpen && importsChanged) ||
+            /* У закреплённого модуля появились новые зависимости. */
+            (this.pinnedModules.has(uri) && importsChanged) ||
+            /* Загрузился модуль, которого замыканию не хватало. */
+            this.pinnedWantedNames.has(normalizeName(moduleNameOfUri(uri)))
+        ) {
             this.refreshPinnedModules();
         }
 
@@ -916,4 +936,27 @@ function withMacExtension(name: string): string {
     const value = (name || "").trim();
 
     return /\.mac$/i.test(value) ? value : value + ".mac";
+}
+
+/**
+ * Один ли и тот же набор Import.
+ *
+ * Сравниваются нормализованные имена как множества: порядок в тексте роли не
+ * играет, а тождество массивов меняется на каждую правку файла.
+ */
+function sameImportSet(
+    left: readonly string[] | undefined,
+    right: readonly string[]
+): boolean {
+    if (!left) {
+        return right.length === 0;
+    }
+
+    if (left.length !== right.length) {
+        return false;
+    }
+
+    const known = new Set(left.map(normalizeName));
+
+    return right.every(name => known.has(normalizeName(name)));
 }
