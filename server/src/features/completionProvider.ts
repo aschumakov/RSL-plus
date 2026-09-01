@@ -1,4 +1,7 @@
 import {
+    collectRslImportClosure
+} from "../indexing/importClosure";
+import {
     CompletionItem,
     CompletionList,
     CompletionParams,
@@ -9,7 +12,7 @@ import type { TextDocument } from "vscode-languageserver-textdocument";
 
 import { getDefaults } from "../defaults";
 import { tokenAtOffset } from "../lexer";
-import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
+import type { IIndexedModule } from "../workspaceIndex";
 import {
     buildRslFastCompletions,
     buildRslFastMemberCompletions,
@@ -289,45 +292,15 @@ export class RslCompletionProvider {
         const wanted = getFastDocumentImports(
             this.environment.getFastDocumentSnapshot(document)
         );
-        const result: IIndexedModule[] = [];
-        const seen = new Set<string>([document.uri]);
-        const queue: string[] = [];
-
-        for (const name of wanted) {
-            const uri = resolvedUri(index.resolveWorkspaceFile(name));
-
-            if (uri) {
-                queue.push(uri);
-            }
-        }
-
-        while (queue.length > 0) {
-            const uri = queue.shift()!;
-
-            if (seen.has(uri)) {
-                continue;
-            }
-            seen.add(uri);
-
-            const module = index.getModule(uri);
-
-            if (!module) {
-                continue;
-            }
-
-            result.push(module);
-
-            /* Транзитивная цепочка: Import подключённого модуля тоже видны. */
-            for (const name of module.imports) {
-                const next = resolvedUri(index.resolveWorkspaceFile(name));
-
-                if (next && !seen.has(next)) {
-                    queue.push(next);
-                }
-            }
-        }
-
-        return result;
+        /*
+         * Обход общий: см. collectRslImportClosure.
+         *
+         * Import берутся из текста текущей версии, а не из модели — она на
+         * быстром пути отстаёт. Для этого и существует seedImports.
+         */
+        return collectRslImportClosure(index, document.uri, {
+            seedImports: wanted
+        }).modules;
     }
 
     /**
@@ -623,8 +596,3 @@ export class RslCompletionProvider {
 
 
 /** URI из разрешения имени модуля; неоднозначное и отсутствующее пропускаем. */
-function resolvedUri(
-    resolution: ReturnType<WorkspaceIndex["resolveWorkspaceFile"]>
-): string | undefined {
-    return resolution.kind === "resolved" ? resolution.value : undefined;
-}

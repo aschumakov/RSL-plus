@@ -1,3 +1,6 @@
+import {
+    collectRslImportClosure
+} from "../indexing/importClosure";
 import type { PlatformModuleCatalog } from "../builtins/platformModuleCatalog";
 import { normalizeIdentifier } from "../lexer";
 import type { WorkspaceIndex } from "../workspaceIndex";
@@ -87,19 +90,13 @@ export function buildImportContextState(
         loading = true;
     }
 
-    const visitedFiles = new Set<string>([uri]);
-    const visitedNames = new Set<string>();
-    const queue: string[][] = [root ? root.imports.slice() : []];
-
-    for (let position = 0; position < queue.length; position++) {
-        for (const importName of queue[position]) {
-            const key = normalizeIdentifier(importName);
-
-            if (visitedNames.has(key)) {
-                continue;
-            }
-            visitedNames.add(key);
-
+    /*
+     * Обход цепочки Import общий: см. collectRslImportClosure. Здесь остаётся
+     * только классификация имён — прикладной модуль, непрозрачный источник,
+     * незагруженный файл, — а она к обходу отношения не имеет.
+     */
+    const closure = collectRslImportClosure(index, uri, {
+        skipName: importName => {
             if (platformModules?.knowsModule(importName)) {
                 collectPlatformModule(
                     platformModules,
@@ -107,7 +104,8 @@ export function buildImportContextState(
                     pendingPlatform,
                     opaque
                 );
-                continue;
+
+                return true;
             }
 
             /*
@@ -126,33 +124,15 @@ export function buildImportContextState(
                 opaque.add(importName);
             }
 
-            const resolution = index.resolveWorkspaceFile(importName);
-
-            if (resolution.kind === "ambiguous") {
-                ambiguous.add(importName);
-                continue;
-            }
-
-            if (resolution.kind === "missing") {
-                opaque.add(importName);
-                continue;
-            }
-
-            if (visitedFiles.has(resolution.value)) {
-                continue;
-            }
-            visitedFiles.add(resolution.value);
-
-            const imported = index.getModule(resolution.value);
-
-            if (!imported) {
-                pending.add(importName);
-                continue;
-            }
-
-            queue.push(imported.imports.slice());
+            return false;
         }
-    }
+    });
+
+    closure.ambiguous.forEach(name => ambiguous.add(name));
+    /* Имя не разрешилось ни в один файл проекта: источник непрозрачен. */
+    closure.missing.forEach(name => opaque.add(name));
+    /* Файл есть, но ещё не прочитан: контекст не полон, но и не потерян. */
+    closure.unloaded.forEach(name => pending.add(name));
 
     if (
         !loading &&

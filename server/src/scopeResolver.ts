@@ -1,4 +1,7 @@
 import {
+    collectRslImportClosure
+} from "./indexing/importClosure";
+import {
     CompletionItem,
     CompletionItemKind
 } from "vscode-languageserver";
@@ -1202,32 +1205,26 @@ export class RslScopeResolver {
         }
 
         const found = new Set<string>();
-        const visitedUris = new Set<string>([uri]);
-        const queue: readonly string[][] = [seedImports.slice()];
 
-        for (const imports of queue) {
-            for (const importName of imports) {
-                if (catalog.knowsModule(importName)) {
-                    found.add(importName);
-                    continue;
+        /*
+         * Обход цепочки Import общий: см. collectRslImportClosure.
+         *
+         * Прикладные модули забираются до разрешения имени: у каталога
+         * платформы преимущество перед файлом проекта с тем же именем, и внутрь
+         * такого имени обход не заходит — состав модуля знает каталог.
+         */
+        collectRslImportClosure(this.index, uri, {
+            seedImports,
+            skipName: importName => {
+                if (!catalog.knowsModule(importName)) {
+                    return false;
                 }
 
-                /* Файл проекта: его собственные Import учитываются, если он уже разобран. */
-                const resolution = this.index.resolveWorkspaceFile(importName);
+                found.add(importName);
 
-                if (resolution.kind !== "resolved") {
-                    continue;
-                }
-
-                const imported = this.index.getModule(resolution.value);
-
-                if (!imported || visitedUris.has(imported.uri)) {
-                    continue;
-                }
-                visitedUris.add(imported.uri);
-                (queue as string[][]).push(imported.imports.slice());
+                return true;
             }
-        }
+        });
 
         return Object.freeze(Array.from(found));
     }
