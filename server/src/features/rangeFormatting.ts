@@ -6,7 +6,11 @@ import {
 import type { TextDocument } from "vscode-languageserver-textdocument";
 
 import { FormatCode, type IRslFormatOptions } from "../format";
-import { normalizeIdentifier, type IRslToken } from "../lexer";
+import {
+    normalizeIdentifier,
+    type IRslLexResult,
+    type IRslToken
+} from "../lexer";
 import { BLOCK_START_KEYWORDS } from "../language/rslLanguageReference";
 
 /**
@@ -45,7 +49,14 @@ export interface IRangeFormattingOptions {
      * кусок даёт тот же текст, что весь документ. Иначе — и когда токенов нет —
      * форматируется весь документ: медленно, зато тем же текстом.
      */
-    tokens?: readonly IRslToken[];
+    /**
+     * Разбор текущей версии целиком.
+     *
+     * Отсюда берутся и токены для проверки открытых блоков, и готовый lex для
+     * запасного пути: там форматируется весь документ, и лексировать его
+     * заново незачем.
+     */
+    lex?: IRslLexResult;
     /**
      * Настройки форматирования: отступ проекта, пробелы, выравнивание.
      *
@@ -112,8 +123,9 @@ function formatLines(
         document
     );
 
-    if (!window || openBlocksBefore(options.tokens, window.from) !== 0) {
-        const whole = FormatCode(source, tabSize, formatOptions);
+    if (!window || openBlocksBefore(options.lex?.tokens, window.from) !== 0) {
+        /* Запасной путь: весь документ, но с готовым разбором. */
+        const whole = FormatCode(source, tabSize, formatOptions, options.lex);
         const offsets = lineRangeOffsets(whole, startLine, endLine);
 
         return whole.substring(offsets.start, offsets.end);

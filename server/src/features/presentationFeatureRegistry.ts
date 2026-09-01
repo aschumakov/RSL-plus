@@ -124,10 +124,19 @@ export class PresentationFeatureRegistry {
                     document.uri,
                     params.options
                 );
+                /*
+                 * Разбор берётся из снимка текущей версии: он уже есть, и
+                 * лексировать тот же текст второй раз незачем.
+                 */
+                const snapshot = getFastDocumentSnapshot(document);
                 const formatted = FormatCode(
                     source,
                     options.tabSize,
-                    options
+                    options,
+                    snapshot.lex.tokens.length > 0 &&
+                        snapshot.text === source
+                        ? snapshot.lex
+                        : undefined
                 );
                 if (span) performance.end(span, {
                     changed: formatted !== source,
@@ -159,8 +168,7 @@ export class PresentationFeatureRegistry {
                     blockStartLines: this.environment.getBlockStartLines
                         ? this.environment.getBlockStartLines(document)
                         : undefined,
-                    tokens: this.environment
-                        .getFastDocumentSnapshot(document).lex.tokens,
+                    lex: this.environment.getFastDocumentSnapshot(document).lex,
                     format: this.formatOptions(
                         document.uri,
                         params.options

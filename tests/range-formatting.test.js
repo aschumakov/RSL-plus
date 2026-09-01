@@ -14,7 +14,8 @@ const {
     formatRslDocumentRange
 } = require("../server/out/features/rangeFormatting");
 const { FormatCode } = require("../server/out/format");
-const { lexRsl } = require("../server/out/lexer");
+const lexerModule = require("../server/out/lexer");
+const { lexRsl } = lexerModule;
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
 const {
     splitRslDocumentUnits
@@ -86,7 +87,7 @@ function formatRange(source, startLine, endLine, options = {}) {
         blockStartLines: options.withoutBlocks
             ? undefined
             : blockStartLines(source),
-        tokens: options.withoutTokens ? undefined : lexRsl(source).tokens
+        lex: options.withoutTokens ? undefined : lexRsl(source)
     });
 
     return edits.length === 0
@@ -188,7 +189,7 @@ test("работа не растёт вместе с файлом", () => {
             document,
             options: {
                 blockStartLines: blockStartLines(source),
-                tokens: lexRsl(source).tokens
+                lex: lexRsl(source)
             },
             params: {
                 textDocument: { uri: document.uri },
@@ -360,7 +361,7 @@ function growing(withUnfinishedDot) {
     };
     const options = {
         blockStartLines: blockStartLines(source),
-        tokens: lexRsl(source).tokens
+        lex: lexRsl(source)
     };
     let best = Infinity;
 
@@ -469,7 +470,7 @@ function growing(withUnfinishedDot) {
     };
     const options = {
         blockStartLines: blockStartLines(source),
-        tokens: lexRsl(source).tokens
+        lex: lexRsl(source)
     };
     let best = Infinity;
 
@@ -495,6 +496,53 @@ test("табуляции и размер отступа берутся у ред
 
     assert.strictEqual(spaces, "  Var first = 1;\n");
     assert.strictEqual(tabs, "\tVar first = 1;\n");
+});
+
+test("готовый разбор не лексируется заново", () => {
+    /*
+     * Форматирование всего документа получает разбор снаружи: снимок текущей
+     * версии его уже посчитал. Прежде FormatCode первым делом лексировал тот
+     * же текст сам.
+     */
+    const source = Array.from({ length: 400 }, (_ignored, at) => [
+        "Macro Run" + at + "()",
+        "  Var value = " + at + ";",
+        "  if (value > 0)",
+        "    value = value + 1;",
+        "  end;",
+        "End;",
+        ""
+    ].join("\n")).join("\n");
+    const prepared = lexRsl(source);
+    const original = lexerModule.lexRsl;
+    let whole = 0;
+
+    lexerModule.lexRsl = function (text, ...rest) {
+        if (text === source) {
+            whole++;
+        }
+
+        return original.call(this, text, ...rest);
+    };
+
+    let formatted;
+
+    try {
+        formatted = FormatCode(source, 4, {}, prepared);
+    } finally {
+        lexerModule.lexRsl = original;
+    }
+
+    assert.strictEqual(
+        formatted,
+        FormatCode(source, 4, {}),
+        "результат обязан совпасть с прежним путём"
+    );
+    assert.strictEqual(
+        whole,
+        0,
+        "весь документ не имеет права лексироваться второй раз"
+    );
 });
 
 console.log(`\nПройдено: ${passed}, провалено: ${failed}`);

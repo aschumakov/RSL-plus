@@ -9,7 +9,8 @@ import {
 
 import {
     IRslToken,
-    lexRsl
+    lexRsl,
+    type IRslLexResult
 } from "./lexer";
 
 export const FORMATTER_REVISION = "spacing-v2";
@@ -78,13 +79,21 @@ export interface IRslFormatOptions {
 export function FormatCode(
     text: string,
     tabSize: number = 4,
-    options: IRslFormatOptions = {}
+    options: IRslFormatOptions = {},
+    /**
+     * Готовый разбор ТОГО ЖЕ текста, если он уже есть.
+     *
+     * Снимок открытого документа уже содержит поток токенов текущей версии,
+     * а форматирование лексировало тот же текст заново. Чужую версию сюда
+     * передавать нельзя: eol, BOM и границы строк берутся отсюда.
+     */
+    preparedLex?: IRslLexResult
 ): string {
     const indentText = (level: number): string => options.insertSpaces === false
         ? "\t".repeat(Math.max(0, level))
         : " ".repeat(Math.max(0, level * tabSize));
     const source = text || "";
-    const lex = lexRsl(source);
+    const lex = preparedLex || lexRsl(source);
     const bom = lex.hasBom ? "\uFEFF" : "";
     const body = lex.hasBom ? source.substring(1) : source;
     const bodyOffset = lex.hasBom ? 1 : 0;
