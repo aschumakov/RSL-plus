@@ -100,6 +100,12 @@ export function getFastDocumentDeclarations(
 ): IRslDeclarationSnapshot {
     const declarations = extractCompactDeclarations(snapshot.text, {
         includePrivate: true,
+        /*
+         * Structure своего файла показывает и вложенные Macro: это такой же
+         * кусок кода, и умалчивать о нём панель не вправе. Внешняя сводка
+         * строится другим вызовом и вложенных по-прежнему не содержит.
+         */
+        includeNestedCallables: true,
         tokens: snapshot.lex.tokens
     });
     snapshot.imports = declarations.imports;

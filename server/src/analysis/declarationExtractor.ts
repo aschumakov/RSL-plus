@@ -99,6 +99,20 @@ export interface ICompactDeclarationOptions {
      * из другого файла и не видны.
      */
     includeCallableParameters?: boolean;
+    /**
+     * Включать Macro, объявленные внутри другого Macro.
+     *
+     * Нужно Structure открытого документа: вложенное объявление — такой же
+     * кусок кода, и умалчивать о нём панель не вправе. Внешней сводке не нужно
+     * и вредно: вызвать вложенный Macro из соседнего файла нельзя, а в каталоге
+     * проекта его имя стало бы ложной целью для Ctrl+T и перехода.
+     *
+     * Ключ отдельный, а не «заодно с includePrivate». Видимость и вложенность —
+     * разные вопросы: `Private Macro` виден снаружи файла ровно так же, как
+     * вложенный, то есть никак, но причины у этого разные, и режим, где нужно
+     * одно без другого, существует.
+     */
+    includeNestedCallables?: boolean;
 }
 
 /*
@@ -276,8 +290,21 @@ export function extractCompactDeclarations(
                     index: classHeader.nameIndex
                 }
                 : nextIdentifier(tokens, index + 1);
-            const visibleContainer = !insideMacro &&
-                (currentClass === undefined || currentClass.descriptor !== undefined);
+            /*
+             * Кому вложить объявление и вкладывать ли вообще.
+             *
+             * Со включёнными вложенными родителем становится ближайшее
+             * объемлющее объявление — Macro или Class, — а без них Macro
+             * внутри Macro не заводится вовсе. Пропущенный родитель забирает
+             * с собой и детей: показывать Inner в корне, когда Outer скрыт
+             * как приватный, значило бы соврать про место объявления.
+             */
+            const nestedAllowed = options.includeNestedCallables === true;
+            const container = nestedAllowed
+                ? findEnclosingDeclaration(blocks)
+                : currentClass;
+            const visibleContainer = (nestedAllowed || !insideMacro) &&
+                (container === undefined || container.descriptor !== undefined);
             const descriptor = nameInfo && isExternal && visibleContainer
                 ? createCallableDescriptor(
                     text,
@@ -294,7 +321,7 @@ export function extractCompactDeclarations(
                 : undefined;
 
             if (descriptor) {
-                addDescriptor(rootSymbols, currentClass?.descriptor, descriptor);
+                addDescriptor(rootSymbols, container?.descriptor, descriptor);
             }
 
             blocks.push({ keyword, descriptor });
@@ -732,6 +759,26 @@ function findCurrentClass(blocks: IBlockFrame[]): IBlockFrame | undefined {
             return blocks[index];
         }
     }
+    return undefined;
+}
+
+/**
+ * Ближайшее объемлющее объявление: Macro или Class.
+ *
+ * В отличие от findCurrentClass не останавливается на Macro, а возвращает
+ * его: вложенное объявление принадлежит именно ему.
+ */
+function findEnclosingDeclaration(
+    blocks: IBlockFrame[]
+): IBlockFrame | undefined {
+    for (let index = blocks.length - 1; index >= 0; index--) {
+        const frame = blocks[index];
+
+        if (frame.keyword === "macro" || frame.keyword === "class") {
+            return frame;
+        }
+    }
+
     return undefined;
 }
 
