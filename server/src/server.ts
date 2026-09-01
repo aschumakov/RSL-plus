@@ -51,6 +51,7 @@ import {
 import {
     CompactModuleWorkerService
 } from "./indexing/compactModuleWorkerService";
+import { WorkspaceModuleResolver } from "./indexing/workspaceModuleResolver";
 import { WorkspaceFileDiscoveryService } from "./indexing/workspaceFileDiscoveryService";
 import {
     shouldHandleWatchedFileChange
@@ -583,6 +584,22 @@ function getCurDoc(uri: string): TextDocument | undefined {
     return documents.get(uri);
 }
 
+/**
+ * Единственный путь от имени модуля к файлу проекта.
+ *
+ * Каталог отвечает всегда; обход диска нужен только пока каталог строится, и
+ * найденное сразу в него попадает. См. workspaceModuleResolver.
+ */
+const moduleFileResolver = new WorkspaceModuleResolver({
+    catalog: {
+        resolveWorkspaceFile: name => workspaceIndex.resolveWorkspaceFile(name),
+        registerWorkspaceFile: uri => workspaceIndex.registerWorkspaceFile(uri),
+        workspaceFilesReady: () => workspaceIndex.workspaceFilesReady
+    },
+    roots: () => workspaceDiscovery.rootPaths(),
+    log: logMessage
+});
+
 const definitionProvider = new RslDefinitionProvider({
     getOpenDocument: getCurDoc,
     ensureDocumentParsed,
@@ -592,6 +609,8 @@ const definitionProvider = new RslDefinitionProvider({
         workspaceIndex.findWorkspaceFileUri(name),
     resolveWorkspaceFileUri: name =>
         workspaceIndex.resolveWorkspaceFile(name),
+    resolveModuleFile: name => moduleFileResolver.resolve(name),
+    invalidateModuleFiles: () => moduleFileResolver.invalidate(),
     ensureModuleByName: name => moduleLoader.ensureLoadedByName(name),
     ensureImportedSymbol: (uri, symbolName) =>
         moduleLoader.ensureImportedSymbol(uri, symbolName),

@@ -17,8 +17,21 @@ export function resolveByModuleName<T>(
 
     const exact: T[] = [];
     const fallback: T[] = [];
+    /*
+     * Порядок кандидатов не зависит от порядка обхода проекта.
+     *
+     * Множество URI перебирается в порядке добавления, а он у обхода диска и у
+     * восстановленного каталога разный. Список неоднозначных назначений от
+     * этого менялся местами между запусками — на одном и том же проекте.
+     */
+    const ordered = [...uris].sort((left, right) => {
+        const leftPath = normalizeUriPath(left);
+        const rightPath = normalizeUriPath(right);
 
-    for (const uri of uris) {
+        return leftPath < rightPath ? -1 : leftPath > rightPath ? 1 : 0;
+    });
+
+    for (const uri of ordered) {
         const value = getValue(uri);
 
         if (value === undefined) {

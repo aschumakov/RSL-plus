@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
-import { fileURLToPath, pathToFileURL } from "url";
+import { fileURLToPath } from "url";
 
 import {
     CompletionItemKind,
@@ -21,6 +21,7 @@ import {
 } from "../execMacroDefinition";
 import { getScopeChain } from "../scopeResolver";
 import { decodeRslSourceText } from "../core/textDecoding";
+import { normalizeModuleName } from "../indexing/moduleNames";
 
 export interface IRslDefinitionContext {
     document: TextDocument;
@@ -38,6 +39,18 @@ export interface IDefinitionEnvironment {
     getImportedModules(uri: string): IIndexedModule[];
     findWorkspaceFileUri(moduleName: string): string | undefined;
     resolveWorkspaceFileUri?(moduleName: string): ModuleResolution<string>;
+    /**
+     * Единственный путь от имени модуля к файлу проекта.
+     *
+     * Отвечает WorkspaceModuleResolver: каталог проекта, а до его готовности —
+     * адресный обход с теми же исключениями, который найденное в каталог и
+     * складывает. URI возвращается зарегистрированный, а не собранный заново
+     * из пути: у собранного не совпадает регистр, и он не равен байт в байт
+     * тому, которым тот же файл зовёт редактор.
+     */
+    resolveModuleFile?(moduleName: string): Promise<ModuleResolution<string>>;
+    /** Забыть найденное и ненайденное: файл создан, удалён или переименован. */
+    invalidateModuleFiles?(): void;
     ensureModuleByName?(moduleName: string): Promise<IIndexedModule | undefined>;
     ensureImportedSymbol?(
         uri: string,
@@ -69,32 +82,32 @@ interface IDefinitionModule {
  * по обычному токену: ExecMacro, ExecMacro2 и ExecMacroFile.
  */
 export class RslDefinitionProvider {
-    private workspaceRoots: string[] = [];
-
-    private workspaceFileCache:
-        Map<string, string | null> =
-            new Map<string, string | null>();
-
     constructor(
         private environment: IDefinitionEnvironment
     ) {}
 
-    configureWorkspace(params: InitializeParams): void {
-        this.workspaceRoots = getWorkspaceRoots(params);
+    configureWorkspace(_params: InitializeParams): void {
+        /*
+         * Корни проекта здесь больше не нужны.
+         *
+         * Имя модуля разрешает WorkspaceModuleResolver — он же знает корни,
+         * исключаемые каталоги и правило неоднозначности. Прежде провайдер
+         * держал своё: свой список корней, свой обход диска и свой кэш, и они
+         * расходились с каталогом проекта.
+         */
         this.clearCaches();
     }
 
     clearCaches(): void {
-        this.workspaceFileCache.clear();
+        this.environment.invalidateModuleFiles?.();
     }
 
     invalidateUri(_uri: string): void {
         /*
-         * Отрицательный/положительный поиск мог зависеть от созданного,
-         * удалённого или переименованного файла. Размер кэша небольшой,
-         * поэтому безопаснее сбросить только path cache целиком.
+         * Созданный, удалённый или переименованный файл отменяет и найденное,
+         * и ненайденное: имя, которого не было, теперь может разрешиться.
          */
-        this.workspaceFileCache.clear();
+        this.environment.invalidateModuleFiles?.();
     }
 
     /**
@@ -113,16 +126,15 @@ export class RslDefinitionProvider {
             return null;
         }
 
-        const filePath = await this.findWorkspaceFile(
-            target.moduleName
-        );
+        const uri = await this.findWorkspaceFileUri(target.moduleName);
 
-        if (!filePath) {
+        if (!uri) {
             return null;
         }
 
+        /* URI из каталога проекта, без пересборки из пути: см. resolveModuleFile. */
         return Location.create(
-            pathToFileURL(filePath).toString(),
+            uri,
             {
                 start: { line: 0, character: 0 },
                 end: { line: 0, character: 0 }
@@ -384,14 +396,14 @@ export class RslDefinitionProvider {
         }
 
         /* Fallback для unit-тестов/клиентов без WorkspaceModuleLoader: без кэша. */
-        const filePath = await this.findWorkspaceFile(moduleName);
+        const uri = await this.findWorkspaceFileUri(moduleName);
+        const filePath = uri ? uriToFilePath(uri) : "";
 
         if (!filePath) {
             return undefined;
         }
 
         try {
-            const uri = pathToFileURL(filePath).toString();
             const text = decodeRslSourceText(
                 await fs.promises.readFile(filePath)
             );
@@ -408,118 +420,48 @@ export class RslDefinitionProvider {
         }
     }
 
-    private async findWorkspaceFile(
+    /**
+     * URI файла проекта по имени модуля.
+     *
+     * Неоднозначность не разрешается выбором наугад ни на одном пути: два
+     * одноимённых файла — это вопрос к человеку, а не повод увести в первый
+     * попавшийся. Прежде так и было до готовности каталога.
+     */
+    private async findWorkspaceFileUri(
         moduleName: string
     ): Promise<string | undefined> {
-        const indexedResolution = this.environment.resolveWorkspaceFileUri
-            ? this.environment.resolveWorkspaceFileUri(moduleName)
-            : undefined;
+        const resolution = await this.resolveModule(moduleName);
 
-        if (indexedResolution?.kind === "ambiguous") {
+        if (resolution.kind === "ambiguous") {
             this.environment.log(
                 `Ambiguous Import ${moduleName}: ` +
-                indexedResolution.candidates.join(", ")
+                resolution.candidates.join(", ")
             );
+
             return undefined;
         }
 
-        const indexedUri = indexedResolution?.kind === "resolved"
-            ? indexedResolution.value
-            : this.environment.findWorkspaceFileUri(moduleName);
-
-        if (indexedUri) {
-            const indexedPath = uriToFilePath(indexedUri);
-
-            if (indexedPath && await isFile(indexedPath)) {
-                return indexedPath;
-            }
-        }
-
-        const target = normalizeModuleName(moduleName);
-        const cached = this.workspaceFileCache.get(target);
-
-        if (cached !== undefined) {
-            return cached || undefined;
-        }
-
-        for (const root of this.workspaceRoots) {
-            const directPath = path.resolve(
-                root,
-                target.replace(/\//g, path.sep)
-            );
-
-            if (
-                isPathInsideRoot(root, directPath) &&
-                await isFile(directPath)
-            ) {
-                this.workspaceFileCache.set(target, directPath);
-                return directPath;
-            }
-        }
-
-        for (const root of this.workspaceRoots) {
-            const found = await findFileRecursively(
-                root,
-                target,
-                root
-            );
-
-            if (found) {
-                this.workspaceFileCache.set(target, found);
-                return found;
-            }
-        }
-
-        this.workspaceFileCache.set(target, null);
-        return undefined;
-    }
-}
-
-function getWorkspaceRoots(params: InitializeParams): string[] {
-    const result: string[] = [];
-
-    if (params.workspaceFolders) {
-        params.workspaceFolders.forEach(folder => {
-            const folderPath = uriToFilePath(folder.uri);
-
-            if (folderPath.length > 0) {
-                result.push(folderPath);
-            }
-        });
+        return resolution.kind === "resolved" ? resolution.value : undefined;
     }
 
-    if (result.length === 0 && params.rootUri) {
-        const rootPath = uriToFilePath(params.rootUri);
-
-        if (rootPath.length > 0) {
-            result.push(rootPath);
+    private async resolveModule(
+        moduleName: string
+    ): Promise<ModuleResolution<string>> {
+        if (this.environment.resolveModuleFile) {
+            return this.environment.resolveModuleFile(moduleName);
         }
-    }
 
-    if (result.length === 0 && params.rootPath) {
-        result.push(path.resolve(params.rootPath));
-    }
+        /* Клиент без resolver: отвечает только каталог, обхода диска нет. */
+        const known = this.environment.resolveWorkspaceFileUri?.(moduleName);
 
-    return uniquePaths(result);
-}
-
-function uniquePaths(values: string[]): string[] {
-    const result: string[] = [];
-    const seen: { [value: string]: boolean } = Object.create(null);
-
-    values.forEach(value => {
-        const resolved = path.resolve(value);
-        const normalized = process.platform === "win32"
-            ? resolved.toLowerCase()
-            : resolved;
-
-        if (!seen[normalized]) {
-            seen[normalized] = true;
-            result.push(resolved);
+        if (known) {
+            return known;
         }
-    });
 
-    return result;
+        const uri = this.environment.findWorkspaceFileUri(moduleName);
+
+        return uri ? { kind: "resolved", value: uri } : { kind: "missing" };
+    }
 }
 
 function uriToFilePath(uri: string): string {
@@ -534,22 +476,6 @@ function uriToFilePath(uri: string): string {
             ? ""
             : path.resolve(uri);
     }
-}
-
-function normalizeModuleName(value: string): string {
-    let result = (value || "")
-        .trim()
-        .replace(/\\/g, "/");
-
-    while (result.indexOf("./") === 0) {
-        result = result.substring(2);
-    }
-
-    if (!/\.mac$/i.test(result)) {
-        result += ".mac";
-    }
-
-    return result.toLowerCase();
 }
 
 function moduleMatchesUri(
@@ -655,104 +581,6 @@ function findObjectNameOffsets(
     };
 }
 
-function isPathInsideRoot(
-    root: string,
-    candidate: string
-): boolean {
-    const relative = path.relative(
-        path.resolve(root),
-        path.resolve(candidate)
-    );
-
-    return (
-        relative.length === 0 ||
-        (
-            relative !== ".." &&
-            !relative.startsWith(".." + path.sep) &&
-            relative.charAt(0) !== path.sep &&
-            !/^[A-Za-z]:[\\/]/.test(relative)
-        )
-    );
-}
-
-async function isFile(filePath: string): Promise<boolean> {
-    try {
-        return (await fs.promises.stat(filePath)).isFile();
-    } catch (_error) {
-        return false;
-    }
-}
-
-async function findFileRecursively(
-    directory: string,
-    target: string,
-    root: string
-): Promise<string | undefined> {
-    let entries: fs.Dirent[];
-
-    try {
-        entries = await fs.promises.readdir(directory, {
-            withFileTypes: true
-        });
-    } catch (_error) {
-        return undefined;
-    }
-
-    entries.sort((left, right) =>
-        left.name.localeCompare(right.name)
-    );
-
-    for (const entry of entries) {
-        if (!entry.isFile()) {
-            continue;
-        }
-
-        const candidate = path.join(directory, entry.name);
-        const relative = path.relative(root, candidate)
-            .replace(/\\/g, "/")
-            .toLowerCase();
-
-        if (
-            relative === target ||
-            relative.endsWith("/" + target) ||
-            entry.name.toLowerCase() === path.basename(target)
-        ) {
-            return candidate;
-        }
-    }
-
-    for (const entry of entries) {
-        if (
-            !entry.isDirectory() ||
-            shouldSkipDirectory(entry.name)
-        ) {
-            continue;
-        }
-
-        const found = await findFileRecursively(
-            path.join(directory, entry.name),
-            target,
-            root
-        );
-
-        if (found) {
-            return found;
-        }
-    }
-
-    return undefined;
-}
-
-function shouldSkipDirectory(name: string): boolean {
-    const normalized = name.toLowerCase();
-
-    return (
-        normalized === ".git" ||
-        normalized === "node_modules" ||
-        normalized === "out" ||
-        normalized === ".vscode-test"
-    );
-}
 
 function namesEqual(left: string, right: string): boolean {
     return (left || "").toLowerCase() ===

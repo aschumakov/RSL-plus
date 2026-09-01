@@ -4,6 +4,11 @@ import { fileURLToPath, pathToFileURL } from "url";
 
 import type { InitializeParams, WorkspaceFolder } from "vscode-languageserver/node";
 import type { PerformanceLogger } from "../performanceLogger";
+import {
+    isExcludedRslDirectory,
+    resolveRslWorkspaceRoots,
+    uniqueRoots
+} from "./workspaceModuleResolver";
 
 export interface IWorkspaceFileDiscoveryOptions {
     log(message: string): void;
@@ -13,10 +18,13 @@ export interface IWorkspaceFileDiscoveryOptions {
     interactivePauseMs?: number;
 }
 
-const EXCLUDED_DIRECTORIES = new Set([
-    ".git", "node_modules", "out", "dist", "build",
-    "archive", "backup", ".history"
-]);
+/*
+ * Исключаемые каталоги и корни проекта — общие с адресным поиском.
+ *
+ * Прежде обход и переход к определению держали свои списки, и они разошлись:
+ * переход находил файлы в dist, build, archive, backup и .history, а каталог
+ * их не видел. См. workspaceModuleResolver.
+ */
 
 /**
  * Строит каталог .mac в отдельном процессе language server.
@@ -24,7 +32,8 @@ const EXCLUDED_DIRECTORIES = new Set([
  * которого UI и приём LSP-ответов могли останавливаться на несколько секунд.
  */
 export class WorkspaceFileDiscoveryService {
-    private roots = new Set<string>();
+    /** Ключ одинаковости -> исходный путь корня; регистр сохраняется. */
+    private roots = new Map<string, string>();
     private timer: NodeJS.Timeout | undefined;
     private generation = 0;
     private running = false;
@@ -41,8 +50,13 @@ export class WorkspaceFileDiscoveryService {
     }
 
     configure(params: InitializeParams): void {
-        this.roots = new Set(getWorkspaceRoots(params));
+        this.roots = rootMap(resolveRslWorkspaceRoots(params));
         this.restart();
+    }
+
+    /** Корни проекта: их же обходит адресный поиск по имени модуля. */
+    rootPaths(): string[] {
+        return [...this.roots.values()];
     }
 
     updateWorkspaceFolders(
@@ -51,11 +65,11 @@ export class WorkspaceFileDiscoveryService {
     ): void {
         for (const folder of removed) {
             const root = uriToPath(folder.uri);
-            if (root) this.roots.delete(normalizePath(root));
+            if (root) this.roots.delete(rootKey(root));
         }
         for (const folder of added) {
             const root = uriToPath(folder.uri);
-            if (root) this.roots.add(normalizePath(root));
+            if (root) this.roots.set(rootKey(root), path.resolve(root));
         }
         this.restart();
     }
@@ -103,7 +117,7 @@ export class WorkspaceFileDiscoveryService {
             })
             : undefined;
         const files: string[] = [];
-        const directories = Array.from(this.roots);
+        const directories = this.rootPaths();
         let processedSinceYield = 0;
 
         try {
@@ -121,7 +135,7 @@ export class WorkspaceFileDiscoveryService {
 
                 for (const entry of entries) {
                     if (entry.isDirectory()) {
-                        if (!EXCLUDED_DIRECTORIES.has(entry.name.toLowerCase())) {
+                        if (!isExcludedRslDirectory(entry.name)) {
                             directories.push(path.join(directory, entry.name));
                         }
                     } else if (entry.isFile() && /\.mac$/i.test(entry.name)) {
@@ -163,22 +177,14 @@ export class WorkspaceFileDiscoveryService {
     }
 }
 
-function getWorkspaceRoots(params: InitializeParams): string[] {
-    const values: string[] = [];
-    for (const folder of params.workspaceFolders || []) {
-        const root = uriToPath(folder.uri);
-        if (root) values.push(root);
-    }
-    if (values.length === 0 && params.rootUri) {
-        const root = uriToPath(params.rootUri);
-        if (root) values.push(root);
-    }
-    if (values.length === 0 && params.rootPath) values.push(params.rootPath);
-    return Array.from(new Set(values.map(normalizePath)));
+function rootMap(roots: readonly string[]): Map<string, string> {
+    return new Map(uniqueRoots(roots).map(root => [rootKey(root), root]));
 }
 
-function normalizePath(value: string): string {
+/** Ключ одинаковости корня: регистр значим только для сравнения. */
+function rootKey(value: string): string {
     const resolved = path.resolve(value);
+
     return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
