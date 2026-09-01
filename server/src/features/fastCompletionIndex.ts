@@ -1,3 +1,7 @@
+import {
+    isRslImportWord,
+    startsRslImportDirective
+} from "../core/language/importDirective";
 import { CompletionItem, CompletionItemKind } from "vscode-languageserver";
 
 import {
@@ -784,12 +788,17 @@ function buildFastCompletionIndex(
          * что и у полного извлекателя: объявление и Import опознаются и
          * посреди строки, но только вне скобок и не после точки.
          */
+        /* Директива Import: общее правило, см. importDirective. */
+        const importHere = isRslImportWord(token) &&
+            startsRslImportDirective(tokens[index - 1], tokens[index + 1]);
+
         if (
+            !importHere &&
             !canStartStatement &&
             !(
                 groupDepth === 0 &&
                 !previousAfterDot &&
-                (DECLARATION_WORDS.has(word) || word === "import")
+                DECLARATION_WORDS.has(word)
             )
         ) {
             canStartStatement = false;
@@ -797,7 +806,8 @@ function buildFastCompletionIndex(
             continue;
         }
 
-        if (previousAfterDot || groupDepth > 0) {
+        /* Директиву Import точка перед ней не отменяет: см. importDirective. */
+        if (!importHere && (previousAfterDot || groupDepth > 0)) {
             canStartStatement = false;
             modifier = "";
             continue;
@@ -857,7 +867,7 @@ function buildFastCompletionIndex(
             continue;
         }
 
-        if (word === "import") {
+        if (word === "import" && importHere) {
             index = readImport(tokens, index, imports);
         }
         modifier = "";

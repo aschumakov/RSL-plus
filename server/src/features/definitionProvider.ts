@@ -116,7 +116,7 @@ export class RslDefinitionProvider {
      */
     async findImportDefinition(
         context: IRslDefinitionContext
-    ): Promise<Location | null> {
+    ): Promise<Location | Location[] | null> {
         const target = GetImportDefinitionTargetFromTokens(
             context.tokens,
             context.offset
@@ -126,20 +126,23 @@ export class RslDefinitionProvider {
             return null;
         }
 
-        const uri = await this.findWorkspaceFileUri(target.moduleName);
+        const resolution = await this.resolveModule(target.moduleName);
 
-        if (!uri) {
-            return null;
+        /*
+         * Неоднозначность — список назначений, а не молчание.
+         *
+         * Прежде здесь она превращалась в null, и два одноимённых файла до
+         * построения каталога не давали перехода вовсе, а после — давали оба.
+         * Ответ обязан быть одним и тем же.
+         */
+        if (resolution.kind === "ambiguous") {
+            return [...resolution.candidates].sort().map(fileStart);
         }
 
         /* URI из каталога проекта, без пересборки из пути: см. resolveModuleFile. */
-        return Location.create(
-            uri,
-            {
-                start: { line: 0, character: 0 },
-                end: { line: 0, character: 0 }
-            }
-        );
+        return resolution.kind === "resolved"
+            ? fileStart(resolution.value)
+            : null;
     }
 
     async findDynamicDefinition(
@@ -462,6 +465,14 @@ export class RslDefinitionProvider {
 
         return uri ? { kind: "resolved", value: uri } : { kind: "missing" };
     }
+}
+
+/** Начало файла: у макромодуля нет объявления, к которому можно было бы вести. */
+function fileStart(uri: string): Location {
+    return Location.create(uri, {
+        start: { line: 0, character: 0 },
+        end: { line: 0, character: 0 }
+    });
 }
 
 function uriToFilePath(uri: string): string {

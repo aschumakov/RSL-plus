@@ -636,6 +636,7 @@ languageFeatures = new RslLanguageFeatureRegistry({
     index: workspaceIndex,
     resolver: scopeResolver,
     definitionProvider,
+    resolveModuleFile: name => moduleFileResolver.resolve(name),
     referenceIndex,
     referenceShards,
     getFastDocumentSnapshot: document =>

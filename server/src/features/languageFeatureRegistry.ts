@@ -1,3 +1,4 @@
+import type { ModuleResolution } from "../workspaceIndex";
 import {
     CancellationToken,
     CodeAction,
@@ -136,6 +137,10 @@ export interface IRslLanguageFeatureEnvironment {
     getSettings(uri: string): IRslSettings;
     /** Клиент умеет перезапрашивать semantic tokens по просьбе сервера. */
     supportsRefresh?(): boolean;
+    /** Единственный путь от имени модуля к файлу: см. WorkspaceModuleResolver. */
+    resolveModuleFile?(
+        moduleName: string
+    ): Promise<ModuleResolution<string>>;
     noteInteractiveActivity?(): void;
     log(message: string): void;
     performance?: PerformanceLogger;
@@ -255,6 +260,9 @@ export class RslLanguageFeatureRegistry {
             ensureImportedSymbol: environment.ensureImportedSymbol
                 ? (fromUri, symbolName) =>
                     environment.ensureImportedSymbol!(fromUri, symbolName)
+                : undefined,
+            resolveModuleFile: environment.resolveModuleFile
+                ? name => environment.resolveModuleFile!(name)
                 : undefined,
             noteInteractiveActivity: () =>
                 environment.noteInteractiveActivity?.(),

@@ -43,6 +43,10 @@ const {
 const {
     planRslImports
 } = require("../server/out/features/organizeImports");
+const {
+    collectRslImports,
+    importKey
+} = require("../server/out/features/importModel");
 
 let passed = 0;
 let failed = 0;
@@ -295,6 +299,112 @@ const LIBRARY = {
     "file:///d:/org/alpha.mac": "Macro AlphaOne()\n  return 1;\nEnd;\n",
     "file:///d:/org/beta.mac": "Macro BetaOne()\n  return 1;\nEnd;\n"
 };
+
+/*
+ * Путь с удвоенным обратным слешем — так и только так он написан в проекте.
+ *
+ * В исходном тексте RSL здесь ДВА физических символа `\`, и это не описка: из
+ * девяти строковых Import с обратным слешем в проекте все девять удвоены.
+ * Ключ сравнения строился своим способом и давал `..//user//lib`, а
+ * разобранное имя — `../user/lib`. Ключи не совпадали, и от этого «удалить
+ * неиспользуемые» не удаляло импорт, «добавить недостающие» добавляло его
+ * второй раз, а повтор одного модуля не опознавался.
+ */
+const DEEP = {
+    "file:///d:/org/user/lib.mac": "Macro DeepOne()\n  return 1;\nEnd;\n"
+};
+/* В файле это: Import "..\\user\\lib.mac"; */
+const DEEP_IMPORT = 'Import "..\\\\user\\\\lib.mac";';
+
+test("удвоенный слеш даёт тот же ключ, что и разобранное имя", () => {
+    const { module } = open(DEEP_IMPORT + "\n\nMacro Run()\nEnd;\n");
+    const items = collectRslImports(module).flatMap(one => one.items);
+
+    assert.strictEqual(items.length, 1, "директива одна");
+    assert.strictEqual(
+        items[0].key,
+        importKey(items[0].name),
+        "ключ написания обязан совпасть с ключом разобранного имени"
+    );
+    assert.strictEqual(
+        items[0].key,
+        "../user/lib",
+        "и быть путём, а не удвоенными слешами: " + items[0].key
+    );
+});
+
+test("удвоенный слеш: повтор того же модуля опознаётся", () => {
+    /* Два написания одного файла: строкой с путём и обычным именем. */
+    assert.strictEqual(
+        importKey('"..\\\\user\\\\lib.mac"'),
+        importKey("..\\user\\lib"),
+        "написания одного модуля обязаны дать один ключ"
+    );
+});
+
+test("удвоенный слеш: неиспользуемый Import находится", () => {
+    const source = DEEP_IMPORT + "\nImport alpha;\n\nMacro Run()\n" +
+        "  return AlphaOne();\nEnd;\n";
+    const { index, module } = open(source, { ...LIBRARY, ...DEEP });
+
+    assert.ok(
+        rslImportContextIsComplete(module, index),
+        "оба модуля проекта разобраны"
+    );
+    /* Отдаётся ключ, а не написание: он же и был сломан — `..//user//lib`. */
+    assert.deepStrictEqual(
+        [...findUnusedRslImports(module, index)],
+        ["../user/lib"],
+        "импорт с путём обязан опознаваться как неиспользуемый"
+    );
+});
+
+test("удвоенный слеш: используемый Import не удаляется", () => {
+    const source = DEEP_IMPORT + "\n\nMacro Run()\n  return DeepOne();\nEnd;\n";
+    const { index, module } = open(source, DEEP);
+
+    assert.deepStrictEqual(
+        [...findUnusedRslImports(module, index)],
+        [],
+        "модуль используется — удалять нечего"
+    );
+});
+
+test("удвоенный слеш: недостающий Import не добавляется второй раз", () => {
+    const source = DEEP_IMPORT + "\n\nMacro Run()\n  return DeepOne();\nEnd;\n";
+    const { index, module } = open(source, DEEP);
+
+    assert.deepStrictEqual(
+        findMissingRslImports(module, index, () => false),
+        [],
+        "модуль уже подключён: повторно добавлять нельзя"
+    );
+});
+
+test("удвоенный слеш: Organize Imports идемпотентен", () => {
+    const source = DEEP_IMPORT + "\nImport alpha;\n\nMacro Run()\n" +
+        "  return DeepOne() + AlphaOne();\nEnd;\n";
+    const first = run(
+        source,
+        RSL_IMPORT_ACTION_KINDS.all,
+        { ...LIBRARY, ...DEEP }
+    ).text;
+    const second = run(
+        first,
+        RSL_IMPORT_ACTION_KINDS.all,
+        { ...LIBRARY, ...DEEP }
+    ).text;
+
+    assert.strictEqual(
+        second,
+        first,
+        "второй запуск не имеет права ничего менять"
+    );
+    assert.ok(
+        first.includes("..\\\\user\\\\lib.mac"),
+        "написание пути обязано сохраниться как есть: " + first
+    );
+});
 
 test("неиспользуемый Import находится", () => {
     const { index, module } = open(

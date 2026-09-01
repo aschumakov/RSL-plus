@@ -1,3 +1,5 @@
+import type { IImportDefinitionTarget } from "../execMacroDefinition";
+import type { ModuleResolution } from "../workspaceIndex";
 import {
     Hover,
     Location,
@@ -222,21 +224,27 @@ export function findRslReferenceTypeDefinition(
  * двух файлов наугад хуже, чем не уводить никуда. Теперь показываются все
  * подходящие файлы, и выбирает человек.
  */
-export function findRslImportModuleDefinition(
-    context: IRslInteractiveContext,
-    index: WorkspaceIndex
-): Location | Location[] | undefined {
-    const target = GetImportDefinitionTargetFromTokens(
+/** Ссылка на файл модуля под курсором, если она там есть. */
+export function rslImportReferenceAt(
+    context: IRslInteractiveContext
+): IImportDefinitionTarget | undefined {
+    return GetImportDefinitionTargetFromTokens(
         context.tokens as IRslToken[],
         context.offset
     );
+}
 
-    if (!target) {
-        return undefined;
-    }
-
-    const resolution = index.resolveWorkspaceFile(target.moduleName);
-
+/**
+ * Разрешение имени модуля в ответ редактору.
+ *
+ * Неоднозначность — это список назначений, а не молчание: два одноимённых
+ * файла выбирает человек. Ответ обязан быть одинаковым и до построения
+ * каталога, и после, поэтому разрешение приходит снаружи: каталог, а до его
+ * готовности — WorkspaceModuleResolver.
+ */
+export function rslImportDefinitionOf(
+    resolution: ModuleResolution<string>
+): Location | Location[] | undefined {
     if (resolution.kind === "resolved") {
         return fileStartLocation(resolution.value);
     }
@@ -249,6 +257,24 @@ export function findRslImportModuleDefinition(
     return [...resolution.candidates]
         .sort()
         .map(uri => fileStartLocation(uri));
+}
+
+/**
+ * Переход по имени модуля только по каталогу проекта.
+ *
+ * Оставлено для клиентов без resolver: обхода диска здесь нет, поэтому до
+ * готовности каталога ответа тоже нет. Настоящий сервер ходит через
+ * resolveModuleFile — см. interactiveHandlers.
+ */
+export function findRslImportModuleDefinition(
+    context: IRslInteractiveContext,
+    index: WorkspaceIndex
+): Location | Location[] | undefined {
+    const target = rslImportReferenceAt(context);
+
+    return target
+        ? rslImportDefinitionOf(index.resolveWorkspaceFile(target.moduleName))
+        : undefined;
 }
 
 /** Начало файла: у макромодуля нет объявления, к которому можно было бы вести. */

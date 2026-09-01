@@ -455,6 +455,105 @@ test("10. после построения каталога переход не �
     }
 });
 
+/**
+ * Задержать обход диска и дать вмешаться в проект посередине.
+ *
+ * Обход идёт асинхронно и живёт дольше события наблюдателя за файлами. Без
+ * поколения он доводил до конца работу, начатую по прежнему составу проекта.
+ */
+async function withSlowScan(inside, onRead, action) {
+    const original = fs.promises.readdir;
+    let done = false;
+
+    fs.promises.readdir = async function (target, ...rest) {
+        const listing = await original.call(this, target, ...rest);
+
+        /*
+         * Вмешательство после чтения каталога с файлами, а не корня.
+         *
+         * Если править проект до того, как обход добрался до нужного каталога,
+         * он просто увидит новое состояние — и проверка пройдёт даже без
+         * поколения, ничего не проверив.
+         */
+        if (!done && String(target).replace(/\\/gu, "/").endsWith("/lib")) {
+            done = true;
+            await onRead();
+        }
+
+        return listing;
+    };
+
+    try {
+        return await action();
+    } finally {
+        fs.promises.readdir = original;
+    }
+}
+
+test("11. файл, удалённый во время обхода, не возвращается", async () => {
+    const board = stand({ "lib/doomed.mac": SOURCE });
+
+    try {
+        const answer = await withSlowScan(
+            board.directory,
+            async () => {
+                /* Пока обход идёт, файл удаляют и сообщают об этом. */
+                fs.rmSync(board.pathOf("lib/doomed.mac"));
+                board.resolver.invalidate();
+            },
+            () => board.resolver.resolve("doomed")
+        );
+
+        assert.strictEqual(
+            answer.kind,
+            "missing",
+            "обход не имеет права оживить удалённый файл: " +
+            JSON.stringify(answer)
+        );
+
+        /* И в каталоге его тоже не должно остаться. */
+        assert.strictEqual(
+            board.index.resolveWorkspaceFile("doomed").kind,
+            "missing",
+            "удалённый файл не должен попасть в каталог задним числом"
+        );
+    } finally {
+        board.dispose();
+    }
+});
+
+test("12. файл, созданный во время обхода, потом находится", async () => {
+    const board = stand({ "lib/other.mac": SOURCE });
+
+    try {
+        const answer = await withSlowScan(
+            board.directory,
+            async () => {
+                /* Пока обход ищет и не находит, файл появляется. */
+                put(board.directory, "lib/fresh.mac");
+                board.resolver.invalidate();
+            },
+            () => board.resolver.resolve("fresh")
+        );
+
+        /*
+         * Ответ этого запроса может быть любым: файла на момент начала обхода
+         * не было. Важно, что «такого нет» не запомнилось — иначе файл остался
+         * бы невидимым до конца сеанса.
+         */
+        const next = await board.resolver.resolve("fresh");
+
+        assert.strictEqual(
+            next.kind,
+            "resolved",
+            "созданный во время обхода файл обязан найтись следующим запросом; " +
+            "первый ответ был " + JSON.stringify(answer)
+        );
+    } finally {
+        board.dispose();
+    }
+});
+
 (async () => {
     for (const item of tests) {
         try {

@@ -1,3 +1,4 @@
+import { normalizeModuleName } from "../core/language/moduleName";
 import {
     isIdentifierPart,
     isIdentifierStart,
@@ -97,15 +98,15 @@ export function normalizeReferenceImports(
         .filter(value => !!value)));
 }
 
+/**
+ * Имя модуля для записей о ссылках.
+ *
+ * Разбор написания общий: см. core/language/moduleName. Своя копия здесь
+ * ошибалась на удвоенном обратном слеше — `"..\\user\\lib.mac"` превращался в
+ * `..//user//lib.mac`, и записи о ссылках расходились с каталогом проекта.
+ */
 export function normalizeReferenceModuleName(value: string): string {
-    let result = (value || "").trim().replace(/\\/g, "/").toLowerCase();
-    while (result.startsWith("./")) {
-        result = result.substring(2);
-    }
-    if (result && !result.endsWith(".mac")) {
-        result += ".mac";
-    }
-    return result;
+    return value ? normalizeModuleName(value) : "";
 }
 
 function collectIdentifierHashes(source: string): Uint32Array {

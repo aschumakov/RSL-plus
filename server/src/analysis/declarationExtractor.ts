@@ -1,3 +1,7 @@
+import {
+    isRslImportWord,
+    startsRslImportDirective
+} from "../core/language/importDirective";
 import { CompletionItemKind } from "vscode-languageserver";
 
 import {
@@ -200,12 +204,22 @@ export function extractCompactDeclarations(
          * базы вполне может содержать поле `file`; внутри скобок стоит
          * аргумент, а не объявление.
          */
+        /*
+         * Директива Import опознаётся общим правилом, а не отслеживанием
+         * предложений: см. core/language/importDirective. Своё правило здесь
+         * пропускало директиву после точки — так написаны четыре настоящих
+         * файла проекта — и принимало за неё `Var Import = 1;`.
+         */
+        const importHere = isRslImportWord(token) &&
+            startsRslImportDirective(tokens[index - 1], tokens[index + 1]);
+
         if (
+            !importHere &&
             !canStartStatement &&
             !(
                 groupDepth === 0 &&
                 !previousAfterDot &&
-                (DECLARATION_KEYWORDS.has(word) || word === "import")
+                DECLARATION_KEYWORDS.has(word)
             )
         ) {
             continue;
@@ -227,7 +241,7 @@ export function extractCompactDeclarations(
             index = next.index;
         }
 
-        if (keyword === "import") {
+        if (keyword === "import" && importHere) {
             const parsed = scanImportNames(tokens, index + 1, keywordToken.line);
             parsed.names.forEach(name => {
                 if (name && !imports.some(item => moduleReferenceKey(item) === moduleReferenceKey(name))) {

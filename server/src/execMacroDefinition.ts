@@ -1,3 +1,7 @@
+import {
+    isRslImportWord,
+    startsRslImportDirective
+} from "./core/language/importDirective";
 import { rslModuleItemName } from "./core/language/moduleName";
 import {
     cachedSignificantTokens,
@@ -479,7 +483,11 @@ export function createImportReferenceScanner(
     let resumeAt = 0;
 
     const step = (token: IRslToken, index: number): void => {
-        if (index < resumeAt || !isImportWord(token)) {
+        if (
+            index < resumeAt ||
+            !isRslImportWord(token) ||
+            !startsRslImportDirective(tokens[index - 1], tokens[index + 1])
+        ) {
             return;
         }
 
@@ -507,7 +515,7 @@ export function createImportReferenceScanner(
              * В повреждённом коде без ; не захватываем следующую
              * директиву Import как часть имени предыдущего файла.
              */
-            if (current.length > 0 && isImportWord(part)) {
+            if (current.length > 0 && isRslImportWord(part)) {
                 addImportReference(current, result);
                 resumeAt = cursor;
                 return;
@@ -532,17 +540,6 @@ export function createImportReferenceScanner(
     };
 }
 
-/**
- * Слово Import.
- *
- * Длина проверяется раньше регистра: приведение к нижнему регистру создаёт
- * строку на каждый идентификатор файла, а слово Import — ровно шесть символов.
- */
-function isImportWord(token: IRslToken): boolean {
-    return token.kind === "identifier" &&
-        token.value.length === 6 &&
-        token.value.toLowerCase() === "import";
-}
 
 function computeImportReferences(
     sourceTokens: IRslToken[]

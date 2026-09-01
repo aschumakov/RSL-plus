@@ -146,6 +146,17 @@ export class WorkspaceModuleResolver {
     private misses = new Set<string>();
     /** Идущие поиски: два перехода подряд не обходят диск дважды. */
     private running = new Map<string, Promise<ModuleResolution<string>>>();
+    /**
+     * Поколение состава проекта.
+     *
+     * Обход диска идёт асинхронно и живёт дольше события наблюдателя за
+     * файлами. Без поколения он доводил до конца работу, начатую по прежнему
+     * состоянию: регистрировал в каталоге файл, удалённый минуту назад, и
+     * записывал «такого нет» про файл, созданный уже во время обхода. Первое
+     * оживляло удалённый файл в Ctrl+T и в переходе, второе прятало новый до
+     * конца сессии.
+     */
+    private generation = 0;
 
     constructor(private options: IWorkspaceModuleResolverOptions) {}
 
@@ -191,7 +202,16 @@ export class WorkspaceModuleResolver {
         }
 
         const search = this.searchOnDisk(target, moduleName)
-            .finally(() => this.running.delete(target));
+            .finally(() => {
+                /*
+                 * Снимается только свой поиск. Пока шёл этот, invalidate мог
+                 * очистить список, а следующий запрос — начать новый поиск того
+                 * же имени; удалить его запись значит запустить третий.
+                 */
+                if (this.running.get(target) === search) {
+                    this.running.delete(target);
+                }
+            });
 
         this.running.set(target, search);
 
@@ -206,12 +226,24 @@ export class WorkspaceModuleResolver {
      */
     invalidate(): void {
         this.misses.clear();
+        /*
+         * Идущие обходы теряют силу вместе с кэшем.
+         *
+         * Отменить сам обход нельзя — он уже читает каталоги, — но его
+         * результат больше не описывает проект: пока он шёл, файл могли
+         * создать или удалить. Поэтому такой обход ничего не регистрирует и
+         * ничего не запоминает, а спросивший получает ответ каталога на
+         * текущий момент.
+         */
+        this.generation++;
+        this.running.clear();
     }
 
     private async searchOnDisk(
         target: string,
         moduleName: string
     ): Promise<ModuleResolution<string>> {
+        const startedAt = this.generation;
         const found: string[] = [];
 
         for (const root of this.options.roots()) {
@@ -223,6 +255,16 @@ export class WorkspaceModuleResolver {
             }
 
             await collectMatches(root, target, root, found);
+        }
+
+        /*
+         * Состав проекта изменился, пока шёл обход: его находки уже не факт.
+         *
+         * Отвечает каталог на текущий момент, а найденное на диске
+         * отбрасывается — вместе с правом записать «такого файла нет».
+         */
+        if (startedAt !== this.generation) {
+            return this.options.catalog.resolveWorkspaceFile(moduleName);
         }
 
         if (found.length === 0) {

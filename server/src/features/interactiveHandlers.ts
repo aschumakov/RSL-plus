@@ -12,7 +12,11 @@ import type { TextDocument } from "vscode-languageserver-textdocument";
 import { normalizeIdentifier, tokenAtOffset } from "../lexer";
 import { RSL_BUILTIN_URI, type RslScopeResolver } from "../scopeResolver";
 import type { RslSymbol } from "../symbols/rslSymbol";
-import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
+import type {
+    IIndexedModule,
+    ModuleResolution,
+    WorkspaceIndex
+} from "../workspaceIndex";
 import type { PerformanceLogger } from "../performanceLogger";
 import type {
     IFastDocumentSnapshot
@@ -33,7 +37,8 @@ import {
     buildRslReferenceSignatureHelp,
     findRslCallAt,
     findRslDynamicDefinition,
-    findRslImportModuleDefinition,
+    rslImportDefinitionOf,
+    rslImportReferenceAt,
     findRslReferenceDefinition,
     findRslReferenceTypeDefinition,
     typeNameOfOwnClass
@@ -78,6 +83,10 @@ export interface IRslInteractiveHandlerEnvironment {
         fromUri: string,
         symbolName: string
     ): Promise<boolean>;
+    /** Единственный путь от имени модуля к файлу: см. WorkspaceModuleResolver. */
+    resolveModuleFile?(
+        moduleName: string
+    ): Promise<ModuleResolution<string>>;
     noteInteractiveActivity?(): void;
     performance?: PerformanceLogger;
 }
@@ -319,14 +328,33 @@ export function createRslInteractiveHandlers(
                  * ссылки на символ, а имена файлов и процедур: их знает каталог
                  * проекта, и разбор для них не нужен ни до, ни после.
                  */
-                const byImport = findRslImportModuleDefinition(
-                    context,
-                    environment.index
-                );
+                const importReference = rslImportReferenceAt(context);
 
-                if (byImport) {
-                    outcomeName = "import";
-                    return context.isStale() ? null : byImport;
+                if (importReference) {
+                    /*
+                     * Разрешает WorkspaceModuleResolver, а не индекс напрямую.
+                     *
+                     * Прежде быстрый путь спрашивал каталог, и до конца обхода
+                     * ответа не было: запрос уходил дальше — строить полную
+                     * модель, — а потом тот же файл всё равно находился обходом
+                     * диска, но уже в медленном пути, где неоднозначность
+                     * превращалась в молчание. Получалось, что два одноимённых
+                     * файла до построения каталога перехода не давали, а после
+                     * давали оба.
+                     */
+                    const resolution = environment.resolveModuleFile
+                        ? await environment.resolveModuleFile(
+                            importReference.moduleName
+                        )
+                        : environment.index.resolveWorkspaceFile(
+                            importReference.moduleName
+                        );
+                    const byImport = rslImportDefinitionOf(resolution);
+
+                    if (byImport) {
+                        outcomeName = "import";
+                        return context.isStale() ? null : byImport;
+                    }
                 }
 
                 if (context.token?.kind === "string") {

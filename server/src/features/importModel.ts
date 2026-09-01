@@ -1,4 +1,5 @@
-import { normalizeIdentifier, type IRslToken } from "../lexer";
+import { moduleReferenceKey } from "../core/language/moduleName";
+import { type IRslToken } from "../lexer";
 import type { IIndexedModule } from "../workspaceIndex";
 
 /**
@@ -59,15 +60,18 @@ export interface IRslImportDeclaration {
     lineEnd: number;
 }
 
-/** Ключ сравнения имён модулей. */
+/**
+ * Ключ сравнения имён модулей.
+ *
+ * Разбор написания общий: см. core/language/moduleName. Свой собственный здесь
+ * уже был, и он ошибался ровно там, где ошибались остальные, — на удвоенном
+ * обратном слеше. Для настоящего `Import "..\\user\\lib.mac";` он давал
+ * `..//user//lib`, а разобранное имя — `../user/lib`. Ключи не совпадали, и от
+ * этого «удалить неиспользуемые» не удаляло импорт, «добавить недостающие»
+ * добавляло его второй раз, а повтор одного модуля не опознавался.
+ */
 export function importKey(value: string): string {
-    return normalizeIdentifier(
-        value
-            .trim()
-            .replace(/^["']|["']$/gu, "")
-            .replace(/\\/gu, "/")
-            .replace(/\.mac$/iu, "")
-    );
+    return moduleReferenceKey(value);
 }
 
 export function collectRslImports(
