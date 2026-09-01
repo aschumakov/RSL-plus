@@ -66,13 +66,29 @@ const SOURCE = [
     ""
 ].join("\n");
 
+/**
+ * Занять worker посторонним файлом.
+ *
+ * Объединяются только запросы, стоящие в ОЧЕРЕДИ: ушедший worker'у
+ * попутчиков не берёт. Поэтому проверка объединения обязана сперва занять
+ * worker, иначе первый же запрос уходит немедленно и объединять нечего.
+ */
+function occupyWorker(directory, service, name) {
+    const { uri } = writeModule(directory, name, SOURCE);
+
+    return service.index({ uri, generation: 1, priority: "background" });
+}
+
 test("два потребителя одного URI дают один запрос worker", () =>
     withWorkspace(async ({ directory, service }) => {
+        const busy = occupyWorker(directory, service, "busy.mac");
         const { uri } = writeModule(directory, "shared.mac", SOURCE);
-        /* Загрузчик и прогрев спрашивают один файл одновременно. */
+        const before = service.stats.dispatched;
+        /* Загрузчик и прогрев спрашивают один файл, пока worker занят. */
         const [loader, warmup] = await Promise.all([
             service.index({ uri, generation: 1, priority: "background" }),
-            service.index({ uri, generation: 1, priority: "foreground" })
+            service.index({ uri, generation: 1, priority: "foreground" }),
+            busy
         ]);
 
         assert.strictEqual(loader.status, "indexed");
@@ -88,7 +104,7 @@ test("два потребителя одного URI дают один запр�
             "строковые ссылки нужны каталогу и обязаны дойти"
         );
         assert.strictEqual(
-            service.stats.dispatched,
+            service.stats.dispatched - before,
             1,
             "worker обязан получить ровно один запрос: " +
             JSON.stringify(service.stats)
@@ -158,6 +174,59 @@ test("изменившийся файл не получает прежний о�
         );
     }));
 
+test("к уже выполняющемуся запросу присоединиться нельзя", () =>
+    withWorkspace(async ({ directory, service }) => {
+        /*
+         * Гонка, ради которой объединение ограничено очередью.
+         *
+         * Файл читается worker'ом; пока он это делает, файл меняют. Пришедший
+         * следом запрос обязан получить НОВОЕ содержимое, а не результат
+         * чтения, начатого до правки. Проверка поколения у вызывающего тут не
+         * помогает: его запрос начался уже после сброса.
+         */
+        const busy = occupyWorker(directory, service, "busy.mac");
+        const written = writeModule(directory, "racing.mac", SOURCE);
+        const queued = service.index({
+            uri: written.uri,
+            generation: 1,
+            priority: "background"
+        });
+
+        /*
+         * Как только посторонний файл закончен, racing.mac уходит worker'у:
+         * pump вызывается синхронно при разборе ответа, до продолжения этого
+         * await. Дальше файл уже выполняется.
+         */
+        await busy;
+
+        const beforeCoalesced = service.stats.coalesced;
+
+        fs.writeFileSync(
+            written.filePath,
+            SOURCE + "\nMacro Charlie()\nEnd;\n"
+        );
+
+        const foreground = await service.index({
+            uri: written.uri,
+            generation: 2,
+            priority: "foreground"
+        });
+
+        await queued;
+
+        assert.strictEqual(
+            service.stats.coalesced - beforeCoalesced,
+            0,
+            "выполняющийся запрос попутчиков не берёт: " +
+            JSON.stringify(service.stats)
+        );
+        assert.strictEqual(foreground.status, "indexed");
+        assert.ok(
+            foreground.declarations.some(item => item.name === "Charlie"),
+            "ответ обязан быть по новому содержимому файла"
+        );
+    }));
+
 test("разные отпечатки не объединяются: каждый получает своё", () =>
     withWorkspace(async ({ directory, service }) => {
         const written = writeModule(directory, "stable.mac", SOURCE);
@@ -170,13 +239,15 @@ test("разные отпечатки не объединяются: кажды�
          * отпечатка: ему нужен полный состав. Объединить их нельзя, и
          * проверяется, что каждый получает именно то, о чём просил.
          */
+        const busy = occupyWorker(directory, service, "busy.mac");
         const [withPrint, without] = await Promise.all([
             service.index({
                 uri: written.uri,
                 generation: 2,
                 knownFingerprint: first.fingerprint
             }),
-            service.index({ uri: written.uri, generation: 2 })
+            service.index({ uri: written.uri, generation: 2 }),
+            busy
         ]);
 
         assert.strictEqual(
@@ -197,11 +268,13 @@ test("разные отпечатки не объединяются: кажды�
 
 test("expectedExport не объединяется с обычным запросом", () =>
     withWorkspace(async ({ directory, service }) => {
+        const busy = occupyWorker(directory, service, "busy.mac");
         const { uri } = writeModule(directory, "exports.mac", SOURCE);
         const before = service.stats.dispatched;
         const [plain, targeted] = await Promise.all([
             service.index({ uri, generation: 1 }),
-            service.index({ uri, generation: 1, expectedExport: "Alpha" })
+            service.index({ uri, generation: 1, expectedExport: "Alpha" }),
+            busy
         ]);
 
         assert.strictEqual(plain.status, "indexed");
@@ -218,12 +291,14 @@ test("expectedExport не объединяется с обычным запро�
 
 test("два одинаковых expectedExport объединяются", () =>
     withWorkspace(async ({ directory, service }) => {
+        const busy = occupyWorker(directory, service, "busy.mac");
         const { uri } = writeModule(directory, "same-export.mac", SOURCE);
         const before = service.stats.dispatched;
 
         await Promise.all([
             service.index({ uri, generation: 1, expectedExport: "Alpha" }),
-            service.index({ uri, generation: 1, expectedExport: "Alpha" })
+            service.index({ uri, generation: 1, expectedExport: "Alpha" }),
+            busy
         ]);
 
         assert.strictEqual(

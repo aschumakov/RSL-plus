@@ -268,6 +268,15 @@ export class CompactModuleWorkerService {
         }
     }
 
+    /** Убрать запрос из объединения: присоединяться к нему больше нельзя. */
+    private forgetCoalescing(entry: IPendingRequest): void {
+        const key = coalescingKey(entry.request);
+
+        if (this.pendingByKey.get(key) === entry) {
+            this.pendingByKey.delete(key);
+        }
+    }
+
     /**
      * Поднять ожидающий запрос в очереди повыше.
      *
@@ -288,7 +297,10 @@ export class CompactModuleWorkerService {
         const at = from.indexOf(entry);
 
         if (at < 0) {
-            /* Уже у worker'а: обгонять нечего. */
+            /*
+             * Страховка: до запроса у worker'а отсюда не добраться — он
+             * снят с объединения, и присоединиться к нему нельзя.
+             */
             return;
         }
 
@@ -374,6 +386,19 @@ export class CompactModuleWorkerService {
         }
 
         this.inFlight = next;
+        /*
+         * Запрос ушёл worker'у и попутчиков больше не берёт.
+         *
+         * Иначе была гонка: пока файл читается, его успевают изменить, и
+         * пришедший следом запрос присоединялся к работе, начатой ДО правки, —
+         * получая содержимое, которого на диске уже нет. Проверка поколения у
+         * вызывающего от этого не спасает: его запрос начался после сброса, а
+         * ответ достался от прежнего чтения.
+         *
+         * Полезный случай сохраняется целиком: пока запрос стоит в очереди,
+         * к нему по-прежнему присоединяются и повышают его в приоритете.
+         */
+        this.forgetCoalescing(next);
 
         try {
             worker.ref();
