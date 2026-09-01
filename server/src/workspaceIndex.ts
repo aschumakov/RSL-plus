@@ -144,6 +144,7 @@ export class WorkspaceIndex {
         modules: 0,
         interfaceChanges: 0,
         dependentInvalidations: 0,
+        importGraphUpdates: 0,
         skippedDependentInvalidations: 0
     };
     private catalogValue = new WorkspaceCatalog();
@@ -267,6 +268,7 @@ export class WorkspaceIndex {
         modules: number;
         interfaceChanges: number;
         dependentInvalidations: number;
+        importGraphUpdates: number;
         skippedDependentInvalidations: number;
     } {
         return { ...this.interfaceStats };
@@ -710,9 +712,22 @@ export class WorkspaceIndex {
     ): IIndexedModule {
         const affected = this.collectAffectedUris(uri);
         const previous = this.modules.delete(uri);
+        /*
+         * Рёбра Import трогаются только при изменившемся наборе.
+         *
+         * Граф хранит одни URI, и при том же наборе снятие и постановка
+         * рёбер возвращают его в прежнее состояние — работа впустую на
+         * каждую правку и на каждый фоновый модуль.
+         */
+        const importsUnchanged = previous !== undefined &&
+            sameImportSet(previous.imports, model.imports);
+
         if (previous) {
             this.symbols.remove(previous);
-            this.imports.remove(previous);
+
+            if (!importsUnchanged) {
+                this.imports.remove(previous);
+            }
         }
         /*
          * Интерфейс считается по уже построенной модели: ни разбора,
@@ -742,8 +757,16 @@ export class WorkspaceIndex {
         this.modules.set(module);
         this.catalogValue.record(module);
         this.files.register(uri);
+        /*
+         * Символы обновляются всегда: индекс держит сами объекты, а их
+         * диапазоны от правки тела съезжают.
+         */
         this.symbols.add(module);
-        this.imports.add(module);
+
+        if (!importsUnchanged) {
+            this.imports.add(module);
+            this.interfaceStats.importGraphUpdates++;
+        }
         this.collectAffectedUris(uri).forEach(value => affected.add(value));
         affected.add(uri);
         this.invalidateImportContexts(affected);

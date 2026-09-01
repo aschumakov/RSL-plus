@@ -301,6 +301,31 @@ test("счётчики считают несделанную работу", () =
     );
 });
 
+test("рёбра Import не перестраиваются от правки тела", () => {
+    const index = project();
+    const before = index.interfaceCounters.importGraphUpdates;
+
+    index.updateExternalModule(LIB, BODY_CHANGED, 2);
+
+    assert.strictEqual(
+        index.interfaceCounters.importGraphUpdates - before,
+        0,
+        "набор Import тот же: граф трогать незачем"
+    );
+
+    index.updateExternalModule(LIB, "Import extra;" + BODY_CHANGED, 3);
+
+    assert.strictEqual(
+        index.interfaceCounters.importGraphUpdates - before,
+        1,
+        "а новый Import обязан дойти до графа"
+    );
+    assert.ok(
+        index.getDependents(LIB).includes(USER),
+        "и прежние рёбра при этом целы"
+    );
+});
+
 test("положения объявлений в интерфейс не входят", () => {
     /*
      * Строка, вставленная выше по файлу, сдвигает всё, что ниже. Если бы
