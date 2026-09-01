@@ -368,6 +368,14 @@ export class RslReferenceShardStore {
         try {
             await fs.promises.mkdir(this.directory, { recursive: true });
         } catch (error) {
+            /*
+             * Каталог не создан — корзины возвращаются в очередь.
+             *
+             * Иначе они уже вычеркнуты из dirty, и записать их больше нечему:
+             * следующий flush не увидит работы, а сохранённые записи о ссылках
+             * молча отстанут от памяти до конца сеанса.
+             */
+            pending.forEach(bucket => this.dirty.add(bucket));
             this.options.log?.(
                 "Не удалось создать каталог записей о ссылках: " + error
             );
@@ -376,7 +384,10 @@ export class RslReferenceShardStore {
         }
 
         for (const bucket of pending) {
-            await this.saveBucket(bucket);
+            if (!await this.saveBucket(bucket)) {
+                /* Запись не удалась: корзина ждёт следующего раза. */
+                this.dirty.add(bucket);
+            }
         }
     }
 
@@ -483,11 +494,13 @@ export class RslReferenceShardStore {
         }
     }
 
-    private async saveBucket(bucket: number): Promise<void> {
+    /** Записана ли корзина: false обязывает вернуть её в очередь. */
+    private async saveBucket(bucket: number): Promise<boolean> {
         const entries = this.loaded.get(bucket);
 
         if (!entries || !this.directory) {
-            return;
+            /* Писать нечего — это не отказ. */
+            return true;
         }
 
         const payload: ISerializedShard = {
@@ -509,7 +522,7 @@ export class RslReferenceShardStore {
             if (payload.files.length === 0) {
                 await fs.promises.rm(target, { force: true });
 
-                return;
+                return true;
             }
 
             /*
@@ -524,8 +537,12 @@ export class RslReferenceShardStore {
                 "utf8"
             );
             await fs.promises.rename(temporary, target);
+
+            return true;
         } catch (error) {
             this.options.log?.("Не удалось сохранить записи о ссылках: " + error);
+
+            return false;
         }
     }
 

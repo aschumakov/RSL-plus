@@ -96,6 +96,8 @@ export class ReferenceIndex {
     private workspaceUris = new Set<string>();
     private cacheFilePath: string | undefined;
     private saveTimer: NodeJS.Timeout | undefined;
+    /* Одна запись одновременно: у отложенной и явной один временный файл. */
+    private saving: Promise<void> | undefined;
     private loadPromise: Promise<void> = Promise.resolve();
     private loadStarted = false;
     private persistedFiles = 0;
@@ -284,7 +286,25 @@ export class ReferenceIndex {
         }
 
         await this.ensureLoaded();
-        await this.saveToDisk();
+        await this.saveSerialized();
+    }
+
+    /**
+     * Записи не пересекаются.
+     *
+     * Отложенная запись и явный flush писали один и тот же временный файл.
+     * clearTimeout останавливает таймер, но не запись, которую он уже начал: при
+     * наложении одна переименовывала временный файл первой, а вторая на
+     * Windows-пути успевала удалить сам кэш, не заменив его ничем.
+     */
+    private saveSerialized(): Promise<void> {
+        const next = (this.saving ?? Promise.resolve())
+            .catch(() => undefined)
+            .then(() => this.saveToDisk());
+
+        this.saving = next.catch(() => undefined);
+
+        return next;
     }
 
     private ensureLoaded(): Promise<void> {
@@ -469,7 +489,7 @@ export class ReferenceIndex {
 
         this.saveTimer = setTimeout(() => {
             this.saveTimer = undefined;
-            this.saveToDisk().catch(error => this.options.log?.(
+            this.saveSerialized().catch(error => this.options.log?.(
                 `Reference index save failed: ${errorToString(error)}`
             ));
         }, SAVE_DEBOUNCE_MS);

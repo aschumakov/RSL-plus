@@ -26,8 +26,14 @@ export interface IRslClientSettings {
      * Сервер берёт значения только отсюда: то, что клиент не прочитал, до него
      * не доходит вовсе. Настройка, объявленная в package.json и забытая здесь,
      * видна в интерфейсе VS Code и не делает ничего — так было с
-     * redundantImports, unknownVariables, файлами известных имён и
-     * unknownSpecialVariables.
+     * redundantImports, unknownVariables, файлами известных имён,
+     * unknownSpecialVariables и unknownMembers.
+     *
+     * Пять раз подряд требование соблюдалось вручную и пять раз нарушалось,
+     * поэтому теперь его держат двое. Поле здесь обязательное — пропуск чтения
+     * становится ошибкой сборки. А settings-contract.test.js сверяет три места
+     * сразу: объявление, чтение клиентом и разбор на сервере, вместе со
+     * значениями по умолчанию.
      */
     diagnostics: {
         enabled: boolean;
@@ -51,6 +57,7 @@ export interface IRslClientSettings {
         ambiguousReferences: boolean;
         redundantImports: boolean;
         unknownVariables: string;
+        unknownMembers: boolean;
         unknownVariablesKnownGlobalsFile: string;
         unknownVariablesAuditFile: string;
         unknownSpecialVariables: string;
@@ -223,7 +230,12 @@ export function readRslSettings(resource?: Uri): IRslClientSettings {
             ),
             unknownVariables: readSetting(
                 "diagnostics.unknownVariables",
-                "off",
+                "safe",
+                resource
+            ),
+            unknownMembers: readSetting(
+                "diagnostics.unknownMembers",
+                true,
                 resource
             ),
             unknownVariablesKnownGlobalsFile: readSetting(

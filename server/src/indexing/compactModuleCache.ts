@@ -124,6 +124,10 @@ export class CompactModuleCache {
     private saveTimer: NodeJS.Timeout | undefined;
     private loadPromise: Promise<void> | undefined;
     private dirty = false;
+    /* Номер правки: по нему видно, менялись ли записи во время записи на диск. */
+    private revision = 0;
+    /* Одна запись одновременно: у отложенной и явной один временный файл. */
+    private saving: Promise<void> | undefined;
     private hits = 0;
     private misses = 0;
 
@@ -206,6 +210,7 @@ export class CompactModuleCache {
         this.entries.set(uri, entry);
         this.used.add(uri);
         this.dirty = true;
+        this.revision++;
         this.scheduleSave();
     }
 
@@ -213,13 +218,37 @@ export class CompactModuleCache {
     async flush(): Promise<void> {
         this.cancelSave();
 
+        /*
+         * Дождаться незавершённой записи нужно и без своей работы: таймер мог
+         * сработать за миг до flush, и выйти, пока запись идёт, значит оставить
+         * файл в неизвестном состоянии.
+         */
         if (!this.dirty) {
+            await this.saving?.catch(() => undefined);
+
             return;
         }
 
-        await this.saveToDisk().catch(error => this.options.log?.(
+        await this.saveSerialized().catch(error => this.options.log?.(
             `Compact module cache save failed: ${errorToString(error)}`
         ));
+    }
+
+    /**
+     * Записи не пересекаются.
+     *
+     * Отложенная запись и явный flush писали один и тот же временный файл. При
+     * наложении одна переименовывала его первой, вторая не находила и — на
+     * Windows-пути через unlink — успевала удалить сам кэш, не заменив его.
+     */
+    private saveSerialized(): Promise<void> {
+        const next = (this.saving ?? Promise.resolve())
+            .catch(() => undefined)
+            .then(() => this.saveToDisk());
+
+        this.saving = next.catch(() => undefined);
+
+        return next;
     }
 
     private ensureLoaded(): Promise<void> {
@@ -313,7 +342,7 @@ export class CompactModuleCache {
         this.cancelSave();
         this.saveTimer = setTimeout(() => {
             this.saveTimer = undefined;
-            this.saveToDisk().catch(error => this.options.log?.(
+            this.saveSerialized().catch(error => this.options.log?.(
                 `Compact module cache save failed: ${errorToString(error)}`
             ));
         }, SAVE_DEBOUNCE_MS);
@@ -327,7 +356,14 @@ export class CompactModuleCache {
             return;
         }
 
-        this.dirty = false;
+        /*
+         * Снимок номера правки, а не снятие dirty.
+         *
+         * Прежде dirty снимался здесь, до записи. Отказ writeFile или rename
+         * логировался, но повторный flush уже считал, что писать нечего, — и
+         * кэш оставался на диске устаревшим до конца сеанса.
+         */
+        const revisionAtStart = this.revision;
         const entries: ISerializedEntry[] = [];
 
         for (const [uri, entry] of this.entries) {
@@ -402,6 +438,14 @@ export class CompactModuleCache {
             /* Windows не заменяет существующий файл через rename. */
             await fs.promises.unlink(cacheFilePath).catch(() => undefined);
             await fs.promises.rename(temporary, cacheFilePath);
+        }
+
+        /*
+         * Записано ровно то, что было на начало записи. Правка, пришедшая
+         * во время неё, в этот снимок не попала — и dirty остаётся.
+         */
+        if (this.revision === revisionAtStart) {
+            this.dirty = false;
         }
     }
 }

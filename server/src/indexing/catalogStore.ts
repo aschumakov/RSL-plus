@@ -407,6 +407,14 @@ export class RslCatalogStore {
         try {
             await fs.promises.mkdir(this.directory, { recursive: true });
         } catch (error) {
+            /*
+             * Корзины возвращаются в очередь — как и при отказе самой записи.
+             *
+             * Отказ mkdir прежде был единственным путём, на котором очередь
+             * терялась: dirty уже очищена, работы для следующего flush нет, и
+             * сохранённый состав отстаёт от памяти до конца сеанса.
+             */
+            pending.forEach(bucket => this.dirty.add(bucket));
             this.options.log?.(
                 "Не удалось создать каталог сохранённого состава: " + error
             );
