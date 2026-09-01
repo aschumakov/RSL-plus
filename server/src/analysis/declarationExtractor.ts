@@ -7,7 +7,10 @@ import {
     DECLARATION_MODIFIERS,
     numericLiteralType
 } from "../language/rslLanguageReference";
-import { moduleReferenceKey } from "../indexing/moduleNames";
+import {
+    decodeRslModulePath,
+    moduleReferenceKey
+} from "../core/language/moduleName";
 import { lexRsl, normalizeIdentifier, type IRslToken } from "../lexer";
 import { readClassDeclarationHeader } from "../parsing/classDeclarationHeader";
 import {
@@ -552,7 +555,7 @@ function scanImportNames(
             current += token.raw;
         } else if (token.kind === "identifier" || token.kind === "string") {
             current += token.kind === "string"
-                ? stripQuotes(token.value || token.raw)
+                ? decodeRslModulePath(token.raw)
                 : token.value;
         }
         lastIndex = index;

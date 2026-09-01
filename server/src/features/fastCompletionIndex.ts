@@ -11,7 +11,10 @@ import {
     normalizeIdentifier,
     type IRslToken
 } from "../lexer";
-import { moduleReferenceKey } from "../indexing/moduleNames";
+import {
+    decodeRslModulePath,
+    moduleReferenceKey
+} from "../core/language/moduleName";
 import type { IFastDocumentSnapshot } from "../services/fastDocumentSnapshot";
 
 /**
@@ -1420,7 +1423,12 @@ function readImport(
             return index - 1;
         }
 
-        parts.push(token.kind === "string" ? token.value : token.raw);
+        /* Разбор написания общий: см. core/language/moduleName. */
+        parts.push(
+            token.kind === "string"
+                ? decodeRslModulePath(token.raw)
+                : token.raw
+        );
         index++;
     }
 

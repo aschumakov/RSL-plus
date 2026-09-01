@@ -2,6 +2,7 @@ import * as path from "path";
 import { fileURLToPath } from "url";
 
 import type { ModuleResolution } from "./indexTypes";
+import { normalizeModuleName } from "../core/language/moduleName";
 
 export function resolveByModuleName<T>(
     moduleName: string,
@@ -109,20 +110,18 @@ export function removeUriAlias(
     }
 }
 
-export function normalizeModuleName(value: string): string {
-    let result = (value || "")
-        .trim()
-        .replace(/\\/g, "/")
-        .toLowerCase();
-
-    while (result.startsWith("./")) {
-        result = result.substring(2);
-    }
-
-    return result.endsWith(".mac")
-        ? result
-        : result + ".mac";
-}
+/*
+ * Разбор написания имени модуля переехал в core/language/moduleName: там он
+ * доступен и извлекателям Import, которые про индекс проекта ничего не знают.
+ * Здесь остаётся разрешение имени в файл — то, ради чего нужен каталог.
+ */
+export {
+    decodeRslModulePath,
+    moduleReferenceKey,
+    normalizeModuleName,
+    rslModuleItemName,
+    stripQuotes
+} from "../core/language/moduleName";
 
 /**
  * Возвращает ключ физической идентичности ресурса.
@@ -210,18 +209,3 @@ export function normalizeUriPath(uri: string): string {
         .toLowerCase();
 }
 
-/**
- * Ключ имени модуля: по нему два написания считаются одним файлом.
- *
- * Разделитель пути и регистр в RSL не значимы, а расширение .mac
- * подразумевается: Import oralib и Import "oralib.mac" — один и тот же
- * модуль. Прочие расширения оставлены как есть: файлы с одинаковым именем и
- * разными расширениями — это ошибка, и диагностика сообщает о ней отдельно.
- */
-export function moduleReferenceKey(value: string): string {
-    return (value || "")
-        .trim()
-        .replace(/\\/gu, "/")
-        .toLowerCase()
-        .replace(/\.mac$/u, "");
-}

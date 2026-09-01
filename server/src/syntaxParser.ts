@@ -1,3 +1,4 @@
+import { rslModuleItemName } from "./core/language/moduleName";
 import {
     IRslLexResult,
     IRslToken,
@@ -1105,11 +1106,8 @@ class Parser {
     }
 
     private importItemName(tokens: IRslToken[]): string {
-        if (tokens.length === 1 && tokens[0].kind === "string") {
-            return tokens[0].value.trim();
-        }
-
-        return tokens.map(token => token.raw).join("").trim();
+        /* Разбор написания общий на всех: см. core/language/moduleName. */
+        return rslModuleItemName(tokens);
     }
 
     private canStartImportItem(token: IRslToken): boolean {

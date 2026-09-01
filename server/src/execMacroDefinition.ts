@@ -1,3 +1,4 @@
+import { rslModuleItemName } from "./core/language/moduleName";
 import {
     cachedSignificantTokens,
     IRslToken,
@@ -572,18 +573,18 @@ function addImportReference(
 
     if (tokens.length === 1 && first.kind === "string") {
         /*
-         * Берётся исходный текст строки, а не её значение.
+         * Разбор написания общий на всех пятерых: см. core/language/moduleName.
          *
-         * Значение строки прошло через escape-последовательности лексера, и
-         * `"sub\checkaml.mac"` превращается в `subcheckaml.mac`: обратная
-         * косая черта там понята как escape. В имени файла она разделитель
-         * каталогов, и терять её нельзя.
+         * Значение строки от лексера здесь не годится — обратная косая черта
+         * понята им как escape, и `"sub\lib.mac"` превращается в `sublib.mac`.
+         * Исходный текст тоже не годится: в проекте такие пути пишут удвоенным
+         * слешем, и `"..\\user\\lib.mac"` оставался с обоими.
          */
-        raw = first.raw.slice(1, -1).trim();
+        raw = rslModuleItemName([first]);
         nameStart = first.start + 1;
         nameEnd = last.end - 1;
     } else {
-        raw = tokens.map(token => token.raw).join("").trim();
+        raw = rslModuleItemName(tokens);
     }
 
     if (!raw) {
