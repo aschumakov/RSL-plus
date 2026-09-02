@@ -958,11 +958,12 @@ connection.onInitialized(() => {
      */
     connection.onRequest(
         "rsl/importRange",
-        (request: { uri: string; name: string }) => ({
+        (request: { uri: string; name: string; targetUri?: string }) => ({
             range: findRslImportRange(
                 { index: workspaceIndex },
                 request.uri,
-                request.name
+                request.name,
+                request.targetUri
             )
         })
     );

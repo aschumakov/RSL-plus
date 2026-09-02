@@ -70,7 +70,15 @@ class DependencyItem extends TreeItem {
          * Путь URI от корня: по нему сервер видит цикл, а последний в
          * нём — это файл, где написан Import этого узла.
          */
-        readonly ancestors: readonly string[]
+        readonly ancestors: readonly string[],
+        /**
+         * Куда смотрит дерево.
+         *
+         * От этого зависит, В КАКОМ файле написан Import: в прямом
+         * дереве — у родителя, в обратном — в самом узле, ведь узел это
+         * и есть тот, кто подключает.
+         */
+        readonly direction: "dependencies" | "dependents"
     ) {
         super(
             node.name,
@@ -137,20 +145,17 @@ class DependencyProvider implements TreeDataProvider<DependencyItem> {
         const ancestors = item
             ? [...item.ancestors, uri]
             : [uri];
+        /* Обратные ссылки спрашиваются только у корня. */
+        const direction = item ? "dependencies" : this.direction;
 
         try {
             const answer = await this.client.sendRequest<IDependencyAnswer>(
                 "rsl/dependencies",
-                {
-                    uri,
-                    /* Обратные ссылки спрашиваются только у корня. */
-                    direction: item ? "dependencies" : this.direction,
-                    ancestors
-                }
+                { uri, direction, ancestors }
             );
 
             return (answer?.items || [])
-                .map(node => new DependencyItem(node, ancestors));
+                .map(node => new DependencyItem(node, ancestors, direction));
         } catch (_error) {
             return [];
         }
@@ -219,16 +224,43 @@ async function goToImport(
         return;
     }
 
+    /*
+     * Кто кого подключает, зависит от направления дерева.
+     *
+     * В прямом Import написан у родителя и ведёт в узел. В обратном
+     * наоборот: узел — это тот, кто подключает родителя, и открывать
+     * надо его файл.
+     */
+    const reverse = item.direction === "dependents";
+    const sourceUri = reverse ? item.node.uri : parentUri;
+    const wantedUri = reverse ? parentUri : item.node.uri;
+    const wantedName = reverse
+        ? moduleNameOf(parentUri)
+        : item.node.name;
+
+    if (!sourceUri) {
+        return;
+    }
+
     const answer = await client.sendRequest<{ range?: Range }>(
         "rsl/importRange",
-        { uri: parentUri, name: item.node.name }
+        {
+            uri: sourceUri,
+            name: wantedName,
+            /*
+             * Куда ведёт узел, уже известно. По одному имени директиву не
+             * выбрать: в файле бывают обе ссылки — `a/lib.mac` и
+             * `b/lib.mac`, — и базовое имя у них одно.
+             */
+            targetUri: wantedUri
+        }
     );
-    const document = await workspace.openTextDocument(Uri.parse(parentUri));
+    const document = await workspace.openTextDocument(Uri.parse(sourceUri));
     const range = answer?.range;
 
     if (!range) {
         void window.showInformationMessage(
-            "RSL: директива Import для " + item.node.name + " не найдена"
+            "RSL: директива Import для " + wantedName + " не найдена"
         );
         await window.showTextDocument(document);
 
@@ -241,6 +273,16 @@ async function goToImport(
     );
 
     await window.showTextDocument(document, { selection });
+}
+
+/** Имя модуля по его URI: без пути и расширения. */
+function moduleNameOf(uri: string): string {
+    const slash = uri.lastIndexOf("/");
+    const name = slash < 0 ? uri : uri.slice(slash + 1);
+
+    return name.toLowerCase().endsWith(".mac")
+        ? name.slice(0, -4)
+        : name;
 }
 
 /** Показать путь от текущего файла к выбранному модулю. */

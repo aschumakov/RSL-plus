@@ -7,6 +7,7 @@ import {
     type IRslDeclarationDescriptor
 } from "../analysis/declarationExtractor";
 import {
+    normalizeModuleName,
     rslModuleBaseName
 } from "../core/language/moduleName";
 import { normalizeIdentifier } from "../lexer";
@@ -101,6 +102,26 @@ export interface IRslCatalogStats {
 export class WorkspaceCatalog {
     private modules = new Map<string, IRslCatalogModule>();
     /**
+     * Кто подключает эту ссылку: НАПИСАНИЕ ссылки -> файлы-импортёры.
+     *
+     * Ключ — нормализованная ссылка целиком, вместе с путём. Сводить её
+     * к базовому имени нельзя: `Import "a/lib.mac"` и
+     * `Import "b/lib.mac"` — разные модули, и путь в Import написан
+     * именно затем, чтобы их различить.
+     */
+    private importersByReference = new Map<string, Set<string>>();
+    /**
+     * Написания ссылок с этим базовым именем.
+     *
+     * Нужна, чтобы ответить на обратный вопрос без обхода каталога: у
+     * файла берётся базовое имя, по нему — все написания, которые могли
+     * бы в него разрешиться, и разрешается только они. Прежде обратные
+     * ссылки считались полным проходом по каталогу, а потом ещё по одному
+     * проходу на каждого найденного — на популярном модуле это
+     * произведение числа файлов на число зависимых.
+     */
+    private referencesByBaseName = new Map<string, Set<string>>();
+    /**
      * Имя -> файл -> объявления.
      *
      * Двухуровневая карта, а не список: при обновлении модуля запись о
@@ -166,6 +187,81 @@ export class WorkspaceCatalog {
             exports,
             imports: module.imports
         });
+    }
+
+    private attachImports(uri: string, imports: readonly string[]): void {
+        for (const name of imports) {
+            const key = normalizeModuleName(name);
+
+            if (!key) {
+                continue;
+            }
+
+            const importers = this.importersByReference.get(key) ||
+                new Set<string>();
+
+            importers.add(uri);
+            this.importersByReference.set(key, importers);
+
+            const base = rslModuleBaseName(name);
+            const spellings = this.referencesByBaseName.get(base) ||
+                new Set<string>();
+
+            spellings.add(key);
+            this.referencesByBaseName.set(base, spellings);
+        }
+    }
+
+    private detachImports(uri: string, imports: readonly string[]): void {
+        for (const name of imports) {
+            const key = normalizeModuleName(name);
+            const importers = this.importersByReference.get(key);
+
+            if (!importers) {
+                continue;
+            }
+
+            importers.delete(uri);
+
+            if (importers.size > 0) {
+                continue;
+            }
+
+            this.importersByReference.delete(key);
+
+            const base = rslModuleBaseName(name);
+            const spellings = this.referencesByBaseName.get(base);
+
+            spellings?.delete(key);
+
+            if (spellings && spellings.size === 0) {
+                this.referencesByBaseName.delete(base);
+            }
+        }
+    }
+
+    /**
+     * Написания Import, которые могли бы разрешиться в этот файл.
+     *
+     * Кто из них действительно в него разрешается, решает тот же каталог
+     * файлов, что и обычное разрешение имён: здесь только сужение
+     * перебора по базовому имени.
+     */
+    importReferencesForBaseName(baseName: string): string[] {
+        const spellings = this.referencesByBaseName.get(
+            rslModuleBaseName(baseName)
+        );
+
+        return spellings ? [...spellings] : [];
+    }
+
+    /** Кто подключает ссылку с этим написанием. */
+    importersOfReference(reference: string): string[] {
+        const importers = this.importersByReference.get(
+            normalizeModuleName(reference)
+        );
+
+        return importers ? [...importers] : [];
     }
 
     private attachExports(uri: string, exports: ReadonlySet<string>): void {
@@ -503,6 +599,7 @@ export class WorkspaceCatalog {
             fileReferences: references
         });
         this.attachExports(record.uri, record.exports);
+        this.attachImports(record.uri, record.imports);
         this.attachFileReferences(record.uri, references);
 
         if (!record.deferIndexing) {
@@ -536,6 +633,7 @@ export class WorkspaceCatalog {
         }
 
         this.detachExports(uri, previous.exports);
+        this.detachImports(uri, previous.imports);
         this.detachFileReferences(uri, previous.fileReferences);
         this.modules.delete(uri);
         this.revisionValue++;
@@ -600,6 +698,8 @@ export class WorkspaceCatalog {
         this.byName.clear();
         this.byExport.clear();
         this.byFileReference.clear();
+        this.importersByReference.clear();
+        this.referencesByBaseName.clear();
         this.revisionValue++;
     }
 

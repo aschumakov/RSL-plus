@@ -150,52 +150,98 @@ function classify(
 /**
  * Кто зависит от файла — по всему проекту.
  *
- * Спрашивается каталог, а не граф загруженных модулей. При обычном
- * режиме индексации значительная часть проекта в память не
- * загружена, и ответ по графу зависел бы от того, какие модули
- * случайно оказались прочитаны: тот же вопрос давал бы разные ответы
- * в разные минуты работы. Состав Import каталог знает про все
- * прочитанные файлы, и полные модули ради панели не грузятся.
+ * Спрашивается каталог, а не граф загруженных модулей: при обычном режиме
+ * индексации значительная часть проекта в память не загружена, и ответ по
+ * графу зависел бы от того, что успела прочитать фоновая индексация.
+ *
+ * Совпадения имён мало. `a/lib.mac` и `b/lib.mac` — разные модули, и путь
+ * в Import написан именно затем, чтобы их различить. Поэтому каждое
+ * НАПИСАНИЕ ссылки разрешается тем же каталогом файлов, что и обычное
+ * разрешение имён, и в зависимые попадает только тот, чья ссылка ведёт
+ * ровно в этот файл. Неоднозначная ссылка не приписывается никому: выбрать
+ * за пользователя один из двух одноимённых модулей значит соврать.
+ *
+ * Перебор сужен обратным индексом каталога: берутся только те написания,
+ * у которых базовое имя совпадает с именем файла.
  */
 function dependentsOf(
     environment: IRslDependencyEnvironment,
     uri: string
 ): IRslDependencyNode[] {
-    const index = environment.index;
-    const name = moduleNameOfUri(uri);
-    const seen = new Set<string>([
-        ...index.catalog.modulesImportingModule(name),
-        /*
-         * Граф загруженных модулей добавляется сверху: открытый
-         * документ мог получить новый Import уже после того, как
-         * его прочитала достройка каталога.
-         */
-        ...index.getDependents(uri)
-    ]);
-
-    seen.delete(uri);
-
-    return [...seen]
+    return collectDependents(environment, uri)
         .map(item => ({
-            name: moduleNameOfUri(item),
-            uri: item,
-            state: "resolved" as const,
-            expandable: hasDependents(environment, item)
+            name: moduleNameOfUri(item.uri),
+            uri: item.uri,
+            /*
+             * Неоднозначная ссылка помечается, а не прячется: файл
+             * действительно среди её кандидатов, но который из них
+             * имелся в виду — не знает никто.
+             */
+            state: item.ambiguous
+                ? ("ambiguous" as const)
+                : ("resolved" as const),
+            expandable: collectDependents(environment, item.uri).length > 0
         }))
         .sort(byName);
 }
 
-/** Есть ли у файла свои зависимые: считается тем же способом. */
-function hasDependents(
+/** Кто подключает этот файл; ambiguous — ссылка ведёт не только сюда. */
+interface IRslDependentFile {
+    uri: string;
+    ambiguous: boolean;
+}
+
+function collectDependents(
     environment: IRslDependencyEnvironment,
     uri: string
-): boolean {
-    const name = moduleNameOfUri(uri);
+): IRslDependentFile[] {
+    const index = environment.index;
+    const result = new Map<string, boolean>();
+    const add = (importer: string, ambiguous: boolean): void => {
+        if (sameUri(importer, uri)) {
+            return;
+        }
 
-    return environment.index.catalog
-        .modulesImportingModule(name)
-        .some(item => item !== uri) ||
-        environment.index.getDependents(uri).length > 0;
+        /* Однозначная ссылка сильнее: она снимает пометку. */
+        result.set(importer, (result.get(importer) ?? true) && ambiguous);
+    };
+
+    for (const reference of index.catalog.importReferencesForBaseName(
+        moduleNameOfUri(uri)
+    )) {
+        const resolved = index.resolveWorkspaceFile(reference);
+        const leadsHere = resolved.kind === "resolved"
+            ? sameUri(resolved.value, uri)
+            : resolved.kind === "ambiguous" &&
+                resolved.candidates.some(item => sameUri(item, uri));
+
+        if (!leadsHere) {
+            continue;
+        }
+
+        for (const importer of index.catalog.importersOfReference(reference)) {
+            add(importer, resolved.kind === "ambiguous");
+        }
+    }
+
+    /*
+     * Граф загруженных модулей добавляется сверху: открытый документ мог
+     * получить новый Import уже после того, как его прочитала достройка
+     * каталога. Он ключуется URI, значит ссылка разрешилась однозначно.
+     */
+    for (const item of index.getDependents(uri)) {
+        add(item, false);
+    }
+
+    return [...result].map(([item, ambiguous]) => ({
+        uri: item,
+        ambiguous
+    }));
+}
+
+/** Один ли это файл: регистр пути на Windows значения не имеет. */
+function sameUri(left: string, right: string): boolean {
+    return left === right || left.toLowerCase() === right.toLowerCase();
 }
 
 /**
@@ -209,7 +255,9 @@ function hasDependents(
 export function findRslImportRange(
     environment: IRslDependencyEnvironment,
     uri: string,
-    moduleName: string
+    moduleName: string,
+    /* Куда ведёт узел дерева, если это уже известно. */
+    targetUri?: string
 ): Range | undefined {
     const module = environment.index.getModule(uri);
 
@@ -218,6 +266,14 @@ export function findRslImportRange(
     }
 
     const wanted = rslModuleBaseName(moduleName);
+    /*
+     * Если известен сам файл, директива выбирается по разрешению: в
+     * одном файле бывают обе ссылки — `a/lib.mac` и `b/lib.mac`, — и по
+     * базовому имени они неразличимы.
+     */
+    const wantedUri = targetUri ||
+        resolvedUriOf(environment, moduleName);
+    let fallback: Range | undefined;
 
     for (const target of GetImportDefinitionTargetsFromTokens(
         module.lex.tokens as never
@@ -226,10 +282,29 @@ export function findRslImportRange(
             continue;
         }
 
-        return rangeInModule(module, target.nameStart, target.nameEnd);
+        const range = rangeInModule(
+            module,
+            target.nameStart,
+            target.nameEnd
+        );
+
+        if (!wantedUri) {
+            return range;
+        }
+
+        const resolved = environment.index.resolveWorkspaceFile(
+            target.moduleName
+        );
+
+        if (resolved.kind === "resolved" && sameUri(resolved.value, wantedUri)) {
+            return range;
+        }
+
+        /* Ссылка того же имени, но в другой файл: годится лишь как запас. */
+        fallback = fallback || range;
     }
 
-    return undefined;
+    return fallback;
 }
 
 /**
@@ -292,6 +367,16 @@ function restore(
     }
 
     return path;
+}
+
+/** Куда разрешается написанная ссылка; пусто, если неоднозначно. */
+function resolvedUriOf(
+    environment: IRslDependencyEnvironment,
+    moduleName: string
+): string {
+    const resolved = environment.index.resolveWorkspaceFile(moduleName);
+
+    return resolved.kind === "resolved" ? resolved.value : "";
 }
 
 /** Имя элемента Import без пути и расширения. */

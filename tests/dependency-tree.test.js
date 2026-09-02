@@ -287,6 +287,140 @@ test("ненаписанный Import диапазона не имеет", () =>
     );
 });
 
+const A_LIB = "file:///d:/ident/a/lib.mac";
+const B_LIB = "file:///d:/ident/b/lib.mac";
+const ONE = "file:///d:/ident/one.mac";
+const TWO = "file:///d:/ident/two.mac";
+const THREE = "file:///d:/ident/three.mac";
+
+/**
+ * Два одноимённых модуля в разных каталогах.
+ *
+ * one подключает a/lib, two подключает b/lib, three пишет просто lib —
+ * и это неоднозначно.
+ */
+function identityProject() {
+    const index = new WorkspaceIndex();
+
+    index.registerWorkspaceFiles([A_LIB, B_LIB, ONE, TWO, THREE]);
+
+    const record = (uri, imports) => index.catalog.recordDeclarations({
+        uri,
+        version: 1,
+        declarations: [],
+        imports
+    });
+
+    record(A_LIB, []);
+    record(B_LIB, []);
+    record(ONE, ["a/lib.mac"]);
+    record(TWO, ["b/lib.mac"]);
+    record(THREE, ["lib"]);
+
+    return index;
+}
+
+test("зависимые различаются по пути, а не по имени файла", () => {
+    const index = identityProject();
+    const resolved = uri => level(index, uri, { direction: "dependents" })
+        .filter(node => node.state === "resolved")
+        .map(node => node.uri);
+
+    assert.deepStrictEqual(
+        resolved(A_LIB),
+        [ONE],
+        "two подключает b/lib и зависимым a/lib не является"
+    );
+    assert.deepStrictEqual(resolved(B_LIB), [TWO]);
+});
+
+test("неоднозначная ссылка помечается, а не приписывается одному", () => {
+    /*
+     * `Import lib` при двух файлах lib.mac ведёт сразу в оба. Выбрать
+     * за пользователя один значит соврать; спрятать связь вовсе — тоже:
+     * на настоящем проекте у популярного модуля три одноимённых файла,
+     * и умолчание потеряло бы 1353 настоящих зависимых.
+     *
+     * Поэтому файл показан у обоих кандидатов и помечен неоднозначным.
+     */
+    const index = identityProject();
+
+    for (const target of [A_LIB, B_LIB]) {
+        const node = level(index, target, { direction: "dependents" })
+            .find(item => item.uri === THREE);
+
+        assert.ok(node, "three обязан быть виден у " + target);
+        assert.strictEqual(
+            node.state,
+            "ambiguous",
+            "и помечен: который из двух имелся в виду, не знает никто"
+        );
+    }
+});
+
+test("переход к Import выбирает нужную директиву", () => {
+    const index = identityProject();
+    const source = [
+        'Import "a/lib.mac";',
+        'Import "b/lib.mac";',
+        "Macro Run()",
+        "End;",
+        ""
+    ].join("\n");
+
+    index.updateOpenModule(ONE, source, 1);
+
+    const first = findRslImportRange({ index }, ONE, "lib", A_LIB);
+    const second = findRslImportRange({ index }, ONE, "lib", B_LIB);
+
+    assert.strictEqual(first.start.line, 0, "первая строка ведёт в a/lib");
+    assert.strictEqual(second.start.line, 1, "вторая — в b/lib");
+});
+
+test("обратный индекс переживает удаление файла", () => {
+    const index = identityProject();
+
+    assert.deepStrictEqual(
+        level(index, A_LIB, { direction: "dependents" })
+            .filter(node => node.state === "resolved")
+            .map(node => node.uri),
+        [ONE]
+    );
+
+    index.catalog.remove(ONE);
+
+    assert.deepStrictEqual(
+        level(index, A_LIB, { direction: "dependents" })
+            .filter(node => node.state === "resolved")
+            .map(node => node.uri),
+        [],
+        "файла больше нет — и зависимости от него тоже"
+    );
+});
+
+test("перезапись Import обновляет обратный индекс", () => {
+    const index = identityProject();
+
+    index.catalog.recordDeclarations({
+        uri: ONE,
+        version: 2,
+        declarations: [],
+        imports: ["b/lib.mac"]
+    });
+
+    const resolved = uri => level(index, uri, { direction: "dependents" })
+        .filter(node => node.state === "resolved")
+        .map(node => node.uri)
+        .sort();
+
+    assert.deepStrictEqual(
+        resolved(A_LIB),
+        [],
+        "one больше не подключает a/lib"
+    );
+    assert.deepStrictEqual(resolved(B_LIB), [ONE, TWO].sort());
+});
+
 console.log(
     failed === 0
         ? "\nПройдено: " + passed
