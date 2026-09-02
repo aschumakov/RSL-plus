@@ -109,6 +109,15 @@
             "path": "./snippets/snippets.json"
          }
       ],
+      "views": {
+         "explorer": [
+            {
+               "id": "rslDependencies",
+               "name": "RSL: зависимости",
+               "when": "resourceLangId == rsl || rslPlusActive"
+            }
+         ]
+      },
       "commands": [
          {
             "command": "extension.insertQueryFromClipboard",
@@ -157,6 +166,29 @@
          {
             "command": "rsl.explainType",
             "title": "RSL: Explain Type at Cursor"
+         },
+         {
+            "command": "rsl.dependencies.showDependencies",
+            "title": "RSL: Зависимости файла",
+            "icon": "$(references)"
+         },
+         {
+            "command": "rsl.dependencies.showDependents",
+            "title": "RSL: Кто зависит от файла",
+            "icon": "$(type-hierarchy)"
+         },
+         {
+            "command": "rsl.dependencies.refresh",
+            "title": "RSL: Обновить дерево зависимостей",
+            "icon": "$(refresh)"
+         },
+         {
+            "command": "rsl.dependencies.goToImport",
+            "title": "RSL: Перейти к Import"
+         },
+         {
+            "command": "rsl.dependencies.showPath",
+            "title": "RSL: Показать путь зависимости"
          }
       ],
       "keybindings": [
@@ -172,6 +204,33 @@
          }
       ],
       "menus": {
+         "view/title": [
+            {
+               "command": "rsl.dependencies.showDependencies",
+               "when": "view == rslDependencies",
+               "group": "navigation@1"
+            },
+            {
+               "command": "rsl.dependencies.showDependents",
+               "when": "view == rslDependencies",
+               "group": "navigation@2"
+            },
+            {
+               "command": "rsl.dependencies.refresh",
+               "when": "view == rslDependencies",
+               "group": "navigation@3"
+            }
+         ],
+         "view/item/context": [
+            {
+               "command": "rsl.dependencies.goToImport",
+               "when": "view == rslDependencies"
+            },
+            {
+               "command": "rsl.dependencies.showPath",
+               "when": "view == rslDependencies && viewItem == rslDependencyFile"
+            }
+         ],
          "editor/context": [
             {
                "when": "resourceLangId == rsl",

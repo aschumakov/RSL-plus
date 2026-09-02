@@ -23,6 +23,7 @@ import {
 } from "vscode-languageclient/node";
 
 import { readRslSettings, readSetting } from "./clientSettings";
+import { registerRslDependencyView } from "./dependencyView";
 import { openRslDocument } from "./documentOpenPolicy";
 import { registerEditorCommands } from "./editorCommands";
 
@@ -600,6 +601,9 @@ export function activate(context: ExtensionContext): void {
             })
         );
     }
+
+    /* Панель зависимостей: спрашивает сервер по узлу, когда его раскрывают. */
+    registerRslDependencyView(context, client);
 
     const showMacrosCommand = "rsl.showMacroFiles";
 

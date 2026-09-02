@@ -10,6 +10,11 @@ import {
 
 import { TextDocument } from "vscode-languageserver-textdocument";
 
+import {
+    buildRslDependencyLevel,
+    findRslDependencyPath,
+    type IRslDependencyRequest
+} from "./features/dependencyTree";
 import { RslTypeEngine } from "./analysis/typeEngine";
 import {
     buildRslInspectorReport,
@@ -845,6 +850,37 @@ connection.onInitialized(() => {
      * ответом лежат замыкание, ревизии и кэши. Отчёт показывает ровно то
      * состояние, по которому сервер отвечал, и на обычную работу не влияет.
      */
+    /*
+     * Дерево зависимостей: по одному уровню за раз.
+     *
+     * Всё дерево проекта не строится намеренно — на 6166 файлах это тысячи
+     * узлов, из которых пользователь раскроет пять.
+     */
+    connection.onRequest(
+        "rsl/dependencies",
+        (request: IRslDependencyRequest) => ({
+            items: buildRslDependencyLevel(
+                {
+                    index: workspaceIndex,
+                    knowsPlatformModule: name =>
+                        platformModules.knowsModule(name)
+                },
+                request
+            )
+        })
+    );
+
+    connection.onRequest(
+        "rsl/dependencyPath",
+        (request: { fromUri: string; toUri: string }) => ({
+            path: findRslDependencyPath(
+                workspaceIndex,
+                request.fromUri,
+                request.toUri
+            )
+        })
+    );
+
     connection.onRequest(
         "rsl/inspect",
         (request: IRslInspectorRequest) => {
