@@ -8,7 +8,8 @@
  * описывает форму вызова, а совпадение ищется по токенам.
  *
  * Отдельно проверяются три правила, без которых такой поиск нельзя выпускать:
- * кандидаты отбираются заранее, обход идёт порциями и его можно отменить.
+ * кандидаты отбираются заранее, обход уступает поток по бюджету времени и его
+ * можно отменить.
  */
 
 const assert = require("assert");
@@ -25,7 +26,8 @@ require.cache[serverModulePath] = {
     }
 };
 
-const { lexRsl } = require("../server/out/lexer");
+const lexerModule = require("../server/out/lexer");
+const { lexRsl } = lexerModule;
 const {
     findRslStructuralMatches,
     parseRslStructuralPattern
@@ -161,10 +163,14 @@ function project(sources) {
     index.registerWorkspaceFiles(uris);
 
     const reads = [];
+    let clock = 0;
 
     return {
         index,
         reads,
+        advance: value => {
+            clock += value;
+        },
         environment: {
             index,
             referenceIndex: {
@@ -175,6 +181,7 @@ function project(sources) {
                     .map(uri => ({ uri }))
             },
             yieldToInteractive: async () => undefined,
+            now: () => clock,
             readSource: async uri => {
                 reads.push(uri);
 
@@ -253,10 +260,16 @@ test("предел ограничивает и работу, и ответ", asy
     );
 });
 
-test("обход уступает поток между порциями", async () => {
+test("поток уступается по бюджету времени, а не по числу файлов", async () => {
+    /*
+     * Порция в фиксированное число файлов — неверная мерка: среди
+     * кандидатов попадаются файлы по 700 КБ, и такая порция занимает поток
+     * надолго. Часы стенда двигаются вручную: так проверяется само правило,
+     * а не скорость машины.
+     */
     const sources = {};
 
-    for (let index = 0; index < 60; index++) {
+    for (let index = 0; index < 6; index++) {
         sources["file:///hit" + index + ".mac"] = WITH_CALL;
     }
 
@@ -272,9 +285,68 @@ test("обход уступает поток между порциями", async
         { pattern: "ExecMacro($name)" }
     );
 
-    assert.ok(
-        yields >= 2,
-        "порций больше одной, и между ними поток отдаётся: " + yields
+    assert.strictEqual(
+        yields,
+        0,
+        "шесть мелких файлов бюджет не исчерпывают: уступать незачем"
+    );
+
+    /* Теперь каждый файл «занимает» больше бюджета. */
+    const slow = project(sources);
+    let slowYields = 0;
+
+    slow.environment.yieldToInteractive = async () => {
+        slowYields++;
+    };
+    slow.environment.readSource = async uri => {
+        slow.advance(50);
+
+        return sources[uri];
+    };
+
+    await runRslStructuralSearch(
+        slow.environment,
+        { pattern: "ExecMacro($name)" }
+    );
+
+    assert.strictEqual(
+        slowYields,
+        6,
+        "после каждого долгого файла поток отдаётся сразу"
+    );
+});
+
+test("файл лексируется один раз", async () => {
+    const sources = {};
+
+    for (let index = 0; index < 5; index++) {
+        sources["file:///hit" + index + ".mac"] = WITH_CALL;
+    }
+
+    const board = project(sources);
+    const original = lexerModule.lexRsl;
+    let calls = 0;
+
+    lexerModule.lexRsl = function (...args) {
+        calls++;
+
+        return original.apply(this, args);
+    };
+
+    try {
+        await runRslStructuralSearch(
+            board.environment,
+            { pattern: "ExecMacro($name)" }
+        );
+    } finally {
+        lexerModule.lexRsl = original;
+    }
+
+    /* Пять файлов и один разбор образца. */
+    assert.strictEqual(
+        calls,
+        6,
+        "второй разбор файла был только ради начал строк: " + calls
     );
 });
 

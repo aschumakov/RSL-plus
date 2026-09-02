@@ -12,9 +12,9 @@ import type { WorkspaceIndex } from "../workspaceIndex";
  * Обход проекта для структурного поиска.
  *
  * Три правила, без которых такой поиск нельзя выпускать: кандидаты отбираются
- * заранее, обход идёт порциями и его можно отменить. Иначе одна команда на
- * проекте в шесть тысяч файлов занимает поток на секунды, и всё это время
- * редактор не отвечает.
+ * заранее, обход уступает поток по бюджету времени и его можно отменить.
+ * Иначе одна команда на проекте в шесть тысяч файлов занимает поток на
+ * секунды, и всё это время редактор не отвечает.
  */
 export interface IRslStructuralSearchRequest {
     /** Образец: вызов с заполнителями. */
@@ -46,13 +46,23 @@ export interface IRslStructuralSearchAnswer {
 export interface IRslStructuralSearchEnvironment {
     index: WorkspaceIndex;
     referenceIndex: ReferenceIndex;
-    /** Уступка интерактивным запросам между порциями. */
+    /** Уступка интерактивным запросам, когда бюджет времени вышел. */
     yieldToInteractive(): Promise<void>;
+    /** Часы: подменяются стендом, чтобы бюджет проверялся без ожидания. */
+    now?(): number;
     /** Чтение файла; отдельно, чтобы стенд не зависел от диска. */
     readSource(uri: string): Promise<string | undefined>;
 }
 
-const FILES_PER_CHUNK = 24;
+/**
+ * Сколько времени обход вправе занимать поток между уступками.
+ *
+ * Считалось порциями по 24 файла, и это неверная мерка: среди
+ * кандидатов попадаются файлы по 700 КБ, и такая порция занимала
+ * поток надолго. Бюджет времени не зависит от того, какие файлы
+ * попались.
+ */
+const SLICE_BUDGET_MS = 10;
 const DEFAULT_LIMIT = 500;
 
 export async function runRslStructuralSearch(
@@ -88,48 +98,54 @@ export async function runRslStructuralSearch(
     );
     const hits: IRslStructuralSearchHit[] = [];
     let scanned = 0;
+    const clock = environment.now ?? now;
+    let sliceStartedAt = clock();
 
-    for (let at = 0; at < candidates.length; at += FILES_PER_CHUNK) {
+    for (const candidate of candidates) {
         if (isCancelled()) {
             return answer(hits, scanned, all.length - scanned, true, false);
         }
 
-        const chunk = candidates.slice(at, at + FILES_PER_CHUNK);
+        const source = candidate.source ??
+            await environment.readSource(candidate.uri);
 
-        for (const candidate of chunk) {
-            const source = candidate.source ??
-                await environment.readSource(candidate.uri);
-
-            if (source === undefined) {
-                continue;
-            }
-
-            scanned++;
-
-            const found = findRslStructuralMatches(
-                parsed.pattern,
-                source,
-                lexRsl(source).tokens,
-                isCancelled
-            );
-
-            if (found.length > 0) {
-                appendHits(hits, candidate.uri, source, found, limit);
-            }
-
-            if (hits.length >= limit) {
-                return answer(
-                    hits,
-                    scanned,
-                    all.length - scanned,
-                    false,
-                    true
-                );
-            }
+        if (source === undefined) {
+            continue;
         }
 
-        /* Порция кончилась — уступаем поток тому, кто ждёт ответа. */
-        await environment.yieldToInteractive();
+        scanned++;
+
+        /*
+         * Один разбор на файл: и совпадения, и начала строк берутся
+         * из него. Прежде файл лексировался дважды — второй раз
+         * только ради того, чтобы перевести смещение в строку.
+         */
+        const lex = lexRsl(source);
+        const found = findRslStructuralMatches(
+            parsed.pattern,
+            source,
+            lex.tokens,
+            isCancelled
+        );
+
+        if (found.length > 0) {
+            appendHits(hits, candidate.uri, source, lex, found, limit);
+        }
+
+        if (hits.length >= limit) {
+            return answer(hits, scanned, all.length - scanned, false, true);
+        }
+
+        /*
+         * Уступка по времени, а не по числу файлов.
+         *
+         * Крупный файл кандидата один занимает поток дольше, чем
+         * два десятка обычных, и уступать после него надо сразу.
+         */
+        if (clock() - sliceStartedAt >= SLICE_BUDGET_MS) {
+            await environment.yieldToInteractive();
+            sliceStartedAt = clock();
+        }
     }
 
     return answer(hits, scanned, all.length - scanned, false, false);
@@ -139,10 +155,12 @@ function appendHits(
     hits: IRslStructuralSearchHit[],
     uri: string,
     source: string,
+    /* Разбор того же файла: второй раз его лексировать незачем. */
+    lex: { lineStarts: readonly number[] },
     found: readonly IRslStructuralMatch[],
     limit: number
 ): void {
-    const lineStarts = lexRsl(source).lineStarts;
+    const lineStarts = lex.lineStarts;
 
     for (const match of found) {
         if (hits.length >= limit) {
@@ -160,6 +178,11 @@ function appendHits(
             bindings: match.bindings
         });
     }
+}
+
+/** Часы обхода: вынесены, чтобы стенд мог их подменить. */
+function now(): number {
+    return Date.now();
 }
 
 function answer(

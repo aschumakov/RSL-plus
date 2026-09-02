@@ -674,7 +674,7 @@ export function activate(context: ExtensionContext): void {
                 channel.appendLine(
                     Uri.parse(hit.uri).fsPath + ":" +
                     (hit.range.start.line + 1) + "  " +
-                    hit.text.replace(/s+/gu, " ")
+                    hit.text.replace(/\s+/gu, " ")
                 );
             }
 
