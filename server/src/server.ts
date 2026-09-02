@@ -846,6 +846,13 @@ connection.onInitialized(() => {
                 event.added,
                 event.removed
             );
+            /*
+             * Состав проекта собран по прежнему набору папок: удалённая
+             * папка не должна продолжать находиться, а добавленная —
+             * считаться пустой до конца нового обхода.
+             */
+            workspaceIndex.resetWorkspaceFiles();
+            moduleFileResolver.invalidate();
         });
     }
 
@@ -1131,6 +1138,12 @@ async function handleWatchedFileChange(
      */
     if (/\.rslplus\.json$/iu.test(uri)) {
         if (workspaceDiscovery.reloadProjectConfig()) {
+            /*
+             * Прежний состав проекта собран по прежним правилам, и верить
+             * ему больше нельзя: до конца нового обхода каталог не готов, а
+             * адресный поиск идёт по диску уже по новой политике.
+             */
+            workspaceIndex.resetWorkspaceFiles();
             moduleFileResolver.invalidate();
             logMessage(
                 "Настройка проекта перечитана: область поиска обновлена"

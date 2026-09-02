@@ -159,6 +159,14 @@ export class WorkspaceFileDiscoveryService {
             const root = uriToPath(folder.uri);
             if (root) this.roots.set(rootKey(root), path.resolve(root));
         }
+
+        /*
+         * Политика собрана по прежнему набору папок и к новому не
+         * относится: настройка проекта лежит в корне, а корни только что
+         * изменились. Без пересборки moduleRoots и exclude добавленной
+         * папки не действовали бы, а удалённая продолжала бы обходиться.
+         */
+        this.applyProjectConfig();
         this.restart();
     }
 
