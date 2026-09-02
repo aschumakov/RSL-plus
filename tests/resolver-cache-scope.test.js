@@ -225,12 +225,55 @@ test("ревизия документа не меняется от чужого 
         "чужой модуль ревизию документа не трогает"
     );
 
+    /*
+     * Подключённый модуль — тоже не трогает, если снаружи он не изменился.
+     *
+     * Здесь перечитан тот же текст: так выглядит фоновое перечитывание файла.
+     * Прежде ревизия от этого менялась, и горячие кэши документа обнулялись
+     * без всякой причины.
+     */
     board.index.updateExternalModule(LIB, LIB_SOURCE, 2);
+
+    assert.strictEqual(
+        board.index.getSemanticRevision(MAIN),
+        before,
+        "тот же интерфейс — то же окружение документа"
+    );
+
+    /* А изменение публичного объявления обязано её изменить. */
+    board.index.updateExternalModule(
+        LIB,
+        LIB_SOURCE + "\nMacro LibExtra()\nEnd;\n",
+        3
+    );
 
     assert.notStrictEqual(
         board.index.getSemanticRevision(MAIN),
         before,
-        "подключённый модуль обязан её изменить"
+        "новое публичное объявление видно соседнему файлу"
+    );
+});
+
+test("правка тела подключённого модуля ревизию не меняет", () => {
+    /*
+     * То, ради чего заведён отпечаток интерфейса. Соседний файл видит от
+     * модуля только Import и публичные объявления с подписями; что написано
+     * внутри Macro — его дело, и ни один вывод в соседнем файле от этого не
+     * меняется.
+     */
+    const board = stand();
+    const before = board.index.getSemanticRevision(MAIN);
+
+    board.index.updateExternalModule(
+        LIB,
+        LIB_SOURCE.replace("return DeepValue();", "return DeepValue() + 1;"),
+        2
+    );
+
+    assert.strictEqual(
+        board.index.getSemanticRevision(MAIN),
+        before,
+        "тело чужого Macro снаружи не видно"
     );
 });
 

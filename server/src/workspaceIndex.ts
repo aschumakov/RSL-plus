@@ -53,7 +53,16 @@ export interface IWorkspaceIndexOptions {
 }
 
 interface IImportContext {
-    modules: IIndexedModule[];
+    /**
+     * URI модулей замыкания в порядке обхода — не сами модули.
+     *
+     * Объекты держать нельзя. Модель модуля пересобирается при каждой
+     * его правке, и запомненный объект становится устаревшим: именно
+     * поэтому контекст сбрасывался всем зависимым файлам на любую
+     * правку чужого тела. По URI он остаётся верным, пока верен СОСТАВ
+     * замыкания, а состав от правки тела не меняется.
+     */
+    uris: string[];
     /**
      * Место модуля в замыкании: URI -> порядковый номер.
      *
@@ -70,7 +79,6 @@ interface IImportContext {
      */
     orderByUri: Map<string, number>;
     completionItems?: CompletionItem[];
-    closureKey: string;
 }
 
 /**
@@ -169,7 +177,11 @@ export class WorkspaceIndex {
         interfaceChanges: 0,
         dependentInvalidations: 0,
         importGraphUpdates: 0,
-        skippedDependentInvalidations: 0
+        skippedDependentInvalidations: 0,
+        /** Сколько раз Import-контекст собирался заново. */
+        importContextRebuilds: 0,
+        /** Сколько раз ревизия окружения документа назначалась заново. */
+        semanticRevisionResets: 0
     };
     private catalogValue = new WorkspaceCatalog();
 
@@ -294,6 +306,8 @@ export class WorkspaceIndex {
         dependentInvalidations: number;
         importGraphUpdates: number;
         skippedDependentInvalidations: number;
+        importContextRebuilds: number;
+        semanticRevisionResets: number;
     } {
         return { ...this.interfaceStats };
     }
@@ -515,7 +529,29 @@ export class WorkspaceIndex {
         return this.modules.get(uri)?.imports.slice() || [];
     }
     getImportedModules(uri: string): IIndexedModule[] {
-        return this.importsEnabled ? this.getImportContext(uri).modules.slice() : [];
+        return this.importsEnabled
+            ? this.contextModules(this.getImportContext(uri))
+            : [];
+    }
+
+    /**
+     * Модули замыкания в их ТЕКУЩЕМ виде.
+     *
+     * Вытесненный модуль выпадает: контекст помнит состав, а не
+     * содержимое, и держать вытесненное он не вправе.
+     */
+    private contextModules(context: IImportContext): IIndexedModule[] {
+        const result: IIndexedModule[] = [];
+
+        for (const uri of context.uris) {
+            const module = this.modules.get(uri);
+
+            if (module) {
+                result.push(module);
+            }
+        }
+
+        return result;
     }
     /**
      * Ключ замыкания БЕЗ самого документа.
@@ -537,7 +573,7 @@ export class WorkspaceIndex {
          * растёт от любой правки чужого тела и от каждого фонового
          * перечитывания файла, и ключ устаревал без всякой причины.
          */
-        return this.getImportContext(uri).modules
+        return this.contextModules(this.getImportContext(uri))
             .map(item => item.uri + "@i" + item.interfaceRevision)
             .sort()
             .join("|");
@@ -562,10 +598,25 @@ export class WorkspaceIndex {
             .join(",");
     }
 
+    /**
+     * Условия семантического расчёта документа одной строкой.
+     *
+     * Своя версия — плюс ИНТЕРФЕЙСЫ модулей замыкания, а не их версии.
+     * Прежде здесь стояли версии, и правка чужого тела отменяла
+     * посчитанные Problems соседнего файла: ключ переставал совпадать,
+     * хотя ни один вывод в этом файле измениться не мог. На популярном
+     * модуле это значило пересчёт межфайловой фазы у каждого открытого
+     * зависимого — на каждое нажатие клавиши в библиотеке.
+     */
     getImportClosureKey(uri: string): string {
-        return this.importsEnabled
-            ? this.getImportContext(uri).closureKey
-            : "imports-disabled";
+        if (!this.importsEnabled) {
+            return "imports-disabled";
+        }
+
+        const own = this.modules.get(uri);
+
+        return (own ? own.uri + "@v" + own.version : uri + "@-") +
+            "|" + this.getImportedClosureKey(uri);
     }
     resolveModule(name: string): ModuleResolution<IIndexedModule> {
         return this.modules.resolve(name);
@@ -671,7 +722,7 @@ export class WorkspaceIndex {
         if (context.completionItems) return context.completionItems.slice();
         const result: CompletionItem[] = [];
         const seen = new Set<string>();
-        for (const module of context.modules) {
+        for (const module of this.contextModules(context)) {
             for (const symbol of module.symbolTree.children) {
                 if (symbol.isPrivate) continue;
                 const key = normalizeName(symbol.name);
@@ -890,15 +941,31 @@ export class WorkspaceIndex {
             this.interfaceStats.importGraphUpdates++;
         }
         this.collectAffectedUris(uri).forEach(value => affected.add(value));
-        affected.add(uri);
-        this.invalidateImportContexts(affected);
+        affected.delete(uri);
 
+        /*
+         * Зависимые сбрасываются ТОЛЬКО при изменившемся интерфейсе.
+         *
+         * Соседний файл видит от модуля его Import и публичные
+         * объявления с подписями, типами и базовыми классами — ровно то,
+         * что учтено в отпечатке. Что написано внутри Macro, снаружи не
+         * видно, и ни один вывод в соседнем файле от этого не меняется.
+         *
+         * Единственное, чего в отпечатке нет, — положения в тексте. Их
+         * спрашивают у ТЕКУЩЕЙ модели по паре «файл и номер объявления»
+         * (см. symbols/symbolRef), поэтому запомненный объект соседнего
+         * файла устаревшего положения дать больше не может.
+         */
         if (interfaceChanged) {
-            this.interfaceStats.dependentInvalidations += affected.size - 1;
+            this.invalidateImportContexts(affected);
+            this.interfaceStats.dependentInvalidations += affected.size;
         } else {
             this.interfaceStats.skippedDependentInvalidations +=
-                affected.size - 1;
+                affected.size;
         }
+
+        /* Свой контекст сбрасывается всегда: правка была в нём. */
+        this.invalidateImportContexts([uri]);
 
         if (isOpen) {
             /*
@@ -1064,13 +1131,13 @@ export class WorkspaceIndex {
         const orderByUri = new Map<string, number>();
 
         modules.forEach((module, at) => orderByUri.set(module.uri, at));
-        const root = this.modules.get(uri);
-        const closureKey = [root, ...modules]
-            .filter((item): item is IIndexedModule => !!item)
-            .map(item => `${item.uri}@${item.version}`)
-            .sort()
-            .join("|");
-        const context = { modules, orderByUri, closureKey };
+
+        const context: IImportContext = {
+            uris: modules.map(module => module.uri),
+            orderByUri
+        };
+
+        this.interfaceStats.importContextRebuilds++;
         if (cacheable) this.importContexts.set(uri, context);
         return context;
     }
@@ -1093,7 +1160,9 @@ export class WorkspaceIndex {
         for (const uri of uris) {
             this.importContexts.delete(uri);
             /* Окружение этих документов изменилось: их ревизия больше не та. */
-            this.semanticRevisionByUri.delete(uri);
+            if (this.semanticRevisionByUri.delete(uri)) {
+                this.interfaceStats.semanticRevisionResets++;
+            }
         }
     }
 
