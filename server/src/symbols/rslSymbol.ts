@@ -149,16 +149,114 @@ export class RslSymbol {
 
         const callable = this.kind === CompletionItemKind.Function ||
             this.kind === CompletionItemKind.Method;
+        /*
+         * У вызова с известной подписью параметры вставляются заготовками:
+         * `Send(${1:document}, ${2:silent})`, и Tab переводит между ними.
+         * Прежде вставлялось `Send()` — имена параметров приходилось
+         * подсматривать в подсказке и набирать вручную.
+         */
+        const snippet = callable ? callSnippet(this.name, this.parameterText) : "";
+
         return {
             label: this.name,
             documentation: this.documentation,
-            insertTextFormat: InsertTextFormat.PlainText,
+            insertTextFormat: snippet
+                ? InsertTextFormat.Snippet
+                : InsertTextFormat.PlainText,
             kind: this.kind,
             detail,
-            insertText: callable ? `${this.name}()` : this.name,
+            insertText: snippet || (callable ? `${this.name}()` : this.name),
             data: { symbolId: this.id }
         };
     }
+}
+
+/**
+ * Вызов с заготовками параметров.
+ *
+ * Пусто, если параметров нет или подпись неизвестна: тогда вставляется
+ * обычный текст, и лишнего режима правки у пользователя не появляется.
+ */
+function callSnippet(name: string, parameterText: string): string {
+    const inside = parameterText.trim();
+    const open = inside.indexOf("(");
+    const close = inside.lastIndexOf(")");
+
+    if (open < 0 || close <= open) {
+        return "";
+    }
+
+    const parameters = splitCallParameters(inside.substring(open + 1, close))
+        .map(parameterPlaceholderName)
+        .filter(value => !!value);
+
+    if (parameters.length === 0) {
+        return "";
+    }
+
+    const body = parameters
+        .map((value, at) => "${" + (at + 1) + ":" + escapeSnippet(value) + "}")
+        .join(", ");
+
+    return escapeSnippet(name) + "(" + body + ")";
+}
+
+/** Имя параметра без типа, без ссылки и без значения по умолчанию. */
+function parameterPlaceholderName(text: string): string {
+    let value = text.trim();
+    const colon = value.indexOf(":");
+
+    if (colon >= 0) {
+        value = value.substring(0, colon);
+    }
+
+    const assign = value.indexOf("=");
+
+    if (assign >= 0) {
+        value = value.substring(0, assign);
+    }
+
+    /* Передача по ссылке пишется как @имя: сама собака в имя не входит. */
+    return value.replace(/^@/u, "").trim();
+}
+
+/** Разделение по запятым верхнего уровня. */
+function splitCallParameters(value: string): string[] {
+    const result: string[] = [];
+    let current = "";
+    let depth = 0;
+
+    for (const character of value) {
+        if (character === "(" || character === "[") {
+            depth++;
+        } else if (character === ")" || character === "]") {
+            depth = Math.max(0, depth - 1);
+        }
+
+        if (character === "," && depth === 0) {
+            result.push(current);
+            current = "";
+            continue;
+        }
+
+        current += character;
+    }
+
+    if (current.trim()) {
+        result.push(current);
+    }
+
+    return result;
+}
+
+/**
+ * Экранирование для заготовки.
+ *
+ * `$`, `}` и обратная косая в тексте заготовки значат не то, что написано:
+ * без экранирования имя параметра со скобкой ломало бы вставку.
+ */
+function escapeSnippet(value: string): string {
+    return value.replace(/[\\$}]/gu, match => "\\" + match);
 }
 
 export function createSymbolId(
