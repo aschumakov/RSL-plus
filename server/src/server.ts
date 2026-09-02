@@ -16,6 +16,7 @@ import { TextDocument } from "vscode-languageserver-textdocument";
 import {
     buildRslDependencyLevel,
     findRslDependencyPath,
+    findRslImportRange,
     type IRslDependencyRequest
 } from "./features/dependencyTree";
 import {
@@ -937,6 +938,24 @@ connection.onInitialized(() => {
                         platformModules.knowsModule(name)
                 },
                 request
+            )
+        })
+    );
+
+    /*
+     * Где написан Import этого модуля.
+     *
+     * Отвечает общий разбор директив, а не поиск подстроки в тексте: имя
+     * модуля запросто встречается в комментарии или в вызове раньше самой
+     * директивы.
+     */
+    connection.onRequest(
+        "rsl/importRange",
+        (request: { uri: string; name: string }) => ({
+            range: findRslImportRange(
+                { index: workspaceIndex },
+                request.uri,
+                request.name
             )
         })
     );

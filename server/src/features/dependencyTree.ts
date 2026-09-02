@@ -1,5 +1,13 @@
 import { collectRslImportClosure } from "../indexing/importClosure";
-import { moduleReferenceKey } from "../core/language/moduleName";
+import {
+    moduleReferenceKey,
+    rslModuleBaseName
+} from "../core/language/moduleName";
+import {
+    GetImportDefinitionTargetsFromTokens
+} from "../execMacroDefinition";
+import { rangeInModule } from "../core/documentPosition";
+import type { Range } from "vscode-languageserver";
 import { normalizeIdentifier } from "../lexer";
 import type { WorkspaceIndex } from "../workspaceIndex";
 
@@ -139,18 +147,89 @@ function classify(
     };
 }
 
+/**
+ * Кто зависит от файла — по всему проекту.
+ *
+ * Спрашивается каталог, а не граф загруженных модулей. При обычном
+ * режиме индексации значительная часть проекта в память не
+ * загружена, и ответ по графу зависел бы от того, какие модули
+ * случайно оказались прочитаны: тот же вопрос давал бы разные ответы
+ * в разные минуты работы. Состав Import каталог знает про все
+ * прочитанные файлы, и полные модули ради панели не грузятся.
+ */
 function dependentsOf(
     environment: IRslDependencyEnvironment,
     uri: string
 ): IRslDependencyNode[] {
-    return environment.index.getDependents(uri)
+    const index = environment.index;
+    const name = moduleNameOfUri(uri);
+    const seen = new Set<string>([
+        ...index.catalog.modulesImportingModule(name),
+        /*
+         * Граф загруженных модулей добавляется сверху: открытый
+         * документ мог получить новый Import уже после того, как
+         * его прочитала достройка каталога.
+         */
+        ...index.getDependents(uri)
+    ]);
+
+    seen.delete(uri);
+
+    return [...seen]
         .map(item => ({
             name: moduleNameOfUri(item),
             uri: item,
             state: "resolved" as const,
-            expandable: environment.index.getDependents(item).length > 0
+            expandable: hasDependents(environment, item)
         }))
         .sort(byName);
+}
+
+/** Есть ли у файла свои зависимые: считается тем же способом. */
+function hasDependents(
+    environment: IRslDependencyEnvironment,
+    uri: string
+): boolean {
+    const name = moduleNameOfUri(uri);
+
+    return environment.index.catalog
+        .modulesImportingModule(name)
+        .some(item => item !== uri) ||
+        environment.index.getDependents(uri).length > 0;
+}
+
+/**
+ * Точное место, где написан Import этого модуля.
+ *
+ * Ищет общий разбор директив, а не поиск подстроки: имя модуля
+ * запросто встречается в комментарии или в вызове раньше самой
+ * директивы, и переход уводил бы не туда. Строковую форму и путь
+ * общий разбор понимает сам.
+ */
+export function findRslImportRange(
+    environment: IRslDependencyEnvironment,
+    uri: string,
+    moduleName: string
+): Range | undefined {
+    const module = environment.index.getModule(uri);
+
+    if (!module) {
+        return undefined;
+    }
+
+    const wanted = rslModuleBaseName(moduleName);
+
+    for (const target of GetImportDefinitionTargetsFromTokens(
+        module.lex.tokens as never
+    )) {
+        if (rslModuleBaseName(target.moduleName) !== wanted) {
+            continue;
+        }
+
+        return rangeInModule(module, target.nameStart, target.nameEnd);
+    }
+
+    return undefined;
 }
 
 /**

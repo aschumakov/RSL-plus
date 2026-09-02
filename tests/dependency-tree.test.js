@@ -28,7 +28,8 @@ require.cache[serverModulePath] = {
 
 const {
     buildRslDependencyLevel,
-    findRslDependencyPath
+    findRslDependencyPath,
+    findRslImportRange
 } = require("../server/out/features/dependencyTree");
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
 
@@ -180,6 +181,109 @@ test("незагруженный модуль отличается от недо
         nodes[0].state,
         "unloaded",
         "файл в проекте есть, но ещё не прочитан — это не отсутствие"
+    );
+});
+
+test("обратные зависимости берутся из каталога, а не из загруженного", () => {
+    /*
+     * При обычном режиме индексации значительная часть проекта в память не
+     * загружена. Ответ по графу загруженных модулей зависел бы от того, что
+     * успела прочитать фоновая индексация: тот же вопрос давал бы разные
+     * ответы в разные минуты работы.
+     */
+    const LIB = "file:///d:/tree/lib.mac";
+    const MIDDLE = "file:///d:/tree/middle.mac";
+    const OTHER = "file:///d:/tree/other.mac";
+    const index = new WorkspaceIndex();
+
+    index.registerWorkspaceFiles([MAIN, MIDDLE, OTHER, LIB]);
+
+    /* Только каталог: полных модулей в индексе нет. */
+    const record = (uri, imports) => index.catalog.recordDeclarations({
+        uri,
+        version: 1,
+        declarations: [],
+        imports
+    });
+
+    record(LIB, []);
+    record(MIDDLE, ["lib"]);
+    record(OTHER, ["lib"]);
+    record(MAIN, ["middle"]);
+
+    assert.strictEqual(
+        index.getModules().length,
+        0,
+        "полные модули ради панели не грузятся"
+    );
+
+    const nodes = level(index, LIB, { direction: "dependents" });
+
+    assert.deepStrictEqual(
+        nodes.map(node => node.uri).sort(),
+        [MIDDLE, OTHER].sort(),
+        "ответ полный: оба файла подключают lib"
+    );
+    assert.ok(
+        nodes.find(node => node.uri === MIDDLE).expandable,
+        "у middle свой зависимый есть — main"
+    );
+});
+
+test("путь Import понимается и со строкой, и с путём", () => {
+    const index = new WorkspaceIndex();
+    const source = [
+        "// сначала про utils в комментарии",
+        'Import "sub/utils.mac";',
+        "Macro Run()",
+        "  return utils;",
+        "End;",
+        ""
+    ].join("\n");
+
+    index.registerWorkspaceFiles([MAIN]);
+    index.updateOpenModule(MAIN, source, 1);
+
+    const range = findRslImportRange({ index }, MAIN, "utils");
+
+    assert.ok(range, "директива обязана найтись");
+    assert.strictEqual(
+        range.start.line,
+        1,
+        "это строка с Import, а не комментарий выше: " + JSON.stringify(range)
+    );
+});
+
+test("имя в комментарии за директиву не принимается", () => {
+    const index = new WorkspaceIndex();
+    const source = [
+        "// common ниже по файлу",
+        "Var common = 1;",
+        "Import common;",
+        ""
+    ].join("\n");
+
+    index.registerWorkspaceFiles([MAIN]);
+    index.updateOpenModule(MAIN, source, 1);
+
+    const range = findRslImportRange({ index }, MAIN, "common");
+
+    assert.strictEqual(
+        range.start.line,
+        2,
+        "поиск подстроки привёл бы на первую строку"
+    );
+});
+
+test("ненаписанный Import диапазона не имеет", () => {
+    const index = new WorkspaceIndex();
+
+    index.registerWorkspaceFiles([MAIN]);
+    index.updateOpenModule(MAIN, "Macro Run()\nEnd;\n", 1);
+
+    assert.strictEqual(
+        findRslImportRange({ index }, MAIN, "common"),
+        undefined
     );
 });
 

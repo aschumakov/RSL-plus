@@ -6,6 +6,9 @@ import {
     descriptorKind,
     type IRslDeclarationDescriptor
 } from "../analysis/declarationExtractor";
+import {
+    rslModuleBaseName
+} from "../core/language/moduleName";
 import { normalizeIdentifier } from "../lexer";
 import {
     createSymbolId,
@@ -789,6 +792,37 @@ export class WorkspaceCatalog {
      * Ответ по каталогу, а не чтением проекта: переименование файла
      * должно предлагать правки сразу, а не после обхода тысяч файлов.
      */
+    /**
+     * Кто подключает этот модуль — по всему каталогу проекта.
+     *
+     * Отличается от modulesReferencing тем, что сравнивает БАЗОВОЕ имя:
+     * `Import "sub/lib.mac"` и `Import lib` подключают один модуль.
+     * Отвечает каталог, а не граф загруженных модулей: при обычном
+     * режиме индексации значительная часть проекта не загружена, а
+     * состав Import каталог знает про все прочитанные файлы.
+     */
+    modulesImportingModule(moduleName: string): string[] {
+        const wanted = rslModuleBaseName(moduleName);
+
+        if (!wanted) {
+            return [];
+        }
+
+        const result: string[] = [];
+
+        for (const module of this.modules.values()) {
+            const imports = module.imports.some(
+                name => rslModuleBaseName(name) === wanted
+            );
+
+            if (imports) {
+                result.push(module.uri);
+            }
+        }
+
+        return result.sort();
+    }
+
     modulesReferencing(moduleName: string): string[] {
         const wanted = normalizeIdentifier(moduleName);
         const result: string[] = [];

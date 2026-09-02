@@ -1,6 +1,8 @@
 import {
     commands,
     EventEmitter,
+    Position,
+    Range,
     ThemeIcon,
     TreeItem,
     TreeItemCollapsibleState,
@@ -64,7 +66,10 @@ const STATE_ICON: Record<DependencyState, string> = {
 class DependencyItem extends TreeItem {
     constructor(
         readonly node: IDependencyNode,
-        /** Путь URI от корня: по нему сервер видит цикл. */
+        /**
+         * Путь URI от корня: по нему сервер видит цикл, а последний в
+         * нём — это файл, где написан Import этого узла.
+         */
         readonly ancestors: readonly string[]
     ) {
         super(
@@ -182,7 +187,7 @@ export function registerRslDependencyView(
             provider.setRoot(provider.root)),
         commands.registerCommand(
             "rsl.dependencies.goToImport",
-            (item: DependencyItem) => goToImport(provider.root, item)
+            (item: DependencyItem) => goToImport(client, item)
         ),
         commands.registerCommand(
             "rsl.dependencies.showPath",
@@ -193,31 +198,49 @@ export function registerRslDependencyView(
     context.subscriptions.push(...subscriptions);
 }
 
-/** Открыть файл на строке, где написан этот Import. */
+/**
+ * Открыть файл, где написан этот Import, на самой директиве.
+ *
+ * Файл берётся у РОДИТЕЛЯ узла, а не у корня дерева: в цепочке
+ * `main -> common -> utils` Import модуля utils написан в common, и искать
+ * его в main бессмысленно.
+ *
+ * Диапазон считает сервер общим разбором директив. Поиск подстроки по
+ * тексту сюда не годится: имя модуля запросто встречается в комментарии
+ * или в вызове раньше самой директивы.
+ */
 async function goToImport(
-    rootUri: string | undefined,
+    client: LanguageClient,
     item: DependencyItem | undefined
 ): Promise<void> {
-    if (!rootUri || !item) {
+    const parentUri = item?.ancestors[item.ancestors.length - 1];
+
+    if (!item || !parentUri) {
         return;
     }
 
-    const document = await workspace.openTextDocument(Uri.parse(rootUri));
-    const text = document.getText();
-    /*
-     * Ищется само написанное имя, а не разобранная директива: показать нужно
-     * то место, где пользователь его написал.
-     */
-    const at = text.toLowerCase().indexOf(item.node.name.toLowerCase());
+    const answer = await client.sendRequest<{ range?: Range }>(
+        "rsl/importRange",
+        { uri: parentUri, name: item.node.name }
+    );
+    const document = await workspace.openTextDocument(Uri.parse(parentUri));
+    const range = answer?.range;
 
-    await window.showTextDocument(document, {
-        selection: at < 0
-            ? undefined
-            : new (await import("vscode")).Range(
-                document.positionAt(at),
-                document.positionAt(at + item.node.name.length)
-            )
-    });
+    if (!range) {
+        void window.showInformationMessage(
+            "RSL: директива Import для " + item.node.name + " не найдена"
+        );
+        await window.showTextDocument(document);
+
+        return;
+    }
+
+    const selection = new Range(
+        new Position(range.start.line, range.start.character),
+        new Position(range.end.line, range.end.character)
+    );
+
+    await window.showTextDocument(document, { selection });
 }
 
 /** Показать путь от текущего файла к выбранному модулю. */

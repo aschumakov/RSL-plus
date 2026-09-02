@@ -99,6 +99,21 @@ export function stripQuotes(value: string): string {
  *
  * По нему каталог проекта ищет файл.
  */
+/**
+ * Базовое имя модуля: без пути и без расширения, в нижнем регистре.
+ *
+ * `sub/lib.mac`, `lib.mac` и `LIB` — один и тот же модуль. Правило
+ * общее: по нему сравнивают имена и каталог, и дерево зависимостей, и
+ * переименование файла.
+ */
+export function rslModuleBaseName(value: string): string {
+    const normalized = normalizeModuleName(value);
+    const slash = normalized.lastIndexOf("/");
+    const name = slash < 0 ? normalized : normalized.slice(slash + 1);
+
+    return name.endsWith(".mac") ? name.slice(0, -4) : name;
+}
+
 export function normalizeModuleName(value: string): string {
     let result = decodeRslModulePath(value)
         .replace(/\\/gu, "/")
