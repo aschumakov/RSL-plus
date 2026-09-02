@@ -50,6 +50,18 @@ export interface IRslCatalogWarmupOptions {
     /** Отчёт о ходе: для лога и тестов. */
     onProgress?(progress: IRslCatalogWarmupProgress): void;
     /**
+     * Факты прочитанного файла: те же, что получает загрузчик Import.
+     *
+     * Обход читает файл целиком и получает ответ со всем, что worker
+     * посчитал, — включая хэши идентификаторов для поиска ссылок.
+     * Прежде они здесь выбрасывались, и индекс ссылок позже добывал
+     * то же самое сам, читая тот же файл второй раз.
+     *
+     * Обход не знает, кому эти факты нужны: приёмник один на всех
+     * потребителей чтения — см. RslCompactFactsSink.
+     */
+    onCompactFacts?(response: ICompactModuleResponse): void;
+    /**
      * Сохранённый состав проекта, если он ведётся.
      *
      * Обход спрашивает его о каждом файле: неизменный файл не читается вовсе,
@@ -367,6 +379,11 @@ export class RslCatalogWarmupService {
             return false;
         }
 
+        /*
+         * Факты отдаются до записи в каталог: их ждёт индекс ссылок,
+         * и они не зависят от того, изменился ли каталог.
+         */
+        this.options.onCompactFacts?.(response);
         this.options.index.catalog.recordDeclarations({
             uri: response.uri,
             version: 0,

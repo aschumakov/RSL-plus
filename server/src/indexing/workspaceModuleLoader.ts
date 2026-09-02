@@ -39,6 +39,13 @@ export interface IWorkspaceModuleLoaderOptions {
     compactModules?: ICompactModuleIndexer;
     onModuleLoaded(module: IIndexedModule): void;
     onModuleCountChanged(): void;
+    /**
+     * Факты прочитанного файла: приёмник один с достройкой каталога.
+     *
+     * Без него загрузчик кормит индекс ссылок сам — так работает
+     * прямой вызов в тестах и резервный путь.
+     */
+    onCompactFacts?(response: ICompactModuleResponse): void;
     onIndexProgress?(loaded: number, total: number): void;
     /**
      * Часы службы: задержки и текущее время.
@@ -972,7 +979,9 @@ export class WorkspaceModuleLoader {
          * Хэшей нет у ответа, поднятого из дискового кэша: там их не хранят,
          * и запись индекса ссылок остаётся прежней.
          */
-        if (response.identifierHashes) {
+        if (this.options.onCompactFacts) {
+            this.options.onCompactFacts(response);
+        } else if (response.identifierHashes) {
             this.referenceIndex.acceptScannedFacts(
                 uri,
                 response.fingerprint,

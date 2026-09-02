@@ -24,6 +24,7 @@ import {
     type IRslStructuralSearchRequest
 } from "./features/structuralSearchService";
 import { decodeRslSourceText } from "./core/textDecoding";
+import { RslCompactFactsSink } from "./analysis/compactFactsSink";
 import { buildRslModuleStub } from "./features/stubGenerator";
 import { RslTypeEngine } from "./analysis/typeEngine";
 import {
@@ -152,6 +153,15 @@ const diagnosticEngine = new RslDiagnosticEngine({
     }
 });
 const referenceIndex = new ReferenceIndex({ log: logMessage });
+/*
+ * Куда попадают факты одного настоящего чтения файла.
+ *
+ * Читают файл двое — загрузчик Import и достройка каталога, — и оба
+ * получают ответ целиком. Приёмник один: одно сканирование кормит всех,
+ * кому эти факты нужны.
+ */
+const compactFacts = new RslCompactFactsSink(referenceIndex);
+
 /*
  * Постоянные записи о разрешённых ссылках.
  *
@@ -291,7 +301,9 @@ const moduleLoader = new WorkspaceModuleLoader(
         onModuleLoaded: module => {
             refreshOpenDependents(module.uri);
         },
-        onModuleCountChanged: () => notifyModuleCount()
+        onModuleCountChanged: () => notifyModuleCount(),
+        /* Факты чтения — в общий приёмник, а не мимо него. */
+        onCompactFacts: response => compactFacts.accept(response)
     },
     referenceIndex
 );
@@ -316,6 +328,12 @@ const catalogWarmup = new RslCatalogWarmupService({
     index: workspaceIndex,
     log: logMessage,
     store: catalogStore,
+    /*
+     * Обход читает файл целиком, и его ответ несёт всё, что посчитал
+     * worker. Прежде хэши идентификаторов здесь выбрасывались, и индекс
+     * ссылок добывал то же самое сам, читая файл второй раз.
+     */
+    onCompactFacts: response => compactFacts.accept(response),
     /*
      * Чтение и сканирование — в том же worker, что у фоновой индексации, с
      * фоновым приоритетом: навигация и Import активного файла его
