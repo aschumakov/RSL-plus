@@ -133,6 +133,30 @@
          {
             "command": "rsl.showServerStatus",
             "title": "RSL: Show Language Server Status"
+         },
+         {
+            "command": "rsl.showSyntaxTree",
+            "title": "RSL: Show Syntax Tree"
+         },
+         {
+            "command": "rsl.showSymbolTree",
+            "title": "RSL: Show Symbol Tree"
+         },
+         {
+            "command": "rsl.showModuleInterface",
+            "title": "RSL: Show Module Interface"
+         },
+         {
+            "command": "rsl.showImportClosure",
+            "title": "RSL: Show Import Closure"
+         },
+         {
+            "command": "rsl.explainSymbol",
+            "title": "RSL: Explain Symbol at Cursor"
+         },
+         {
+            "command": "rsl.explainType",
+            "title": "RSL: Explain Type at Cursor"
          }
       ],
       "keybindings": [

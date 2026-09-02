@@ -10,6 +10,11 @@ import {
 
 import { TextDocument } from "vscode-languageserver-textdocument";
 
+import { RslTypeEngine } from "./analysis/typeEngine";
+import {
+    buildRslInspectorReport,
+    type IRslInspectorRequest
+} from "./features/inspectorReports";
 import { RslSymbol } from "./symbols/rslSymbol";
 import { RslDiagnosticEngine } from "./diagnostics/diagnosticEngine";
 import { DiagnosticsCoordinator } from "./diagnostics/diagnosticsCoordinator";
@@ -85,6 +90,13 @@ const scopeResolver = new RslScopeResolver(
     undefined,
     platformModules
 );
+/*
+ * Слой типов для отчётов инспекторов.
+ *
+ * Он ленивый и ничего не считает, пока не спросят: держать его рядом с
+ * резолвером дешевле, чем заводить на каждый запрос.
+ */
+const inspectorTypes = new RslTypeEngine(workspaceIndex, scopeResolver);
 
 const defaultSettings: IRslSettings = {
     language: { dialect: "rsBank" },
@@ -826,6 +838,33 @@ connection.onInitialized(() => {
      * «почему выросло»: постоянных структур стало много, и каждая молча
      * добавляет к сумме.
      */
+    /*
+     * Отчёты для разбора работы сервера: только по запросу.
+     *
+     * После появления интерфейса модуля и слоя типов между текстом и
+     * ответом лежат замыкание, ревизии и кэши. Отчёт показывает ровно то
+     * состояние, по которому сервер отвечал, и на обычную работу не влияет.
+     */
+    connection.onRequest(
+        "rsl/inspect",
+        (request: IRslInspectorRequest) => {
+            try {
+                return {
+                    report: buildRslInspectorReport(
+                        {
+                            index: workspaceIndex,
+                            resolver: scopeResolver,
+                            types: inspectorTypes
+                        },
+                        request
+                    )
+                };
+            } catch (error) {
+                return { report: "Отчёт не построен: " + String(error) };
+            }
+        }
+    );
+
     connection.onRequest("rsl/serverStatus", () => {
         const status = collectRslServerStatus({
             openModels: () => documents.all().length,

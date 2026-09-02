@@ -547,6 +547,60 @@ export function activate(context: ExtensionContext): void {
         )
     );
 
+    /*
+     * Инспекторы: показывают состояние, по которому сервер отвечал.
+     *
+     * Работают только по команде и на обычную работу не влияют — ни кэшей не
+     * греют, ни индексации не запускают. Нужны там, где ответ выглядит
+     * неверным: между текстом и ответом лежат замыкание Import, ревизии
+     * интерфейсов и кэши, и без такого отчёта разбираться в этом тяжело.
+     */
+    const inspectors: Array<[string, string, string]> = [
+        ["rsl.showSyntaxTree", "syntaxTree", "Синтаксическое дерево"],
+        ["rsl.showSymbolTree", "symbolTree", "Дерево символов"],
+        ["rsl.showModuleInterface", "moduleInterface", "Интерфейс модуля"],
+        ["rsl.showImportClosure", "importClosure", "Замыкание Import"],
+        ["rsl.explainSymbol", "explainSymbol", "Символ под курсором"],
+        ["rsl.explainType", "explainType", "Тип под курсором"]
+    ];
+
+    for (const [command, kind, title] of inspectors) {
+        context.subscriptions.push(
+            commands.registerCommand(command, () => {
+                const editor = window.activeTextEditor;
+
+                if (!editor) {
+                    void window.showInformationMessage(
+                        "RSL: откройте файл, о котором спрашиваете"
+                    );
+
+                    return;
+                }
+
+                const channel = window.createOutputChannel(
+                    "RSL-plus: " + title
+                );
+
+                void client.sendRequest("rsl/inspect", {
+                    kind,
+                    uri: editor.document.uri.toString(),
+                    offset: editor.document.offsetAt(editor.selection.active)
+                }).then(
+                    (answer: unknown) => {
+                        const report = (answer as { report?: string })?.report;
+
+                        channel.appendLine(report || "Сервер не ответил");
+                        channel.show(true);
+                    },
+                    error => {
+                        channel.appendLine("RSL: отчёт не получен: " + error);
+                        channel.show(true);
+                    }
+                );
+            })
+        );
+    }
+
     const showMacrosCommand = "rsl.showMacroFiles";
 
     context.subscriptions.push(
