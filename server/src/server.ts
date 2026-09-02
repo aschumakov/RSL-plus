@@ -668,6 +668,8 @@ const definitionProvider = new RslDefinitionProvider({
         moduleLoader.ensureImportedSymbol(uri, symbolName),
     getDefinitionRange: (uri, object) =>
         workspaceIndex.getDefinitionRange(uri, object),
+    liveSymbol: (uri, object) =>
+        workspaceIndex.liveSymbol(uri, object),
     resolveMethodReference: (uri, tree, receiverOffset, methodName) => {
         const resolved = scopeResolver.resolveMemberReference(
             uri,

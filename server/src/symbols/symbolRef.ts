@@ -1,0 +1,87 @@
+import type { RslSymbol, SymbolId } from "./rslSymbol";
+
+/**
+ * Межфайловая идентичность объявления.
+ *
+ * `RslSymbol` — объект КОНКРЕТНОЙ модели документа. Он неизменяем, и это его
+ * достоинство, но у него есть свойства, которые к идентичности объявления не
+ * относятся: положения в тексте. Правка выше по файлу двигает их все, модель
+ * пересобирается, и объект становится другим, хотя объявление то же.
+ *
+ * Из-за этого экземпляр нельзя держать через файл. Кэш соседнего документа,
+ * запомнивший символ из библиотеки, после правки её тела отдавал бы прежний
+ * объект с прежними положениями — и переход прыгал бы на строку, где этого
+ * объявления уже нет.
+ *
+ * Идентичность — это пара: файл и устойчивый номер объявления внутри него.
+ * Номер переживает правку тела: он собран из вида, имени и номера среди
+ * одноимённых братьев, а не из положения (см. createSymbolId). Актуальный
+ * объект и его диапазон получают ПО ЭТОЙ ПАРЕ из текущей модели — там, где
+ * положение действительно нужно.
+ */
+export interface IRslSymbolRef {
+    uri: string;
+    symbolId: SymbolId;
+}
+
+/** Идентичность символа, взятого из модели этого файла. */
+export function rslSymbolRef(uri: string, symbol: RslSymbol): IRslSymbolRef {
+    return { uri, symbolId: symbol.id };
+}
+
+/**
+ * Одно ли это объявление.
+ *
+ * URI сравнивается идентичностью файла, а не строкой: см. core/identity.
+ * Сравнение вынесено сюда, чтобы места, соединяющие межфайловые связи, не
+ * повторяли его каждое по-своему.
+ */
+export function sameRslSymbolRef(
+    left: IRslSymbolRef | undefined,
+    right: IRslSymbolRef | undefined,
+    sameUri: (left: string, right: string) => boolean
+): boolean {
+    if (!left || !right) {
+        return left === right;
+    }
+
+    return left.symbolId === right.symbolId &&
+        sameUri(left.uri, right.uri);
+}
+
+/**
+ * Объявление с этим номером в дереве символов.
+ *
+ * Номер устроен как путь — `module/3:alpha/6:count`, — поэтому спуск идёт по
+ * префиксу: ветка, чей номер не является началом искомого, целиком
+ * пропускается. Перебирать все объявления файла незачем.
+ */
+export function findRslSymbolById(
+    root: RslSymbol,
+    symbolId: SymbolId
+): RslSymbol | undefined {
+    if (root.id === symbolId) {
+        return root;
+    }
+
+    const prefix = root.id + "/";
+
+    /*
+     * Корень модуля — особый случай: его номер `module`, и он действительно
+     * префикс всех прочих. У остальных проверка префикса и отсекает лишние
+     * ветки.
+     */
+    if (!(symbolId as string).startsWith(prefix)) {
+        return undefined;
+    }
+
+    for (const child of root.children) {
+        const found = findRslSymbolById(child, symbolId);
+
+        if (found) {
+            return found;
+        }
+    }
+
+    return undefined;
+}

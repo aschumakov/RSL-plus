@@ -530,6 +530,12 @@ export function isLocalReferenceTarget(root: RslSymbol, target: RslSymbol): bool
     );
 }
 
+/*
+ * Сравнение по устойчивому номеру объявления, а не по ссылке.
+ *
+ * Дерево здесь из текущей модели файла, а искомый символ мог прийти из
+ * кэша, собранного до её пересборки: поля те же, объект другой.
+ */
 function findObjectPath(
     current: RslSymbol,
     target: RslSymbol,
@@ -537,12 +543,12 @@ function findObjectPath(
 ): RslSymbol[] | undefined {
     const currentPath = [...path, current];
 
-    if (current === target) {
+    if (current.id === target.id) {
         return currentPath;
     }
 
     for (const child of getReferenceTreeChildren(current)) {
-        if (child === target) {
+        if (child.id === target.id) {
             return [...currentPath, child];
         }
 

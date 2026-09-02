@@ -305,8 +305,16 @@ export class RslCallHierarchyProvider {
 function createCallHierarchyItem(
     index: WorkspaceIndex,
     module: IIndexedModule,
-    symbol: RslSymbol
+    given: RslSymbol
 ): CallHierarchyItem {
+    /*
+     * Положения берутся у объекта из ТЕКУЩЕЙ модели этого файла.
+     *
+     * Символ мог прийти из кэша разрешения имён соседнего документа,
+     * собранного до правки тела этого файла: имя, вид и подпись у него
+     * те же, а диапазоны съехали.
+     */
+    const symbol = index.liveSymbol(module.uri, given);
     const selectionRange = findNameRange(index, module, symbol);
     const range = module.kind === "open"
         ? offsetRange(module, symbol.range.start, symbol.range.end)

@@ -444,7 +444,7 @@ export function addUnusedDeclarationDiagnostics(
 
                 return !!resolved &&
                     resolved.uri === module.uri &&
-                    resolved.symbol === symbol;
+                    resolved.symbol.id === symbol.id;
             }
         );
 

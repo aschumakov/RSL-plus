@@ -14,6 +14,11 @@ import type {
     IRslDeclarationSnapshot
 } from "./analysis/declarationExtractor";
 import type { RslSymbol } from "./symbols/rslSymbol";
+import {
+    findRslSymbolById,
+    rslSymbolRef,
+    type IRslSymbolRef
+} from "./symbols/symbolRef";
 import { FileCatalog } from "./indexing/fileCatalog";
 import { WorkspaceCatalog } from "./indexing/workspaceCatalog";
 import { ImportGraph } from "./indexing/importGraph";
@@ -696,7 +701,58 @@ export class WorkspaceIndex {
         uri: string,
         symbol: RslSymbol
     ): IExternalLocationRange | undefined {
-        return this.modules.get(uri)?.definitionRanges?.get(symbol);
+        const module = this.modules.get(uri);
+
+        if (!module?.definitionRanges) {
+            return undefined;
+        }
+
+        /*
+         * Диапазон ищется по АКТУАЛЬНОМУ объекту той же
+         * идентичности, а не по переданному.
+         *
+         * Переданный мог быть запомнен соседним файлом до того,
+         * как тело этого модуля правили: карта диапазонов
+         * ключуется объектом, и по устаревшему объекту ответа в ней
+         * нет вовсе — переход уходил читать файл с диска заново.
+         * А там, где диапазон брали прямо у символа, он указывал на
+         * строку, где объявления уже нет.
+         */
+        const live = this.liveSymbol(uri, symbol);
+
+        return module.definitionRanges.get(live);
+    }
+
+    /**
+     * Актуальный объект того же объявления в текущей модели файла.
+     *
+     * Если модель не загружена или объявления в ней больше нет,
+     * возвращается переданный объект: ответ по устаревшим сведениям
+     * лучше отсутствия ответа, и раньше он и был единственным.
+     */
+    liveSymbol(uri: string, symbol: RslSymbol): RslSymbol {
+        const module = this.modules.get(uri);
+
+        if (!module) {
+            return symbol;
+        }
+
+        return findRslSymbolById(module.symbolTree, symbol.id) ||
+            symbol;
+    }
+
+    /** Актуальный объект по межфайловой идентичности. */
+    resolveSymbolRef(ref: IRslSymbolRef): RslSymbol | undefined {
+        const module = this.modules.get(ref.uri);
+
+        return module
+            ? findRslSymbolById(module.symbolTree, ref.symbolId)
+            : undefined;
+    }
+
+    /** Идентичность символа этого файла. */
+    symbolRef(uri: string, symbol: RslSymbol): IRslSymbolRef {
+        return rslSymbolRef(uri, symbol);
     }
     getDependents(uri: string): string[] { return this.imports.dependents(uri); }
     /**

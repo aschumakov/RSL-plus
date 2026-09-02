@@ -158,9 +158,10 @@ function isParameterNode(
     return visit(module.syntax.root);
 }
 
+/* По номеру объявления: дерево и искомый символ бывают из разных сборок. */
 function findParent(root: RslSymbol, target: RslSymbol): RslSymbol | undefined {
     for (const child of root.children) {
-        if (child === target) {
+        if (child.id === target.id) {
             return root;
         }
         if (child.isContainer) {
@@ -177,8 +178,10 @@ function declarationLine(
     index: WorkspaceIndex,
     module: IIndexedModule | undefined,
     uri: string,
-    symbol: RslSymbol
+    given: RslSymbol
 ): number | undefined {
+    /* Строка объявления — свойство текущей модели, а не запомненного объекта. */
+    const symbol = index.liveSymbol(uri, given);
     const external = index.getDefinitionRange(uri, symbol);
     if (external) {
         return external.start.line;

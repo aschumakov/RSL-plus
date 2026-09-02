@@ -63,6 +63,16 @@ export interface IDefinitionEnvironment {
         start: { line: number; character: number };
         end: { line: number; character: number };
     } | undefined;
+    /**
+     * Актуальный объект того же объявления в текущей модели файла.
+     *
+     * Символ мог быть запомнен кэшем соседнего документа до того, как
+     * тело этого файла правили. Все его поля, кроме положений, к
+     * идентичности объявления и относятся — а положения съезжают от
+     * любой правки выше по файлу, и переход уходил на строку, где
+     * этого объявления уже нет.
+     */
+    liveSymbol?(uri: string, symbol: RslSymbol): RslSymbol;
     resolveMethodReference?(
         uri: string,
         tree: RslSymbol,
@@ -304,8 +314,11 @@ export class RslDefinitionProvider {
      */
     async createObjectLocationByUri(
         uri: string,
-        symbol: RslSymbol
+        given: RslSymbol
     ): Promise<Location | null> {
+        /* Положение спрашивается у актуального объекта. */
+        const symbol = this.environment.liveSymbol?.(uri, given) ||
+            given;
         const openedDocument =
             this.environment.getOpenDocument(uri);
 
