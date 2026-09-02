@@ -1,4 +1,10 @@
 import { InteractiveActivityGate } from "../core/interactiveActivityGate";
+import {
+    defaultRslProjectConfig,
+    isExcludedByRslConfig,
+    readRslProjectConfig,
+    type IRslProjectConfig
+} from "../config/projectConfig";
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
@@ -42,6 +48,13 @@ export class WorkspaceFileDiscoveryService {
     private interactive: InteractiveActivityGate;
     private initialDelayMs: number;
     private interactivePauseMs: number;
+    /**
+     * Настройка проекта, если она есть.
+     *
+     * Без файла остаётся умолчание — пустые списки, то есть ровно
+     * прежнее поведение обхода.
+     */
+    private projectConfig: IRslProjectConfig = defaultRslProjectConfig();
 
     constructor(private options: IWorkspaceFileDiscoveryOptions) {
         this.initialDelayMs = Math.max(0, options.initialDelayMs ?? 2000);
@@ -54,7 +67,49 @@ export class WorkspaceFileDiscoveryService {
 
     configure(params: InitializeParams): void {
         this.roots = rootMap(resolveRslWorkspaceRoots(params));
+        this.applyProjectConfig();
         this.restart();
+    }
+
+    /**
+     * Читает .rslplus.json и добавляет к корням то, что в нём названо.
+     *
+     * Каталоги заглушек становятся обычными корнями: для сервера
+     * заглушка — такой же файл проекта, и отдельного пути обхода ей не
+     * нужно.
+     */
+    private applyProjectConfig(): void {
+        const roots = [...this.roots.values()];
+        const answer = readRslProjectConfig(roots);
+
+        this.projectConfig = answer.config;
+
+        for (const problem of answer.problems) {
+            this.options.log(
+                "Настройка проекта: " + problem +
+                (answer.filePath ? " (" + answer.filePath + ")" : "")
+            );
+        }
+
+        const extra = [
+            ...answer.config.moduleRoots,
+            ...answer.config.stubPaths
+        ];
+
+        for (const root of roots) {
+            for (const item of extra) {
+                const full = path.resolve(root, item);
+
+                if (!this.roots.has(rootKey(full))) {
+                    this.roots.set(rootKey(full), full);
+                }
+            }
+        }
+    }
+
+    /** Настройка проекта: её же спрашивают разрешение имён и каталог. */
+    get config(): IRslProjectConfig {
+        return this.projectConfig;
     }
 
     /** Корни проекта: их же обходит адресный поиск по имени модуля. */
@@ -134,14 +189,18 @@ export class WorkspaceFileDiscoveryService {
                 }
 
                 for (const entry of entries) {
+                    const full = path.join(directory, entry.name);
+
+                    if (this.isExcluded(full)) {
+                        continue;
+                    }
+
                     if (entry.isDirectory()) {
                         if (!isExcludedRslDirectory(entry.name)) {
-                            directories.push(path.join(directory, entry.name));
+                            directories.push(full);
                         }
                     } else if (entry.isFile() && /\.mac$/i.test(entry.name)) {
-                        files.push(pathToFileURL(
-                            path.join(directory, entry.name)
-                        ).toString());
+                        files.push(pathToFileURL(full).toString());
                     }
                 }
 
@@ -165,6 +224,25 @@ export class WorkspaceFileDiscoveryService {
             }
             if (generation !== this.generation) this.schedule();
         }
+    }
+
+    /** Исключён ли путь шаблонами настройки проекта. */
+    private isExcluded(fullPath: string): boolean {
+        const patterns = this.projectConfig.exclude;
+
+        if (patterns.length === 0) {
+            return false;
+        }
+
+        for (const root of this.roots.values()) {
+            const relative = path.relative(root, fullPath);
+
+            if (relative && !relative.startsWith("..")) {
+                return isExcludedByRslConfig(relative, patterns);
+            }
+        }
+
+        return false;
     }
 
     private async waitForInteractiveWindow(generation: number): Promise<void> {

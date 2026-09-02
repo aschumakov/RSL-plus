@@ -602,6 +602,54 @@ export function activate(context: ExtensionContext): void {
         );
     }
 
+    /*
+     * Заглушка модуля: объявления без тел.
+     *
+     * Библиотеки и платформенные компоненты приходят без исходников, и
+     * заглушка — обычный файл RSL, по которому работает всё остальное:
+     * подсказка, Hover, подпись, переход, вывод типа.
+     */
+    context.subscriptions.push(
+        commands.registerCommand("rsl.generateStub", async () => {
+            const editor = window.activeTextEditor;
+
+            if (!editor) {
+                void window.showInformationMessage(
+                    "RSL: откройте файл, для которого нужна заглушка"
+                );
+
+                return;
+            }
+
+            const answer = await client.sendRequest<{
+                text?: string;
+                error?: string;
+            }>("rsl/generateStub", {
+                uri: editor.document.uri.toString()
+            });
+
+            if (!answer?.text) {
+                void window.showWarningMessage(
+                    "RSL: заглушка не создана: " + (answer?.error || "нет ответа")
+                );
+
+                return;
+            }
+
+            /*
+             * Заглушка открывается новым документом, а не пишется на диск:
+             * куда её положить, решает пользователь — путь зависит от
+             * stubPaths в настройке проекта.
+             */
+            const document = await workspace.openTextDocument({
+                content: answer.text,
+                language: "rsl"
+            });
+
+            await window.showTextDocument(document);
+        })
+    );
+
     /* Панель зависимостей: спрашивает сервер по узлу, когда его раскрывают. */
     registerRslDependencyView(context, client);
 

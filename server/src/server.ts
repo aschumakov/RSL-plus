@@ -15,6 +15,7 @@ import {
     findRslDependencyPath,
     type IRslDependencyRequest
 } from "./features/dependencyTree";
+import { buildRslModuleStub } from "./features/stubGenerator";
 import { RslTypeEngine } from "./analysis/typeEngine";
 import {
     buildRslInspectorReport,
@@ -856,6 +857,24 @@ connection.onInitialized(() => {
      * Всё дерево проекта не строится намеренно — на 6166 файлах это тысячи
      * узлов, из которых пользователь раскроет пять.
      */
+    /*
+     * Заглушка модуля по его внешнему интерфейсу.
+     *
+     * Источник тот же, что и у отпечатка интерфейса: объявления без тел и
+     * без приватного. Другого источника у заглушки быть не должно — иначе
+     * они разойдутся.
+     */
+    connection.onRequest(
+        "rsl/generateStub",
+        (request: { uri: string }) => {
+            const module = workspaceIndex.getModule(request.uri);
+
+            return module
+                ? { text: buildRslModuleStub(module) }
+                : { error: "Модуль не загружен" };
+        }
+    );
+
     connection.onRequest(
         "rsl/dependencies",
         (request: IRslDependencyRequest) => ({

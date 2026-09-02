@@ -189,6 +189,10 @@
          {
             "command": "rsl.dependencies.showPath",
             "title": "RSL: Показать путь зависимости"
+         },
+         {
+            "command": "rsl.generateStub",
+            "title": "RSL: Generate Stub From File"
          }
       ],
       "keybindings": [
