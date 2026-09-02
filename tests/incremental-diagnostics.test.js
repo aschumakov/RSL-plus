@@ -778,18 +778,29 @@ test("полный ключ окружения остаётся у прочих 
         "ключ окружения от версии документа зависеть не имеет права"
     );
 
+    /*
+     * Подсветка объявляет свои зависимости, а не складывает ключ по месту:
+     * текст документа в них входит, потому что пересчитывать раскраску при
+     * каждой правке и надо.
+     */
     const registry = fs.readFileSync(
         "server/src/features/semanticTokensFeatureRegistry.ts",
         "utf8"
     );
+    const declared = registry.slice(
+        registry.indexOf("const SEMANTIC_TOKENS_DEPENDS"),
+        registry.indexOf("} as const;", registry.indexOf(
+            "const SEMANTIC_TOKENS_DEPENDS"
+        ))
+    );
 
     assert.ok(
-        registry.includes("getImportContextKey"),
-        "кэш semantic tokens обязан сверяться по полному ключу"
+        declared.includes("text: true"),
+        "подсветка обязана зависеть от текста документа"
     );
     assert.ok(
-        !registry.includes("getImportedContextKey"),
-        "ключ без документа кэшу semantic tokens не годится"
+        declared.includes("closure: true"),
+        "и от интерфейсов замыкания: внешний символ красится иначе"
     );
 });
 

@@ -8,6 +8,10 @@ import {
 import type { IIndexedModule, IIndexedSymbol } from "../workspaceIndex";
 import { normalizeIdentifier, type IRslToken } from "../lexer";
 import type { RslScopeResolver } from "../scopeResolver";
+import {
+    sameRslHotStamp,
+    type IRslHotStamp
+} from "./semanticState";
 import type { RslSymbol } from "../symbols/rslSymbol";
 import type { WorkspaceIndex } from "../workspaceIndex";
 
@@ -52,7 +56,7 @@ export class RslTypeEngine {
      */
     private readonly byModule = new WeakMap<
         IIndexedModule,
-        { revision: number; values: Map<string, string> }
+        { stamp: IRslHotStamp; values: Map<string, string> }
     >();
 
     constructor(
@@ -276,15 +280,15 @@ export class RslTypeEngine {
             return "";
         }
 
-        const revision = this.index.getSemanticRevision(uri);
+        const stamp = this.resolver.semanticState.hotStamp(uri);
         let entry = this.byModule.get(module);
 
-        if (!entry || entry.revision !== revision) {
+        if (!entry || !sameRslHotStamp(entry.stamp, stamp)) {
             /*
              * Окружение изменилось: прежние ответы к нему не относятся.
              * Сбрасывается запись ЭТОГО документа, а не весь слой.
              */
-            entry = { revision, values: new Map() };
+            entry = { stamp, values: new Map() };
             this.byModule.set(module, entry);
         }
 

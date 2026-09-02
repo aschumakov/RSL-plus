@@ -792,8 +792,11 @@ export class RslLanguageFeatureRegistry {
     }
 
     invalidate(uri: string): void {
+        /*
+         * Подсветке сбрасывать нечего: её кэш сам себя признаёт
+         * устаревшим по объявленным зависимостям.
+         */
         this.presentationFeatures.invalidate(uri);
-        this.semanticTokensFeatures.invalidate(uri);
         /* Текст изменился: индекс и сеансы этой версии больше не нужны. */
         dropFastCompletionIndex(uri);
         this.completionProvider.forget(uri);

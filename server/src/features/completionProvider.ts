@@ -69,6 +69,25 @@ import {
  * элементами — и со своими правилами, общими для быстрого индекса и полной
  * модели. Среди двух десятков обработчиков реестра они терялись.
  */
+/**
+ * От чего зависит то, что подсказка знает О ДРУГИХ ФАЙЛАХ.
+ *
+ * Своего документа здесь нет вовсе — ни текста, ни написанных в нём Import.
+ * И то и другое входит в ключ сессии отдельной составляющей: его версией.
+ * Взять их и здесь значило бы, что готовность модели меняет ключ — модели ещё
+ * нет, и написанные Import индексу неизвестны, — а уже открытый список от
+ * готовности модели меняться не вправе: пользователь видел бы, как состав и
+ * порядок прыгают под курсором.
+ *
+ * По той же причине здесь нет ни состава проекта, ни ревизии его каталога.
+ * Достройка каталога идёт всё время, пока пользователь набирает текст, и она
+ * обязана попасть в СЛЕДУЮЩИЙ сеанс подсказки, а не переписать открытый.
+ */
+const COMPLETION_KNOWLEDGE_DEPENDS = {
+    closure: true,
+    platform: true
+} as const;
+
 export class RslCompletionProvider {
     private defaultCompletionItems = getDefaults().completionItems;
     private completionTransport = new CompletionTransport();
@@ -284,10 +303,19 @@ export class RslCompletionProvider {
         return this.typeEngineValue;
     }
 
+    /**
+     * Что сервер знает об окружении документа — одной строкой.
+     *
+     * Набор состояний объявлен, а не собран здесь по месту: подсказка
+     * зависит от интерфейсов замыкания, состава проекта и каталога
+     * платформы, но НЕ от собственного текста документа — его она
+     * перечитывает всякий раз заново.
+     */
     private knowledgeRevision(uri: string): string {
-        const { index, resolver } = this.environment;
-
-        return index.getImportedClosureKey(uri) + " " + resolver.catalogRevision;
+        return this.environment.resolver.captureSemanticStamp(
+            uri,
+            COMPLETION_KNOWLEDGE_DEPENDS
+        ).key;
     }
 
     /**

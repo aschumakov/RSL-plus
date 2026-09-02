@@ -46,10 +46,9 @@ const {
     rslUnitCacheLaneRules
 } = require("../server/out/diagnostics/ruleRegistry");
 const {
-    mergeRslSnapshotDependencies,
-    rslSnapshotKey,
-    rslSnapshotsDiffer
-} = require("../server/out/diagnostics/computationSnapshot");
+    mergeRslSemanticDependencies,
+    RslSemanticState
+} = require("../server/out/analysis/semanticState");
 
 let passed = 0;
 let failed = 0;
@@ -235,38 +234,113 @@ testAsync("реестр совпадает с планом межфайлово�
 /* ─── Снимок вычисления ──────────────────────────────────────────────────── */
 
 test("ключ складывается только из того, от чего зависит проверка", () => {
-    const base = {
-        textVersion: 1,
-        importClosure: "a",
+    /* Источник состояний под управлением теста. */
+    const values = {
+        text: 1,
+        imports: "i",
+        closure: "a",
         catalog: 1,
-        settings: "s"
+        workspace: 1,
+        platform: 1,
+        semantic: 1
     };
-    const other = { ...base, importClosure: "b" };
+    const state = new RslSemanticState({
+        textVersion: () => values.text,
+        importsKey: () => values.imports,
+        closureKey: () => values.closure,
+        catalogRevision: () => values.catalog,
+        workspaceRevision: () => values.workspace,
+        platformRevision: () => values.platform,
+        semanticRevision: () => values.semantic
+    });
+    const uri = "file:///d:/rules/main.mac";
+    const textOnly = state.capture(
+        uri,
+        { text: true, settings: true },
+        { settings: "s" }
+    );
+    const withClosure = state.capture(
+        uri,
+        { text: true, closure: true, settings: true },
+        { settings: "s" }
+    );
+
+    values.closure = "b";
 
     assert.ok(
-        !rslSnapshotsDiffer(base, other, { text: true, settings: true }),
+        !state.isStale(textOnly, { settings: "s" }),
         "проверка, не читающая импорты, от их правки не устаревает"
     );
     assert.ok(
-        rslSnapshotsDiffer(base, other, { text: true, importClosure: true }),
+        state.isStale(withClosure, { settings: "s" }),
         "проверка, читающая импорты, устаревает"
     );
     assert.notStrictEqual(
-        rslSnapshotKey(base, { text: true }),
-        rslSnapshotKey(base, { settings: true }),
+        state.capture(uri, { text: true }).key,
+        state.capture(uri, { settings: true }).key,
         "разные зависимости не дают одинаковый ключ"
     );
 });
 
+test("запомненный ответ переживает изменение того, от чего не зависит", () => {
+    /*
+     * Ради этого модель и заведена: потребитель объявляет зависимости и
+     * получает запоминание вместе с правильным сбросом, а не свою карту,
+     * свой ключ и свой invalidate().
+     */
+    const values = { closure: "a", catalog: 1 };
+    const state = new RslSemanticState({
+        textVersion: () => 1,
+        importsKey: () => "i",
+        closureKey: () => values.closure,
+        catalogRevision: () => values.catalog,
+        workspaceRevision: () => 1,
+        platformRevision: () => 1,
+        semanticRevision: () => 1
+    });
+    const uri = "file:///d:/rules/main.mac";
+    let computed = 0;
+    const ask = () => state.remember(
+        uri,
+        "проба",
+        { closure: true },
+        () => ++computed
+    );
+
+    assert.strictEqual(ask(), 1);
+    assert.strictEqual(ask(), 1, "второй раз считать незачем");
+
+    values.catalog = 2;
+    assert.strictEqual(
+        ask(),
+        1,
+        "каталог в зависимостях не объявлен — ответ остаётся"
+    );
+
+    values.closure = "b";
+    assert.strictEqual(ask(), 2, "а замыкание объявлено");
+    assert.strictEqual(state.counters.resets, 1);
+});
+
 test("зависимости фазы складываются из зависимостей её проверок", () => {
-    const local = mergeRslSnapshotDependencies(
+    const local = mergeRslSemanticDependencies(
         rslDiagnosticRules("local").map(rule => rule.depends)
     );
-    const workspace = mergeRslSnapshotDependencies(
+    const workspace = mergeRslSemanticDependencies(
         rslDiagnosticRules("workspace").map(rule => rule.depends)
     );
 
-    assert.ok(local.text && local.importClosure && local.settings);
+    assert.ok(
+        local.text && local.imports && local.closure && local.settings
+    );
+    assert.ok(
+        !local.workspace,
+        "состав файлов проекта локальной фазе не нужен"
+    );
+    assert.ok(
+        workspace.workspace,
+        "а межфайловой нужен: от него зависит, найдётся ли файл по имени"
+    );
     assert.ok(
         !local.catalog,
         "локальная фаза не отвечает про весь проект и от каталога не зависит"
@@ -308,7 +382,7 @@ test("лента текста и лента импортов отпечатыв�
     );
     assert.ok(
         rslUnitCacheLaneRules("text").every(
-            rule => !rule.depends.importClosure
+            rule => !rule.depends.imports && !rule.depends.closure
         ),
         "в ленте текста нет проверок, читающих импорты"
     );

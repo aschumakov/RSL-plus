@@ -7,10 +7,9 @@ import type { TextDocument } from "vscode-languageserver-textdocument";
 
 import type { RslDiagnosticEngine } from "./diagnosticEngine";
 import {
-    mergeRslSnapshotDependencies,
-    rslSnapshotKey,
-    type IRslComputationSnapshot
-} from "./computationSnapshot";
+    mergeRslSemanticDependencies,
+    type IRslSemanticDependencies
+} from "../analysis/semanticState";
 import { rslDiagnosticRules } from "./ruleRegistry";
 import {
     type IDiagnosticPublication,
@@ -514,6 +513,24 @@ export class DiagnosticsCoordinator {
                     ...stages.fields()
                 });
             }
+            /*
+             * Условия проверяются ещё раз перед записью — как в локальной фазе.
+             *
+             * Межфайловая фаза дольше, и за время её работы импорты могли
+             * дочитаться. Прежде результат всё равно попадал в кэш под ключом,
+             * снятым ДО расчёта: показать его visibleDiagnostics уже не мог —
+             * ключ не совпадал, — но и пересчитать никто не просил, и Problems
+             * оставались пустыми до следующей правки.
+             */
+            if (
+                this.workspaceConditionKey(uri, state.module.version) !== key
+            ) {
+                this.staleWorkspace.add(uri);
+                this.scheduleWorkspace(uri, 0);
+
+                return;
+            }
+
             this.workspaceCache.set(uri, {
                 source: state.module.source,
                 version: state.module.version,
@@ -712,17 +729,11 @@ export class DiagnosticsCoordinator {
      * ссылка и неизвестное имя — это ответы про весь проект, и появление нового
      * модуля меняет их, не меняя ни текста, ни замыкания Import этого файла.
      */
-    private workspaceConditionKey(uri: string, version: number): string {
-        return rslSnapshotKey(
-            {
-                textVersion: version,
-                importClosure: this.index.getImportClosureKey(uri),
-                catalog: this.catalogRevision(),
-                settings: diagnosticsSettingsKey(
-                    this.settings.getAvailable(uri)
-                )
-            },
-            WORKSPACE_PHASE_DEPENDENCIES
+    private workspaceConditionKey(uri: string, _version: number): string {
+        return this.conditionKey(
+            uri,
+            WORKSPACE_PHASE_DEPENDENCIES,
+            this.settings.getAvailable(uri)
         );
     }
 
@@ -731,38 +742,50 @@ export class DiagnosticsCoordinator {
         uri: string,
         state: { module: { version: number }; settings: IRslSettings }
     ): string {
-        return rslSnapshotKey(
-            this.snapshot(uri, state.module.version, state.settings),
-            LOCAL_PHASE_DEPENDENCIES
+        return this.conditionKey(
+            uri,
+            LOCAL_PHASE_DEPENDENCIES,
+            state.settings
         );
     }
 
     /**
-     * Снимок условий расчёта.
+     * Условия расчёта фазы одной строкой.
      *
-     * Один на обе фазы: подмножество, от которого зависит фаза, задаёт реестр
-     * проверок, а не выписанный рядом список полей.
+     * Значения состояний спрашиваются у общей модели, а набор — у реестра
+     * проверок. Прежде каждая фаза складывала ключ сама, и подмножества
+     * расходились: у локальной в него входил каталог платформы, у
+     * межфайловой нет — загрузка прикладного модуля не отменяла её
+     * результат, хотя её вывод «имя неизвестно» от неё и зависит.
      */
-    private snapshot(
+    private conditionKey(
         uri: string,
-        version: number,
+        depends: IRslSemanticDependencies,
         settings: IRslSettings
-    ): IRslComputationSnapshot {
-        return {
-            textVersion: version,
-            importClosure: this.importContextKey(uri),
-            catalog: this.catalogRevision(),
-            settings: diagnosticsSettingsKey(settings)
-        };
+    ): string {
+        const resolver = this.options.resolver;
+
+        if (!resolver) {
+            /*
+             * Индекс в тестах бывает без resolver: тогда условия
+             * складываются из того, что знает сам индекс.
+             */
+            return [
+                this.index.getModule(uri)?.version ?? -1,
+                this.index.getImportClosureKey(uri),
+                this.catalogRevision(),
+                diagnosticsSettingsKey(settings)
+            ].join("\u0000");
+        }
+
+        return resolver.captureSemanticStamp(
+            uri,
+            depends,
+            diagnosticsSettingsKey(settings)
+        ).key;
     }
 
     /**
-     * Состояние импортов файла одной строкой.
-     *
-     * Замыкание .mac плюс ревизия каталога прикладных модулей: состав
-     * модуля читается отдельно от файлов проекта, и без ревизии его
-     * появление ключ не меняло бы.
-     */
     /*
      * Ревизия каталога проекта.
      *
@@ -944,10 +967,10 @@ export class DiagnosticsCoordinator {
  * Список полей рядом с ключом отставал от таблицы проверок; теперь добавленная
  * проверка приносит свои зависимости с собой.
  */
-const LOCAL_PHASE_DEPENDENCIES = mergeRslSnapshotDependencies(
+const LOCAL_PHASE_DEPENDENCIES = mergeRslSemanticDependencies(
     rslDiagnosticRules("local").map(rule => rule.depends)
 );
-const WORKSPACE_PHASE_DEPENDENCIES = mergeRslSnapshotDependencies(
+const WORKSPACE_PHASE_DEPENDENCIES = mergeRslSemanticDependencies(
     rslDiagnosticRules("workspace").map(rule => rule.depends)
 );
 

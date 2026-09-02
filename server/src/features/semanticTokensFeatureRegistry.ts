@@ -59,6 +59,20 @@ export interface ISemanticTokensFeatureEnvironment {
 const REFRESH_COALESCE_MS = 300;
 
 /** Владеет semantic-token lifecycle, resultId и delta-кэшем. */
+/**
+ * От чего зависит раскраска.
+ *
+ * Текст — свой; написанные Import и интерфейсы замыкания — потому что
+ * известный внешний символ красится иначе, чем неизвестный; каталог
+ * платформы — по той же причине.
+ */
+const SEMANTIC_TOKENS_DEPENDS = {
+    text: true,
+    imports: true,
+    closure: true,
+    platform: true
+} as const;
+
 export class SemanticTokensFeatureRegistry {
     private static readonly MAX_CACHED_DOCUMENTS = 4;
     /** Сколько документов держит кэш: для отчёта о памяти. */
@@ -92,6 +106,21 @@ export class SemanticTokensFeatureRegistry {
     private provisional = new Set<string>();
 
     constructor(private environment: ISemanticTokensFeatureEnvironment) {}
+
+    /**
+     * Условия, при которых посчитана подсветка.
+     *
+     * Версии документа недостаточно: подсветка различает известный
+     * импортированный символ и неизвестный, а загрузка внешнего модуля
+     * версию открытого документа не меняет. Набор состояний объявлен
+     * общей моделью, а не сложен здесь по месту.
+     */
+    private conditionKey(uri: string): string {
+        return this.environment.resolver.captureSemanticStamp(
+            uri,
+            SEMANTIC_TOKENS_DEPENDS
+        ).key;
+    }
 
     register(): void {
         const { connection, documents, index, resolver } = this.environment;
@@ -173,7 +202,7 @@ export class SemanticTokensFeatureRegistry {
     }
 
     /** При изменении старый result остаётся для следующего delta-запроса. */
-    invalidate(_uri: string): void {}
+
 
     forget(uri: string): void { this.cache.delete(uri); }
 
@@ -194,8 +223,7 @@ export class SemanticTokensFeatureRegistry {
         const affected = uris.some(uri => {
             const cached = this.cache.get(uri);
             return !!cached &&
-                cached.closureKey !==
-                    this.environment.resolver.getImportContextKey(uri);
+                cached.closureKey !== this.conditionKey(uri);
         });
 
         if (!affected) {
@@ -316,8 +344,7 @@ export class SemanticTokensFeatureRegistry {
         }
         this.provisional.delete(uri);
 
-        const closureKey = this.environment.resolver
-            .getImportContextKey(uri);
+        const closureKey = this.conditionKey(uri);
         const cached = this.cache.get(uri);
         if (
             cached?.version === module.version &&
@@ -346,6 +373,23 @@ export class SemanticTokensFeatureRegistry {
         }
         const resultId = `${module.version}:${++this.sequence}`;
         const value = { data: built.data, resultId };
+
+        /*
+         * Условия проверяются ещё раз: порционная работа шла с
+         * возвратами управления, и за это время импорты могли
+         * дочитаться. Такой ответ отдаётся — пустая подсветка была бы
+         * хуже неточной, — но НЕ запоминается: иначе он остался бы
+         * помечен условиями, при которых не считался, и переспросить
+         * его было бы некому.
+         */
+        if (this.conditionKey(uri) !== closureKey) {
+            this.provisional.add(uri);
+            this.scheduleRefresh();
+            this.endSpan(span, { cancelled: false, dataInts: built.data.length });
+
+            return value;
+        }
+
         this.touchCache(uri, {
             version: module.version,
             closureKey,

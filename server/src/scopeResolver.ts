@@ -28,6 +28,13 @@ import {
     WorkspaceIndex
 } from "./workspaceIndex";
 import { LruCache } from "./core/lruCache";
+import {
+    RslSemanticState,
+    sameRslHotStamp,
+    type IRslHotStamp,
+    type IRslSemanticDependencies,
+    type IRslSemanticStamp
+} from "./analysis/semanticState";
 import { getDefaults } from "./defaults";
 import type { IRslSyntaxNode } from "./syntaxParser";
 import type { BuiltinCatalog } from "./builtins/builtinSymbol";
@@ -46,6 +53,47 @@ export const RSL_BUILTIN_URI = "rsl-builtin:/standard-library";
  */
 const DOCUMENT_CACHE_ENTRIES = 32;
 
+/**
+ * Полнота Import-контекста зависит от окружения документа целиком.
+ *
+ * Обобщающего числа довольно: различать, ЧТО именно изменилось, здесь
+ * незачем — ответ пересчитывается при любом изменении окружения.
+ */
+const IMPORT_CONTEXT_STATE_DEPENDS = {
+    semantic: true,
+    platform: true
+} as const;
+
+/**
+ * Полные условия семантического расчёта документа.
+ *
+ * Свой текст плюс окружение: написанные Import, интерфейсы замыкания и
+ * каталог платформы. Ключ один на всех потребителей — иначе один из них
+ * признавал бы свой кэш устаревшим, а другой нет, и подсветка расходилась
+ * бы с переходом.
+ */
+const FULL_CONTEXT_DEPENDS = {
+    text: true,
+    imports: true,
+    closure: true,
+    platform: true
+} as const;
+
+/**
+ * То же, но без самого документа: «узнал ли сервер что-то о других файлах».
+ *
+ * Полный ключ содержит версию открытого документа и меняется от каждой
+ * правки. Потребителям, которых волнует только окружение файла, это
+ * обнуляет кэш на каждое нажатие клавиши — при том что об импортах ничего
+ * не изменилось. Собственное содержимое документа такие потребители обязаны
+ * учитывать сами: см. moduleWideNamesFingerprint в diagnostics.
+ */
+const IMPORTED_CONTEXT_DEPENDS = {
+    imports: true,
+    closure: true,
+    platform: true
+} as const;
+
 export interface IResolvedSymbol {
     uri: string;
     symbol: RslSymbol;
@@ -53,9 +101,8 @@ export interface IResolvedSymbol {
 }
 
 interface IResolutionCache {
-    /* Ревизии индекса и каталога вместо строкового ключа: см. resolveAt. */
-    revision: number;
-    platformRevision: number;
+    /* Горячий набор состояний вместо строкового ключа: см. resolveAt. */
+    stamp: IRslHotStamp;
     byTokenStart: Map<number, IResolvedSymbol | null>;
 }
 
@@ -223,8 +270,7 @@ export class RslScopeResolver {
      * «область + имя».
      */
     private namesByModule = new WeakMap<IIndexedModule, {
-        revision: number;
-        platformRevision: number;
+        stamp: IRslHotStamp;
         byKey: Map<string, IResolutionCacheEntry>;
     }>();
     /** Присваивания, тип которых сейчас вычисляется: защита от цикла. */
@@ -243,23 +289,61 @@ export class RslScopeResolver {
         string,
         { revision: string; modules: readonly string[] }
     >(DOCUMENT_CACHE_ENTRIES);
-    /*
-     * Полнота Import-контекста на документ.
+    /**
+     * Общая модель актуальности семантических ответов.
      *
-     * Считается обходом транзитивных Import, поэтому кэшируется по тем же двум
-     * ревизиям, что и набор видимых прикладных модулей: состояние зависит и от
-     * индекса проекта, и от того, что успел прочитать каталог.
+     * Живёт здесь, потому что resolver и есть общий семантический узел:
+     * у него на руках и индекс проекта, и каталог платформы, и его
+     * держат все прочие потребители. Заводить её отдельным объектом и
+     * протаскивать через десяток конструкторов — то же самое, только
+     * длиннее.
      */
-    private importContextStateByUri = new LruCache<
-        string,
-        { revision: string; state: IRslImportContextState }
-    >(DOCUMENT_CACHE_ENTRIES);
+    private readonly state: RslSemanticState;
 
     constructor(
         private index: WorkspaceIndex,
         private builtins: BuiltinCatalog = getDefaults(),
         private platformModules?: PlatformModuleCatalog
-    ) {}
+    ) {
+        this.state = new RslSemanticState({
+            textVersion: uri => this.index.getModule(uri)?.version ?? -1,
+            importsKey: uri => this.index.getDeclaredImportsKey(uri),
+            closureKey: uri => this.index.getImportedClosureKey(uri),
+            catalogRevision: () => this.index.catalog?.revision ?? 0,
+            workspaceRevision: () =>
+                this.index.workspaceFilesRevision,
+            platformRevision: () => this.platformModules?.revision ?? 0,
+            semanticRevision: uri => this.index.getSemanticRevision(uri)
+        });
+    }
+
+    /**
+     * Модель актуализации для прочих семантических потребителей.
+     *
+     * Одна на всех намеренно. Пока каждый складывал свой ключ, они
+     * расходились: один признавал свой кэш устаревшим, другой нет, и
+     * подсветка расходилась с переходом.
+     */
+    get semanticState(): RslSemanticState {
+        return this.state;
+    }
+
+    /** Слепок условий: см. RslSemanticState.capture. */
+    captureSemanticStamp(
+        uri: string,
+        depends: IRslSemanticDependencies,
+        settings?: string
+    ): IRslSemanticStamp {
+        return this.state.capture(uri, depends, { settings });
+    }
+
+    /** Устарели ли условия, при которых считался ответ. */
+    isSemanticStampStale(
+        stamp: IRslSemanticStamp,
+        settings?: string
+    ): boolean {
+        return this.state.isStale(stamp, { settings });
+    }
 
     resolveAt(
         uri: string,
@@ -302,18 +386,12 @@ export class RslScopeResolver {
          * модуля проекта, и фоновая индексация постороннего файла обнуляла этот
          * кэш — тысячи раз подряд в режимах workspaceIdle и full.
          */
-        const revision = this.index.getSemanticRevision(module.uri);
-        const platformRevision = this.platformModules?.revision ?? 0;
+        const stamp = this.state.hotStamp(module.uri);
         let cache = this.resolutionByModule.get(module);
 
-        if (
-            !cache ||
-            cache.revision !== revision ||
-            cache.platformRevision !== platformRevision
-        ) {
+        if (!cache || !sameRslHotStamp(cache.stamp, stamp)) {
             cache = {
-                revision,
-                platformRevision,
+                stamp,
                 byTokenStart: new Map<number, IResolvedSymbol | null>()
             };
             this.resolutionByModule.set(module, cache);
@@ -345,8 +423,7 @@ export class RslScopeResolver {
      * устаревшим, а другой нет, и подсветка расходилась бы с переходом.
      */
     getImportContextKey(uri: string): string {
-        return `${this.index.getImportClosureKey(uri)}` +
-            `|platform:${this.platformModules?.revision ?? 0}`;
+        return this.state.capture(uri, FULL_CONTEXT_DEPENDS).key;
     }
 
     /**
@@ -359,9 +436,7 @@ export class RslScopeResolver {
      * учитывать сами: см. moduleWideNamesFingerprint в diagnostics.
      */
     getImportedContextKey(uri: string): string {
-        return `${this.index.getDeclaredImportsKey(uri)}` +
-            `|${this.index.getImportedClosureKey(uri)}` +
-            `|platform:${this.platformModules?.revision ?? 0}`;
+        return this.state.capture(uri, IMPORTED_CONTEXT_DEPENDS).key;
     }
 
     /**
@@ -371,21 +446,16 @@ export class RslScopeResolver {
      * контекст не complete, «не нашли» и «нет» — разные утверждения.
      */
     getImportContextState(uri: string): IRslImportContextState {
-        const revision = `${this.index.getSemanticRevision(uri)}:` +
-            `${this.platformModules?.revision ?? 0}`;
-        const cached = this.importContextStateByUri.get(uri);
-
-        if (cached?.revision === revision) {
-            return cached.state;
-        }
-
-        const state = buildImportContextState(
-            this.index,
+        return this.state.remember(
             uri,
-            this.platformModules
+            "importContextState",
+            IMPORT_CONTEXT_STATE_DEPENDS,
+            () => buildImportContextState(
+                this.index,
+                uri,
+                this.platformModules
+            )
         );
-        this.importContextStateByUri.set(uri, { revision, state });
-        return state;
     }
 
     getCacheStats(): { hits: number; misses: number } {
@@ -818,16 +888,11 @@ export class RslScopeResolver {
          * когда изменился бы ключ, а стоят одно сравнение. Ревизия — документа,
          * а не всего индекса: см. getSemanticRevision.
          */
-        const revision = this.index.getSemanticRevision(module.uri);
-        const platformRevision = this.platformModules?.revision ?? 0;
+        const stamp = this.state.hotStamp(module.uri);
         let cache = this.namesByModule.get(module);
 
-        if (
-            !cache ||
-            cache.revision !== revision ||
-            cache.platformRevision !== platformRevision
-        ) {
-            cache = { revision, platformRevision, byKey: new Map() };
+        if (!cache || !sameRslHotStamp(cache.stamp, stamp)) {
+            cache = { stamp, byKey: new Map() };
             this.namesByModule.set(module, cache);
         }
 

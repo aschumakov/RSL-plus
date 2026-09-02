@@ -1,4 +1,6 @@
-import type { IRslSnapshotDependencies } from "./computationSnapshot";
+import type {
+    IRslSemanticDependencies
+} from "../analysis/semanticState";
 
 /**
  * Реестр проверок: что за проверка, когда её результат устаревает и что нужно
@@ -42,7 +44,7 @@ export interface IRslDiagnosticRule {
     /** Этапы, которые обязаны отработать раньше. */
     requires: readonly string[];
     /** Из чего складывается ключ переиспользования. */
-    depends: IRslSnapshotDependencies;
+    depends: IRslSemanticDependencies;
     cache: RslDiagnosticCacheBoundary;
     /**
      * Отдаёт ли этап управление внутри себя.
@@ -63,18 +65,36 @@ export interface IRslDiagnosticRule {
 }
 
 /** Зависимость только от текста и настроек. */
-const TEXT_ONLY: IRslSnapshotDependencies = { text: true, settings: true };
-/** Текст и замыкание Import: проверка читает импортированные модули. */
-const WITH_IMPORTS: IRslSnapshotDependencies = {
+const TEXT_ONLY: IRslSemanticDependencies = { text: true, settings: true };
+/**
+ * Текст и замыкание Import: проверка читает импортированные модули.
+ *
+ * Написанные Import и интерфейсы замыкания — отдельные состояния:
+ * `Import notyet`, который пока никуда не ведёт, замыкание не меняет, а
+ * смысл файла меняет. Каталог платформы тоже здесь: прикладной модуль
+ * приносит имена так же, как импортированный файл.
+ */
+const WITH_IMPORTS: IRslSemanticDependencies = {
     text: true,
-    importClosure: true,
+    imports: true,
+    closure: true,
+    platform: true,
     settings: true
 };
-/** Ещё и состав проекта: проверка отвечает про проект, а не про импорты. */
-const WITH_CATALOG: IRslSnapshotDependencies = {
+/**
+ * Ещё и состав проекта: проверка отвечает про проект, а не про импорты.
+ *
+ * Состав файлов — отдельно от каталога символов: от него зависит, найдётся
+ * ли файл по имени и не стало ли имя неоднозначным, и меняется он при
+ * обходе проекта, а не при чтении модуля.
+ */
+const WITH_CATALOG: IRslSemanticDependencies = {
     text: true,
-    importClosure: true,
+    imports: true,
+    closure: true,
+    platform: true,
     catalog: true,
+    workspace: true,
     settings: true
 };
 
@@ -490,7 +510,9 @@ export function rslDiagnosticRules(
 export type RslUnitCacheLane = "text" | "imports";
 
 export function rslUnitCacheLane(rule: IRslDiagnosticRule): RslUnitCacheLane {
-    return rule.depends.importClosure ? "imports" : "text";
+    return rule.depends.imports || rule.depends.closure
+        ? "imports"
+        : "text";
 }
 
 /** Проверки одной ленты: по ним же считается её отпечаток настроек. */

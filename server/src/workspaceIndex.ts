@@ -164,6 +164,16 @@ export class WorkspaceIndex {
      */
     private readonly semanticRevisionByUri = new Map<string, number>();
     private semanticRevisionCounter = 0;
+    /**
+     * Ревизия СОСТАВА файлов проекта.
+     *
+     * Отдельно от общей ревизии индекса: та растёт от каждого
+     * прочитанного модуля, а состав меняется на порядки реже — при
+     * обходе проекта, создании и удалении файла, смене области поиска.
+     * От состава зависит, разрешится ли имя вообще и не стало ли оно
+     * неоднозначным, и это отдельное от содержимого модулей условие.
+     */
+    private workspaceFilesRevisionValue = 0;
     private pinnedRebuildCount = 0;
     /**
      * Номер последнего выданного интерфейса и счётчики.
@@ -436,7 +446,7 @@ export class WorkspaceIndex {
         this.imports.clear();
         this.files.clear();
         this.importContexts.clear();
-        this.semanticRevisionByUri.clear();
+        this.forgetSemanticRevisions();
         this.externalModuleOrder.clear();
         this.externalSizeByUri.clear();
         /* Каталог — часть индекса: без этого он отвечал бы про прежний проект. */
@@ -460,24 +470,35 @@ export class WorkspaceIndex {
     resetWorkspaceFiles(): void {
         this.files.clear();
         this.importContexts.clear();
-        this.semanticRevisionByUri.clear();
+        this.forgetSemanticRevisions();
         this.revisionValue++;
     }
 
     registerWorkspaceFiles(uris: readonly string[]): void {
         this.files.registerAll(uris);
         /* Состав файлов изменился: имя могло начать разрешаться или стать неоднозначным. */
-        this.semanticRevisionByUri.clear();
+        this.forgetSemanticRevisions();
     }
     registerWorkspaceFile(uri: string): void {
         this.files.register(uri);
-        this.semanticRevisionByUri.clear();
+        this.forgetSemanticRevisions();
     }
     unregisterWorkspaceFile(uri: string): void {
         /* Файла нет в проекте — записи о нём тоже быть не должно. */
         this.catalogValue.remove(uri);
         this.files.unregister(uri);
+        this.forgetSemanticRevisions();
+    }
+    /** Состав проекта изменился: и ревизия состава, и окружения документов. */
+    private forgetSemanticRevisions(): void {
+        this.workspaceFilesRevisionValue++;
+        this.interfaceStats.semanticRevisionResets +=
+            this.semanticRevisionByUri.size;
         this.semanticRevisionByUri.clear();
+    }
+    /** Ревизия состава файлов проекта: см. workspaceFilesRevisionValue. */
+    get workspaceFilesRevision(): number {
+        return this.workspaceFilesRevisionValue;
     }
     getWorkspaceFileUris(): string[] { return this.files.values(); }
     hasWorkspaceFile(uri: string): boolean { return this.files.has(uri); }
