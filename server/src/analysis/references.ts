@@ -13,6 +13,11 @@ import {
     normalizeIdentifier,
     normalizeReferenceIdentifier
 } from "../lexer";
+import { rangeInModule } from "../core/documentPosition";
+import { collectRslCallSites } from "./callSiteFacts";
+import {
+    resolveRslStringCallSite
+} from "./callSiteResolution";
 import { RslScopeResolver } from "../scopeResolver";
 import { ReferenceIndex } from "./referenceIndex";
 import type {
@@ -66,6 +71,7 @@ export function findRslReferences(
     for (const module of index.getOpenModules()) {
         collectModuleReferences(
             module,
+            index,
             resolver,
             targetKey,
             targetName,
@@ -150,6 +156,7 @@ export async function findRslReferencesForSymbol(
     if (isLocalReferenceTarget(sourceModule.symbolTree, targetObject)) {
         collectModuleReferences(
             sourceModule,
+            index,
             resolver,
             targetKey,
             targetName,
@@ -168,6 +175,7 @@ export async function findRslReferencesForSymbol(
         openUris.add(module.uri);
         collectModuleReferences(
             module,
+            index,
             resolver,
             targetKey,
             targetName,
@@ -285,6 +293,7 @@ export async function findRslReferencesForSymbol(
             index.withTransientOpenModule(candidate.uri, candidate.source, module => {
                 collectModuleReferences(
                     module,
+                    index,
                     resolver,
                     targetKey,
                     targetName,
@@ -325,6 +334,8 @@ export async function findRslReferencesForSymbol(
 
 function collectModuleReferences(
     module: IIndexedModule,
+    /* Нужен строковым формам вызова: имя ищется по модулям. */
+    index: WorkspaceIndex,
     resolver: RslScopeResolver,
     targetKey: string,
     targetName: string,
@@ -398,6 +409,80 @@ function collectModuleReferences(
         if (declaration && !includeDeclaration) {
             continue;
         }
+        addLocation(result, seen, module.uri, range);
+    }
+
+    collectStringCallReferences(
+        module,
+        index,
+        targetKey,
+        targetName,
+        result,
+        seen,
+        collected,
+        isCancelled
+    );
+}
+
+/**
+ * Вызовы, записанные строкой: ExecMacro, ExecMacroFile, R2M, обработчики.
+ *
+ * Обход идентификаторов их не видит — там строка, а не имя. Для RSL это не
+ * редкость, а обычный способ вызвать процедуру, и «найти использования» без
+ * них показывает неполную картину.
+ *
+ * Разбор общий с иерархией вызовов и переходом: см. callSiteFacts.
+ */
+function collectStringCallReferences(
+    module: IIndexedModule,
+    index: WorkspaceIndex,
+    targetKey: string,
+    targetName: string,
+    result: Location[],
+    seen: Set<string>,
+    collected: IRslShardReference[] | undefined,
+    isCancelled: () => boolean
+): void {
+    for (const site of collectRslCallSites(module.syntax.tokens)) {
+        if (isCancelled()) {
+            return;
+        }
+
+        /*
+         * Обычный вызов уже разобран обходом идентификаторов, и делать
+         * это второй раз незачем.
+         */
+        if (site.kind === "call" || site.kind === "method") {
+            continue;
+        }
+
+        if (normalizeReferenceIdentifier(site.targetName) !== targetName) {
+            continue;
+        }
+
+        const resolved = resolveRslStringCallSite(index, module, site);
+
+        if (!resolved) {
+            continue;
+        }
+
+        const range = rangeInModule(module, site.start, site.end);
+
+        if (collected) {
+            collected.push({
+                targetKey: symbolKey(resolved.uri, resolved.symbol),
+                startLine: range.start.line,
+                startCharacter: range.start.character,
+                endLine: range.end.line,
+                endCharacter: range.end.character,
+                isDeclaration: false
+            });
+        }
+
+        if (symbolKey(resolved.uri, resolved.symbol) !== targetKey) {
+            continue;
+        }
+
         addLocation(result, seen, module.uri, range);
     }
 }

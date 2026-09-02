@@ -2,6 +2,11 @@ import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
 
+import { collectRslCallSites } from "../analysis/callSiteFacts";
+import {
+    resolveRslStringCallSite
+} from "../analysis/callSiteResolution";
+
 import {
     CallHierarchyIncomingCall,
     CallHierarchyItem,
@@ -113,14 +118,25 @@ export class RslCallHierarchyProvider {
             }
 
             await this.withFullModule(uri, module => {
+                /*
+                 * Места вызова файла разбираются один раз на все находки.
+                 *
+                 * Проверки «идентификатор и открывающая скобка» мало: вызов
+                 * может быть записан строкой, и тогда в этом месте стоит
+                 * строковый литерал, а не имя.
+                 */
+                const callStarts = new Set(
+                    collectRslCallSites(module.syntax.tokens)
+                        .map(site => site.start)
+                );
+
                 for (const location of locations) {
                     const offset = offsetInModule(module, location.range.start);
                     const tokenIndex = findTokenIndexAt(module, offset);
+                    const isCall = callStarts.has(offset) ||
+                        (tokenIndex >= 0 && isCallToken(module, tokenIndex));
 
-                    if (
-                        tokenIndex < 0 ||
-                        !isCallToken(module, tokenIndex)
-                    ) {
+                    if (!isCall) {
                         continue;
                     }
 
@@ -170,29 +186,44 @@ export class RslCallHierarchyProvider {
         const result = new Map<string, CallHierarchyOutgoingCall>();
 
         await this.withFullModule(data.uri, module => {
-            const tokens = module.syntax.tokens;
-
-            for (let index = 0; index < tokens.length; index++) {
+            /*
+             * Места вызова разбирает общий механизм.
+             *
+             * Прежде вызовом считался «идентификатор и открывающая
+             * скобка», и строковые формы — ExecMacro, ExecMacroFile,
+             * R2M, обработчики — не попадали в ответ вовсе. Для RSL это
+             * не редкость, а обычный способ вызвать процедуру.
+             */
+            for (const site of collectRslCallSites(module.syntax.tokens)) {
                 if (isCancelled()) {
                     return;
                 }
 
-                const token = tokens[index];
                 if (
-                    token.start < data.start ||
-                    token.end > data.end ||
-                    token.kind !== "identifier" ||
-                    !isCallToken(module, index) ||
-                    token.start === data.declarationOffset
+                    site.start < data.start ||
+                    site.end > data.end ||
+                    site.start === data.declarationOffset
                 ) {
                     continue;
                 }
 
-                const resolved = this.environment.resolver.resolveAt(
-                    module.uri,
-                    module.symbolTree,
-                    token.start
-                );
+                /*
+                 * Обычный вызов по-прежнему разрешает resolver по
+                 * смещению: там работают области видимости. У строковой
+                 * формы идентификатора нет, и имя ищется по модулям.
+                 */
+                const resolved = site.kind === "call" ||
+                    site.kind === "method"
+                    ? this.environment.resolver.resolveAt(
+                        module.uri,
+                        module.symbolTree,
+                        site.start
+                    )
+                    : resolveRslStringCallSite(
+                        this.environment.index,
+                        module,
+                        site
+                    );
 
                 if (!resolved || !isCallable(resolved.symbol)) {
                     continue;
@@ -214,7 +245,7 @@ export class RslCallHierarchyProvider {
                 const key = targetData
                     ? `${targetData.uri}:${targetData.start}:${targetData.end}`
                     : `${targetItem.uri}:${targetItem.name}`;
-                const range = tokenRange(token);
+                const range = offsetRange(module, site.start, site.end);
                 const existing = result.get(key);
 
                 if (existing) {
