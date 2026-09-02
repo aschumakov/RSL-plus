@@ -156,6 +156,30 @@ test("шаблоны *, ? и ** работают в политике", () => {
     assert.ok(!policy.isExcluded("D:/project/macro/lib.mac"));
 });
 
+test("корень внутри каталога с системным именем не прячется", () => {
+    /*
+     * Проект вполне может лежать в каталоге с именем build или dist. Смотреть
+     * сегменты выше корня значило бы спрятать его целиком.
+     */
+    const policy = createRslSearchPolicy(["D:/build/project"], config());
+
+    assert.ok(!policy.isExcluded("D:/build/project/macro/lib.mac"));
+    assert.ok(!policy.isExcluded("D:/build/project/lib.mac"));
+    assert.ok(
+        policy.isExcluded("D:/build/project/dist/lib.mac"),
+        "а ниже корня системное правило по-прежнему действует"
+    );
+});
+
+test("исключается и сам служебный каталог", () => {
+    const policy = createRslSearchPolicy(["D:/project"], config());
+
+    assert.ok(
+        policy.isExcluded("D:/project/node_modules"),
+        "обход не должен в него заходить"
+    );
+});
+
 test("системное исключение действует на любом уровне", () => {
     const policy = createRslSearchPolicy(["D:/project"], config());
 

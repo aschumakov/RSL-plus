@@ -144,13 +144,43 @@ export function isExcludedByRslConfig(
     relativePath: string,
     patterns: readonly string[]
 ): boolean {
-    if (patterns.length === 0) {
+    return matchesRslExcludePatterns(
+        relativePath,
+        compileRslExcludePatterns(patterns)
+    );
+}
+
+/**
+ * Скомпилированные шаблоны исключения.
+ *
+ * Компилируются ОДИН раз на политику. Прежде выражение собиралось на
+ * каждый проверяемый путь, а спрашивают проверку на каждую запись
+ * каталога при обходе проекта.
+ */
+export function compileRslExcludePatterns(
+    patterns: readonly string[]
+): readonly RegExp[] {
+    return patterns.map(globToRegExp);
+}
+
+/** Подходит ли путь под уже скомпилированные шаблоны. */
+export function matchesRslExcludePatterns(
+    relativePath: string,
+    compiled: readonly RegExp[]
+): boolean {
+    if (compiled.length === 0) {
         return false;
     }
 
     const normalized = relativePath.replace(/\\/gu, "/").toLowerCase();
 
-    return patterns.some(pattern => globToRegExp(pattern).test(normalized));
+    for (const pattern of compiled) {
+        if (pattern.test(normalized)) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 function globToRegExp(pattern: string): RegExp {

@@ -120,31 +120,75 @@ export function normalizeReferenceModuleName(value: string): string {
  */
 export function collectIdentifierHashes(source: string): Uint32Array {
     const hashes = new Set<number>();
+    const length = source.length;
     let position = 0;
 
-    while (position < source.length) {
-        if (!isIdentifierStart(source.charAt(position))) {
+    while (position < length) {
+        if (!isIdentifierStartCode(source.charCodeAt(position))) {
             position++;
             continue;
         }
 
-        const start = position++;
-        while (
-            position < source.length &&
-            isIdentifierPart(source.charAt(position))
-        ) {
+        /*
+         * Хэш считается прямо по диапазону текста.
+         *
+         * Прежде на каждое вхождение заводились две строки: вырезка
+         * идентификатора и её приведённая к нижнему регистру копия. На
+         * настоящем проекте это самое частое действие во всём компактном
+         * чтении — идентификаторов в файле тысячи, — и обходилось оно в
+         * четверть его времени. Здесь строк не создаётся вовсе.
+         *
+         * Регистр складывается посимвольно, и для набора символов имени RSL
+         * это то же самое, что toLowerCase: латиница и А-Я сдвигаются на 32,
+         * Ё переходит в ё, цифры и подчёркивание не меняются.
+         */
+        let hash = 2166136261 >>> 0;
+
+        while (position < length) {
+            const code = source.charCodeAt(position);
+
+            if (!isIdentifierPartCode(code)) {
+                break;
+            }
+
+            hash ^= foldIdentifierCode(code);
+            hash = Math.imul(hash, 16777619) >>> 0;
             position++;
         }
 
-        const name = normalizeIdentifier(source.substring(start, position));
-        if (name) {
-            hashes.add(hashReferenceIdentifier(name));
-        }
+        hashes.add(hash);
     }
 
     return Uint32Array.from(
         Array.from(hashes).sort((left, right) => left - right)
     );
+}
+
+/** Начало имени: подчёркивание, латиница, А-я, Ё и ё. */
+function isIdentifierStartCode(code: number): boolean {
+    return code === 95 ||
+        (code >= 65 && code <= 90) ||
+        (code >= 97 && code <= 122) ||
+        (code >= 0x0410 && code <= 0x044f) ||
+        code === 0x0401 ||
+        code === 0x0451;
+}
+
+function isIdentifierPartCode(code: number): boolean {
+    return isIdentifierStartCode(code) || (code >= 48 && code <= 57);
+}
+
+/** Нижний регистр для символов имени: то же, что toLowerCase на них. */
+function foldIdentifierCode(code: number): number {
+    if (code >= 65 && code <= 90) {
+        return code + 32;
+    }
+
+    if (code >= 0x0410 && code <= 0x042f) {
+        return code + 32;
+    }
+
+    return code === 0x0401 ? 0x0451 : code;
 }
 
 function collectImportNames(source: string): string[] {

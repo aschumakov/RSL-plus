@@ -1,7 +1,8 @@
 import * as path from "path";
 
 import {
-    isExcludedByRslConfig,
+    compileRslExcludePatterns,
+    matchesRslExcludePatterns,
     type IRslProjectConfig
 } from "./projectConfig";
 import { isExcludedRslDirectory } from "../indexing/workspaceModuleResolver";
@@ -47,33 +48,41 @@ export function createRslSearchPolicy(
         : base;
     const stubRoots = collapseRoots(expand(base, config.stubPaths));
     const searchRoots = collapseRoots([...moduleRoots, ...stubRoots]);
-    const patterns = config.exclude;
+    /* Один раз на политику, а не на каждый проверяемый путь. */
+    const compiled = compileRslExcludePatterns(config.exclude);
+    /*
+     * Длины корней: по ним видно, откуда начинать смотреть сегменты.
+     *
+     * Считать их у всего пути нельзя. Проект вполне может лежать внутри
+     * каталога с именем `build` или `dist`, и тогда системное правило
+     * спрятало бы его целиком.
+     */
+    const roots = [...new Set([...searchRoots, ...base])];
 
     return {
         moduleRoots,
         stubRoots,
         searchRoots,
         isExcluded(fullPath: string): boolean {
-            const resolved = path.resolve(fullPath);
-
-            if (hasExcludedSegment(resolved, base, searchRoots)) {
+            if (hasExcludedSegment(fullPath, segmentStart(fullPath, roots))) {
                 return true;
             }
 
-            if (patterns.length === 0) {
+            /* Своих шаблонов нет — и работы больше никакой. */
+            if (compiled.length === 0) {
                 return false;
             }
 
             /*
-             * Шаблоны написаны относительно корня рабочей области, а не корня
-             * поиска: пользователь пишет `legacy/**`, глядя на дерево проекта,
-             * и про moduleRoots при этом не думает.
+             * Шаблоны написаны относительно корня рабочей области, а не
+             * корня поиска: пользователь пишет `legacy` со звёздами,
+             * глядя на дерево проекта, и про moduleRoots не думает.
              */
             for (const root of base) {
-                const relative = path.relative(root, resolved);
+                const relative = path.relative(root, fullPath);
 
                 if (isInside(relative)) {
-                    return isExcludedByRslConfig(relative, patterns);
+                    return matchesRslExcludePatterns(relative, compiled);
                 }
             }
 
@@ -94,33 +103,100 @@ export function createDefaultRslSearchPolicy(
 }
 
 /**
- * Системные исключения по имени каталога.
+ * Системные исключения: служебные каталоги вроде node_modules.
  *
- * Проверяется каждый сегмент пути ниже корня: адресный поиск умеет начать
- * обход изнутри, и проверки одного имени файла ему мало.
+ * Проверяется каждый сегмент пути, а не только имя файла: адресный поиск
+ * умеет начать обход изнутри, и одного имени ему мало.
+ *
+ * Путь просматривается одним проходом, без split: спрашивают эту проверку
+ * на каждую запись каталога при обходе проекта, и массив на каждый вызов
+ * там заметен.
+ *
+ * Смотрятся только сегменты НИЖЕ корня: сам корень может лежать внутри
+ * каталога с системным именем, и это не повод спрятать проект.
  */
-function hasExcludedSegment(
-    fullPath: string,
-    base: readonly string[],
-    searchRoots: readonly string[]
-): boolean {
-    for (const root of [...searchRoots, ...base]) {
-        const relative = path.relative(root, fullPath);
+function hasExcludedSegment(fullPath: string, from: number): boolean {
+    let end = fullPath.length;
 
-        if (!isInside(relative)) {
+    for (let at = fullPath.length - 1; at >= from; at--) {
+        const code = fullPath.charCodeAt(at);
+
+        if (code !== SLASH && code !== BACKSLASH) {
             continue;
         }
 
-        const segments = relative.split(/[\\/]/u);
+        if (
+            end > at + 1 &&
+            isExcludedRslDirectory(fullPath.slice(at + 1, end))
+        ) {
+            return true;
+        }
 
-        /* Последний сегмент — имя файла, и системное правило про каталоги. */
-        return segments
-            .slice(0, -1)
-            .some(segment => isExcludedRslDirectory(segment));
+        end = at;
     }
 
-    return false;
+    return end > from && isExcludedRslDirectory(fullPath.slice(from, end));
 }
+
+/**
+ * С какого места путь принадлежит проекту.
+ *
+ * Ноль означает «корень не найден»: путь не из проекта, и смотреть его
+ * целиком не вредно — в состав он всё равно не попадёт.
+ */
+function segmentStart(fullPath: string, roots: readonly string[]): number {
+    for (const root of roots) {
+        if (startsWithRoot(fullPath, root)) {
+            return root.length + 1;
+        }
+    }
+
+    return 0;
+}
+
+/** Начинается ли путь этим корнем; регистр на Windows не значит ничего. */
+function startsWithRoot(fullPath: string, root: string): boolean {
+    if (fullPath.length <= root.length) {
+        return false;
+    }
+
+    const next = fullPath.charCodeAt(root.length);
+
+    if (next !== SLASH && next !== BACKSLASH) {
+        return false;
+    }
+
+    for (let at = 0; at < root.length; at++) {
+        if (!sameChar(fullPath.charCodeAt(at), root.charCodeAt(at))) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+function sameChar(left: number, right: number): boolean {
+    if (left === right) {
+        return true;
+    }
+
+    /* Разделители равны между собой, регистр латиницы не важен. */
+    if (
+        (left === SLASH || left === BACKSLASH) &&
+        (right === SLASH || right === BACKSLASH)
+    ) {
+        return true;
+    }
+
+    return lowerChar(left) === lowerChar(right);
+}
+
+function lowerChar(code: number): number {
+    return code >= 65 && code <= 90 ? code + 32 : code;
+}
+
+const SLASH = 47;
+const BACKSLASH = 92;
 
 /** Корни из настройки: относительно каждого корня рабочей области. */
 function expand(

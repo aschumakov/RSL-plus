@@ -16,7 +16,6 @@ import { fileURLToPath, pathToFileURL } from "url";
 import type { InitializeParams, WorkspaceFolder } from "vscode-languageserver/node";
 import type { PerformanceLogger } from "../performanceLogger";
 import {
-    isExcludedRslDirectory,
     resolveRslWorkspaceRoots,
     uniqueRoots
 } from "./workspaceModuleResolver";
@@ -233,10 +232,13 @@ export class WorkspaceFileDiscoveryService {
                         continue;
                     }
 
+                    /*
+                     * Системные исключения тоже спрашиваются у политики: своя
+                     * проверка здесь была вторым местом с тем же правилом, и
+                     * разойтись они могли незаметно.
+                     */
                     if (entry.isDirectory()) {
-                        if (!isExcludedRslDirectory(entry.name)) {
-                            directories.push(full);
-                        }
+                        directories.push(full);
                     } else if (entry.isFile() && /\.mac$/i.test(entry.name)) {
                         files.push(pathToFileURL(full).toString());
                     }
