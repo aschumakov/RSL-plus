@@ -8,6 +8,9 @@ import {
     TextDocuments
 } from "vscode-languageserver/node";
 
+import * as fs from "fs";
+import { fileURLToPath } from "url";
+
 import { TextDocument } from "vscode-languageserver-textdocument";
 
 import {
@@ -15,6 +18,11 @@ import {
     findRslDependencyPath,
     type IRslDependencyRequest
 } from "./features/dependencyTree";
+import {
+    runRslStructuralSearch,
+    type IRslStructuralSearchRequest
+} from "./features/structuralSearchService";
+import { decodeRslSourceText } from "./core/textDecoding";
 import { buildRslModuleStub } from "./features/stubGenerator";
 import { RslTypeEngine } from "./analysis/typeEngine";
 import {
@@ -864,6 +872,43 @@ connection.onInitialized(() => {
      * без приватного. Другого источника у заглушки быть не должно — иначе
      * они разойдутся.
      */
+    /*
+     * Структурный поиск: только по явной команде.
+     *
+     * Кандидаты отбирает индекс ссылок, обход идёт порциями и уступает
+     * поток между ними, отмена доходит до обхода. Без этих трёх правил одна
+     * команда на проекте в шесть тысяч файлов занимает поток на секунды.
+     */
+    connection.onRequest(
+        "rsl/structuralSearch",
+        async (request: IRslStructuralSearchRequest, token) =>
+            runRslStructuralSearch(
+                {
+                    index: workspaceIndex,
+                    referenceIndex,
+                    yieldToInteractive: () =>
+                        new Promise<void>(resolve => setImmediate(resolve)),
+                    readSource: async uri => {
+                        const open = documents.get(uri);
+
+                        if (open) {
+                            return open.getText();
+                        }
+
+                        try {
+                            return decodeRslSourceText(
+                                await fs.promises.readFile(fileURLToPath(uri))
+                            );
+                        } catch (_error) {
+                            return undefined;
+                        }
+                    }
+                },
+                request,
+                () => token.isCancellationRequested
+            )
+    );
+
     connection.onRequest(
         "rsl/generateStub",
         (request: { uri: string }) => {

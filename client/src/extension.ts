@@ -9,6 +9,7 @@ import {
     StatusBarAlignment,
     QuickPickItem,
     Position,
+    ProgressLocation,
     Range,
     Selection,
     Uri,
@@ -601,6 +602,76 @@ export function activate(context: ExtensionContext): void {
             })
         );
     }
+
+    /*
+     * Структурный поиск: по явной команде.
+     *
+     * Образец описывает форму вызова, а не текст: `ExecMacroFile($file,
+     * $args...)` найдёт вызов и с переносами строк, и с вложенным вызовом в
+     * аргументе — там, где регулярное выражение уже не совпадает.
+     */
+    context.subscriptions.push(
+        commands.registerCommand("rsl.structuralSearch", async () => {
+            const pattern = await window.showInputBox({
+                title: "RSL: структурный поиск",
+                prompt: "Образец вызова; $имя — один аргумент, $имя... — остальные",
+                placeHolder: "ExecMacroFile($file, $args...)"
+            });
+
+            if (!pattern) {
+                return;
+            }
+
+            const channel = window.createOutputChannel(
+                "RSL-plus: структурный поиск"
+            );
+
+            channel.appendLine("Образец: " + pattern);
+            channel.show(true);
+
+            const answer = await window.withProgress(
+                {
+                    location: ProgressLocation.Window,
+                    title: "RSL: структурный поиск",
+                    cancellable: true
+                },
+                (_progress, token) => client.sendRequest<{
+                    hits?: Array<{
+                        uri: string;
+                        range: { start: { line: number; character: number } };
+                        text: string;
+                    }>;
+                    scannedFiles?: number;
+                    skippedFiles?: number;
+                    problem?: string;
+                    cancelled?: boolean;
+                    truncated?: boolean;
+                }>("rsl/structuralSearch", { pattern }, token)
+            );
+
+            if (answer?.problem) {
+                channel.appendLine("Образец не разобран: " + answer.problem);
+
+                return;
+            }
+
+            for (const hit of answer?.hits || []) {
+                channel.appendLine(
+                    Uri.parse(hit.uri).fsPath + ":" +
+                    (hit.range.start.line + 1) + "  " +
+                    hit.text.replace(/s+/gu, " ")
+                );
+            }
+
+            channel.appendLine(
+                "Найдено " + (answer?.hits?.length || 0) +
+                "; прочитано файлов " + (answer?.scannedFiles || 0) +
+                ", отсеяно до чтения " + (answer?.skippedFiles || 0) +
+                (answer?.cancelled ? "; поиск отменён" : "") +
+                (answer?.truncated ? "; показано не всё" : "")
+            );
+        })
+    );
 
     /*
      * Заглушка модуля: объявления без тел.

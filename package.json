@@ -193,6 +193,10 @@
          {
             "command": "rsl.generateStub",
             "title": "RSL: Generate Stub From File"
+         },
+         {
+            "command": "rsl.structuralSearch",
+            "title": "RSL: Structural Search"
          }
       ],
       "keybindings": [
