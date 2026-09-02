@@ -59,10 +59,34 @@ export class RslTypeEngine {
         { stamp: IRslHotStamp; values: Map<string, string> }
     >();
 
+    /**
+     * Попадания, промахи и сбросы.
+     *
+     * Нужны стенду отменённой работы. Разницу здесь видно не
+     * секундомером, а тем, сколько ответов НЕ пришлось считать заново:
+     * правка тела импортированного модуля обязана давать ноль сбросов.
+     */
+    private hitCount = 0;
+    private missCount = 0;
+    private resetCount = 0;
+
     constructor(
         private readonly index: WorkspaceIndex,
         private readonly resolver: RslScopeResolver
     ) {}
+
+    /** Счётчики запомненных ответов; для стендов и лога. */
+    get cacheCounters(): {
+        hits: number;
+        misses: number;
+        resets: number;
+    } {
+        return {
+            hits: this.hitCount,
+            misses: this.missCount,
+            resets: this.resetCount
+        };
+    }
 
     /**
      * Тип объявления.
@@ -349,6 +373,10 @@ export class RslTypeEngine {
              * Окружение изменилось: прежние ответы к нему не относятся.
              * Сбрасывается запись ЭТОГО документа, а не весь слой.
              */
+            if (entry) {
+                this.resetCount++;
+            }
+
             entry = { stamp, values: new Map() };
             this.byModule.set(module, entry);
         }
@@ -356,8 +384,12 @@ export class RslTypeEngine {
         const known = entry.values.get(key);
 
         if (known !== undefined) {
+            this.hitCount++;
+
             return known;
         }
+
+        this.missCount++;
 
         const value = compute();
 
