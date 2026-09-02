@@ -689,6 +689,159 @@ export function activate(context: ExtensionContext): void {
     );
 
     /*
+     * Замена по структуре: продолжение структурного поиска.
+     *
+     * Двумя шагами. Сначала подготовка — она находит совпадения и
+     * складывает правки, но ничего не применяет; пользователь читает
+     * предпросмотр. Потом применение — оно сверяет содержимое каждого
+     * файла заново: за время чтения файл могли поправить, и старые
+     * диапазоны указывают уже не туда.
+     */
+    context.subscriptions.push(
+        commands.registerCommand("rsl.structuralReplace", async () => {
+            const pattern = await window.showInputBox({
+                title: "RSL: структурная замена — образец",
+                prompt: "Что искать; $имя — один аргумент, $имя... — остальные",
+                placeHolder: "ExecMacroFile($file, $args...)"
+            });
+
+            if (!pattern) {
+                return;
+            }
+
+            const replacement = await window.showInputBox({
+                title: "RSL: структурная замена — на что",
+                prompt: "Чем заменить; заполнители переносятся дословно",
+                placeHolder: "ExecMacro2($file, $args...)"
+            });
+
+            if (!replacement) {
+                return;
+            }
+
+            const channel = window.createOutputChannel(
+                "RSL-plus: структурная замена"
+            );
+
+            channel.appendLine("Образец: " + pattern);
+            channel.appendLine("Замена:  " + replacement);
+            channel.show(true);
+
+            const prepared = await window.withProgress(
+                {
+                    location: ProgressLocation.Window,
+                    title: "RSL: структурная замена",
+                    cancellable: true
+                },
+                (_progress, token) => client.sendRequest<{
+                    previews?: Array<{
+                        uri: string;
+                        range: { start: { line: number } };
+                        before: string;
+                        after: string;
+                    }>;
+                    files?: number;
+                    replacements?: number;
+                    scannedFiles?: number;
+                    skippedFiles?: number;
+                    overlapping?: number;
+                    problem?: string;
+                    cancelled?: boolean;
+                    truncated?: boolean;
+                }>(
+                    "rsl/structuralReplace",
+                    { pattern, replacement },
+                    token
+                )
+            );
+
+            if (prepared?.problem) {
+                channel.appendLine("Не разобрано: " + prepared.problem);
+
+                return;
+            }
+
+            for (const preview of prepared?.previews || []) {
+                channel.appendLine(
+                    Uri.parse(preview.uri).fsPath + ":" +
+                    (preview.range.start.line + 1) + eolFree(preview.before) +
+                    "  ->  " + eolFree(preview.after)
+                );
+            }
+
+            channel.appendLine(
+                "Замен " + (prepared?.replacements || 0) +
+                " в " + (prepared?.files || 0) + " файлах" +
+                "; прочитано файлов " + (prepared?.scannedFiles || 0) +
+                ", отсеяно до чтения " + (prepared?.skippedFiles || 0) +
+                (prepared?.overlapping
+                    ? "; вложенных совпадений пропущено " +
+                        prepared.overlapping
+                    : "") +
+                (prepared?.cancelled ? "; отменено" : "") +
+                (prepared?.truncated ? "; подготовлено не всё" : "")
+            );
+
+            if (!prepared?.replacements) {
+                return;
+            }
+
+            const choice = await window.showWarningMessage(
+                "RSL: применить " + prepared.replacements +
+                    " замен в " + prepared.files + " файлах?",
+                { modal: true },
+                "Применить"
+            );
+
+            if (choice !== "Применить") {
+                channel.appendLine("Не применено.");
+
+                return;
+            }
+
+            const applied = await client.sendRequest<{
+                edit?: unknown;
+                files?: number;
+                replacements?: number;
+                staleFiles?: string[];
+                problem?: string;
+            }>("rsl/structuralReplaceApply", {});
+
+            if (applied?.problem) {
+                channel.appendLine("Не применено: " + applied.problem);
+
+                return;
+            }
+
+            for (const stale of applied?.staleFiles || []) {
+                channel.appendLine(
+                    "Пропущен: файл изменился после подготовки — " +
+                    Uri.parse(stale).fsPath
+                );
+            }
+
+            if (!applied?.edit) {
+                channel.appendLine("Применять нечего.");
+
+                return;
+            }
+
+            const converted = await client.protocol2CodeConverter
+                .asWorkspaceEdit(applied.edit as never);
+            const done = converted
+                ? await workspace.applyEdit(converted)
+                : false;
+
+            channel.appendLine(
+                done
+                    ? "Применено замен " + (applied.replacements || 0) +
+                        " в " + (applied.files || 0) + " файлах."
+                    : "Правка отклонена редактором: файл изменился."
+            );
+        })
+    );
+
+    /*
      * Заглушка модуля: объявления без тел.
      *
      * Библиотеки и платформенные компоненты приходят без исходников, и
@@ -841,4 +994,9 @@ export function deactivate():
     }
 
     return client.stop();
+}
+
+/** Код одной строкой: в списке замен переносы только мешают. */
+function eolFree(text: string): string {
+    return "  " + text.replace(/\s+/gu, " ").trim();
 }

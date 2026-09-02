@@ -197,6 +197,10 @@
          {
             "command": "rsl.structuralSearch",
             "title": "RSL: Structural Search"
+         },
+         {
+            "command": "rsl.structuralReplace",
+            "title": "RSL: Structural Replace"
          }
       ],
       "keybindings": [

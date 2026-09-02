@@ -84,7 +84,7 @@ export function parseRslStructuralPattern(
     const args: IRslPatternArgument[] = [];
 
     for (let at = 0; at < groups.length; at++) {
-        const group = groups[at];
+        const group = groups[at].tokens;
 
         if (group.length === 0) {
             /* Пустой список аргументов: `Foo()`. */
@@ -96,6 +96,7 @@ export function parseRslStructuralPattern(
         }
 
         const placeholder = placeholderOf(group);
+
 
         if (!placeholder) {
             args.push({ tokens: group });
@@ -177,11 +178,13 @@ export function findRslStructuralMatches(
 /** Сопоставление списков аргументов; undefined — не совпало. */
 function matchArguments(
     expected: readonly IRslPatternArgument[],
-    actual: readonly IRslToken[][],
+    actual: readonly IRslArgumentGroup[],
     source: string
 ): Record<string, string> | undefined {
     const bindings: Record<string, string> = {};
-    const groups = actual.length === 1 && actual[0].length === 0 ? [] : actual;
+    const groups = actual.length === 1 && actual[0].tokens.length === 0
+        ? []
+        : actual;
 
     for (let at = 0; at < expected.length; at++) {
         const item = expected[at];
@@ -189,9 +192,17 @@ function matchArguments(
         if (item.rest) {
             const rest = groups.slice(at);
 
-            bindings[item.placeholder || "rest"] = rest
-                .map(group => textOf(group, source))
-                .join(", ");
+            /*
+             * Остаток берётся ОДНИМ участком — от начала первого
+             * аргумента до конца последнего. Склейка через «, » потеряла
+             * бы то, что стоит между аргументами: комментарии, переносы
+             * строк и выравнивание.
+             */
+            bindings[item.placeholder || "rest"] = rest.length === 0
+                ? ""
+                : source
+                    .slice(rest[0].start, rest[rest.length - 1].end)
+                    .trim();
 
             return bindings;
         }
@@ -207,7 +218,7 @@ function matchArguments(
             continue;
         }
 
-        if (!sameTokens(item.tokens || [], group)) {
+        if (!sameTokens(item.tokens || [], group.tokens)) {
             return undefined;
         }
     }
@@ -262,21 +273,40 @@ function sameTokens(
     });
 }
 
-function textOf(group: readonly IRslToken[], source: string): string {
-    if (group.length === 0) {
-        return "";
-    }
-
-    return source.slice(group[0].start, group[group.length - 1].end);
+/**
+ * Написанный текст аргумента.
+ *
+ * Именно написанный, а не «от первого значимого токена до последнего»:
+ * комментарий внутри аргумента значимым не считается, и такой срез
+ * выбрасывал бы его молча. Обрамляющие пробелы снимаются — они
+ * принадлежат не аргументу, а его расположению в строке.
+ */
+function textOf(group: IRslArgumentGroup, source: string): string {
+    return source.slice(group.start, group.end).trim();
 }
 
-/** Аргументы верхнего уровня: вложенные скобки их не разделяют. */
+/**
+ * Аргументы верхнего уровня: вложенные скобки их не разделяют.
+ *
+ * Кроме токенов группа помнит НАПИСАННЫЙ участок — от разделителя до
+ * разделителя. Он нужен замене: комментарий внутри аргумента значимым
+ * токеном не считается, и текст «от первого до последнего значимого»
+ * молча выбрасывал бы его.
+ */
+interface IRslArgumentGroup {
+    tokens: IRslToken[];
+    /** Границы написанного участка между разделителями. */
+    start: number;
+    end: number;
+}
+
 function splitArguments(
     tokens: readonly IRslToken[],
     openIndex: number
-): IRslToken[][] | undefined {
-    const result: IRslToken[][] = [];
+): IRslArgumentGroup[] | undefined {
+    const result: IRslArgumentGroup[] = [];
     let current: IRslToken[] = [];
+    let from = tokens[openIndex] ? tokens[openIndex].end : 0;
     let depth = 0;
 
     for (let index = openIndex; index < tokens.length; index++) {
@@ -287,6 +317,7 @@ function splitArguments(
                 depth++;
 
                 if (depth === 1) {
+                    from = token.end;
                     continue;
                 }
             } else if (
@@ -295,13 +326,22 @@ function splitArguments(
                 depth--;
 
                 if (depth === 0) {
-                    result.push(current);
+                    result.push({
+                        tokens: current,
+                        start: from,
+                        end: token.start
+                    });
 
                     return result;
                 }
             } else if (token.raw === "," && depth === 1) {
-                result.push(current);
+                result.push({
+                    tokens: current,
+                    start: from,
+                    end: token.start
+                });
                 current = [];
+                from = token.end;
                 continue;
             } else if (token.raw === ";") {
                 return undefined;

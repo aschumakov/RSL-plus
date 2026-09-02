@@ -21,8 +21,15 @@ import {
 } from "./features/dependencyTree";
 import {
     runRslStructuralSearch,
+    type IRslStructuralSearchEnvironment,
     type IRslStructuralSearchRequest
 } from "./features/structuralSearchService";
+import {
+    applyRslStructuralReplace,
+    prepareRslStructuralReplace,
+    type IRslStructuralReplaceAnswer,
+    type IRslStructuralReplaceRequest
+} from "./features/structuralReplace";
 import { decodeRslSourceText } from "./core/textDecoding";
 import { RslCompactFactsSink } from "./analysis/compactFactsSink";
 import { buildRslModuleStub } from "./features/stubGenerator";
@@ -914,34 +921,93 @@ connection.onInitialized(() => {
      * поток между ними, отмена доходит до обхода. Без этих трёх правил одна
      * команда на проекте в шесть тысяч файлов занимает поток на секунды.
      */
+    /** Окружение обхода: одно на поиск и на замену. */
+    const structuralEnvironment = (): IRslStructuralSearchEnvironment => ({
+        index: workspaceIndex,
+        referenceIndex,
+        yieldToInteractive: () =>
+            new Promise<void>(resolve => setImmediate(resolve)),
+        documentVersion: uri => documents.get(uri)?.version,
+        readSource: async uri => {
+            const open = documents.get(uri);
+
+            if (open) {
+                return open.getText();
+            }
+
+            try {
+                return decodeRslSourceText(
+                    await fs.promises.readFile(fileURLToPath(uri))
+                );
+            } catch (_error) {
+                return undefined;
+            }
+        }
+    });
+
     connection.onRequest(
         "rsl/structuralSearch",
         async (request: IRslStructuralSearchRequest, token) =>
             runRslStructuralSearch(
-                {
-                    index: workspaceIndex,
-                    referenceIndex,
-                    yieldToInteractive: () =>
-                        new Promise<void>(resolve => setImmediate(resolve)),
-                    readSource: async uri => {
-                        const open = documents.get(uri);
-
-                        if (open) {
-                            return open.getText();
-                        }
-
-                        try {
-                            return decodeRslSourceText(
-                                await fs.promises.readFile(fileURLToPath(uri))
-                            );
-                        } catch (_error) {
-                            return undefined;
-                        }
-                    }
-                },
+                structuralEnvironment(),
                 request,
                 () => token.isCancellationRequested
             )
+    );
+
+    /*
+     * Замена по структуре: подготовка и применение — два запроса.
+     *
+     * Между ними пользователь читает предпросмотр, и за это время файл
+     * могли поправить. Применять старые диапазоны нельзя — они указывают
+     * уже не туда, — поэтому применение сверяет содержимое каждого файла
+     * заново: у открытого документа по версии, у закрытого по отпечатку.
+     *
+     * Подготовленное держится ОДНОЙ записью: следующая подготовка её
+     * заменяет, применение забирает и обнуляет. Копить их незачем —
+     * пользователь работает с одной заменой за раз, а устаревшее
+     * подготовленное всё равно не применилось бы.
+     */
+    let pendingReplace: IRslStructuralReplaceAnswer | undefined;
+
+    connection.onRequest(
+        "rsl/structuralReplace",
+        async (request: IRslStructuralReplaceRequest, token) => {
+            const answer = await prepareRslStructuralReplace(
+                structuralEnvironment(),
+                request,
+                () => token.isCancellationRequested
+            );
+
+            pendingReplace = answer.problem ? undefined : answer;
+
+            /* Состояние файлов наружу не отдаётся: оно нужно применению. */
+            return { ...answer, sources: undefined };
+        }
+    );
+
+    connection.onRequest(
+        "rsl/structuralReplaceApply",
+        async (_request: unknown, token) => {
+            const prepared = pendingReplace;
+
+            pendingReplace = undefined;
+
+            if (!prepared) {
+                return {
+                    files: 0,
+                    replacements: 0,
+                    staleFiles: [],
+                    problem: "Нечего применять: замена не подготовлена"
+                };
+            }
+
+            return applyRslStructuralReplace(
+                structuralEnvironment(),
+                prepared.sources,
+                () => token.isCancellationRequested
+            );
+        }
     );
 
     connection.onRequest(
