@@ -2189,6 +2189,71 @@ export class RslScopeResolver {
      * которой при этом успешно предлагались методы класса: тип выводился
      * только внутри разрешения членов и никуда больше не попадал.
      */
+    /**
+     * Действующий тип имени в этой точке, даже если объявления нет.
+     *
+     * В RSL переменная возникает и просто от присваивания:
+     *
+     *     rs = ExecSQLselect(sql, ..., true);
+     *     while (rs.movenext())
+     *
+     * Такого имени в дереве символов нет, и разрешение имени по нему
+     * молчит. Разрешение ЧЛЕНА получателя это учитывает — иначе
+     * подсказка после точки в таком коде не работала бы, — а прочие
+     * потребители получали `variant` там, где тип известен.
+     *
+     * Правило то же, что у effectiveTypeName: объявленный тип сильнее
+     * присваивания, а из присваиваний берётся только достижимое и
+     * только подтверждённое — имя неразрешённого вызова типом не
+     * считается.
+     */
+    effectiveTypeNameAt(
+        uri: string,
+        tree: RslSymbol,
+        offset: number
+    ): string {
+        const module = this.index.getModule(uri);
+
+        if (!module) {
+            return "";
+        }
+
+        const resolved = this.resolveAt(uri, tree, offset);
+
+        /*
+         * Объявление есть и оно наше: обычный расчёт. Объявление из
+         * другого файла уже несёт готовый тип, а его положения к нашему
+         * потоку токенов отношения не имеют.
+         */
+        if (resolved) {
+            return resolved.uri === uri
+                ? this.effectiveTypeName(
+                    uri,
+                    tree,
+                    resolved.symbol,
+                    offset
+                )
+                : resolved.symbol.typeName;
+        }
+
+        const token = tokenAtOffset(this.getTokens(module), offset, true);
+
+        if (!token || token.kind !== "identifier") {
+            return "";
+        }
+
+        const assigned = this.inferAssignedType(
+            module,
+            tree,
+            token.value,
+            offset
+        );
+
+        return this.isResolvableTypeName(uri, tree, assigned)
+            ? assigned
+            : "";
+    }
+
     effectiveTypeName(
         uri: string,
         tree: RslSymbol,
