@@ -207,6 +207,98 @@ test("ответ запоминается на версию документа",
     );
 });
 
+const LIB = "file:///d:/types/lib.mac";
+
+/** Проект: main подключает lib и вызывает Send из него. */
+function project(libSource) {
+    const index = new WorkspaceIndex();
+
+    index.registerWorkspaceFiles([MAIN, LIB]);
+
+    if (libSource !== undefined) {
+        index.updateExternalModule(LIB, libSource, 1);
+    }
+
+    const source = "Import lib;\nMacro Run()\n  Send(\nEnd;\n";
+
+    index.updateOpenModule(MAIN, source, 1);
+
+    const resolver = new RslScopeResolver(index);
+
+    return {
+        index,
+        engine: new RslTypeEngine(index, resolver),
+        offset: source.indexOf("Send(") + 5
+    };
+}
+
+const SEND_STRING = "Macro Send(value: String)\nEnd;\n";
+const SEND_INTEGER = "Macro Send(value: Integer)\nEnd;\n";
+
+test("правка подписи в зависимости меняет ожидаемый тип", () => {
+    /*
+     * Сам main.mac не менялся, и объект его модели остался тем же. Кэша по
+     * объекту модуля тут мало: тип аргумента берётся из ПОДКЛЮЧЁННОГО файла,
+     * и правка его подписи обязана дойти.
+     */
+    const board = project(SEND_STRING);
+
+    assert.strictEqual(
+        board.engine.expectedTypeAt(MAIN, board.offset),
+        "string"
+    );
+
+    const before = board.index.getModule(MAIN);
+
+    board.index.updateExternalModule(LIB, SEND_INTEGER, 2);
+
+    assert.strictEqual(
+        board.index.getModule(MAIN),
+        before,
+        "модель main.mac обязана остаться прежним объектом"
+    );
+    assert.strictEqual(
+        board.engine.expectedTypeAt(MAIN, board.offset),
+        "integer",
+        "устаревший ответ отдавать нельзя"
+    );
+});
+
+test("догруженная зависимость меняет ответ", () => {
+    /* Пока lib не прочитан, тип неизвестен — и это честный ответ. */
+    const board = project(undefined);
+
+    assert.strictEqual(board.engine.expectedTypeAt(MAIN, board.offset), "");
+
+    board.index.updateExternalModule(LIB, SEND_STRING, 1);
+
+    assert.strictEqual(
+        board.engine.expectedTypeAt(MAIN, board.offset),
+        "string",
+        "после загрузки зависимости ответ обязан появиться"
+    );
+});
+
+test("правка постороннего файла ответ не сбрасывает", () => {
+    /*
+     * Обратная сторона: сбрасывать весь слой из-за чужого файла нельзя, иначе
+     * фоновая индексация обнуляла бы кэш тысячи раз подряд.
+     */
+    const other = "file:///d:/types/other.mac";
+    const board = project(SEND_STRING);
+
+    board.index.registerWorkspaceFile(other);
+
+    const first = board.engine.expectedTypeAt(MAIN, board.offset);
+
+    board.index.updateExternalModule(other, "Macro Alone()\nEnd;\n", 1);
+
+    assert.strictEqual(
+        board.engine.expectedTypeAt(MAIN, board.offset),
+        first
+    );
+});
+
 console.log(
     failed === 0
         ? "\nПройдено: " + passed

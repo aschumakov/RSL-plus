@@ -36,14 +36,23 @@ export interface IRslCallTargetInfo {
 
 export class RslTypeEngine {
     /**
-     * Ответы на текущую версию документа.
+     * Ответы на текущее состояние документа И его окружения.
      *
-     * Ключ — сам объект модуля: он меняется вместе с текстом, и устаревшая
-     * запись просто перестаёт находиться. Отдельной проверки версии не нужно.
+     * Объекта модуля мало. Он меняется вместе с текстом самого файла, и
+     * этого достаточно, пока речь о своих объявлениях. Но тип аргумента
+     * берётся из ПОДКЛЮЧЁННОГО модуля: правка подписи в lib.mac не
+     * трогает main.mac, объект его модели остаётся тем же — и ответ
+     * отдавался бы прежний, уже неверный.
+     *
+     * Поэтому рядом лежит ревизия окружения документа. Она меняется
+     * ровно тогда, когда изменилось то, от чего зависит разрешение имён
+     * в этом файле, и не меняется от чужого модуля: сброс идёт по
+     * обратным рёбрам Import-графа — см. getSemanticRevision. Весь слой
+     * из-за правки в постороннем файле не обнуляется.
      */
     private readonly byModule = new WeakMap<
         IIndexedModule,
-        Map<string, string | undefined>
+        { revision: number; values: Map<string, string> }
     >();
 
     constructor(
@@ -267,14 +276,19 @@ export class RslTypeEngine {
             return "";
         }
 
-        let byKey = this.byModule.get(module);
+        const revision = this.index.getSemanticRevision(uri);
+        let entry = this.byModule.get(module);
 
-        if (!byKey) {
-            byKey = new Map();
-            this.byModule.set(module, byKey);
+        if (!entry || entry.revision !== revision) {
+            /*
+             * Окружение изменилось: прежние ответы к нему не относятся.
+             * Сбрасывается запись ЭТОГО документа, а не весь слой.
+             */
+            entry = { revision, values: new Map() };
+            this.byModule.set(module, entry);
         }
 
-        const known = byKey.get(key);
+        const known = entry.values.get(key);
 
         if (known !== undefined) {
             return known;
@@ -282,7 +296,7 @@ export class RslTypeEngine {
 
         const value = compute();
 
-        byKey.set(key, value);
+        entry.values.set(key, value);
 
         return value;
     }
