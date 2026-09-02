@@ -302,12 +302,24 @@ export class RslTypeEngine {
     }
 }
 
-/** Тип параметра под этим номером, если он написан. */
+/**
+ * Тип параметра под этим номером, если он написан.
+ *
+ * Подпись берётся у самого символа. Прежде она добывалась из `detail` элемента
+ * подсказки, а тот — геттер: на каждый вопрос собирался целый CompletionItem с
+ * заготовкой параметров, только чтобы прочитать из него строку. Заводить
+ * элемент подсказки ради вывода типа незачем.
+ *
+ * Разбор `detail` остался запасным путём: у встроенных имён своя подпись живёт
+ * там, а не в parameterText.
+ */
 export function parameterTypeAt(
     symbol: RslSymbol,
     argumentIndex: number
 ): string {
-    const labels = extractParameterLabels(symbol);
+    const labels = symbol.parameterText
+        ? splitParameterText(symbol.parameterText)
+        : extractParameterLabels(symbol);
     const label = labels[argumentIndex];
 
     if (!label) {
@@ -319,6 +331,48 @@ export function parameterTypeAt(
     return colon < 0
         ? ""
         : canonicalTypeName(label.substring(colon + 1).trim());
+}
+
+/**
+ * Параметры из подписи объявления: `(a: String, b)` -> два элемента.
+ *
+ * Запятые внутри вложенных скобок не разделяют параметры.
+ */
+function splitParameterText(text: string): string[] {
+    const open = text.indexOf("(");
+    const close = text.lastIndexOf(")");
+
+    if (open < 0 || close <= open) {
+        return [];
+    }
+
+    const result: string[] = [];
+    let current = "";
+    let depth = 0;
+
+    for (let at = open + 1; at < close; at++) {
+        const character = text.charAt(at);
+
+        if (character === "(" || character === "[") {
+            depth++;
+        } else if (character === ")" || character === "]") {
+            depth = Math.max(0, depth - 1);
+        }
+
+        if (character === "," && depth === 0) {
+            result.push(current.trim());
+            current = "";
+            continue;
+        }
+
+        current += character;
+    }
+
+    if (current.trim()) {
+        result.push(current.trim());
+    }
+
+    return result;
 }
 
 function isCallableKind(kind: CompletionItemKind): boolean {
