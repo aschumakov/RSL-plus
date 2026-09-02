@@ -130,6 +130,28 @@ export class WorkspaceCatalog {
      * записей — обновление одного файла стоило прохода по всему проекту.
      */
     private byName = new Map<string, Map<string, IRslCatalogSymbol[]>>();
+    /**
+     * Имена каталога по порядку: поиск по началу имени идёт двоичным.
+     *
+     * Нужен Auto Import. Он спрашивает кандидатов на КАЖДУЮ нажатую букву,
+     * а общий отбор (find) для этого не годится: он обходит все объявления
+     * проекта, и на настоящем проекте это сотня тысяч символов за запрос.
+     * Ctrl+T такой обход по силам — там один запрос на ввод пользователя, —
+     * подсказке нет.
+     *
+     * Строится лениво: проект, в котором Auto Import не спрашивали, за него
+     * не платит.
+     */
+    private sortedNames: string[] | undefined;
+    /**
+     * Имена, добавленные после последней сортировки.
+     *
+     * Полная пересортировка на каждую запись каталога не годится: достройка
+     * читает проект всё время, пока пользователь набирает текст, и подсказка
+     * пересобирала бы список ста тысяч имён на каждую букву. Новых имён при
+     * записи одного модуля единицы, и они вставляются на место.
+     */
+    private pendingNames: string[] = [];
     /** Имя файла -> файлы, которые упоминают его строкой. */
     private byFileReference = new Map<string, Set<string>>();
     /**
@@ -299,6 +321,7 @@ export class WorkspaceCatalog {
             if (!byUri) {
                 byUri = new Map<string, IRslCatalogSymbol[]>();
                 this.byName.set(symbol.normalized, byUri);
+                this.pendingNames.push(symbol.normalized);
             }
 
             const list = byUri.get(uri);
@@ -696,6 +719,8 @@ export class WorkspaceCatalog {
     clear(): void {
         this.modules.clear();
         this.byName.clear();
+        this.sortedNames = undefined;
+        this.pendingNames = [];
         this.byExport.clear();
         this.byFileReference.clear();
         this.importersByReference.clear();
@@ -722,6 +747,16 @@ export class WorkspaceCatalog {
     /** Известная версия модуля: повторно записывать неизменившийся незачем. */
     versionOf(uri: string): number | undefined {
         return this.modules.get(uri)?.version;
+    }
+
+    /**
+     * Написанные в файле ссылки на модули — как они есть в тексте.
+     *
+     * Нужны, когда подробной модели файла в памяти нет: состав Import каталог
+     * помнит про все прочитанные файлы.
+     */
+    importsOf(uri: string): string[] {
+        return (this.modules.get(uri)?.imports || []).slice();
     }
 
     get stats(): IRslCatalogStats {
@@ -871,6 +906,101 @@ export class WorkspaceCatalog {
         }
 
         return result;
+    }
+
+    /**
+     * Объявления, чьё имя начинается с prefix, в порядке имени и файла.
+     *
+     * Порядок задан ключом, а не порядком записи в каталог: одноимённые
+     * объявления из разных файлов обязаны идти всегда одинаково.
+     *
+     * Пустой prefix ответа не имеет: «все объявления проекта» — это не
+     * поиск по началу имени, и такой запрос обслуживает find.
+     */
+    findByPrefix(prefix: string, limit: number): IRslCatalogSymbol[] {
+        const normalized = normalizeIdentifier(prefix);
+
+        if (!normalized || limit <= 0) {
+            return [];
+        }
+
+        const names = this.orderedNames();
+        const result: IRslCatalogSymbol[] = [];
+
+        for (
+            let at = lowerBoundName(names, normalized);
+            at < names.length && result.length < limit;
+            at++
+        ) {
+            if (!names[at].startsWith(normalized)) {
+                break;
+            }
+
+            const byUri = this.byName.get(names[at]);
+
+            if (!byUri) {
+                /* Имя осталось от удалённого модуля: см. orderedNames. */
+                continue;
+            }
+
+            for (const uri of [...byUri.keys()].sort()) {
+                for (const symbol of byUri.get(uri) || []) {
+                    if (result.length >= limit) {
+                        return result;
+                    }
+
+                    result.push(symbol);
+                }
+            }
+        }
+
+        return result;
+    }
+
+    /**
+     * Имена каталога по порядку.
+     *
+     * Добавленные с прошлого раза вставляются на место, а не заставляют
+     * сортировать всё заново: при достройке каталога новых имён на модуль
+     * единицы. Если их накопилось много — дешевле пересортировать.
+     *
+     * Удаления здесь не отслеживаются вовсе: имя удалённого модуля остаётся
+     * в списке, а поиск пропускает его, не найдя в byName. Держать список в
+     * точности значило бы платить за это на каждом удалении, а ответ от
+     * лишнего имени не меняется.
+     */
+    private orderedNames(): string[] {
+        if (!this.sortedNames) {
+            this.sortedNames = [...this.byName.keys()].sort();
+            this.pendingNames = [];
+
+            return this.sortedNames;
+        }
+
+        if (this.pendingNames.length === 0) {
+            return this.sortedNames;
+        }
+
+        const names = this.sortedNames;
+        const pending = this.pendingNames;
+
+        this.pendingNames = [];
+
+        if (pending.length * 8 > names.length) {
+            this.sortedNames = [...this.byName.keys()].sort();
+
+            return this.sortedNames;
+        }
+
+        for (const name of pending) {
+            const at = lowerBoundName(names, name);
+
+            if (names[at] !== name) {
+                names.splice(at, 0, name);
+            }
+        }
+
+        return names;
     }
 
     /** Все объявления с таким именем: кандидаты References и Auto Import. */
@@ -1179,4 +1309,22 @@ function positionAt(
     offset: number
 ): { line: number; character: number } {
     return positionAtOffset(lineStarts, offset);
+}
+
+/** Первое имя, не меньшее искомого. */
+function lowerBoundName(names: readonly string[], wanted: string): number {
+    let low = 0;
+    let high = names.length;
+
+    while (low < high) {
+        const middle = (low + high) >>> 1;
+
+        if (names[middle] < wanted) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+
+    return low;
 }

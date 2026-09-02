@@ -11,6 +11,10 @@ import { rangeInModule } from "../core/documentPosition";
 import type { Range } from "vscode-languageserver";
 import { normalizeIdentifier } from "../lexer";
 import type { WorkspaceIndex } from "../workspaceIndex";
+import {
+    RslProjectIndexView,
+    type IRslProjectDependent
+} from "../indexing/projectIndexView";
 
 /**
  * Дерево зависимостей проекта.
@@ -56,6 +60,8 @@ export interface IRslDependencyRequest {
 
 export interface IRslDependencyEnvironment {
     index: WorkspaceIndex;
+    /** Один вход к сведениям уровня проекта; создаётся по индексу. */
+    view?: RslProjectIndexView;
     /** Знает ли платформа модуль с таким именем. */
     knowsPlatformModule?(name: string): boolean;
 }
@@ -186,60 +192,37 @@ function dependentsOf(
         .sort(byName);
 }
 
-/** Кто подключает этот файл; ambiguous — ссылка ведёт не только сюда. */
-interface IRslDependentFile {
-    uri: string;
-    ambiguous: boolean;
+/**
+ * Один вход к сведениям проекта на этот индекс.
+ *
+ * Сам вход состояния не держит, но создавать его на каждый узел дерева
+ * незачем: узлов на большом проекте тысячи.
+ */
+const viewByIndex = new WeakMap<WorkspaceIndex, RslProjectIndexView>();
+
+function viewOf(
+    environment: IRslDependencyEnvironment
+): RslProjectIndexView {
+    if (environment.view) {
+        return environment.view;
+    }
+
+    let view = viewByIndex.get(environment.index);
+
+    if (!view) {
+        view = new RslProjectIndexView(environment.index);
+        viewByIndex.set(environment.index, view);
+    }
+
+    return view;
 }
 
 function collectDependents(
     environment: IRslDependencyEnvironment,
     uri: string
-): IRslDependentFile[] {
-    const index = environment.index;
-    const result = new Map<string, boolean>();
-    const add = (importer: string, ambiguous: boolean): void => {
-        if (sameUri(importer, uri)) {
-            return;
-        }
-
-        /* Однозначная ссылка сильнее: она снимает пометку. */
-        result.set(importer, (result.get(importer) ?? true) && ambiguous);
-    };
-
-    for (const reference of index.catalog.importReferencesForBaseName(
-        moduleNameOfUri(uri)
-    )) {
-        const resolved = index.resolveWorkspaceFile(reference);
-        const leadsHere = resolved.kind === "resolved"
-            ? sameUri(resolved.value, uri)
-            : resolved.kind === "ambiguous" &&
-                resolved.candidates.some(item => sameUri(item, uri));
-
-        if (!leadsHere) {
-            continue;
-        }
-
-        for (const importer of index.catalog.importersOfReference(reference)) {
-            add(importer, resolved.kind === "ambiguous");
-        }
-    }
-
-    /*
-     * Граф загруженных модулей добавляется сверху: открытый документ мог
-     * получить новый Import уже после того, как его прочитала достройка
-     * каталога. Он ключуется URI, значит ссылка разрешилась однозначно.
-     */
-    for (const item of index.getDependents(uri)) {
-        add(item, false);
-    }
-
-    return [...result].map(([item, ambiguous]) => ({
-        uri: item,
-        ambiguous
-    }));
+): IRslProjectDependent[] {
+    return viewOf(environment).dependentsOf(uri);
 }
-
 
 /**
  * Точное место, где написан Import этого модуля.

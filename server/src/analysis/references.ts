@@ -1,4 +1,7 @@
 import { RslRequestSourceCache } from "./requestSourceCache";
+import {
+    RslProjectIndexView
+} from "../indexing/projectIndexView";
 import { performance } from "perf_hooks";
 
 import {
@@ -192,15 +195,26 @@ export async function findRslReferencesForSymbol(
         return [];
     }
 
-    const candidateUniverse = await referenceIndex.getCandidateUris(
-        targetUri,
-        index.getWorkspaceFileUris(),
-        index.getIndexedModules().map(module => ({
-            uri: module.uri,
-            imports: module.imports
-        })),
-        isCancelled
-    );
+    /*
+     * Кандидаты спрашиваются у общего входа к сведениям проекта.
+     *
+     * Сужение — забота индекса идентификаторов; если он не готов или
+     * неполон, ответом остаётся весь состав проекта. Здесь важно, что
+     * состав и загруженные модули берутся в одном месте, а не
+     * складываются заново каждым потребителем.
+     */
+    const candidateUniverse = await new RslProjectIndexView(index, {
+        referenceCandidates: (declarationUri, uris, modules, cancel) =>
+            referenceIndex.getCandidateUris(
+                declarationUri,
+                uris,
+                modules.map(module => ({
+                    uri: module.uri,
+                    imports: module.imports
+                })),
+                cancel
+            )
+    }).referencesOf(targetUri, isCancelled);
     const externalUris = candidateUniverse.filter(candidateUri =>
         !openUris.has(candidateUri)
     );

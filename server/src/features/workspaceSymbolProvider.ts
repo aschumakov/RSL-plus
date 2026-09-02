@@ -6,7 +6,10 @@ import {
 import * as path from "path";
 import { fileURLToPath } from "url";
 
-import type { IRslCatalogSymbol } from "../indexing/workspaceCatalog";
+import {
+    RslProjectIndexView,
+    type IRslProjectSymbol
+} from "../indexing/projectIndexView";
 import type { WorkspaceIndex } from "../workspaceIndex";
 
 const MAX_WORKSPACE_SYMBOLS = 200;
@@ -25,24 +28,31 @@ export function findRslWorkspaceSymbols(
     index: WorkspaceIndex,
     query: string
 ): SymbolInformation[] {
-    return index.catalog
-        .find(query, MAX_WORKSPACE_SYMBOLS)
-        .map(symbol => toSymbolInformation(symbol));
+    return new RslProjectIndexView(index)
+        .workspaceSymbols(query, MAX_WORKSPACE_SYMBOLS)
+        .map(symbol => toSymbolInformation(index, symbol));
 }
 
-function toSymbolInformation(symbol: IRslCatalogSymbol): SymbolInformation {
-    const start = { line: symbol.line, character: symbol.character };
-    const end = {
-        line: symbol.line,
-        character: symbol.character + symbol.name.length
-    };
+/**
+ * Положение берётся у текущей модели, если она в памяти.
+ *
+ * Запись каталога помнит положение на момент чтения файла. У открытого
+ * документа оно съезжает от каждой правки, и до следующего чтения Ctrl+T
+ * приводил в строку, где объявления уже нет.
+ */
+function toSymbolInformation(
+    index: WorkspaceIndex,
+    symbol: IRslProjectSymbol
+): SymbolInformation {
+    const range = index.getDefinitionRangeByRef(symbol.ref) ||
+        catalogRange(symbol);
 
     return SymbolInformation.create(
         symbol.name,
         symbolKind(symbol.kind),
-        { start, end },
-        symbol.uri,
-        symbol.container || displayModule(symbol.uri)
+        range,
+        symbol.ref.uri,
+        symbol.container || displayModule(symbol.ref.uri)
     );
 }
 
@@ -73,4 +83,20 @@ function displayModule(uri: string): string {
     } catch (_error) {
         return path.basename(uri);
     }
+}
+
+/** Положение, которое помнит каталог: строка, где имя стояло при чтении. */
+function catalogRange(symbol: IRslProjectSymbol): {
+    start: { line: number; character: number };
+    end: { line: number; character: number };
+} {
+    const start = { line: symbol.line, character: symbol.character };
+
+    return {
+        start,
+        end: {
+            line: symbol.line,
+            character: symbol.character + symbol.name.length
+        }
+    };
 }

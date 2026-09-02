@@ -14,12 +14,15 @@ import type { RslSymbol } from "../symbols/rslSymbol";
 import { KEYWORDS } from "../language/rslLanguageReference";
 import { normalizeIdentifier, tokenAtOffset } from "../lexer";
 import type { RslScopeResolver } from "../scopeResolver";
+import {
+    RslProjectIndexView,
+    type IRslProjectSymbol
+} from "../indexing/projectIndexView";
 import type {
     IIndexedModule,
     IIndexedSymbol,
     WorkspaceIndex
 } from "../workspaceIndex";
-import { completionLabelMatchesPrefix } from "./completionRanking";
 import { offsetInModule, positionInModule } from "../core/documentPosition";
 
 /* Ключевое слово Import-ом не исправляется: см. справочник языка. */
@@ -60,78 +63,88 @@ export function buildKnownAutoImportCompletions(
     }
 
     /*
-     * Сначала имена, начинающиеся с набранного: их находит индекс, не
-     * перебирая проект. Перебор остаётся на случай, когда таких мало — тогда
-     * в списке уместны и совпадения по середине имени, и он дёшев.
+     * Кандидаты спрашиваются у общего входа, а не у индекса загруженных
+     * символов.
+     *
+     * Прежде отвечал только он, а держит он лишь то, что сейчас в памяти:
+     * на проекте, который в предел по числу модулей не помещается,
+     * предложение подключить объявление ИСЧЕЗАЛО, стоило модель его модуля
+     * вытеснить. Объявление при этом из проекта никуда не делось.
+     *
+     * Постоянный каталог помнит весь прочитанный проект, поэтому ответ
+     * больше не зависит от того, что успела прочитать фоновая индексация и
+     * что из прочитанного ещё не вытеснено.
      */
-    const byPrefix = index.findUnimportedSymbolsByPrefix(
+    const found = viewOf(index).findUnimportedSymbols(
         module.uri,
         prefix,
-        /* На один больше предела: так видно, что список пришлось урезать. */
-        limit === Number.MAX_SAFE_INTEGER ? limit : limit + 1
+        limit
+    );
+    const built = buildAutoImportItems(
+        module,
+        index,
+        found.items,
+        limit
     );
 
-    if (byPrefix.length > limit) {
-        return buildAutoImportItems(module, index, byPrefix, limit);
+    return {
+        items: built.items,
+        truncated: built.truncated || found.truncated
+    };
+}
+
+/**
+ * Один вход к сведениям проекта на этот индекс.
+ *
+ * Сам вход состояния не держит, но заводить его на каждую нажатую букву
+ * незачем.
+ */
+const viewByIndex = new WeakMap<WorkspaceIndex, RslProjectIndexView>();
+
+function viewOf(index: WorkspaceIndex): RslProjectIndexView {
+    let view = viewByIndex.get(index);
+
+    if (!view) {
+        view = new RslProjectIndexView(index);
+        viewByIndex.set(index, view);
     }
 
-    const matched: IIndexedSymbol[] = [];
-    const seen = new Set<string>();
-
-    for (const symbol of index.findUnimportedSymbols(module.uri)) {
-        if (!completionLabelMatchesPrefix(symbol.symbol.name, prefix)) {
-            continue;
-        }
-
-        const key = [
-            normalizeIdentifier(symbol.symbol.name),
-            symbol.uri
-        ].join(":");
-
-        if (seen.has(key)) {
-            continue;
-        }
-
-        seen.add(key);
-        matched.push(symbol);
-    }
-
-    matched.sort((left, right) => compareAutoImportCandidates(left, right));
-
-    return buildAutoImportItems(module, index, matched, limit);
+    return view;
 }
 
 /** Элементы списка и правки Import — только для тех, кто в список попал. */
 function buildAutoImportItems(
     module: IIndexedModule,
     index: WorkspaceIndex,
-    matched: readonly IIndexedSymbol[],
+    matched: readonly IRslProjectSymbol[],
     limit: number
 ): IAutoImportSearchResult {
     const items: CompletionItem[] = [];
     /* Имя модуля для Import одно на модуль: у соседних символов оно то же. */
     const names = new Map<string, string>();
 
-    for (const symbol of matched) {
+    for (const candidate of matched) {
         if (items.length >= limit) {
             return { items, truncated: true };
         }
 
-        if (!names.has(symbol.uri)) {
-            names.set(symbol.uri, importName(module, index, symbol.uri));
+        const uri = candidate.ref.uri;
+
+        if (!names.has(uri)) {
+            names.set(uri, importName(module, index, uri));
         }
 
         /* Модуль, имя которого не определить, подключить нечем. */
-        if (!names.get(symbol.uri)) {
+        if (!names.get(uri)) {
             continue;
         }
 
-        const source = symbol.symbol.completionItem;
+        const source = autoImportSource(candidate);
         items.push({
             ...source,
             detail: [
                 source.detail || "",
-                `Auto Import: ${displayModule(symbol.uri)}`
+                `Auto Import: ${displayModule(uri)}`
             ].filter(value => !!value).join("\n"),
             sortText: `z_${String(source.label).toLowerCase()}`,
             /*
@@ -139,10 +152,10 @@ function buildAutoImportItems(
              * Import: её строит resolve по этим же данным.
              */
             data: {
-                rslAutoImportUri: symbol.uri,
+                rslAutoImportUri: uri,
                 rslAutoImportFrom: module.uri,
-                uri: symbol.uri,
-                symbolId: symbol.symbolId
+                uri,
+                symbolId: candidate.ref.symbolId
             }
         });
     }
@@ -165,21 +178,18 @@ export function resolveAutoImportEdit(
     return buildImportEdit(module, index, targetUri);
 }
 
-/** Порядок кандидатов: имя, затем файл и символ — без опоры на индексацию. */
-function compareAutoImportCandidates(
-    left: IIndexedSymbol,
-    right: IIndexedSymbol
-): number {
-    const byName = normalizeIdentifier(left.symbol.name)
-        .localeCompare(normalizeIdentifier(right.symbol.name));
-
-    if (byName !== 0) {
-        return byName;
-    }
-
-    const byUri = left.uri.localeCompare(right.uri);
-
-    return byUri !== 0 ? byUri : left.symbolId.localeCompare(right.symbolId);
+/**
+ * Строка списка для кандидата.
+ *
+ * У загруженной модели есть готовый элемент подсказки — с подписью,
+ * заготовкой параметров и документацией. У записи каталога их нет: он
+ * помнит имя, вид и место. Подробности дополнит completionItem/resolve —
+ * он и без того загружает модуль, чтобы построить правку Import.
+ */
+function autoImportSource(candidate: IRslProjectSymbol): CompletionItem {
+    return candidate.symbol
+        ? candidate.symbol.completionItem
+        : { label: candidate.name, kind: candidate.kind };
 }
 
 /**

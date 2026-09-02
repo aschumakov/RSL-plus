@@ -813,6 +813,24 @@ export class WorkspaceIndex {
             symbol;
     }
 
+    /**
+     * Диапазон объявления по его межфайловой идентичности.
+     *
+     * Пусто, если модели файла в памяти нет или объявления в ней больше
+     * не осталось: тогда спрашивающий берёт то, что помнит каталог.
+     */
+    getDefinitionRangeByRef(
+        ref: IRslSymbolRef
+    ): IExternalLocationRange | undefined {
+        const module = this.modules.get(ref.uri);
+        const symbol = module &&
+            findRslSymbolById(module.symbolTree, ref.symbolId);
+
+        return symbol
+            ? module.definitionRanges?.get(symbol)
+            : undefined;
+    }
+
     /** Актуальный объект по межфайловой идентичности. */
     resolveSymbolRef(ref: IRslSymbolRef): RslSymbol | undefined {
         const module = this.modules.get(ref.uri);
