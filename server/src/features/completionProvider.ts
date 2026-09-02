@@ -35,6 +35,7 @@ import {
     buildRslContextCompletions,
     buildRslImportContextCompletions
 } from "./contextCompletionProvider";
+import { RslTypeEngine } from "../analysis/typeEngine";
 import {
     completionPrefixAt,
     rankCompletionItemsForPrefix
@@ -72,6 +73,13 @@ export class RslCompletionProvider {
     private defaultCompletionItems = getDefaults().completionItems;
     private completionTransport = new CompletionTransport();
     private completionSessions = new CompletionSessionCache();
+    /**
+     * Слой типов: заводится один раз и ничего не считает заранее.
+     *
+     * Ответы он запоминает на объект модуля, поэтому общий экземпляр
+     * устаревших данных не отдаёт.
+     */
+    private typeEngineValue: RslTypeEngine | undefined;
 
     constructor(
         private environment: IRslLanguageFeatureEnvironment,
@@ -265,6 +273,17 @@ export class RslCompletionProvider {
      * растут по мере фонового чтения, и пока они те же — новых сведений нет, а
      * значит и пересобирать открытый список не из чего.
      */
+    private typeEngine(): RslTypeEngine {
+        if (!this.typeEngineValue) {
+            this.typeEngineValue = new RslTypeEngine(
+                this.environment.index,
+                this.environment.resolver
+            );
+        }
+
+        return this.typeEngineValue;
+    }
+
     private knowledgeRevision(uri: string): string {
         const { index, resolver } = this.environment;
 
@@ -340,13 +359,27 @@ export class RslCompletionProvider {
             wordStart: offset - prefix.length,
             knowledge: this.knowledgeRevision(document.uri)
         };
+        /*
+         * Ожидаемый тип — только там, где есть полная модель.
+         *
+         * Быстрый путь работает по снимку без резолвера, и ждать модель
+         * ради порядка списка нельзя: подсказка обязана ответить сразу.
+         * Без типа порядок остаётся прежним.
+         */
+        const expectedType = module
+            ? this.typeEngine().expectedTypeAt(document.uri, offset)
+            : "";
         const contextMs = performance.now() - contextStartedMs;
         const cached = this.completionSessions.get(sessionKey);
 
         if (cached) {
             return {
                 list: this.completionTransport.prepare(
-                    rankCompletionItemsForPrefix(cached.candidates, prefix),
+                    rankCompletionItemsForPrefix(
+                        cached.candidates,
+                        prefix,
+                        { expectedType }
+                    ),
                     { incomplete: cached.incomplete, sessionId: cached.key }
                 ),
                 fields: {
@@ -403,7 +436,7 @@ export class RslCompletionProvider {
 
         return {
             list: this.completionTransport.prepare(
-                rankCompletionItemsForPrefix(candidates, prefix),
+                rankCompletionItemsForPrefix(candidates, prefix, { expectedType }),
                 {
                     incomplete,
                     sessionId: session

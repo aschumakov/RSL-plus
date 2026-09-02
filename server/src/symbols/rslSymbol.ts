@@ -122,6 +122,20 @@ export class RslSymbol {
         return undefined;
     }
 
+    /**
+     * Тип, которым это объявление годится в выражение.
+     *
+     * У переменной — её тип, у процедуры — тип результата, у класса —
+     * его собственное имя: `TBFile()` даёт TBFile.
+     */
+    get completionType(): string {
+        if (this.kind === CompletionItemKind.Class) {
+            return normalizeIdentifier(this.name);
+        }
+
+        return normalizeIdentifier(this.typeName || "");
+    }
+
     get completionItem(): CompletionItem {
         const kindName = completionKindName(this.kind);
         let detail: string;
@@ -166,7 +180,11 @@ export class RslSymbol {
             kind: this.kind,
             detail,
             insertText: snippet || (callable ? `${this.name}()` : this.name),
-            data: { symbolId: this.id }
+            /*
+             * Тип кандидата нужен ранжированию по ожидаемому типу.
+             * У процедуры это тип результата, у класса — он сам.
+             */
+            data: { symbolId: this.id, rslType: this.completionType }
         };
     }
 }

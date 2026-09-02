@@ -14,6 +14,18 @@ export function completionPrefixAt(source: string, offset: number): string {
 
 export interface IRslCompletionRankingOptions {
     /**
+     * Тип, уместный в этом месте.
+     *
+     * Это ВЕС, а не фильтр: подходящие по типу поднимаются выше
+     * равных им по совпадению имени, но никто не пропадает. Тип
+     * выводится не всегда и не обязан быть верным во всех случаях —
+     * отбрасывать по нему кандидатов значило бы прятать нужное имя
+     * из-за неточного вывода.
+     *
+     * Пусто, если тип неизвестен: тогда порядок прежний.
+     */
+    expectedType?: string;
+    /**
      * Отбрасывать нерелевантные элементы.
      *
      * Полный список, помеченный `isIncomplete: false`, отбрасывать нельзя:
@@ -38,6 +50,7 @@ export function rankCompletionItemsForPrefix(
     options: IRslCompletionRankingOptions = {}
 ): CompletionItem[] {
     const normalizedPrefix = normalizeIdentifier(prefix);
+    const expectedType = normalizeIdentifier(options.expectedType || "");
     const filterIrrelevant = options.dropIrrelevant === true &&
         normalizedPrefix.length >= 2;
     const ranked: CompletionItem[] = [];
@@ -51,7 +64,7 @@ export function rankCompletionItemsForPrefix(
         ranked.push({
             ...item,
             filterText: item.filterText || label,
-            sortText: stableSortText(item, score, label)
+            sortText: stableSortText(item, score, label, expectedType)
         });
     }
 
@@ -150,17 +163,35 @@ function isSubsequence(needle: string, haystack: string): boolean {
 function stableSortText(
     item: CompletionItem,
     score: number,
-    label: string
+    label: string,
+    expectedType: string
 ): string {
     const own = item.sortText || "7";
     const detail = typeof item.detail === "string" ? item.detail : "";
 
     return [
         score,
+        typeRank(item, expectedType),
         own,
         normalizeIdentifier(label),
         item.kind ?? 0,
         normalizeIdentifier(detail).slice(0, 40),
         completionOrigin(item)
     ].join("_");
+}
+
+/**
+ * Подходит ли кандидат по типу: 0 — да, 1 — неизвестно или нет.
+ *
+ * Стоит сразу после совпадения имени и перед всем остальным: среди
+ * одинаково совпавших по имени первым идёт тот, чей тип уместен здесь.
+ */
+function typeRank(item: CompletionItem, expectedType: string): number {
+    if (!expectedType) {
+        return 0;
+    }
+
+    const data = item.data as { rslType?: string } | undefined;
+
+    return data?.rslType && data.rslType === expectedType ? 0 : 1;
 }
