@@ -20,9 +20,16 @@ export interface IRslProjectConfig {
     exclude: string[];
     /** Где лежат заглушки внешних модулей. */
     stubPaths: string[];
-    /** Диалект языка; пока читается, но поведения не меняет. */
-    dialect: string;
 }
+
+/*
+ * Чего здесь нет — поля dialect.
+ *
+ * Оно было в первой версии настройки: читалось, проверялось и не
+ * меняло ровно ничего. Публичная настройка, которая молча ничего не
+ * делает, хуже её отсутствия — пользователь пишет её и ждёт эффекта.
+ * Вернём, когда появится сама поддержка диалектов.
+ */
 
 export interface IRslProjectConfigResult {
     config: IRslProjectConfig;
@@ -39,8 +46,7 @@ export const RSL_PROJECT_CONFIG_NAME = ".rslplus.json";
 const KNOWN_FIELDS = new Set([
     "moduleRoots",
     "exclude",
-    "stubPaths",
-    "dialect"
+    "stubPaths"
 ]);
 
 /** Умолчания: ровно нынешнее поведение. */
@@ -48,8 +54,7 @@ export function defaultRslProjectConfig(): IRslProjectConfig {
     return {
         moduleRoots: [],
         exclude: [],
-        stubPaths: [],
-        dialect: ""
+        stubPaths: []
     };
 }
 
@@ -124,7 +129,6 @@ export function parseRslProjectConfig(
     config.moduleRoots = readStrings(record, "moduleRoots", problems);
     config.exclude = readStrings(record, "exclude", problems);
     config.stubPaths = readStrings(record, "stubPaths", problems);
-    config.dialect = readString(record, "dialect", problems);
 
     return { config, found: true, filePath, problems };
 }
@@ -233,26 +237,6 @@ function readStrings(
     }
 
     return result;
-}
-
-function readString(
-    record: Record<string, unknown>,
-    key: string,
-    problems: string[]
-): string {
-    const value = record[key];
-
-    if (value === undefined) {
-        return "";
-    }
-
-    if (typeof value !== "string") {
-        problems.push(key + ": ожидалась строка");
-
-        return "";
-    }
-
-    return value.trim();
 }
 
 function readText(filePath: string): string | undefined {

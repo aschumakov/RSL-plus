@@ -1,10 +1,14 @@
 import { InteractiveActivityGate } from "../core/interactiveActivityGate";
 import {
     defaultRslProjectConfig,
-    isExcludedByRslConfig,
     readRslProjectConfig,
     type IRslProjectConfig
 } from "../config/projectConfig";
+import {
+    createDefaultRslSearchPolicy,
+    createRslSearchPolicy,
+    type IRslSearchPolicy
+} from "../config/searchPolicy";
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
@@ -55,6 +59,15 @@ export class WorkspaceFileDiscoveryService {
      * прежнее поведение обхода.
      */
     private projectConfig: IRslProjectConfig = defaultRslProjectConfig();
+    /**
+     * Где искать модули: одно правило на обход и адресный поиск.
+     *
+     * Без неё эти два пути расходились: обход учитывал exclude, а
+     * адресный поиск шёл по диску своим ходом — и один и тот же
+     * Import разрешался по-разному до и после построения каталога.
+     */
+    private policy: IRslSearchPolicy =
+        createDefaultRslSearchPolicy([]);
 
     constructor(private options: IWorkspaceFileDiscoveryOptions) {
         this.initialDelayMs = Math.max(0, options.initialDelayMs ?? 2000);
@@ -83,27 +96,13 @@ export class WorkspaceFileDiscoveryService {
         const answer = readRslProjectConfig(roots);
 
         this.projectConfig = answer.config;
+        this.policy = createRslSearchPolicy(roots, answer.config);
 
         for (const problem of answer.problems) {
             this.options.log(
                 "Настройка проекта: " + problem +
                 (answer.filePath ? " (" + answer.filePath + ")" : "")
             );
-        }
-
-        const extra = [
-            ...answer.config.moduleRoots,
-            ...answer.config.stubPaths
-        ];
-
-        for (const root of roots) {
-            for (const item of extra) {
-                const full = path.resolve(root, item);
-
-                if (!this.roots.has(rootKey(full))) {
-                    this.roots.set(rootKey(full), full);
-                }
-            }
         }
     }
 
@@ -114,7 +113,38 @@ export class WorkspaceFileDiscoveryService {
 
     /** Корни проекта: их же обходит адресный поиск по имени модуля. */
     rootPaths(): string[] {
-        return [...this.roots.values()];
+        return [...this.policy.searchRoots];
+    }
+
+    /** Политика поиска: её спрашивает и адресный resolver. */
+    searchPolicy(): IRslSearchPolicy {
+        return this.policy;
+    }
+
+    /**
+     * Перечитать настройку проекта и перестроить обход.
+     *
+     * Правка `.rslplus.json` меняет область поиска модулей, и требовать
+     * ради неё перезапуска редактора незачем. Сам обход при этом не
+     * запускается сразу: он встаёт в обычную отложенную очередь и
+     * уступает правке — см. schedule и InteractiveActivityGate.
+     *
+     * Возвращает true, если политика действительно изменилась: заново
+     * обходить проект из-за сохранения без правок незачем.
+     */
+    reloadProjectConfig(): boolean {
+        const roots = [...this.roots.values()];
+        const before = describeConfig(roots, this.projectConfig);
+
+        this.applyProjectConfig();
+
+        if (describeConfig(roots, this.projectConfig) === before) {
+            return false;
+        }
+
+        this.restart();
+
+        return true;
     }
 
     updateWorkspaceFolders(
@@ -191,7 +221,7 @@ export class WorkspaceFileDiscoveryService {
                 for (const entry of entries) {
                     const full = path.join(directory, entry.name);
 
-                    if (this.isExcluded(full)) {
+                    if (this.policy.isExcluded(full)) {
                         continue;
                     }
 
@@ -226,24 +256,6 @@ export class WorkspaceFileDiscoveryService {
         }
     }
 
-    /** Исключён ли путь шаблонами настройки проекта. */
-    private isExcluded(fullPath: string): boolean {
-        const patterns = this.projectConfig.exclude;
-
-        if (patterns.length === 0) {
-            return false;
-        }
-
-        for (const root of this.roots.values()) {
-            const relative = path.relative(root, fullPath);
-
-            if (relative && !relative.startsWith("..")) {
-                return isExcludedByRslConfig(relative, patterns);
-            }
-        }
-
-        return false;
-    }
 
     private async waitForInteractiveWindow(generation: number): Promise<void> {
         while (
@@ -260,6 +272,26 @@ function rootMap(roots: readonly string[]): Map<string, string> {
 }
 
 /** Ключ одинаковости корня: регистр значим только для сравнения. */
+/**
+ * Слепок настройки: по нему видно, изменилось ли что-то по существу.
+ *
+ * Сравнивается сама настройка, а не политика: у политики исключения живут
+ * в замыкании, и по объекту не видно, поменялись ли шаблоны. А поменяться
+ * они могут в одиночку — при тех же корнях, — и тогда уже найденные файлы
+ * обязаны перестать находиться.
+ */
+function describeConfig(
+    roots: readonly string[],
+    config: IRslProjectConfig
+): string {
+    return JSON.stringify({
+        roots: [...roots].sort(),
+        moduleRoots: [...config.moduleRoots].sort(),
+        exclude: [...config.exclude].sort(),
+        stubPaths: [...config.stubPaths].sort()
+    });
+}
+
 function rootKey(value: string): string {
     const resolved = path.resolve(value);
 

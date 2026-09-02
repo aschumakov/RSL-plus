@@ -52,15 +52,13 @@ test("полная настройка читается", () => {
     const answer = parseRslProjectConfig(JSON.stringify({
         moduleRoots: ["macro", "custom"],
         exclude: ["archive/**", "old/**"],
-        stubPaths: [".rslplus/stubs"],
-        dialect: "rsBank"
+        stubPaths: [".rslplus/stubs"]
     }));
 
     assert.deepStrictEqual(answer.problems, []);
     assert.deepStrictEqual(answer.config.moduleRoots, ["macro", "custom"]);
     assert.deepStrictEqual(answer.config.exclude, ["archive/**", "old/**"]);
     assert.deepStrictEqual(answer.config.stubPaths, [".rslplus/stubs"]);
-    assert.strictEqual(answer.config.dialect, "rsBank");
 });
 
 test("пустой объект даёт умолчания", () => {
@@ -97,14 +95,29 @@ test("сломанный JSON не проходит молча", () => {
 
 test("неверный тип поля называется", () => {
     const answer = parseRslProjectConfig(JSON.stringify({
-        exclude: "archive/**",
-        dialect: 5
+        exclude: "archive/**"
     }));
 
     assert.deepStrictEqual(answer.problems, [
-        "exclude: ожидался список строк",
-        "dialect: ожидалась строка"
+        "exclude: ожидался список строк"
     ]);
+});
+
+test("dialect больше не публичная настройка", () => {
+    /*
+     * Поле читалось, проверялось и не меняло ровно ничего. Публичная
+     * настройка, которая молча ничего не делает, хуже её отсутствия:
+     * пользователь пишет её и ждёт эффекта. Теперь про неё сказано как
+     * про любое неизвестное поле.
+     */
+    const answer = parseRslProjectConfig(JSON.stringify({
+        dialect: "rsBank"
+    }));
+
+    assert.deepStrictEqual(
+        answer.problems,
+        ["Неизвестное поле: dialect"]
+    );
 });
 
 const PATTERNS = ["archive/**", "old/**", "*.bak.mac"];

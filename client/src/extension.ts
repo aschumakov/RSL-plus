@@ -340,13 +340,24 @@ export function activate(context: ExtensionContext): void {
      */
     const editorConfigWatcher =
         workspace.createFileSystemWatcher("**/.editorconfig");
+    /*
+     * Настройка проекта тоже наблюдается: она задаёт область поиска
+     * модулей, и её правка обязана действовать сразу, а не после
+     * перезапуска редактора.
+     */
+    const projectConfigWatcher =
+        workspace.createFileSystemWatcher("**/.rslplus.json");
     const performanceLogFile = readSetting(
         "performance.logFile",
         ""
     ).trim();
     const initialSettings = readRslSettings();
 
-    context.subscriptions.push(macroFileWatcher, editorConfigWatcher);
+    context.subscriptions.push(
+        macroFileWatcher,
+        editorConfigWatcher,
+        projectConfigWatcher
+    );
 
     const clientOptions: LanguageClientOptions = {
         documentSelector: [
@@ -356,7 +367,11 @@ export function activate(context: ExtensionContext): void {
             }
         ],
         synchronize: {
-            fileEvents: [macroFileWatcher, editorConfigWatcher]
+            fileEvents: [
+                macroFileWatcher,
+                editorConfigWatcher,
+                projectConfigWatcher
+            ]
         },
         middleware: {
             provideDocumentSymbols: async (document, token, next) => {

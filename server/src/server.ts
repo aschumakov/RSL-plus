@@ -623,6 +623,13 @@ const moduleFileResolver = new WorkspaceModuleResolver({
         workspaceFilesReady: () => workspaceIndex.workspaceFilesReady
     },
     roots: () => workspaceDiscovery.rootPaths(),
+    /*
+     * Исключения — та же политика, что у обхода состава проекта.
+     *
+     * Иначе адресный поиск нашёл бы файл, исключённый настройкой, и один и
+     * тот же Import разрешался бы по-разному до и после построения каталога.
+     */
+    isExcluded: full => workspaceDiscovery.searchPolicy().isExcluded(full),
     log: logMessage
 });
 
@@ -1091,6 +1098,25 @@ async function handleWatchedFileChange(
 ): Promise<void> {
     if (/\.editorconfig$/iu.test(uri)) {
         languageFeatures.invalidateEditorConfig();
+
+        return;
+    }
+
+    /*
+     * Настройка проекта: перечитать и обновить область поиска.
+     *
+     * Требовать перезапуска редактора ради правки `.rslplus.json`
+     * незачем. Работа отложенная: сам обход состава встаёт в обычную
+     * очередь и уступает правке, а здесь только сбрасывается то, что
+     * могло быть найдено по прежним правилам.
+     */
+    if (/\.rslplus\.json$/iu.test(uri)) {
+        if (workspaceDiscovery.reloadProjectConfig()) {
+            moduleFileResolver.invalidate();
+            logMessage(
+                "Настройка проекта перечитана: область поиска обновлена"
+            );
+        }
 
         return;
     }

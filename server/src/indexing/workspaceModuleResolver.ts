@@ -132,6 +132,15 @@ export interface IWorkspaceModuleResolverOptions {
     catalog: IRslModuleCatalog;
     /** Корни проекта; спрашиваются каждый раз: их могут добавить и убрать. */
     roots(): readonly string[];
+    /**
+     * Исключён ли путь настройкой проекта.
+     *
+     * Спрашивается та же политика, что и у обхода состава. Без этого
+     * адресный поиск находил файл, исключённый настройкой, и один и
+     * тот же Import разрешался по-разному до и после построения
+     * каталога.
+     */
+    isExcluded?(fullPath: string): boolean;
     log?(message: string): void;
 }
 
@@ -246,15 +255,21 @@ export class WorkspaceModuleResolver {
         const startedAt = this.generation;
         const found: string[] = [];
 
+        const isExcluded = this.options.isExcluded ?? (() => false);
+
         for (const root of this.options.roots()) {
             /* Прямое попадание по пути из имени: без обхода вовсе. */
             const direct = path.resolve(root, target.replace(/\//g, path.sep));
 
-            if (isPathInsideRoot(root, direct) && await isFile(direct)) {
+            if (
+                isPathInsideRoot(root, direct) &&
+                !isExcluded(direct) &&
+                await isFile(direct)
+            ) {
                 found.push(direct);
             }
 
-            await collectMatches(root, target, root, found);
+            await collectMatches(root, target, root, found, isExcluded);
         }
 
         /*
@@ -297,7 +312,14 @@ async function collectMatches(
     directory: string,
     target: string,
     root: string,
-    found: string[]
+    found: string[],
+    /*
+     * Исключения настройки проекта: та же политика, что у обхода
+     * состава. Иначе адресный поиск нашёл бы файл, который настройка
+     * исключила, и один и тот же Import разрешался бы по-разному до и
+     * после построения каталога.
+     */
+    isExcluded: (fullPath: string) => boolean
 ): Promise<void> {
     let entries: fs.Dirent[];
 
@@ -324,6 +346,10 @@ async function collectMatches(
 
         const candidate = path.join(directory, entry.name);
 
+        if (isExcluded(candidate)) {
+            continue;
+        }
+
         if (!found.includes(candidate)) {
             found.push(candidate);
         }
@@ -334,12 +360,13 @@ async function collectMatches(
             continue;
         }
 
-        await collectMatches(
-            path.join(directory, entry.name),
-            target,
-            root,
-            found
-        );
+        const child = path.join(directory, entry.name);
+
+        if (isExcluded(child)) {
+            continue;
+        }
+
+        await collectMatches(child, target, root, found, isExcluded);
     }
 }
 
