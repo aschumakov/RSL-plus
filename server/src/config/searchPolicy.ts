@@ -1,5 +1,7 @@
 import * as path from "path";
 
+import { samePath } from "../core/identity/uriKey";
+
 import {
     compileRslExcludePatterns,
     matchesRslExcludePatterns,
@@ -245,9 +247,7 @@ export function collapseRoots(values: readonly string[]): string[] {
 }
 
 function sameRoot(left: string, right: string): boolean {
-    return process.platform === "win32"
-        ? left.toLowerCase() === right.toLowerCase()
-        : left === right;
+    return samePath(left, right);
 }
 
 function isInside(relative: string): boolean {

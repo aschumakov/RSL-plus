@@ -11,6 +11,7 @@ import {
 } from "../config/searchPolicy";
 import * as fs from "fs";
 import * as path from "path";
+import { filePathKey } from "../core/identity/uriKey";
 import { fileURLToPath, pathToFileURL } from "url";
 
 import type { InitializeParams, WorkspaceFolder } from "vscode-languageserver/node";
@@ -302,10 +303,9 @@ function describeConfig(
     });
 }
 
+/** Ключ одинаковости корня: правило платформы одно на весь сервер. */
 function rootKey(value: string): string {
-    const resolved = path.resolve(value);
-
-    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+    return filePathKey(path.resolve(value));
 }
 
 function uriToPath(uri: string): string | undefined {

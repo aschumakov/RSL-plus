@@ -1,5 +1,12 @@
 import * as path from "path";
-import { fileURLToPath } from "url";
+
+/*
+ * Путь URI считает общий модуль идентичности.
+ *
+ * Здесь была своя копия того же правила, и разойтись они могли незаметно:
+ * сканер ссылок сравнивает те же файлы, что и индекс модулей.
+ */
+import { uriPathKey as normalizeUriPath } from "../core/identity/uriKey";
 
 import {
     normalizeReferenceImports,
@@ -83,10 +90,4 @@ function resolveImportedUris(
     return exact.length > 0 ? exact : candidates.slice();
 }
 
-function normalizeUriPath(uri: string): string {
-    try {
-        return fileURLToPath(uri).replace(/\\/g, "/").toLowerCase();
-    } catch (_error) {
-        return uri.replace(/\\/g, "/").toLowerCase();
-    }
-}
+

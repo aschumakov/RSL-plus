@@ -6,6 +6,7 @@ import {
 import {
     GetImportDefinitionTargetsFromTokens
 } from "../execMacroDefinition";
+import { sameUri } from "../core/identity/uriKey";
 import { rangeInModule } from "../core/documentPosition";
 import type { Range } from "vscode-languageserver";
 import { normalizeIdentifier } from "../lexer";
@@ -239,10 +240,6 @@ function collectDependents(
     }));
 }
 
-/** Один ли это файл: регистр пути на Windows значения не имеет. */
-function sameUri(left: string, right: string): boolean {
-    return left === right || left.toLowerCase() === right.toLowerCase();
-}
 
 /**
  * Точное место, где написан Import этого модуля.

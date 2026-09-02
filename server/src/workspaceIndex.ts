@@ -19,6 +19,11 @@ import { WorkspaceCatalog } from "./indexing/workspaceCatalog";
 import { ImportGraph } from "./indexing/importGraph";
 import { computeRslModuleInterface } from "./indexing/moduleInterface";
 import { ModuleStore } from "./indexing/moduleStore";
+import {
+    moduleBaseNameOfUri,
+    moduleIdOf
+} from "./core/identity/uriKey";
+import { rslModuleBaseName } from "./core/language/moduleName";
 import { SymbolIndex } from "./indexing/symbolIndex";
 import type {
     IIndexedModule,
@@ -336,9 +341,14 @@ export class WorkspaceIndex {
                 const imported = this.findModuleByName(name);
 
                 if (!imported) {
-                    this.pinnedWantedNames.add(normalizeName(
-                        withMacExtension(name)
-                    ));
+                    /*
+                     * Базовое имя, а не написание с путём. Написание
+                     * `Import sub\lib` сравнивалось с именем файла
+                     * `lib.mac` и не совпадало никогда: такой модуль
+                     * не попадал в закрепление, даже когда его
+                     * дочитывали.
+                     */
+                    this.pinnedWantedNames.add(rslModuleBaseName(name));
                     continue;
                 }
 
@@ -542,7 +552,7 @@ export class WorkspaceIndex {
         }
 
         return (this.modules.get(uri)?.imports || [])
-            .map(name => normalizeName(name))
+            .map(name => moduleIdOf(name) as string)
             .sort()
             .join(",");
     }
@@ -863,7 +873,7 @@ export class WorkspaceIndex {
             /* У закреплённого модуля появились новые зависимости. */
             (this.pinnedModules.has(uri) && importsChanged) ||
             /* Загрузился модуль, которого замыканию не хватало. */
-            this.pinnedWantedNames.has(normalizeName(moduleNameOfUri(uri)))
+            this.pinnedWantedNames.has(moduleBaseNameOfUri(uri))
         ) {
             this.refreshPinnedModules();
         }
@@ -1065,25 +1075,22 @@ function normalizeName(value: string): string {
     return (value || "").toLowerCase();
 }
 
-/** Имя файла модуля по его URI: то же правило, что и у каталога проекта. */
-function moduleNameOfUri(uri: string): string {
-    const at = uri.lastIndexOf("/");
 
-    return at < 0 ? uri : uri.slice(at + 1);
-}
 
-/** Имя с расширением: в Import его пишут не всегда. */
-function withMacExtension(name: string): string {
-    const value = (name || "").trim();
-
-    return /\.mac$/i.test(value) ? value : value + ".mac";
-}
 
 /**
  * Один ли и тот же набор Import.
  *
- * Сравниваются нормализованные имена как множества: порядок в тексте роли не
- * играет, а тождество массивов меняется на каждую правку файла.
+ * Сравниваются КАНОНИЧЕСКИЕ имена — те же, по которым разрешаются ссылки:
+ * разделитель пути, регистр и расширение `.mac` в RSL не значимы. Прежде
+ * здесь стоял простой toLowerCase, и `Import lib` с `Import lib.mac`
+ * считались разными наборами. Дописать в директиве расширение значило
+ * снять и поставить рёбра Import-графа, пересчитать закрепление и сбросить
+ * Import-контекст всем зависимым — при том, что зависимость та же самая.
+ *
+ * Порядок в тексте роли не играет: сравниваются множества. Повторы —
+ * играют по числу элементов, но `Import lib; Import lib;` и без того
+ * ошибка, о которой сообщает отдельная диагностика.
  */
 function sameImportSet(
     left: readonly string[] | undefined,
@@ -1093,11 +1100,18 @@ function sameImportSet(
         return right.length === 0;
     }
 
-    if (left.length !== right.length) {
+    const known = new Set(left.map(name => moduleIdOf(name) as string));
+    const wanted = new Set(right.map(name => moduleIdOf(name) as string));
+
+    if (known.size !== wanted.size) {
         return false;
     }
 
-    const known = new Set(left.map(normalizeName));
+    for (const name of wanted) {
+        if (!known.has(name)) {
+            return false;
+        }
+    }
 
-    return right.every(name => known.has(normalizeName(name)));
+    return true;
 }

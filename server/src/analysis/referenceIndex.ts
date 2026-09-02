@@ -8,6 +8,7 @@ import {
     type IReferenceImportModule
 } from "./referenceImportGraph";
 import { contentFingerprint } from "./contentFingerprint";
+import { uriKey, type UriKey } from "../core/identity/uriKey";
 import {
     RslRequestSourceCache,
     type IRslReadSource
@@ -62,6 +63,13 @@ export interface IReferenceIndexOptions {
 }
 
 interface IReferenceFileEntry {
+    /**
+     * Написание URI, по которому файл открывают.
+     *
+     * Ключом карты служит идентичность файла, а она не URI: по ней нельзя ни
+     * перейти, ни записать её в хранилище.
+     */
+    uri: string;
     /** Отпечаток содержимого, по которому запись считается актуальной. */
     fingerprint: string;
     hashes: Uint32Array;
@@ -96,8 +104,20 @@ interface ISerializedIndex {
  * точная проверка имени в исходнике.
  */
 export class ReferenceIndex {
-    private entries = new Map<string, IReferenceFileEntry>();
-    private workspaceUris = new Set<string>();
+    /*
+     * Ключ — идентичность файла, а не сырая строка URI.
+     *
+     * Один и тот же файл приходит сюда двумя путями: от наблюдателя за
+     * файлами и от компактного чтения, — и написание URI у них совпадает
+     * не всегда. По строке это были две записи: одна сверенная, другая
+     * восстановленная из хранилища, и какая ответит первой, зависело от
+     * порядка обхода.
+     *
+     * Исходный URI хранится в самой записи: наружу нужно написание, по
+     * которому можно открыть файл, а не ключ сравнения.
+     */
+    private entries = new Map<UriKey, IReferenceFileEntry>();
+    private workspaceUris = new Map<UriKey, string>();
     private cacheFilePath: string | undefined;
     private saveTimer: NodeJS.Timeout | undefined;
     /* Одна запись одновременно: у отложенной и явной один временный файл. */
@@ -125,14 +145,23 @@ export class ReferenceIndex {
     }
 
     retainWorkspaceFiles(uris: readonly string[]): void {
-        const retained = new Set(uris.filter(uri => !!uri));
+        const retained = new Map<UriKey, string>();
+
+        for (const uri of uris) {
+            if (uri) {
+                retained.set(uriKey(uri), uri);
+            }
+        }
+
         const catalogChanged = retained.size !== this.workspaceUris.size ||
-            Array.from(retained).some(uri => !this.workspaceUris.has(uri));
+            Array.from(retained.keys()).some(
+                key => !this.workspaceUris.has(key)
+            );
         let changed = false;
 
-        for (const uri of this.entries.keys()) {
-            if (!retained.has(uri)) {
-                this.entries.delete(uri);
+        for (const key of this.entries.keys()) {
+            if (!retained.has(key)) {
+                this.entries.delete(key);
                 changed = true;
             }
         }
@@ -148,7 +177,7 @@ export class ReferenceIndex {
 
     invalidate(uri: string): void {
         this.importGraphValidated = false;
-        if (this.entries.delete(uri)) {
+        if (this.entries.delete(uriKey(uri))) {
             this.scheduleSave();
         }
     }
@@ -174,13 +203,14 @@ export class ReferenceIndex {
             return;
         }
 
-        const existing = this.entries.get(uri);
+        const existing = this.entries.get(uriKey(uri));
 
         if (existing?.validated && existing.fingerprint === fingerprint) {
             return;
         }
 
-        this.entries.set(uri, {
+        this.entries.set(uriKey(uri), {
+            uri,
             fingerprint,
             hashes,
             imports: normalizeReferenceImports(imports),
@@ -209,7 +239,7 @@ export class ReferenceIndex {
         }
 
         const fingerprint = contentFingerprint(source);
-        const existing = this.entries.get(uri);
+        const existing = this.entries.get(uriKey(uri));
 
         /*
          * Сравнивается отпечаток содержимого, а не дата с размером: правка,
@@ -222,7 +252,8 @@ export class ReferenceIndex {
         }
 
         const facts = scanReferenceSource(source, imports);
-        this.entries.set(uri, {
+        this.entries.set(uriKey(uri), {
+            uri,
             fingerprint,
             hashes: facts.hashes,
             imports: facts.imports,
@@ -261,8 +292,8 @@ export class ReferenceIndex {
 
         return buildReferenceCandidateUris(
             declarationUri,
-            Array.from(this.entries, ([uri, entry]) => ({
-                uri,
+            Array.from(this.entries.values(), entry => ({
+                uri: entry.uri,
                 imports: entry.imports
             })),
             allUris,
@@ -383,7 +414,7 @@ export class ReferenceIndex {
             return undefined;
         }
 
-        let entry = this.entries.get(uri);
+        let entry = this.entries.get(uriKey(uri));
 
         /*
          * Файл не читается только по СВЕРЕННОЙ записи.
@@ -427,7 +458,7 @@ export class ReferenceIndex {
         if (!entry || entry.fingerprint !== read.fingerprint) {
             /* Содержимое разошлось с записью — пересканируем. */
             this.indexSource(uri, source, {});
-            entry = this.entries.get(uri);
+            entry = this.entries.get(uriKey(uri));
         } else if (!entry.validated) {
             entry.validated = true;
         }
@@ -466,14 +497,16 @@ export class ReferenceIndex {
             return false;
         }
 
-        const loadedUris = new Set(loadedModules.map(module => module.uri));
+        const loadedUris = new Set(
+            loadedModules.map(module => uriKey(module.uri))
+        );
 
         for (const uri of uris) {
-            if (loadedUris.has(uri)) {
+            if (loadedUris.has(uriKey(uri))) {
                 continue;
             }
 
-            if (!this.entries.get(uri)?.validated) {
+            if (!this.entries.get(uriKey(uri))?.validated) {
                 return false;
             }
         }
@@ -505,7 +538,7 @@ export class ReferenceIndex {
 
                 if (
                     this.workspaceUris.size > 0 &&
-                    !this.workspaceUris.has(item.uri)
+                    !this.workspaceUris.has(uriKey(item.uri))
                 ) {
                     continue;
                 }
@@ -520,8 +553,9 @@ export class ReferenceIndex {
                     continue;
                 }
 
-                if (!this.entries.has(item.uri)) {
-                    this.entries.set(item.uri, {
+                if (!this.entries.has(uriKey(item.uri))) {
+                    this.entries.set(uriKey(item.uri), {
+                        uri: item.uri,
                         fingerprint: item.fingerprint,
                         hashes,
                         imports: normalizeReferenceImports(item.imports || [])
@@ -561,13 +595,13 @@ export class ReferenceIndex {
         }
 
         const files: ISerializedEntry[] = [];
-        for (const [uri, entry] of this.entries) {
-            if (this.workspaceUris.size > 0 && !this.workspaceUris.has(uri)) {
+        for (const [key, entry] of this.entries) {
+            if (this.workspaceUris.size > 0 && !this.workspaceUris.has(key)) {
                 continue;
             }
 
             files.push({
-                uri,
+                uri: entry.uri,
                 fingerprint: entry.fingerprint,
                 hashes: encodeHashes(entry.hashes),
                 imports: entry.imports.slice()
