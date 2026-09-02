@@ -11,7 +11,7 @@ import type { IRslToken } from "../lexer";
 import type { RslScopeResolver } from "../scopeResolver";
 import type { IIndexedModule } from "../workspaceIndex";
 
-interface ICallContext {
+export interface ICallContext {
     callee: IRslToken;
     activeParameter: number;
 }
