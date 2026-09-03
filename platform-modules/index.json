@@ -1,441 +1,462 @@
 {
- "version": 3,
- "modules": {
-  "AcquirerObjects": {
-   "file": "acquirerobjects.json",
-   "classes": 26,
-   "procedures": 0,
-   "constants": 0
-  },
-  "BankInter": {
-   "file": "bankinter.json",
-   "classes": 30,
-   "procedures": 244,
-   "constants": 377,
-   "dependencies": [
-    "AcquirerObjects",
-    "PaymInter"
-   ]
-  },
-  "BilFacturaInter": {
-   "file": "bilfacturainter.json",
-   "classes": 1,
-   "procedures": 6,
-   "constants": 5
-  },
-  "BookInter": {
-   "file": "bookinter.json",
-   "classes": 0,
-   "procedures": 5,
-   "constants": 0
-  },
-  "calendar": {
-   "file": "calendar.json",
-   "classes": 0,
-   "procedures": 23,
-   "constants": 7
-  },
-  "CarryDoc": {
-   "file": "carrydoc.json",
-   "classes": 0,
-   "procedures": 2,
-   "constants": 0
-  },
-  "CashInter": {
-   "file": "cashinter.json",
-   "classes": 0,
-   "procedures": 5,
-   "constants": 0
-  },
-  "CommonInter": {
-   "file": "commoninter.json",
-   "classes": 22,
-   "procedures": 198,
-   "constants": 0,
-   "dependencies": [
-    "AcquirerObjects"
-   ]
-  },
-  "cryptdlm": {
-   "file": "cryptdlm.json",
-   "classes": 2,
-   "procedures": 0,
-   "constants": 0
-  },
-  "CTInter": {
-   "file": "ctinter.json",
-   "classes": 5,
-   "procedures": 35,
-   "constants": 640
-  },
-  "CurrInter": {
-   "file": "currinter.json",
-   "classes": 0,
-   "procedures": 13,
-   "constants": 0
-  },
-  "DealsInter": {
-   "file": "dealsinter.json",
-   "classes": 2,
-   "procedures": 23,
-   "constants": 163
-  },
-  "DeposInter": {
-   "file": "deposinter.json",
-   "classes": 0,
-   "procedures": 74,
-   "constants": 0
-  },
-  "DeskInter": {
-   "file": "deskinter.json",
-   "classes": 0,
-   "procedures": 14,
-   "constants": 3
-  },
-  "DPInter": {
-   "file": "dpinter.json",
-   "classes": 1,
-   "procedures": 46,
-   "constants": 413
-  },
-  "DvInter": {
-   "file": "dvinter.json",
-   "classes": 0,
-   "procedures": 6,
-   "constants": 41
-  },
-  "ExchangeInter": {
-   "file": "exchangeinter.json",
-   "classes": 1,
-   "procedures": 14,
-   "constants": 0,
-   "variables": 15
-  },
-  "FIInter": {
-   "file": "fiinter.json",
-   "classes": 1,
-   "procedures": 45,
-   "constants": 60
-  },
-  "FMInter": {
-   "file": "fminter.json",
-   "classes": 2,
-   "procedures": 20,
-   "constants": 77
-  },
-  "FXInter": {
-   "file": "fxinter.json",
-   "classes": 3,
-   "procedures": 1,
-   "constants": 0
-  },
-  "gate": {
-   "file": "gate.json",
-   "classes": 3,
-   "procedures": 4,
-   "constants": 3
-  },
-  "GateInter": {
-   "file": "gateinter.json",
-   "classes": 0,
-   "procedures": 2,
-   "constants": 1
-  },
-  "IFRSInter": {
-   "file": "ifrsinter.json",
-   "classes": 0,
-   "procedures": 4,
-   "constants": 0
-  },
-  "InsCarryDoc": {
-   "file": "inscarrydoc.json",
-   "classes": 1,
-   "procedures": 67,
-   "constants": 9
-  },
-  "LCInter": {
-   "file": "lcinter.json",
-   "classes": 6,
-   "procedures": 7,
-   "constants": 140,
-   "dependencies": [
-    "BankInter"
-   ]
-  },
-  "LoansFind": {
-   "file": "loansfind.json",
-   "classes": 0,
-   "procedures": 69,
-   "constants": 0
-  },
-  "LoansGlobalData": {
-   "file": "loansglobaldata.json",
-   "classes": 0,
-   "procedures": 3,
-   "constants": 0
-  },
-  "LoansGUI": {
-   "file": "loansgui.json",
-   "classes": 0,
-   "procedures": 7,
-   "constants": 0
-  },
-  "LoansList": {
-   "file": "loanslist.json",
-   "classes": 0,
-   "procedures": 1,
-   "constants": 0
-  },
-  "MesInter": {
-   "file": "mesinter.json",
-   "classes": 4,
-   "procedures": 18,
-   "constants": 160
-  },
-  "MmarkInter": {
-   "file": "mmarkinter.json",
-   "classes": 0,
-   "procedures": 11,
-   "constants": 7
-  },
-  "MonTransInter": {
-   "file": "montransinter.json",
-   "classes": 4,
-   "procedures": 9,
-   "constants": 0
-  },
-  "OprInter": {
-   "file": "oprinter.json",
-   "classes": 1,
-   "procedures": 49,
-   "constants": 107
-  },
-  "PaymInter": {
-   "file": "payminter.json",
-   "classes": 47,
-   "procedures": 168,
-   "constants": 686,
-   "dependencies": [
-    "BankInter"
-   ]
-  },
-  "PcRateInter": {
-   "file": "pcrateinter.json",
-   "classes": 0,
-   "procedures": 2,
-   "constants": 12
-  },
-  "PercInter": {
-   "file": "percinter.json",
-   "classes": 4,
-   "procedures": 23,
-   "constants": 0
-  },
-  "procent": {
-   "file": "procent.json",
-   "classes": 1,
-   "procedures": 13,
-   "constants": 34
-  },
-  "procentbuh": {
-   "file": "procentbuh.json",
-   "classes": 0,
-   "procedures": 6,
-   "constants": 0
-  },
-  "PSBCInter": {
-   "file": "psbcinter.json",
-   "classes": 0,
-   "procedures": 3,
-   "constants": 6
-  },
-  "PsInter": {
-   "file": "psinter.json",
-   "classes": 11,
-   "procedures": 32,
-   "constants": 170,
-   "dependencies": [
-    "PaymInter"
-   ]
-  },
-  "PTInter": {
-   "file": "ptinter.json",
-   "classes": 17,
-   "procedures": 78,
-   "constants": 426
-  },
-  "RcbCoreInter": {
-   "file": "rcbcoreinter.json",
-   "classes": 31,
-   "procedures": 0,
-   "constants": 35
-  },
-  "Reporting": {
-   "file": "reporting.json",
-   "classes": 9,
-   "procedures": 1,
-   "constants": 20
-  },
-  "ReptCBCommon": {
-   "file": "reptcbcommon.json",
-   "classes": 0,
-   "procedures": 8,
-   "constants": 0
-  },
-  "ReptCBInter": {
-   "file": "reptcbinter.json",
-   "classes": 0,
-   "procedures": 49,
-   "constants": 0
-  },
-  "ReptCBMath": {
-   "file": "reptcbmath.json",
-   "classes": 0,
-   "procedures": 2,
-   "constants": 0
-  },
-  "RmInter": {
-   "file": "rminter.json",
-   "classes": 0,
-   "procedures": 12,
-   "constants": 24
-  },
-  "RsbDataSet": {
-   "file": "rsbdataset.json",
-   "classes": 1,
-   "procedures": 0,
-   "constants": 0
-  },
-  "RsbFormsInter": {
-   "file": "rsbformsinter.json",
-   "classes": 22,
-   "procedures": 0,
-   "constants": 11
-  },
-  "RsbObjFactory": {
-   "file": "rsbobjfactory.json",
-   "classes": 1,
-   "procedures": 0,
-   "constants": 3
-  },
-  "RslCellObjects": {
-   "file": "rslcellobjects.json",
-   "classes": 0,
-   "procedures": 7,
-   "constants": 0
-  },
-  "RslScr": {
-   "file": "rslscr.json",
-   "classes": 0,
-   "procedures": 8,
-   "constants": 0,
-   "variables": 7
-  },
-  "rslx": {
-   "file": "rslx.json",
-   "classes": 0,
-   "procedures": 6,
-   "constants": 0
-  },
-  "RsSysLog": {
-   "file": "rssyslog.json",
-   "classes": 1,
-   "procedures": 3,
-   "constants": 7
-  },
-  "safecells": {
-   "file": "safecells.json",
-   "classes": 12,
-   "procedures": 0,
-   "constants": 0,
-   "dependencies": [
-    "CommonInter"
-   ]
-  },
-  "SbCrdInter": {
-   "file": "sbcrdinter.json",
-   "classes": 1,
-   "procedures": 82,
-   "constants": 641,
-   "variables": 11
-  },
-  "SFInter": {
-   "file": "sfinter.json",
-   "classes": 1,
-   "procedures": 40,
-   "constants": 33
-  },
-  "spCardInter": {
-   "file": "spcardinter.json",
-   "classes": 0,
-   "procedures": 27,
-   "constants": 0
-  },
-  "SPInter": {
-   "file": "spinter.json",
-   "classes": 0,
-   "procedures": 52,
-   "constants": 295
-  },
-  "total": {
-   "file": "total.json",
-   "classes": 0,
-   "procedures": 28,
-   "constants": 0
-  },
-  "TSInter": {
-   "file": "tsinter.json",
-   "classes": 0,
-   "procedures": 46,
-   "constants": 94
-  },
-  "VAInter": {
-   "file": "vainter.json",
-   "classes": 0,
-   "procedures": 8,
-   "constants": 2
-  },
-  "VSInter": {
-   "file": "vsinter.json",
-   "classes": 0,
-   "procedures": 26,
-   "constants": 53
-  },
-  "WIdInter": {
-   "file": "widinter.json",
-   "classes": 7,
-   "procedures": 82,
-   "constants": 87
-  },
-  "BalanceInter": {
-   "file": "balanceinter.json",
-   "classes": 0,
-   "procedures": 4,
-   "constants": 0
-  },
-  "RCW": {
-   "file": "rcw.json",
-   "classes": 0,
-   "procedures": 9,
-   "constants": 0
-  },
-  "RX_Exchange": {
-   "file": "rx_exchange.json",
-   "classes": 0,
-   "procedures": 7,
-   "constants": 0
-  },
-  "ReportInter": {
-   "file": "reportinter.json",
-   "classes": 0,
-   "procedures": 4,
-   "constants": 0
-  },
-  "replib": {
-   "file": "replib.json",
-   "classes": 0,
-   "procedures": 3,
-   "constants": 0
+  "version": 3,
+  "modules": {
+    "AcquirerObjects": {
+      "file": "acquirerobjects.json",
+      "classes": 26,
+      "procedures": 0,
+      "constants": 0
+    },
+    "BalanceInter": {
+      "file": "balanceinter.json",
+      "classes": 0,
+      "procedures": 4,
+      "constants": 0
+    },
+    "BankInter": {
+      "file": "bankinter.json",
+      "classes": 30,
+      "procedures": 244,
+      "constants": 377,
+      "dependencies": [
+        "AcquirerObjects",
+        "PaymInter"
+      ]
+    },
+    "BilFacturaInter": {
+      "file": "bilfacturainter.json",
+      "classes": 1,
+      "procedures": 6,
+      "constants": 5
+    },
+    "BookInter": {
+      "file": "bookinter.json",
+      "classes": 0,
+      "procedures": 5,
+      "constants": 0
+    },
+    "CarryDoc": {
+      "file": "carrydoc.json",
+      "classes": 0,
+      "procedures": 2,
+      "constants": 0
+    },
+    "CashInter": {
+      "file": "cashinter.json",
+      "classes": 0,
+      "procedures": 5,
+      "constants": 0
+    },
+    "CFormInter": {
+      "file": "cforminter.json",
+      "classes": 0,
+      "procedures": 0,
+      "constants": 0,
+      "emptyBecause": "Весь модуль описан одной страницей прозой (mzp_cforminter.htm), а не страницами на процедуру."
+    },
+    "CommonInter": {
+      "file": "commoninter.json",
+      "classes": 22,
+      "procedures": 198,
+      "constants": 0,
+      "dependencies": [
+        "AcquirerObjects"
+      ]
+    },
+    "cryptdlm": {
+      "file": "cryptdlm.json",
+      "classes": 2,
+      "procedures": 0,
+      "constants": 0
+    },
+    "CTInter": {
+      "file": "ctinter.json",
+      "classes": 5,
+      "procedures": 35,
+      "constants": 640
+    },
+    "CurrInter": {
+      "file": "currinter.json",
+      "classes": 0,
+      "procedures": 13,
+      "constants": 0
+    },
+    "DealsInter": {
+      "file": "dealsinter.json",
+      "classes": 2,
+      "procedures": 23,
+      "constants": 163
+    },
+    "DeposInter": {
+      "file": "deposinter.json",
+      "classes": 0,
+      "procedures": 74,
+      "constants": 0
+    },
+    "DeskInter": {
+      "file": "deskinter.json",
+      "classes": 0,
+      "procedures": 14,
+      "constants": 3
+    },
+    "DPInter": {
+      "file": "dpinter.json",
+      "classes": 1,
+      "procedures": 46,
+      "constants": 413
+    },
+    "DvInter": {
+      "file": "dvinter.json",
+      "classes": 0,
+      "procedures": 6,
+      "constants": 41
+    },
+    "ExchangeInter": {
+      "file": "exchangeinter.json",
+      "classes": 1,
+      "procedures": 14,
+      "constants": 0,
+      "variables": 15
+    },
+    "FIInter": {
+      "file": "fiinter.json",
+      "classes": 1,
+      "procedures": 45,
+      "constants": 60
+    },
+    "FMInter": {
+      "file": "fminter.json",
+      "classes": 2,
+      "procedures": 20,
+      "constants": 77
+    },
+    "FXInter": {
+      "file": "fxinter.json",
+      "classes": 3,
+      "procedures": 1,
+      "constants": 0
+    },
+    "GateInter": {
+      "file": "gateinter.json",
+      "classes": 0,
+      "procedures": 2,
+      "constants": 1
+    },
+    "IFRSInter": {
+      "file": "ifrsinter.json",
+      "classes": 0,
+      "procedures": 4,
+      "constants": 0
+    },
+    "InsCarryDoc": {
+      "file": "inscarrydoc.json",
+      "classes": 1,
+      "procedures": 67,
+      "constants": 9
+    },
+    "LCInter": {
+      "file": "lcinter.json",
+      "classes": 6,
+      "procedures": 7,
+      "constants": 140,
+      "dependencies": [
+        "BankInter"
+      ]
+    },
+    "LoansFind": {
+      "file": "loansfind.json",
+      "classes": 0,
+      "procedures": 69,
+      "constants": 0
+    },
+    "LoansGlobalData": {
+      "file": "loansglobaldata.json",
+      "classes": 0,
+      "procedures": 3,
+      "constants": 0
+    },
+    "LoansGUI": {
+      "file": "loansgui.json",
+      "classes": 0,
+      "procedures": 7,
+      "constants": 0
+    },
+    "LoansList": {
+      "file": "loanslist.json",
+      "classes": 0,
+      "procedures": 1,
+      "constants": 0
+    },
+    "MesInter": {
+      "file": "mesinter.json",
+      "classes": 4,
+      "procedures": 18,
+      "constants": 160
+    },
+    "MmarkInter": {
+      "file": "mmarkinter.json",
+      "classes": 0,
+      "procedures": 11,
+      "constants": 7
+    },
+    "MonTransInter": {
+      "file": "montransinter.json",
+      "classes": 4,
+      "procedures": 9,
+      "constants": 0
+    },
+    "OprInter": {
+      "file": "oprinter.json",
+      "classes": 1,
+      "procedures": 49,
+      "constants": 107
+    },
+    "PaymInter": {
+      "file": "payminter.json",
+      "classes": 47,
+      "procedures": 168,
+      "constants": 686,
+      "dependencies": [
+        "BankInter"
+      ]
+    },
+    "PcRateInter": {
+      "file": "pcrateinter.json",
+      "classes": 0,
+      "procedures": 2,
+      "constants": 12
+    },
+    "PercInter": {
+      "file": "percinter.json",
+      "classes": 4,
+      "procedures": 23,
+      "constants": 0
+    },
+    "PSBCInter": {
+      "file": "psbcinter.json",
+      "classes": 0,
+      "procedures": 3,
+      "constants": 6
+    },
+    "PsInter": {
+      "file": "psinter.json",
+      "classes": 11,
+      "procedures": 32,
+      "constants": 170,
+      "dependencies": [
+        "PaymInter"
+      ]
+    },
+    "PTInter": {
+      "file": "ptinter.json",
+      "classes": 17,
+      "procedures": 78,
+      "constants": 426
+    },
+    "RcbCoreInter": {
+      "file": "rcbcoreinter.json",
+      "classes": 31,
+      "procedures": 0,
+      "constants": 35
+    },
+    "RCW": {
+      "file": "rcw.json",
+      "classes": 0,
+      "procedures": 9,
+      "constants": 0
+    },
+    "replib": {
+      "file": "replib.json",
+      "classes": 0,
+      "procedures": 3,
+      "constants": 0
+    },
+    "Reporting": {
+      "file": "reporting.json",
+      "classes": 9,
+      "procedures": 1,
+      "constants": 20
+    },
+    "ReportInter": {
+      "file": "reportinter.json",
+      "classes": 0,
+      "procedures": 4,
+      "constants": 0
+    },
+    "ReptCBCommon": {
+      "file": "reptcbcommon.json",
+      "classes": 0,
+      "procedures": 8,
+      "constants": 0
+    },
+    "ReptCBInter": {
+      "file": "reptcbinter.json",
+      "classes": 0,
+      "procedures": 49,
+      "constants": 0
+    },
+    "ReptCBMath": {
+      "file": "reptcbmath.json",
+      "classes": 0,
+      "procedures": 2,
+      "constants": 0
+    },
+    "RmInter": {
+      "file": "rminter.json",
+      "classes": 0,
+      "procedures": 12,
+      "constants": 24
+    },
+    "RsbDataSet": {
+      "file": "rsbdataset.json",
+      "classes": 1,
+      "procedures": 0,
+      "constants": 0
+    },
+    "RsbFormsInter": {
+      "file": "rsbformsinter.json",
+      "classes": 22,
+      "procedures": 0,
+      "constants": 11
+    },
+    "RsbObjFactory": {
+      "file": "rsbobjfactory.json",
+      "classes": 1,
+      "procedures": 0,
+      "constants": 3
+    },
+    "rsd": {
+      "file": "rsd.json",
+      "classes": 0,
+      "procedures": 0,
+      "constants": 0,
+      "emptyBecause": "Справка описывает библиотеку прозой, отдельными страницами состав не разложен — загрузчик справки взять его пока не может."
+    },
+    "rsexts": {
+      "file": "rsexts.json",
+      "classes": 0,
+      "procedures": 0,
+      "constants": 0,
+      "emptyBecause": "Члены лежат в стандартной библиотеке и записаны за модулем там (moduleName в standardLibraryData): имя разрешается и без Import."
+    },
+    "RslCellObjects": {
+      "file": "rslcellobjects.json",
+      "classes": 0,
+      "procedures": 7,
+      "constants": 0
+    },
+    "RslScr": {
+      "file": "rslscr.json",
+      "classes": 0,
+      "procedures": 8,
+      "constants": 0,
+      "variables": 7
+    },
+    "rslx": {
+      "file": "rslx.json",
+      "classes": 0,
+      "procedures": 6,
+      "constants": 0
+    },
+    "RsSysLog": {
+      "file": "rssyslog.json",
+      "classes": 1,
+      "procedures": 3,
+      "constants": 7
+    },
+    "RX_Exchange": {
+      "file": "rx_exchange.json",
+      "classes": 0,
+      "procedures": 7,
+      "constants": 0
+    },
+    "safecells": {
+      "file": "safecells.json",
+      "classes": 12,
+      "procedures": 0,
+      "constants": 0,
+      "dependencies": [
+        "CommonInter"
+      ]
+    },
+    "SbCrdInter": {
+      "file": "sbcrdinter.json",
+      "classes": 1,
+      "procedures": 82,
+      "constants": 641,
+      "variables": 11
+    },
+    "SFInter": {
+      "file": "sfinter.json",
+      "classes": 1,
+      "procedures": 40,
+      "constants": 33
+    },
+    "spCardInter": {
+      "file": "spcardinter.json",
+      "classes": 0,
+      "procedures": 27,
+      "constants": 0
+    },
+    "SPInter": {
+      "file": "spinter.json",
+      "classes": 0,
+      "procedures": 52,
+      "constants": 295
+    },
+    "total": {
+      "file": "total.json",
+      "classes": 0,
+      "procedures": 28,
+      "constants": 0
+    },
+    "TSInter": {
+      "file": "tsinter.json",
+      "classes": 0,
+      "procedures": 46,
+      "constants": 94
+    },
+    "VAInter": {
+      "file": "vainter.json",
+      "classes": 0,
+      "procedures": 8,
+      "constants": 2
+    },
+    "VSInter": {
+      "file": "vsinter.json",
+      "classes": 0,
+      "procedures": 26,
+      "constants": 53
+    },
+    "WIdInter": {
+      "file": "widinter.json",
+      "classes": 7,
+      "procedures": 82,
+      "constants": 87
+    },
+    "Календарь": {
+      "file": "calendar.json",
+      "classes": 0,
+      "procedures": 23,
+      "constants": 7
+    },
+    "Проценты": {
+      "file": "procent.json",
+      "classes": 1,
+      "procedures": 13,
+      "constants": 34
+    },
+    "ПроцентыБухгалтер": {
+      "file": "procentbuh.json",
+      "classes": 0,
+      "procedures": 6,
+      "constants": 0
+    },
+    "Шлюз": {
+      "file": "gate.json",
+      "classes": 3,
+      "procedures": 4,
+      "constants": 3
+    }
   }
- }
 }

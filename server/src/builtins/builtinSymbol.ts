@@ -25,6 +25,13 @@ export class BuiltinSymbol {
     readonly value: string;
     /** Имя базового класса; пусто, если класс ничего не наследует. */
     readonly base: string;
+    /**
+     * Модуль-владелец имени; пусто у безымянной части языка.
+     *
+     * Владелец, а не условие: имя разрешается и без Import — см.
+     * moduleName в standardLibraryData.
+     */
+    readonly moduleName: string;
     readonly children: readonly BuiltinSymbol[];
 
     constructor(definition: IRslBuiltinDefinition) {
@@ -36,6 +43,7 @@ export class BuiltinSymbol {
         this.insertText = definition.insertText || "";
         this.value = definition.value || "";
         this.base = definition.base || "";
+        this.moduleName = definition.moduleName || "";
         this.children = Object.freeze(
             (definition.children || []).map(item => new BuiltinSymbol(item))
         );
@@ -141,6 +149,17 @@ export class BuiltinCatalog {
 
     findSymbol(name: string): RslSymbol | undefined {
         return this.semanticByName.get(normalizeIdentifier(name));
+    }
+
+    /**
+     * Модуль, за которым справка числит это имя; пусто у остальных.
+     *
+     * Владелец, а не условие доступности: имя разрешается и без
+     * Import — см. moduleName в standardLibraryData.
+     */
+    moduleOf(name: string): string {
+        return this.byName.get(normalizeIdentifier(name))
+            ?.moduleName || "";
     }
 
     findClass(name: string): RslSymbol | undefined {

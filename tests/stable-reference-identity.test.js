@@ -47,6 +47,9 @@ const {
 } = require("../server/out/indexing/moduleInterface");
 const { createOpenModuleModel } = require("../server/out/moduleModel");
 const { rslSymbolRefKey } = require("../server/out/symbols/symbolRef");
+const {
+    buildRslRenameEdit
+} = require("../server/out/features/renameProvider");
 
 let passed = 0;
 let failed = 0;
@@ -422,6 +425,120 @@ test("инкрементальный ответ равен сканирован�
         assert.ok(
             cold.reads.count > 0,
             "сканирование с нуля файл читает"
+        );
+    } finally {
+        await settle();
+        await fs.promises.rm(project.directory, {
+            recursive: true,
+            force: true,
+            maxRetries: 20,
+            retryDelay: 25
+        });
+    }
+});
+
+test("WorkspaceEdit после сдвига содержит и объявление, и закрытый файл",
+    async () => {
+    /*
+     * Тот же сценарий, но через сам провайдер Rename, а не через поиск
+     * ссылок под ним. Между ними есть свой слой — проверка имени, сбор
+     * changes, включение самого объявления, — и проверять надо то, что
+     * редактор действительно применит.
+     *
+     * user.mac при этом ЗАКРЫТ: в индексе он только зарегистрирован, а
+     * его вхождение приходит из постоянной записи. Частичный Rename
+     * недопустим — он оставляет проект не собирающимся.
+     */
+    const project = await createProject();
+    const shardDirectory = path.join(project.directory, ".shards");
+
+    try {
+        const before = library([]);
+        const stand = createStand(project, shardDirectory, before);
+
+        /* 1. Запись про закрытый user.mac появляется и ложится на диск. */
+        const first = await stand.find(before);
+
+        assert.strictEqual(first.length, 1, "вхождение найдено");
+        await stand.shards.flush();
+
+        /* 2. Правка тела Filler: Alpha съезжает, интерфейс тот же. */
+        const after = library(["  Var x = 1;", "  Var y = 2;"]);
+
+        assert.strictEqual(
+            computeRslModuleInterface(createOpenModuleModel(before))
+                .fingerprint,
+            computeRslModuleInterface(createOpenModuleModel(after))
+                .fingerprint,
+            "снаружи модуль не изменился"
+        );
+
+        await fs.promises.writeFile(project.libPath, after, "utf8");
+        stand.index.updateOpenModule(project.libUri, after, 2);
+
+        /* 3. Rename по объявлению Alpha в сдвинутой библиотеке. */
+        const module = stand.index.getModule(project.libUri);
+        const declaration = module.symbolTree.children.find(
+            item => item.name.toLowerCase() === "alpha"
+        );
+
+        assert.ok(declaration, "объявление на месте");
+
+        const edit = await buildRslRenameEdit(
+            module,
+            stand.index,
+            new RslScopeResolver(stand.index),
+            new ReferenceIndex({ log: () => undefined }),
+            after.indexOf("Alpha"),
+            "Beta",
+            () => false,
+            stand.shards
+        );
+
+        assert.ok(edit && edit.changes, "Rename обязан вернуть правки");
+
+        const files = Object.keys(edit.changes).sort();
+
+        assert.deepStrictEqual(
+            files.sort(),
+            [project.libUri, project.userUri].sort(),
+            "правки обязаны быть в обоих файлах, включая закрытый: " +
+                files.join(", ")
+        );
+
+        /* Объявление переписывается там, КУДА его сдвинули. */
+        const libEdits = edit.changes[project.libUri];
+        const declarationLine = after.slice(0, declaration.range.start)
+            .split("\n").length - 1;
+
+        assert.strictEqual(
+            declarationLine,
+            5,
+            "объявление действительно съехало на две строки"
+        );
+        assert.ok(
+            libEdits.some(item =>
+                item.range.start.line === declarationLine),
+            "правка объявления обязана быть на строке " + declarationLine +
+                ", а есть на " +
+                libEdits.map(item => item.range.start.line).join(", ")
+        );
+
+        /* И вхождение в закрытом файле — из записи, а не из модели. */
+        const userEdits = edit.changes[project.userUri];
+
+        assert.strictEqual(
+            userEdits.length,
+            1,
+            "вхождение в закрытом файле обязано быть ровно одно"
+        );
+        assert.ok(
+            userEdits.every(item => item.newText === "Beta"),
+            "и переписываться на новое имя"
+        );
+        assert.ok(
+            libEdits.every(item => item.newText === "Beta"),
+            "новое имя и в объявлении"
         );
     } finally {
         await settle();

@@ -806,7 +806,15 @@ export class RslScopeResolver {
             return {
                 uri: RSL_BUILTIN_URI,
                 symbolId: builtin.id,
-                symbol: builtin
+                symbol: builtin,
+                /*
+                 * У части стандартных имён владелец известен из
+                 * справки: `RenameFile` описан в модуле rsexts.
+                 * Показать его — то же, что и для прикладного
+                 * модуля, и идёт он тем же полем.
+                 */
+                platformModule:
+                    this.builtins.moduleOf(referenceName) || undefined
             };
         }
 

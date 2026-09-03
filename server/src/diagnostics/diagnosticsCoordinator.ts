@@ -206,12 +206,40 @@ export class DiagnosticsCoordinator {
             if (!this.localCache.has(next) || this.staleLocal.has(next)) {
                 this.scheduleLocal(next, 0);
             }
-            if (!this.workspaceCache.has(next) || this.staleWorkspace.has(next)) {
-                this.scheduleWorkspace(next, 300);
-            }
+            this.scheduleWorkspaceOnActivation(next);
         } else {
             this.showAllCached();
         }
+    }
+
+    /**
+     * Межфайловая фаза при переходе на вкладку.
+     *
+     * Задержка в 300 мс существует ради быстрого перелистывания вкладок:
+     * она склеивает расчёты, которые всё равно никто не увидит. Когда
+     * файл не менялся, склеивать нечего — правок не было, — и ждать
+     * значит просто позже показать то же самое.
+     */
+    private scheduleWorkspaceOnActivation(uri: string): void {
+        const lanes = this.currentWorkspaceLanes(uri);
+
+        if (!lanes) {
+            if (
+                !this.workspaceCache.has(uri) ||
+                this.staleWorkspace.has(uri)
+            ) {
+                this.scheduleWorkspace(uri, 300);
+            }
+
+            return;
+        }
+
+        if (lanes.stale.length === 0 && !this.staleWorkspace.has(uri)) {
+            /* Все ленты актуальны: показаны выше, считать нечего. */
+            return;
+        }
+
+        this.scheduleWorkspace(uri, lanes.sameText ? 0 : 300);
     }
 
     /** Совместимый вызов после parse: обе фазы, но с разными сроками. */
@@ -743,11 +771,83 @@ export class DiagnosticsCoordinator {
          * Import-замыкания меняют ответ так же, как правка: снятая галочка
          * иначе оставляла бы `unused-import` висеть до следующего
          * пересчёта.
+         *
+         * Спрашивается это по лентам, а не по общему ключу фазы. Общий
+         * ключ объединяет зависимости ВСЕХ проверок, и одного
+         * изменившегося каталога хватало, чтобы убрать с экрана и те
+         * находки, чья лента посчитана по нынешним условиям. Устаревшая
+         * лента не показывается — её пересчитают, — но и не уносит с
+         * собой актуальные.
          */
+        const byLane = this.currentWorkspaceLanes(uri);
+
+        if (byLane) {
+            return byLane.diagnostics;
+        }
+
         return module.source === entry.source &&
             this.workspaceConditionKey(uri, module.version) === entry.key
             ? entry.diagnostics
             : [];
+    }
+
+    /**
+     * Что из межфайловой фазы можно показать сейчас.
+     *
+     * Лента, чей собственный ключ условий совпал, показывается сразу.
+     * Устаревшая не показывается вовсе: показать её значило бы показать
+     * заведомо неверное — ровно то, чего делать нельзя, — а пересчёт её
+     * поставит `scheduleWorkspace`.
+     *
+     * `undefined` — когда по этому файлу лент нет вообще: тогда решает
+     * прежняя общая запись, и первый расчёт ничем не отличается от
+     * прежнего.
+     */
+    private currentWorkspaceLanes(uri: string): {
+        diagnostics: Diagnostic[];
+        stale: readonly string[];
+        sameText: boolean;
+    } | undefined {
+        const known = this.workspaceLaneCache.get(uri);
+
+        if (!known || known.size === 0) {
+            return undefined;
+        }
+
+        const settingsKey = diagnosticsSettingsKey(
+            this.settings.getAvailable(uri)
+        );
+        const diagnostics: Diagnostic[] = [];
+        const stale: string[] = [];
+        let sameText = true;
+
+        for (const lane of rslWorkspaceLanes()) {
+            const parts = this.conditionParts(
+                uri,
+                lane.depends,
+                settingsKey
+            );
+            const entry = known.get(lane.id);
+
+            if (entry && entry.key === Object.values(parts).join("\u0000")) {
+                diagnostics.push(...entry.diagnostics);
+
+                continue;
+            }
+
+            stale.push(lane.id);
+
+            /*
+             * Текст — единственная составляющая, которую правит сам
+             * пользователь; по ней и решается, есть ли что склеивать
+             * задержкой. См. setActiveDocument.
+             */
+            if (entry && entry.parts.text !== parts.text) {
+                sameText = false;
+            }
+        }
+
+        return { diagnostics, stale, sameText };
     }
 
     /**

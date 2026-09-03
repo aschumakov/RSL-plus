@@ -371,11 +371,14 @@ function readContents(chmDirectory) {
 /**
  * Имя модуля для каталога.
  *
- * Раздел называет модуль так, как о нём говорят: «total.mac», «Календарь». В
- * каталоге ключ — то, что пишут в Import, поэтому расширение снимается, а у
- * кириллического названия ключом становится имя его корневой страницы: у
- * Календаря это calendar, у Процентов — procent. Ровно так названы модули,
- * попавшие в каталог раньше.
+ * Раздел называет модуль так, как о нём говорят: «total.mac», «Календарь».
+ * Ключ — то, что пишут в Import, поэтому расширение снимается, а само
+ * название остаётся как есть, кириллическое в том числе.
+ *
+ * Прежде кириллическому названию ключом доставалось имя его корневой
+ * страницы — `calendar` вместо `Календарь`, — и такой модуль не находился
+ * ни по одному написанию: в коде пишут именно `Import Календарь` (192 файла
+ * настоящего проекта против ни одного с `calendar`).
  */
 function moduleKeyOf(title, rootPage, known) {
     const bare = title.replace(/\.(?:mac|d32|dll)$/iu, "");
@@ -384,13 +387,8 @@ function moduleKeyOf(title, rootPage, known) {
         return known.get(bare.toLowerCase());
     }
 
-    if (/^[A-Za-z_][A-Za-z0-9_]*$/u.test(bare)) {
-        return bare;
-    }
-
-    const fromPage = String(rootPage || "").replace(/\.htm$/iu, "");
-
-    return known.get(fromPage.toLowerCase()) || fromPage || bare;
+    return bare ||
+        String(rootPage || "").replace(/\.htm$/iu, "");
 }
 
 const SECTION_TITLES =

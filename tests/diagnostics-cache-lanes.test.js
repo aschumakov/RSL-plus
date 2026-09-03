@@ -34,6 +34,9 @@ const {
 } = require("../server/out/services/settingsService");
 const { createRslVirtualClock } = require("../server/out/core/clock");
 const {
+    PlatformModuleCatalog
+} = require("../server/out/builtins/platformModuleCatalog");
+const {
     TextDocument
 } = require("../server/node_modules/vscode-languageserver-textdocument");
 
@@ -151,6 +154,210 @@ function since(before, after) {
         byReason
     };
 }
+
+/*
+ * Второй стенд: у каждой ленты своя находка.
+ *
+ * Иначе не увидеть, что именно показано. `unused-import` считает лента без
+ * каталога, `platform-module-not-imported` — лента с каталогом; когда
+ * каталог меняется, на экране обязана остаться первая и пропасть вторая.
+ */
+const SHOWN_FIRST = "file:///d:/lanes/shown-first.mac";
+const SHOWN_SECOND = "file:///d:/lanes/shown-second.mac";
+
+const SHOWN_FIRST_SOURCE = [
+    "Import lib;",
+    "",
+    "Macro Run()",
+    "  Var ok = RSBParty;",
+    "  return ok;",
+    "End;",
+    ""
+].join("\n");
+const SHOWN_SECOND_SOURCE =
+    "Macro Other()\n  return 2;\nEnd;\n";
+
+/** Каталог платформы читается один раз на весь файл проверок. */
+let platformCatalog;
+
+async function platform() {
+    if (!platformCatalog) {
+        platformCatalog = new PlatformModuleCatalog({
+            log: () => undefined
+        });
+        await platformCatalog.ensureModules(["PTInter"]);
+    }
+
+    return platformCatalog;
+}
+
+async function createShowStand() {
+    const catalog = await platform();
+    const index = new WorkspaceIndex();
+
+    index.registerWorkspaceFiles([SHOWN_FIRST, SHOWN_SECOND, LIB]);
+    index.updateExternalModule(LIB, LIB_SOURCE, 1);
+
+    const documents = new Map([
+        [
+            SHOWN_FIRST,
+            TextDocument.create(SHOWN_FIRST, "rsl", 1, SHOWN_FIRST_SOURCE)
+        ],
+        [
+            SHOWN_SECOND,
+            TextDocument.create(
+                SHOWN_SECOND, "rsl", 1, SHOWN_SECOND_SOURCE
+            )
+        ]
+    ]);
+
+    index.updateOpenModule(SHOWN_FIRST, SHOWN_FIRST_SOURCE, 1);
+    index.updateOpenModule(SHOWN_SECOND, SHOWN_SECOND_SOURCE, 1);
+    index.markOpen(SHOWN_FIRST);
+    index.markOpen(SHOWN_SECOND);
+
+    const clock = createRslVirtualClock(1000);
+    const settings = new RslSettingsService({
+        ...SETTINGS,
+        diagnostics: { unknownVariables: "warning" }
+    });
+    const coordinator = new DiagnosticsCoordinator(
+        { sendDiagnostics: () => undefined },
+        {
+            get: uri => documents.get(uri),
+            all: () => [...documents.values()]
+        },
+        index,
+        settings,
+        new RslDiagnosticEngine(),
+        {
+            clock,
+            isParseBusy: () => false,
+            waitForIdle: async () => undefined,
+            log: () => undefined,
+            onImports: () => undefined,
+            resolver: new RslScopeResolver(index, getDefaults(), catalog)
+        }
+    );
+
+    return {
+        index,
+        clock,
+        coordinator,
+        /** Коды того, что показали бы прямо сейчас. */
+        shown(uri) {
+            return (coordinator.getCached(uri) || [])
+                .map(item => item.code)
+                .sort();
+        },
+        change(uri, text) {
+            const version = documents.get(uri).version + 1;
+
+            documents.set(uri, TextDocument.create(uri, "rsl", version, text));
+            index.updateOpenModule(uri, text, version);
+        }
+    };
+}
+
+test("запись в каталог не уносит с экрана находки другой ленты",
+    async () => {
+    /*
+     * Прежде показывалось всё из общей записи с объединённым ключом, а в
+     * него входит каталог: одна запись фоновой индексации — и Problems
+     * пустели целиком, включая находки, к каталогу отношения не имеющие.
+     */
+    const stand = await createShowStand();
+
+    stand.coordinator.setActiveDocument(SHOWN_FIRST);
+    stand.coordinator.scheduleLocal(SHOWN_FIRST, 0);
+    stand.coordinator.scheduleWorkspace(SHOWN_FIRST, 0);
+    await stand.clock.advance(4000);
+
+    assert.deepStrictEqual(
+        stand.shown(SHOWN_FIRST),
+        ["platform-module-not-imported", "unused-import"],
+        "обе ленты посчитаны: " + stand.shown(SHOWN_FIRST).join(", ")
+    );
+
+    /* Фоновая индексация прочитала посторонний файл. */
+    stand.index.registerWorkspaceFile(OTHER);
+    stand.index.updateExternalModule(OTHER, "Macro Alone()\nEnd;\n", 1);
+
+    const after = stand.shown(SHOWN_FIRST);
+
+    assert.ok(
+        after.includes("unused-import"),
+        "находка актуальной ленты обязана остаться: " + after.join(", ")
+    );
+    assert.ok(
+        !after.includes("platform-module-not-imported"),
+        "а устаревшая — не показываться: " + after.join(", ")
+    );
+});
+
+test("правка файла убирает с экрана обе ленты", async () => {
+    /*
+     * Обратная сторона: разделение не должно оставлять на экране находки,
+     * посчитанные по прежнему тексту. Текст входит в ключ каждой ленты.
+     */
+    const stand = await createShowStand();
+
+    stand.coordinator.setActiveDocument(SHOWN_FIRST);
+    stand.coordinator.scheduleLocal(SHOWN_FIRST, 0);
+    stand.coordinator.scheduleWorkspace(SHOWN_FIRST, 0);
+    await stand.clock.advance(4000);
+
+    assert.ok(stand.shown(SHOWN_FIRST).length > 0, "есть что показывать");
+
+    stand.change(
+        SHOWN_FIRST,
+        SHOWN_FIRST_SOURCE + "\nMacro Added()\nEnd;\n"
+    );
+
+    const after = stand.shown(SHOWN_FIRST);
+
+    assert.deepStrictEqual(
+        after.filter(code =>
+            code === "unused-import" ||
+            code === "platform-module-not-imported"),
+        [],
+        "по прежнему тексту показывать нельзя ничего: " + after.join(", ")
+    );
+});
+
+test("возврат на неизменённую вкладку не ждёт задержку", async () => {
+    /*
+     * Задержка в 300 мс склеивает расчёты при быстром перелистывании
+     * вкладок. Когда файл не менялся, склеивать нечего: ждать значит
+     * позже показать то же самое.
+     */
+    const stand = await createShowStand();
+
+    stand.coordinator.setActiveDocument(SHOWN_FIRST);
+    stand.coordinator.scheduleLocal(SHOWN_FIRST, 0);
+    stand.coordinator.scheduleWorkspace(SHOWN_FIRST, 0);
+    await stand.clock.advance(4000);
+
+    stand.coordinator.setActiveDocument(SHOWN_SECOND);
+    stand.coordinator.scheduleLocal(SHOWN_SECOND, 0);
+    stand.coordinator.scheduleWorkspace(SHOWN_SECOND, 0);
+    await stand.clock.advance(4000);
+
+    /* Каталог изменился, пока смотрели вторую вкладку. */
+    stand.index.registerWorkspaceFile(OTHER);
+    stand.index.updateExternalModule(OTHER, "Macro Alone()\nEnd;\n", 1);
+
+    stand.coordinator.setActiveDocument(SHOWN_FIRST);
+    await stand.clock.advance(100);
+
+    const after = stand.shown(SHOWN_FIRST);
+
+    assert.ok(
+        after.includes("platform-module-not-imported"),
+        "устаревшая лента обязана быть пересчитана без ожидания 300 мс: " +
+            after.join(", ")
+    );
+});
 
 test("ленты межфайловой фазы разделены по зависимостям", () => {
     const lanes = rslWorkspaceLanes();

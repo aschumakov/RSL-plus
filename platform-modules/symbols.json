@@ -622,36 +622,36 @@
    "FMInter"
   ],
   "basis_30360": [
-   "PcRateInter",
-   "procent"
+   "Проценты",
+   "PcRateInter"
   ],
   "basis_30360noleap": [
-   "PcRateInter",
-   "procent"
+   "Проценты",
+   "PcRateInter"
   ],
   "basis_30act": [
-   "PcRateInter",
-   "procent"
+   "Проценты",
+   "PcRateInter"
   ],
   "basis_30actnoleap": [
-   "PcRateInter",
-   "procent"
+   "Проценты",
+   "PcRateInter"
   ],
   "basis_act360": [
-   "PcRateInter",
-   "procent"
+   "Проценты",
+   "PcRateInter"
   ],
   "basis_act360noleap": [
-   "PcRateInter",
-   "procent"
+   "Проценты",
+   "PcRateInter"
   ],
   "basis_act365": [
-   "PcRateInter",
-   "procent"
+   "Проценты",
+   "PcRateInter"
   ],
   "basis_actact": [
-   "PcRateInter",
-   "procent"
+   "Проценты",
+   "PcRateInter"
   ],
   "batch_cbdk_syncparty": [
    "PTInter"
@@ -894,19 +894,19 @@
    "CommonInter"
   ],
   "calendar_balance_no": [
-   "calendar"
+   "Календарь"
   ],
   "calendar_balance_yes": [
-   "calendar"
+   "Календарь"
   ],
   "calendar_service_bank": [
-   "calendar"
+   "Календарь"
   ],
   "calendar_service_no": [
-   "calendar"
+   "Календарь"
   ],
   "calendar_service_retail": [
-   "calendar"
+   "Календарь"
   ],
   "call_source_ed275_proc": [
    "PaymInter"
@@ -2873,16 +2873,16 @@
    "SPInter"
   ],
   "dateaftercalendays": [
-   "calendar"
+   "Календарь"
   ],
   "dateaftercalenmonths": [
-   "calendar"
+   "Календарь"
   ],
   "dateafterworkdays": [
-   "calendar"
+   "Календарь"
   ],
   "dateafterworkmonths": [
-   "calendar"
+   "Календарь"
   ],
   "deal_executeoperation": [
    "PaymInter"
@@ -4871,7 +4871,7 @@
    "SPInter"
   ],
   "fault": [
-   "gate"
+   "Шлюз"
   ],
   "fcond_expdate": [
    "SbCrdInter"
@@ -5090,7 +5090,7 @@
    "WIdInter"
   ],
   "finddate": [
-   "calendar"
+   "Календарь"
   ],
   "finddepartment": [
    "CommonInter"
@@ -5237,7 +5237,7 @@
    "CommonInter"
   ],
   "floatmonths": [
-   "calendar"
+   "Календарь"
   ],
   "fm_checkclientaddress": [
    "FMInter"
@@ -5526,22 +5526,22 @@
    "MonTransInter"
   ],
   "getdateaftermonthswbranch": [
-   "calendar"
+   "Календарь"
   ],
   "getdateafterworkdays": [
-   "calendar"
+   "Календарь"
   ],
   "getdateattr": [
-   "calendar"
+   "Календарь"
   ],
   "getdatebycalendar": [
-   "calendar"
+   "Календарь"
   ],
   "getdateoff": [
    "CommonInter"
   ],
   "getdaysinmonth": [
-   "calendar"
+   "Календарь"
   ],
   "getdepoacc": [
    "SPInter"
@@ -5805,16 +5805,16 @@
    "CommonInter"
   ],
   "getnextdate": [
-   "calendar"
+   "Календарь"
   ],
   "getnextdateafterdays": [
-   "calendar"
+   "Календарь"
   ],
   "getnextdocfromgddlist": [
    "CommonInter"
   ],
   "getnextworkdate": [
-   "calendar"
+   "Календарь"
   ],
   "getnominalvaluepaym": [
    "FIInter"
@@ -5835,10 +5835,10 @@
    "ExchangeInter"
   ],
   "getobjectcode": [
-   "gate"
+   "Шлюз"
   ],
   "getobjectid": [
-   "gate"
+   "Шлюз"
   ],
   "getobjectrestriction": [
    "BankInter"
@@ -5944,7 +5944,7 @@
    "WIdInter"
   ],
   "getrecordsforseance": [
-   "gate"
+   "Шлюз"
   ],
   "getreferenceidbytype": [
    "BankInter"
@@ -6052,7 +6052,7 @@
    "BankInter"
   ],
   "getworkdaysnumbranch": [
-   "calendar"
+   "Календарь"
   ],
   "getworkfilename": [
    "BankInter"
@@ -6542,7 +6542,7 @@
    "CommonInter"
   ],
   "interestdeal": [
-   "procent"
+   "Проценты"
   ],
   "intransaction": [
    "CommonInter"
@@ -6668,7 +6668,7 @@
    "CommonInter"
   ],
   "isholiday": [
-   "calendar",
+   "Календарь",
    "CommonInter"
   ],
   "isidentprogram": [
@@ -6747,10 +6747,10 @@
    "PsInter"
   ],
   "isworkday": [
-   "calendar"
+   "Календарь"
   ],
   "isworkdaybranch": [
-   "calendar"
+   "Календарь"
   ],
   "iwpdocdelete": [
    "BankInter"
@@ -6974,7 +6974,7 @@
    "PaymInter"
   ],
   "lastdayinmonth": [
-   "calendar",
+   "Календарь",
    "CommonInter"
   ],
   "lcauthorisationpanel": [
@@ -8094,10 +8094,10 @@
    "LoansGlobalData"
   ],
   "loanscalcpercent": [
-   "procentbuh"
+   "ПроцентыБухгалтер"
   ],
   "loanscalcpercentext": [
-   "procentbuh"
+   "ПроцентыБухгалтер"
   ],
   "loanscarrydoc": [
    "CommonInter"
@@ -8566,10 +8566,10 @@
    "total"
   ],
   "month_30": [
-   "calendar"
+   "Календарь"
   ],
   "month_calendar": [
-   "calendar"
+   "Календарь"
   ],
   "moveaccount": [
    "CarryDoc"
@@ -8620,13 +8620,13 @@
    "FIInter"
   ],
   "ndays": [
-   "calendar"
+   "Календарь"
   ],
   "ndays30": [
-   "calendar"
+   "Календарь"
   ],
   "ndays30correct": [
-   "calendar"
+   "Календарь"
   ],
   "needcheckpayerbankenterdate": [
    "PaymInter"
@@ -11080,16 +11080,16 @@
    "SbCrdInter"
   ],
   "pcaddsumtodate": [
-   "procent"
+   "Проценты"
   ],
   "pcidc_m_maturityexcluded": [
-   "procent"
+   "Проценты"
   ],
   "pcidc_m_startexcluded": [
-   "procent"
+   "Проценты"
   ],
   "pcinsertsumlist": [
-   "procent"
+   "Проценты"
   ],
   "pcsetmanualdata": [
    "PercInter"
@@ -11395,20 +11395,20 @@
    "DeposInter"
   ],
   "pitch_days": [
-   "PcRateInter",
-   "procent"
+   "Проценты",
+   "PcRateInter"
   ],
   "pitch_months": [
-   "PcRateInter",
-   "procent"
+   "Проценты",
+   "PcRateInter"
   ],
   "pitch_weeks": [
-   "PcRateInter",
-   "procent"
+   "Проценты",
+   "PcRateInter"
   ],
   "pitch_years": [
-   "PcRateInter",
-   "procent"
+   "Проценты",
+   "PcRateInter"
   ],
   "placereqtoclose": [
    "InsCarryDoc"
@@ -12922,85 +12922,85 @@
    "PTInter"
   ],
   "prc_account": [
-   "procent"
+   "Проценты"
   ],
   "prc_account_aovr": [
-   "procent"
+   "Проценты"
   ],
   "prc_account_cur": [
-   "procent"
+   "Проценты"
   ],
   "prc_account_dep": [
-   "procent"
+   "Проценты"
   ],
   "prc_account_rub": [
-   "procent"
+   "Проценты"
   ],
   "prc_account_tovr": [
-   "procent"
+   "Проценты"
   ],
   "prc_account_type": [
-   "procent"
+   "Проценты"
   ],
   "prc_calc_mode_ordinary": [
-   "procent"
+   "Проценты"
   ],
   "prc_calc_mode_total": [
-   "procent"
+   "Проценты"
   ],
   "prc_calcperiodondate": [
-   "procent"
+   "Проценты"
   ],
   "prc_calcprcvalues": [
-   "procent"
+   "Проценты"
   ],
   "prc_createcontractbyobject": [
-   "procent"
+   "Проценты"
   ],
   "prc_deal_loan": [
-   "procent"
+   "Проценты"
   ],
   "prc_generatecalendargraph": [
-   "procent"
+   "Проценты"
   ],
   "prc_ibc_con": [
-   "procent"
+   "Проценты"
   ],
   "prc_ibc_con_exp": [
-   "procent"
+   "Проценты"
   ],
   "prc_ibc_con_exppc": [
-   "procent"
+   "Проценты"
   ],
   "prc_obacc_cur": [
-   "procent"
+   "Проценты"
   ],
   "prc_obacc_rub": [
-   "procent"
+   "Проценты"
   ],
   "prc_recalcperiodondate": [
-   "procent"
+   "Проценты"
   ],
   "prc_regeneratecalendargraphenddate": [
-   "procent"
+   "Проценты"
   ],
   "prc_setrateval": [
-   "procent"
+   "Проценты"
   ],
   "prc_type_none": [
-   "procent"
+   "Проценты"
   ],
   "prc_veksel": [
-   "procent"
+   "Проценты"
   ],
   "prc_veksel_call": [
-   "procent"
+   "Проценты"
   ],
   "prc_wld_cur": [
-   "procent"
+   "Проценты"
   ],
   "prc_wld_rub": [
-   "procent"
+   "Проценты"
   ],
   "prd_depo_contract_obj_depoacc": [
    "BankInter"
@@ -15867,10 +15867,10 @@
    "DeposInter"
   ],
   "selectrangemarketrate": [
-   "procent"
+   "Проценты"
   ],
   "selectrangemarketrateex": [
-   "procent"
+   "Проценты"
   ],
   "selectreceipt": [
    "PaymInter"
@@ -17401,7 +17401,7 @@
    "CommonInter"
   ],
   "success": [
-   "gate"
+   "Шлюз"
   ],
   "sumconv": [
    "CommonInter"
@@ -18043,13 +18043,13 @@
    "ExchangeInter"
   ],
   "tgtlog": [
-   "gate"
+   "Шлюз"
   ],
   "tgtrecord": [
-   "gate"
+   "Шлюз"
   ],
   "tgtuserlog": [
-   "gate"
+   "Шлюз"
   ],
   "tjuridicalperson": [
    "CommonInter"
@@ -19049,7 +19049,7 @@
    "PaymInter"
   ],
   "updaterecordstatus": [
-   "gate"
+   "Шлюз"
   ],
   "updatescroll": [
    "rslx"
@@ -19331,7 +19331,7 @@
    "DealsInter"
   ],
   "warning": [
-   "gate"
+   "Шлюз"
   ],
   "web_cb_calcfreeamount": [
    "BankInter"
@@ -19940,7 +19940,7 @@
    "WIdInter"
   ],
   "workdays": [
-   "calendar"
+   "Календарь"
   ],
   "workmode_depocoraccpos": [
    "BankInter"
@@ -20193,13 +20193,13 @@
    "FIInter"
   ],
   "интервалы_постоянства_остатка": [
-   "procentbuh"
+   "ПроцентыБухгалтер"
   ],
   "интервалы_постоянства_остатка_1": [
-   "procentbuh"
+   "ПроцентыБухгалтер"
   ],
   "интервалы_постоянства_ставки": [
-   "procentbuh"
+   "ПроцентыБухгалтер"
   ],
   "инфовосстановитьглоб": [
    "ReptCBInter"
@@ -20223,7 +20223,7 @@
    "SbCrdInter"
   ],
   "ключеваяставкацб": [
-   "procent"
+   "Проценты"
   ],
   "количестводнейпросрочки": [
    "total"
@@ -20604,7 +20604,7 @@
    "PercInter"
   ],
   "расчетграфикапроцентов": [
-   "procentbuh"
+   "ПроцентыБухгалтер"
   ],
   "расчетзадолженности": [
    "SbCrdInter"
@@ -20685,7 +20685,7 @@
    "PTInter"
   ],
   "ставкарефинансированияцб": [
-   "procent"
+   "Проценты"
   ],
   "стажработы": [
    "replib"

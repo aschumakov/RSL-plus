@@ -1,5 +1,13 @@
 import { CompletionItemKind } from "vscode-languageserver";
 
+/**
+ * Модуль управления файлами и каталогами.
+ *
+ * Одной строкой, потому что имён за ним числится восемь, и разъезжаться
+ * их написанию незачем.
+ */
+const RSEXTS = "rsexts";
+
 export interface IRslBuiltinDefinition {
     name: string;
     kind: CompletionItemKind;
@@ -25,6 +33,14 @@ export interface IRslBuiltinDefinition {
      */
     base?: string;
     children?: readonly IRslBuiltinDefinition[];
+    /**
+     * Модуль, за которым справка числит это имя.
+     *
+     * Не условие доступности, а владелец: имя разрешается и без
+     * Import, а Hover называет модуль, чтобы не выдавать за
+     * безымянную часть языка то, у чего владелец известен.
+     */
+    moduleName?: string;
 }
 
 /*
@@ -312,9 +328,11 @@ const PROCEDURE_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
         "Run (prog, parm, init, finish:String)",
         "Запускает внешнюю программу."
     ),
+    /* Справка: «необходимо явно импортировать модуль rsexts». */
     procedure(
         "CallRemoteRsl (fileName [, procName [, parm1, parm2, ...]])",
-        "Выполняет макрофайл на терминале."
+        "Выполняет макрофайл на терминале.",
+        RSEXTS
     ),
     procedure(
         "Menu (array [, prompt] [, head] [, x] [, y] [, n])",
@@ -557,20 +575,41 @@ const PROCEDURE_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
             "indHeading:String]]) : Bool",
         "Копирует файл."
     ),
+    /*
+     * Дальше — процедуры, которые справка числит за модулем rsexts.
+     * Названы там прямо: «следует явно импортировать модуль rsexts».
+     * Соседние CopyFile, SplitFile и прочие про него не говорят
+     * ничего, и владельца им не приписано.
+     */
     procedure(
         "RenameFile (src:String, dst:String) : Bool",
-        "Переименовывает файл."
+        "Переименовывает файл.",
+        RSEXTS
     ),
-    procedure("RemoveFile (src:String) : Bool", "Удаляет файл."),
+    procedure(
+        "RemoveFile (src:String) : Bool",
+        "Удаляет файл.",
+        RSEXTS
+    ),
     procedure(
         "ExistDir(name:String):Integer",
-        "Проверяет существование и доступность каталога."
+        "Проверяет существование и доступность каталога.",
+        RSEXTS
     ),
-    procedure("MakeDir (name:String) : Bool", "Создаёт каталог."),
-    procedure("RemoveDir (name:String) : Bool", "Удаляет пустой каталог."),
+    procedure(
+        "MakeDir (name:String) : Bool",
+        "Создаёт каталог.",
+        RSEXTS
+    ),
+    procedure(
+        "RemoveDir (name:String) : Bool",
+        "Удаляет пустой каталог.",
+        RSEXTS
+    ),
     procedure(
         "GetCurDir ([isRemote:Bool]) : String",
-        "Возвращает текущий каталог."
+        "Возвращает текущий каталог.",
+        RSEXTS
     ),
     procedure(
         "SplitFile (pathName: String [, name: String [, " +
@@ -1244,7 +1283,11 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
             "Сбрасывает несохранённые изменения на диск."
         )
     ]),
-    classDef("TDirList", "Список файлов и каталогов, отобранных по маске.", [
+    /* Класс того же модуля: «В этот модуль также входит TDirList». */
+    classDef(
+        "TDirList",
+        "Список файлов и каталогов, отобранных по маске.",
+        [
         property("Count", "Integer", "Количество элементов в списке."),
         method("Name", "(index: Integer)", "String", "Имя файла или каталога."),
         method("Size", "(index: Integer)", "Integer", "Размер файла."),
@@ -1305,7 +1348,10 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
             "Bool",
             "Сортирует список по имени, размеру или дате."
         )
-    ]),
+        ],
+        undefined,
+        RSEXTS
+    ),
     classDef("TRslEvHandler", "Обработчик событий ActiveX-объектов.", [
         property("EvSource", "Object", "Коллекция объектов — источников событий."),
         property("TypeLib", "Object", "Файл библиотеки типов источников."),
@@ -1798,7 +1844,8 @@ function constant(
 
 function procedure(
     signature: string,
-    summary: string
+    summary: string,
+    moduleName?: string
 ): IRslBuiltinDefinition {
     const name = signature.match(/^([^\s(:[]+)/)?.[1] || signature;
     return {
@@ -1808,7 +1855,8 @@ function procedure(
         signature: balancedSignature(signature)
             ? signature
             : `${name}(...)`,
-        summary
+        summary,
+        moduleName
     };
 }
 
@@ -1833,7 +1881,8 @@ function classDef(
     name: string,
     summary: string,
     children: readonly IRslBuiltinDefinition[] = [],
-    base?: string
+    base?: string,
+    moduleName?: string
 ): IRslBuiltinDefinition {
     return {
         name,
@@ -1842,7 +1891,8 @@ function classDef(
         signature: `${name}(...)`,
         summary,
         base,
-        children
+        children,
+        moduleName
     };
 }
 
