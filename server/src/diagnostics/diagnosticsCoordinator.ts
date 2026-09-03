@@ -10,6 +10,10 @@ import {
     mergeRslSemanticDependencies,
     type IRslSemanticDependencies
 } from "../analysis/semanticState";
+import {
+    rslWorkspaceLanes,
+    type IRslWorkspaceLane
+} from "./ruleRegistry";
 import { rslDiagnosticRules } from "./ruleRegistry";
 import {
     type IDiagnosticPublication,
@@ -19,7 +23,7 @@ import {
 } from "./diagnosticVisibility";
 import type { RslSettingsService } from "../services/settingsService";
 import type { RslScopeResolver } from "../scopeResolver";
-import type { WorkspaceIndex } from "../workspaceIndex";
+import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 import {
     normalizeDiagnosticSettings,
     type RslDiagnosticStageObserver
@@ -121,6 +125,30 @@ export class DiagnosticsCoordinator {
     }>();
     private localKeys = new Map<string, string>();
     private workspaceKeys = new Map<string, string>();
+    /**
+     * Межфайловый результат по лентам: файл -> лента -> посчитанное.
+     *
+     * Ленты — это группы проверок с одинаковыми зависимостями. Общий ключ
+     * всей фазы объединял зависимости всех её проверок, а объединение
+     * включает каталог проекта: он меняется на каждую запись модуля, то
+     * есть всё время, пока идёт фоновая индексация. Вместе с ним
+     * отменялись `unusedImports`, `redundantImports`, `selfImport` и
+     * `specialVariables`, которым каталог не нужен вовсе.
+     *
+     * Заметнее всего это было при возврате на уже посчитанную вкладку:
+     * файл не менялся, а Problems считались заново целиком.
+     */
+    private workspaceLaneCache = new Map<string, Map<string, {
+        key: string;
+        parts: Record<string, string>;
+        diagnostics: Diagnostic[];
+    }>>();
+    /** Попадания, промахи и их причины: см. diagnosticsCacheCounters. */
+    private laneCounters = {
+        hits: 0,
+        misses: 0,
+        byReason: new Map<string, number>()
+    };
     private publishedSignatures = new Map<string, string>();
     private staleLocal = new Set<string>();
     private staleWorkspace = new Set<string>();
@@ -202,6 +230,7 @@ export class DiagnosticsCoordinator {
             this.cancel(uri);
             this.localCache.delete(uri);
             this.workspaceCache.delete(uri);
+            this.workspaceLaneCache.delete(uri);
             this.localKeys.delete(uri);
             this.workspaceKeys.delete(uri);
             this.sendIfChanged(uri, []);
@@ -263,6 +292,7 @@ export class DiagnosticsCoordinator {
         this.engine.forget(uri);
         this.localCache.delete(uri);
         this.workspaceCache.delete(uri);
+        this.workspaceLaneCache.delete(uri);
         this.localKeys.delete(uri);
         this.workspaceKeys.delete(uri);
         this.staleLocal.delete(uri);
@@ -487,12 +517,10 @@ export class DiagnosticsCoordinator {
                 state.module.version
             );
             const stages = this.watchStages(span !== undefined);
-            const diagnostics = await this.engine.buildWorkspaceAsync(
-                state.module,
-                this.index,
-                state.settings.diagnostics,
+            const diagnostics = await this.runWorkspaceLanes(
+                uri,
+                state,
                 isCancelled,
-                this.options.resolver,
                 stages.observer
             );
 
@@ -720,6 +748,129 @@ export class DiagnosticsCoordinator {
             this.workspaceConditionKey(uri, module.version) === entry.key
             ? entry.diagnostics
             : [];
+    }
+
+    /**
+     * Посчитать межфайловую фазу по лентам, пересчитав только устаревшие.
+     *
+     * Лента, чьи зависимости не менялись, берётся из памяти как есть.
+     * Ради этого разделение и сделано: возврат на уже посчитанную вкладку
+     * не должен пересчитывать проверки, к которым изменения отношения не
+     * имеют.
+     */
+    private async runWorkspaceLanes(
+        uri: string,
+        state: { module: IIndexedModule; settings: IRslSettings },
+        isCancelled: () => boolean,
+        observer: RslDiagnosticStageObserver | undefined
+    ): Promise<Diagnostic[]> {
+        const settingsKey = diagnosticsSettingsKey(state.settings);
+        const lanes = rslWorkspaceLanes();
+        let byLane = this.workspaceLaneCache.get(uri);
+
+        if (!byLane) {
+            byLane = new Map();
+            this.workspaceLaneCache.set(uri, byLane);
+        }
+
+        const result: Diagnostic[] = [];
+
+        for (const lane of lanes) {
+            const parts = this.conditionParts(
+                uri,
+                lane.depends,
+                settingsKey
+            );
+            const key = Object.values(parts).join("\u0000");
+            const known = byLane.get(lane.id);
+
+            if (known && known.key === key) {
+                this.laneCounters.hits++;
+                result.push(...known.diagnostics);
+
+                continue;
+            }
+
+            this.laneCounters.misses++;
+            this.noteLaneMiss(known ? known.parts : undefined, parts);
+
+            const produced = await this.engine.buildWorkspaceAsync(
+                state.module,
+                this.index,
+                state.settings.diagnostics,
+                isCancelled,
+                this.options.resolver,
+                observer,
+                laneFilter(lane, lanes)
+            );
+
+            if (isCancelled()) {
+                return result;
+            }
+
+            byLane.set(lane.id, { key, parts, diagnostics: produced });
+            result.push(...produced);
+        }
+
+        return result;
+    }
+
+    /** Из-за чего лента пересчитана: первая разошедшаяся составляющая. */
+    private noteLaneMiss(
+        before: Record<string, string> | undefined,
+        after: Record<string, string>
+    ): void {
+        const reason = !before
+            ? "missing"
+            : Object.keys(after).find(
+                name => before[name] !== after[name]
+            ) || "missing";
+
+        this.laneCounters.byReason.set(
+            reason,
+            (this.laneCounters.byReason.get(reason) || 0) + 1
+        );
+    }
+
+    /**
+     * Попадания и промахи кэша диагностик с причинами.
+     *
+     * «Пересчитали заново» — бесполезная запись; «пересчитали, потому что
+     * изменился каталог» показывает, куда смотреть.
+     */
+    get diagnosticsCacheCounters(): {
+        hits: number;
+        misses: number;
+        byReason: Record<string, number>;
+    } {
+        return {
+            hits: this.laneCounters.hits,
+            misses: this.laneCounters.misses,
+            byReason: Object.fromEntries(this.laneCounters.byReason)
+        };
+    }
+
+    /** Составляющие условий ленты: по ним видно, что именно изменилось. */
+    private conditionParts(
+        uri: string,
+        depends: IRslSemanticDependencies,
+        settingsKey: string
+    ): Record<string, string> {
+        const resolver = this.options.resolver;
+
+        if (!resolver) {
+            /* Индекс в тестах бывает без resolver: см. conditionKey. */
+            return {
+                text: String(this.index.getModule(uri)?.version ?? -1),
+                closure: this.index.getImportClosureKey(uri),
+                catalog: String(this.catalogRevision()),
+                settings: settingsKey
+            };
+        }
+
+        return resolver.semanticState.captureParts(uri, depends, {
+            settings: settingsKey
+        });
     }
 
     /**
@@ -1007,4 +1158,37 @@ function errorToString(error: unknown): string {
         return `${error.name}: ${error.message}\n${error.stack || ""}`;
     }
     return String(error);
+}
+
+/**
+ * Какие проверки считать для ленты.
+ *
+ * Спрашивают дважды и в разных пространствах имён: движок — про свои
+ * правила, план фазы — про свои этапы. Имена не пересекаются, поэтому
+ * функция одна.
+ *
+ * `core-workspace` пропускается всегда: он и есть план фазы, а внутри себя
+ * он отберёт этапы этой ленты. Прочие правила движка — те, которых в
+ * реестре нет вовсе, — достаются самой зависимой ленте: пересчитывать их
+ * реже, чем сейчас, было бы догадкой о том, от чего они зависят.
+ */
+function laneFilter(
+    lane: IRslWorkspaceLane,
+    lanes: readonly IRslWorkspaceLane[]
+): (ruleId: string) => boolean {
+    const widest = lanes[lanes.length - 1];
+    const members = new Set(lane.rules);
+    const planned = new Set(lanes.flatMap(item => item.rules));
+
+    return ruleId => {
+        if (ruleId === "core-workspace") {
+            return true;
+        }
+
+        if (planned.has(ruleId)) {
+            return members.has(ruleId);
+        }
+
+        return lane.id === widest.id;
+    };
 }

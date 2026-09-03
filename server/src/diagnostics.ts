@@ -886,10 +886,23 @@ export async function buildWorkspaceRslDiagnosticsChunked(
     isCancelled?: () => boolean,
     sharedResolver?: RslScopeResolver,
     slice: IRslWorkSlice = createWorkSlice(),
-    onStage?: RslDiagnosticStageObserver
+    onStage?: RslDiagnosticStageObserver,
+    /**
+     * Какие проверки фазы считать; без него — все.
+     *
+     * Нужен лентам: они считаются и запоминаются по отдельности,
+     * потому что зависимости у проверок разные.
+     */
+    include?: (ruleId: string) => boolean
 ): Promise<Diagnostic[]> {
     return runDiagnosticPlanChunked(
-        planWorkspaceRslDiagnostics(module, index, settings, sharedResolver),
+        planWorkspaceRslDiagnostics(
+            module,
+            index,
+            settings,
+            sharedResolver,
+            include
+        ),
         isCancelled,
         slice,
         onStage
@@ -900,7 +913,8 @@ function planWorkspaceRslDiagnostics(
     module: IIndexedModule,
     index: WorkspaceIndex,
     settings?: IRslDiagnosticSettings,
-    sharedResolver?: RslScopeResolver
+    sharedResolver?: RslScopeResolver,
+    include?: (ruleId: string) => boolean
 ): IRslDiagnosticPlan {
     const options = normalizeDiagnosticSettings(settings);
     if (!options.enabled || options.maxProblems === 0) {
@@ -1019,7 +1033,11 @@ function planWorkspaceRslDiagnostics(
     ];
 
     return {
-        stages: enabledStages(stages),
+        stages: enabledStages(
+            include
+                ? stages.filter(([name]) => include(name))
+                : stages
+        ),
         hasCapacity: () => result.length <
             Math.max(options.maxProblems, MAX_COMPUTED_PROBLEMS),
         finish: () =>

@@ -42,6 +42,8 @@ export class RslCatalogRestore {
     private readonly slice: IRslWorkSlice;
     private readonly batch: number;
     private restored = 0;
+    /** Сколько переносов брошено: файл открылся, пока шла запись. */
+    private abandoned = 0;
 
     constructor(
         private readonly catalog: WorkspaceCatalog,
@@ -55,6 +57,11 @@ export class RslCatalogRestore {
 
     get count(): number {
         return this.restored;
+    }
+
+    /** Сколько переносов брошено из-за открывшегося файла. */
+    get abandonedCount(): number {
+        return this.abandoned;
     }
 
     async add(record: IRslCatalogRecord): Promise<void> {
@@ -88,7 +95,15 @@ export class RslCatalogRestore {
          * модуля общие, — и отдельными вызовами записи одинаковые объявления
          * по разные стороны границы порции получали бы один symbolId.
          */
-        await this.catalog.recordDeclarationsInBatches(
+        /*
+         * Условие актуальности: файл всё ещё не открыт.
+         *
+         * Проверки в начале мало. Запись крупного файла уступает поток
+         * между порциями, и за это время файл успевают открыть — тогда
+         * живая модель записывает свой, более свежий состав, а перенос
+         * продолжал бы писать сохранённый поверх него.
+         */
+        const written = await this.catalog.recordDeclarationsInBatches(
             {
                 uri: record.uri,
                 version: 0,
@@ -97,8 +112,16 @@ export class RslCatalogRestore {
                 fileReferences: new Set(record.fileReferences)
             },
             this.batch,
-            () => this.yieldIfNeeded()
+            () => this.yieldIfNeeded(),
+            () => !this.options.isOpen(record.uri)
         );
+
+        if (!written) {
+            /* Брошенный перенос восстановленным не считается. */
+            this.abandoned++;
+
+            return;
+        }
 
         this.restored++;
     }

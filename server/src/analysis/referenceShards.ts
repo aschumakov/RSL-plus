@@ -4,6 +4,7 @@ import { fileURLToPath } from "url";
 
 import { decodeRslSourceText } from "../core/textDecoding";
 import { contentFingerprint } from "./contentFingerprint";
+import { uriKey, type UriKey } from "../core/identity/uriKey";
 import {
     RslRequestSourceCache,
     type IRslReadSource
@@ -28,7 +29,13 @@ import {
 
 /** Одна разрешённая ссылка: куда ведёт и где написана. */
 export interface IRslShardReference {
-    /** Устойчивое тождество цели: URI и идентификатор символа. */
+    /**
+     * Устойчивое тождество цели: см. rslSymbolRefKey.
+     *
+     * Идентичность файла и номер объявления — и больше ничего. В формате
+     * 1 сюда входили границы объявления, и сдвиг от правки выше по файлу
+     * делал цель другим символом.
+     */
     targetKey: string;
     startLine: number;
     startCharacter: number;
@@ -62,6 +69,13 @@ interface IRslShardStamp {
 }
 
 interface IRslShardEntry {
+    /**
+     * Написание URI, по которому файл открывают.
+     *
+     * Ключом служит идентичность файла, а по ней нельзя ни перейти, ни
+     * записать её в хранилище.
+     */
+    uri: string;
     stamp: IRslShardStamp;
     /** Имя -> все его разрешённые вхождения в этом файле. */
     names: Map<string, IRslShardReference[]>;
@@ -109,17 +123,28 @@ export interface IRslReferenceShardStats {
 
 /*
  * 1: имя -> разрешённые ссылки, неизменность по дате и размеру.
+ * 2: тождество цели устойчивое — идентичность файла и номер объявления.
+ *
+ * Записи версии 1 не мигрируются: их тождество собрано из положения
+ * объявления, и восстановить по нему номер нечем. Они отбрасываются, а
+ * новые появятся при первом же запросе.
  */
-const SHARD_VERSION = 1;
+const SHARD_VERSION = 2;
 const DEFAULT_BUCKETS = 64;
 const SAVE_DEBOUNCE_MS = 3000;
 
-/** Номер корзины по URI: он же имя файла корзины. */
-function bucketOf(uri: string, buckets: number): number {
+/**
+ * Номер корзины по идентичности файла: он же имя файла корзины.
+ *
+ * Именно по идентичности, а не по написанию URI: иначе один физический
+ * файл, пришедший двумя написаниями, попадал бы в разные корзины, и
+ * запись о нём двоилась.
+ */
+function bucketOf(key: UriKey, buckets: number): number {
     let hash = 2166136261;
 
-    for (let at = 0; at < uri.length; at++) {
-        hash ^= uri.charCodeAt(at);
+    for (let at = 0; at < key.length; at++) {
+        hash ^= key.charCodeAt(at);
         hash = Math.imul(hash, 16777619);
     }
 
@@ -130,11 +155,12 @@ export class RslReferenceShardStore {
     private readonly buckets: number;
     private directory: string | undefined;
     /** Прочитанные корзины: номер -> записи файлов. */
-    private loaded = new Map<number, Map<string, IRslShardEntry>>();
+    /* Ключ — идентичность файла; исходный URI лежит в самой записи. */
+    private loaded = new Map<number, Map<UriKey, IRslShardEntry>>();
     private loading = new Map<number, Promise<void>>();
     private dirty = new Set<number>();
     private saveTimer: NodeJS.Timeout | undefined;
-    private workspaceUris: Set<string> | undefined;
+    private workspaceUris: Set<UriKey> | undefined;
     /**
      * Текущее сохранение: следующее ждёт его.
      *
@@ -269,7 +295,8 @@ export class RslReferenceShardStore {
             ...stat,
             fingerprint: contentFingerprint(source)
         };
-        const bucket = bucketOf(uri, this.buckets);
+        const key = uriKey(uri);
+        const bucket = bucketOf(key, this.buckets);
 
         await this.ensureBucket(bucket);
 
@@ -287,19 +314,21 @@ export class RslReferenceShardStore {
          * текста: пересчитали имя A — имя B осталось прежним, а запись после
          * record считается сверенной, и содержимое больше никто не проверит.
          */
-        const known = entries.get(uri);
+        const known = entries.get(key);
         const reusable = known &&
             known.stamp.fingerprint === stamp.fingerprint;
         const entry = reusable
             ? known
-            : { stamp, names: new Map<string, IRslShardReference[]>() };
+            : { uri, stamp, names: new Map<string, IRslShardReference[]>() };
 
         /* Дата могла измениться при том же содержимом: она тоже обновляется. */
         entry.stamp = stamp;
         /* Запись этой сессии сверена по построению: текст только что читали. */
         entry.confirmed = true;
         entry.names.set(name, [...references]);
-        entries.set(uri, entry);
+        /* Написание могло прийти другое: наружу отдаётся последнее. */
+        entry.uri = uri;
+        entries.set(key, entry);
         this.dirty.add(bucket);
         this.scheduleSave();
     }
@@ -311,12 +340,12 @@ export class RslReferenceShardStore {
 
     /** Файлов проекта больше нет: их записи не нужны. */
     retainWorkspaceFiles(uris: readonly string[]): void {
-        this.workspaceUris = new Set(uris);
+        this.workspaceUris = new Set(uris.map(uri => uriKey(uri)));
 
         for (const [bucket, entries] of this.loaded) {
-            for (const uri of [...entries.keys()]) {
-                if (!this.workspaceUris.has(uri)) {
-                    entries.delete(uri);
+            for (const key of [...entries.keys()]) {
+                if (!this.workspaceUris.has(key)) {
+                    entries.delete(key);
                     this.dirty.add(bucket);
                 }
             }
@@ -403,20 +432,22 @@ export class RslReferenceShardStore {
     }
 
     private forgetEntry(uri: string): void {
-        const bucket = bucketOf(uri, this.buckets);
+        const key = uriKey(uri);
+        const bucket = bucketOf(key, this.buckets);
         const entries = this.loaded.get(bucket);
 
-        if (entries?.delete(uri)) {
+        if (entries?.delete(key)) {
             this.dirty.add(bucket);
         }
     }
 
     private async entryOf(uri: string): Promise<IRslShardEntry | undefined> {
-        const bucket = bucketOf(uri, this.buckets);
+        const key = uriKey(uri);
+        const bucket = bucketOf(key, this.buckets);
 
         await this.ensureBucket(bucket);
 
-        return this.loaded.get(bucket)?.get(uri);
+        return this.loaded.get(bucket)?.get(key);
     }
 
     /**
@@ -446,7 +477,7 @@ export class RslReferenceShardStore {
     }
 
     private async loadBucket(bucket: number): Promise<void> {
-        const entries = new Map<string, IRslShardEntry>();
+        const entries = new Map<UriKey, IRslShardEntry>();
 
         this.loaded.set(bucket, entries);
 
@@ -483,7 +514,9 @@ export class RslReferenceShardStore {
         }
 
         for (const file of parsed.files || []) {
-            if (this.workspaceUris && !this.workspaceUris.has(file.uri)) {
+            const key = uriKey(file.uri);
+
+            if (this.workspaceUris && !this.workspaceUris.has(key)) {
                 continue;
             }
 
@@ -492,7 +525,8 @@ export class RslReferenceShardStore {
                 continue;
             }
 
-            entries.set(file.uri, {
+            entries.set(key, {
+                uri: file.uri,
                 stamp: {
                     mtimeMs: file.mtimeMs,
                     size: file.size,
@@ -516,8 +550,8 @@ export class RslReferenceShardStore {
 
         const payload: ISerializedShard = {
             version: SHARD_VERSION,
-            files: [...entries.entries()].map(([uri, entry]) => ({
-                uri,
+            files: [...entries.values()].map(entry => ({
+                uri: entry.uri,
                 mtimeMs: entry.stamp.mtimeMs,
                 size: entry.stamp.size,
                 fingerprint: entry.stamp.fingerprint,

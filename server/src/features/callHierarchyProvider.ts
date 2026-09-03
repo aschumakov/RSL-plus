@@ -30,18 +30,30 @@ import type { RslScopeResolver } from "../scopeResolver";
 import type { IIndexedModule, WorkspaceIndex } from "../workspaceIndex";
 import { decodeRslSourceText } from "../core/textDecoding";
 import {
+    findRslSymbolById,
+    rslSymbolRefKey
+} from "../symbols/symbolRef";
+import {
+    moduleSymbolId,
+    type SymbolId
+} from "../symbols/rslSymbol";
+import {
     offsetInModule
 } from "../core/documentPosition";
 import {
     positionInModule
 } from "../core/documentPosition";
 
+/**
+ * Чем элемент иерархии опознаётся при следующем запросе.
+ *
+ * Только устойчивое тождество: файл и номер объявления. Положения сюда
+ * не входят — data живёт у клиента между запросами, и за это время файл
+ * правят. Всё, что зависит от текста, берётся из ТЕКУЩЕЙ модели.
+ */
 interface ICallHierarchyData {
     uri: string;
-    name: string;
-    start: number;
-    end: number;
-    declarationOffset: number;
+    symbolId: SymbolId;
 }
 
 export interface ICallHierarchyEnvironment {
@@ -153,7 +165,7 @@ export class RslCallHierarchyProvider {
                         : createFileCallHierarchyItem(module);
                     const callerData = getData(callerItem);
                     const key = callerData
-                        ? `${callerData.uri}:${callerData.start}:${callerData.end}`
+                        ? rslSymbolRefKey(callerData)
                         : `${callerItem.uri}:${callerItem.name}`;
                     const existing = grouped.get(key);
 
@@ -187,6 +199,20 @@ export class RslCallHierarchyProvider {
 
         await this.withFullModule(data.uri, module => {
             /*
+             * Границы тела — у объявления в ТЕКУЩЕЙ модели, а не из data.
+             * Файл могли поправить между prepare и этим запросом.
+             */
+            const owner = findObjectByData(module.symbolTree, data);
+
+            if (!owner) {
+                return;
+            }
+
+            const bodyStart = owner.range.start;
+            const bodyEnd = owner.range.end;
+            const declarationOffset = nameOffset(module, owner);
+
+            /*
              * Места вызова разбирает общий механизм.
              *
              * Прежде вызовом считался «идентификатор и открывающая
@@ -200,9 +226,9 @@ export class RslCallHierarchyProvider {
                 }
 
                 if (
-                    site.start < data.start ||
-                    site.end > data.end ||
-                    site.start === data.declarationOffset
+                    site.start < bodyStart ||
+                    site.end > bodyEnd ||
+                    site.start === declarationOffset
                 ) {
                     continue;
                 }
@@ -243,7 +269,7 @@ export class RslCallHierarchyProvider {
                 );
                 const targetData = getData(targetItem);
                 const key = targetData
-                    ? `${targetData.uri}:${targetData.start}:${targetData.end}`
+                    ? rslSymbolRefKey(targetData)
                     : `${targetItem.uri}:${targetItem.name}`;
                 const range = offsetRange(module, site.start, site.end);
                 const existing = result.get(key);
@@ -321,10 +347,7 @@ function createCallHierarchyItem(
         : selectionRange;
     const data: ICallHierarchyData = {
         uri: module.uri,
-        name: symbol.name,
-        start: symbol.range.start,
-        end: symbol.range.end,
-        declarationOffset: nameOffset(module, symbol)
+        symbolId: symbol.id
     };
 
     return {
@@ -344,12 +367,15 @@ function createFileCallHierarchyItem(
     module: IIndexedModule
 ): CallHierarchyItem {
     const range = offsetRange(module, 0, module.source.length);
+    /*
+     * Вызов на уровне файла, вне какого-либо объявления.
+     *
+     * Тождество — корень модуля: раскрывать такой элемент нечего (корень
+     * не callable), но различать файлы между собой в группировке надо.
+     */
     const data: ICallHierarchyData = {
         uri: module.uri,
-        name: displayFile(module.uri),
-        start: 0,
-        end: module.source.length,
-        declarationOffset: 0
+        symbolId: moduleSymbolId()
     };
 
     return {
@@ -391,33 +417,20 @@ function findEnclosingCallable(
     return result;
 }
 
+/**
+ * Объявление, к которому относится элемент иерархии.
+ *
+ * По устойчивому номеру в ТЕКУЩЕЙ модели файла. Прежде искалось по имени
+ * и границам, и правка выше по объявлению делала элемент
+ * неопознаваемым — иерархия отвечала пустотой на живой код.
+ */
 function findObjectByData(
     root: RslSymbol,
     data: ICallHierarchyData
 ): RslSymbol | undefined {
-    const normalizedName = normalizeIdentifier(data.name);
-    const queue = [root];
+    const found = findRslSymbolById(root, data.symbolId);
 
-    for (let position = 0; position < queue.length; position++) {
-        const current = queue[position];
-
-        for (const child of current.children) {
-            if (
-                isCallable(child) &&
-                normalizeIdentifier(child.name) === normalizedName &&
-                child.range.start === data.start &&
-                child.range.end === data.end
-            ) {
-                return child;
-            }
-
-            if (child.isContainer) {
-                queue.push(child);
-            }
-        }
-    }
-
-    return undefined;
+    return found && isCallable(found) ? found : undefined;
 }
 
 function findNameRange(
@@ -509,9 +522,7 @@ function getData(item: CallHierarchyItem): ICallHierarchyData | undefined {
 
     return data &&
         typeof data.uri === "string" &&
-        typeof data.start === "number" &&
-        typeof data.end === "number" &&
-        typeof data.declarationOffset === "number"
+        typeof data.symbolId === "string"
         ? data as ICallHierarchyData
         : undefined;
 }

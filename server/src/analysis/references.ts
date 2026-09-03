@@ -1,4 +1,5 @@
 import { RslRequestSourceCache } from "./requestSourceCache";
+import { rslSymbolRefKey } from "../symbols/symbolRef";
 import {
     RslProjectIndexView
 } from "../indexing/projectIndexView";
@@ -214,7 +215,7 @@ export async function findRslReferencesForSymbol(
                 })),
                 cancel
             )
-    }).referencesOf(targetUri, isCancelled);
+    }).referenceCandidateUris(targetUri, isCancelled);
     const externalUris = candidateUniverse.filter(candidateUri =>
         !openUris.has(candidateUri)
     );
@@ -583,14 +584,17 @@ function getReferenceTreeChildren(current: RslSymbol): RslSymbol[] {
     return [...current.children];
 }
 
+/**
+ * Тождество цели: файл и устойчивый номер объявления.
+ *
+ * Прежде сюда входили имя, вид и ГРАНИЦЫ объявления. Из-за границ сдвиг
+ * объявления от правки выше по файлу делал цель «другим символом»:
+ * сохранённые записи о ссылках переставали к ней относиться, хотя
+ * снаружи модуль не изменился вовсе. Положение символа не является его
+ * тождеством.
+ */
 function symbolKey(uri: string, symbol: RslSymbol): string {
-    return [
-        uri,
-        normalizeIdentifier(symbol.name),
-        symbol.kind,
-        symbol.range.start,
-        symbol.range.end
-    ].join(":");
+    return rslSymbolRefKey({ uri, symbolId: symbol.id });
 }
 
 function compareLocations(left: Location, right: Location): number {

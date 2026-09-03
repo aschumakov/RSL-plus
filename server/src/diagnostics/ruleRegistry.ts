@@ -577,3 +577,78 @@ export function rslRequiredStageIds(
 
     return result;
 }
+
+/**
+ * Лента межфайловой фазы: проверки с одинаковыми зависимостями.
+ *
+ * Считаются и запоминаются ленты по отдельности. Объединять зависимости
+ * всей фазы в один ключ значит пересчитывать заведомо независимые
+ * правила: у `unknownVariables` и `ambiguousReferences` в зависимостях
+ * каталог проекта, а он меняется на каждую запись модуля — то есть всё
+ * время, пока идёт фоновая индексация.
+ */
+export interface IRslWorkspaceLane {
+    /** Имя ленты: по нему она запоминается. */
+    id: string;
+    depends: IRslSemanticDependencies;
+    /** Какие проверки в неё входят, вместе с их подготовкой. */
+    rules: readonly string[];
+}
+
+/**
+ * Ленты межфайловой фазы.
+ *
+ * Группировка — по слепку зависимостей: у проверок с одинаковым набором
+ * одна судьба, и держать их порознь незачем. Подготовительные проверки
+ * (`produces: false`) попадают в каждую ленту, которая их требует: сами
+ * они ничего не сообщают, но без них не работают те, кто сообщает.
+ */
+export function rslWorkspaceLanes(): IRslWorkspaceLane[] {
+    const rules = rslDiagnosticRules("workspace");
+    const byId = new Map(rules.map(rule => [rule.id, rule]));
+    const lanes = new Map<string, IRslWorkspaceLane>();
+
+    for (const rule of rules) {
+        if (!rule.produces) {
+            continue;
+        }
+
+        const id = laneId(rule.depends);
+        const lane = lanes.get(id) ||
+            { id, depends: rule.depends, rules: [] as string[] };
+        const members = lane.rules as string[];
+
+        for (const required of rule.requires) {
+            if (byId.has(required) && !members.includes(required)) {
+                members.push(required);
+            }
+        }
+
+        members.push(rule.id);
+        lanes.set(id, lane);
+    }
+
+    return [...lanes.values()];
+}
+
+/** Имя ленты: слепок набора зависимостей, а не выдуманная метка. */
+function laneId(depends: IRslSemanticDependencies): string {
+    const parts: string[] = [];
+
+    for (const name of [
+        "text",
+        "imports",
+        "closure",
+        "catalog",
+        "workspace",
+        "platform",
+        "semantic",
+        "settings"
+    ] as const) {
+        if (depends[name]) {
+            parts.push(name);
+        }
+    }
+
+    return parts.join("+") || "нет";
+}

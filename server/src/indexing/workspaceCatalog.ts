@@ -446,6 +446,19 @@ export class WorkspaceCatalog {
      * имён и подменять его целиком; на файле с 50 000 символов это заметная
      * память ради состояния, которое живёт миллисекунды.
      */
+    /**
+     * Записать крупный файл порциями, уступая поток между ними.
+     *
+     * `isCurrent` спрашивается после каждой уступки: за время уступки
+     * файл могли открыть, и живая модель записывает свой, более свежий
+     * состав. Продолжать после этого нельзя — ни коммитить построенное
+     * поверх живой записи, ни доиндексировать старые имена в byName.
+     * Открытая модель главнее фоновой всегда, а не только в момент
+     * начала работы.
+     *
+     * Возвращает false, если работа брошена: вызывающий не вправе
+     * считать такой файл восстановленным.
+     */
     async recordDeclarationsInBatches(
         source: {
             uri: string;
@@ -455,8 +468,10 @@ export class WorkspaceCatalog {
             fileReferences?: ReadonlySet<string>;
         },
         batchSize: number,
-        onBatch?: () => void | Promise<void>
-    ): Promise<void> {
+        onBatch?: () => void | Promise<void>,
+        /** Актуальна ли ещё эта работа; по умолчанию — да. */
+        isCurrent: () => boolean = () => true
+    ): Promise<boolean> {
         const size = Math.max(1, batchSize);
         const declarations = source.declarations;
         const built = this.buildSymbols(source.uri, []);
@@ -464,6 +479,11 @@ export class WorkspaceCatalog {
         for (let at = 0; at < declarations.length; at += size) {
             if (at > 0) {
                 await onBatch?.();
+
+                if (!isCurrent()) {
+                    /* Ничего ещё не записано: бросить и есть весь откат. */
+                    return false;
+                }
             }
 
             this.buildSymbols(
@@ -471,6 +491,15 @@ export class WorkspaceCatalog {
                 declarations.slice(at, at + size),
                 built
             );
+        }
+
+        /*
+         * Последняя проверка перед записью: между сборкой и коммитом
+         * уступок не было, но самая первая порция могла быть и
+         * единственной — тогда проверок выше не случилось вовсе.
+         */
+        if (!isCurrent()) {
+            return false;
         }
 
         this.commitRecord({
@@ -490,6 +519,19 @@ export class WorkspaceCatalog {
                 await onBatch?.();
             }
 
+            /*
+             * Проверка ПЕРЕД каждой порцией, включая первую.
+             *
+             * Запись уже сделана, и если файл открылся, живая модель её
+             * заменила своей — вместе с уже проиндексированными именами
+             * (remove снимает их по файлу). Дописывать старые имена
+             * поверх живой записи нельзя: в byName оказались бы
+             * объявления двух разных версий файла сразу.
+             */
+            if (!isCurrent()) {
+                return false;
+            }
+
             this.indexSymbols(
                 source.uri,
                 built.symbols.slice(at, at + size)
@@ -497,6 +539,8 @@ export class WorkspaceCatalog {
         }
 
         this.revisionValue++;
+
+        return true;
     }
 
     /**

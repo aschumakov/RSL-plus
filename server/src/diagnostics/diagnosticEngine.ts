@@ -61,6 +61,14 @@ export interface IRslDiagnosticContext {
      */
     resolver?: RslScopeResolver;
     /**
+     * Какие проверки считать; без него — все.
+     *
+     * Нужен лентам межфайловой фазы: у её проверок разные зависимости, и
+     * считаются они по отдельности. Спрашивается и про правила движка, и про
+     * этапы плана фазы — имена у них разные, и путаницы не выходит.
+     */
+    include?(ruleId: string): boolean;
+    /**
      * Длительность отдельной порции расчёта.
      *
      * Между порциями управление возвращается редактору, а внутри — нет, поэтому
@@ -198,7 +206,8 @@ export class RslDiagnosticEngine {
                 context.isCancelled,
                 context.resolver,
                 slice,
-                context.onStage
+                context.onStage,
+                context.include
             )
         });
         this.register({
@@ -366,7 +375,9 @@ export class RslDiagnosticEngine {
         settings?: IRslDiagnosticSettings,
         isCancelled?: () => boolean,
         resolver?: RslScopeResolver,
-        onStage?: RslDiagnosticStageObserver
+        onStage?: RslDiagnosticStageObserver,
+        /** Какие проверки фазы считать; без него — все. */
+        include?: (ruleId: string) => boolean
     ): Promise<Diagnostic[]> {
         return this.buildPhaseAsync(
             "workspace",
@@ -375,7 +386,8 @@ export class RslDiagnosticEngine {
             settings,
             isCancelled,
             resolver,
-            onStage
+            onStage,
+            include
         );
     }
 
@@ -430,6 +442,7 @@ export class RslDiagnosticEngine {
             if ((rule.phase || "local") !== phase) {
                 continue;
             }
+
             const remaining = computeLimit - diagnostics.length;
             if (remaining <= 0) {
                 break;
@@ -465,7 +478,14 @@ export class RslDiagnosticEngine {
         settings?: IRslDiagnosticSettings,
         isCancelled?: () => boolean,
         resolver?: RslScopeResolver,
-        onStage?: RslDiagnosticStageObserver
+        onStage?: RslDiagnosticStageObserver,
+        /**
+         * Какие проверки считать; без него — все.
+         *
+         * Спрашивается и про правила движка, и про этапы плана фазы:
+         * имена у них разные, и путаницы не выходит.
+         */
+        include?: (ruleId: string) => boolean
     ): Promise<Diagnostic[]> {
         const options = normalizeDiagnosticSettings(settings);
         if (!options.enabled || options.maxProblems === 0) {
@@ -506,7 +526,8 @@ export class RslDiagnosticEngine {
                 },
                 isCancelled,
                 resolver,
-                onStage
+                onStage,
+                include
             };
             const produced = rule.runChunked
                 ? await rule.runChunked(context, slice)

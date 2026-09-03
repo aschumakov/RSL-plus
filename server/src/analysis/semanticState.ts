@@ -139,6 +139,56 @@ export class RslSemanticState {
 
     constructor(private readonly source: IRslSemanticStateSource) {}
 
+    /**
+     * Ключ по составляющим: по нему видно, ЧТО именно изменилось.
+     *
+     * Нужен диагностикам: «пересчитали заново» — бесполезная запись в
+     * логе, а «пересчитали, потому что изменился каталог» показывает,
+     * куда смотреть. Составляющие те же, что в ключе, поэтому лишней
+     * работы здесь нет.
+     */
+    captureParts(
+        uri: string,
+        depends: IRslSemanticDependencies,
+        extras: IRslSemanticExtras = {}
+    ): Record<string, string> {
+        const parts: Record<string, string> = {};
+
+        if (depends.text) {
+            parts.text = String(this.source.textVersion(uri));
+        }
+
+        if (depends.imports) {
+            parts.imports = this.source.importsKey(uri);
+        }
+
+        if (depends.closure) {
+            parts.closure = this.source.closureKey(uri);
+        }
+
+        if (depends.catalog) {
+            parts.catalog = String(this.source.catalogRevision());
+        }
+
+        if (depends.workspace) {
+            parts.workspace = String(this.source.workspaceRevision());
+        }
+
+        if (depends.platform) {
+            parts.platform = String(this.source.platformRevision());
+        }
+
+        if (depends.semantic) {
+            parts.semantic = String(this.source.semanticRevision(uri));
+        }
+
+        if (depends.settings) {
+            parts.settings = extras.settings ?? "";
+        }
+
+        return parts;
+    }
+
     /** Слепок ровно тех состояний, от которых зависит ответ. */
     capture(
         uri: string,
