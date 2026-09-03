@@ -1,19 +1,20 @@
 "use strict";
 
 /**
- * Модуль платформы известен под тем именем, которое пишут в Import.
+ * Имя из прикладного модуля доступно через Import — и модуль назван правильно.
  *
- * Каталог знал `calendar` — имя корневой страницы справки, — а в коде написано
- * `Import Календарь`. Панель «RSL: зависимости» называет такой модуль «не
- * найден», и это не косметика: тем же вопросом решается, искать ли под этим
- * именем файл проекта. На настоящем проекте под удар попали четыре модуля с
- * кириллическими названиями плюс rsexts, rsd и CFormInter, которых в каталоге
- * не было вовсе: 821, 302 и 75 файлов соответственно.
+ * Две вещи, найденные на настоящем проекте.
  *
- * Здесь же проверяется вторая половина: у части стандартных имён есть
- * модуль-владелец, и справка называет его прямо. Владелец, а не условие —
- * имя разрешается и без Import, — поэтому проверяется и то, что владелец
- * показан, и то, что доступность от этого не изменилась.
+ * Первая: каталог знал модули под именами, которых никто не пишет. Ключом
+ * кириллического модуля стало имя его корневой страницы справки — `calendar`
+ * вместо `Календарь`, — и панель «RSL: зависимости» называла такой модуль «не
+ * найден». Тем же вопросом решается, искать ли под этим именем файл проекта.
+ *
+ * Вторая: состав модулей rsexts, rsd и CFormInter лежал не там. Процедуры
+ * управления файлами и классы RSD числились безымянной частью языка, хотя
+ * справка называет их модуль прямо: «Модуль rsexts содержит процедуры …».
+ * Теперь они в составе своих модулей, и это меняет поведение: без Import имя
+ * не разрешается, а проверка называет модуль, которого не хватает.
  */
 
 const assert = require("assert");
@@ -39,6 +40,9 @@ const { getDefaults } = require("../server/out/defaults");
 const {
     buildRslHoverContent
 } = require("../server/out/features/hoverFormatter");
+const {
+    buildRslPlatformModuleDiagnostics
+} = require("../server/out/diagnostics/platformModuleDiagnostics");
 
 let passed = 0;
 let failed = 0;
@@ -48,13 +52,15 @@ function test(name, action) {
     tests.push({ name, action });
 }
 
+const MOVED = ["rsexts", "rsd", "CFormInter"];
+
 /** Каталог читается один раз на весь файл проверок. */
 let catalog;
 
 async function platform() {
     if (!catalog) {
         catalog = new PlatformModuleCatalog({ log: () => undefined });
-        await catalog.ensureIndexLoaded();
+        await catalog.ensureModules(MOVED);
     }
 
     return catalog;
@@ -62,26 +68,38 @@ async function platform() {
 
 const URI = "file:///d:/names/files.mac";
 
-/** Как разрешается имя и кто назван его владельцем. */
-function ownerOf(name) {
-    const source = [
-        "Macro Run()",
-        "  Var value = " + name + ";",
-        "  return value;",
-        "End;",
-        ""
-    ].join("\n");
+/**
+ * Как разрешается имя и кто назван его владельцем.
+ *
+ * `imports` — директивы файла: без них имя прикладного модуля не должно
+ * разрешаться, с ними должно.
+ */
+async function ask(name, imports = []) {
+    const known = await platform();
+    const source = imports.map(item => "Import " + item + ";\n").join("") +
+        [
+            "Macro Run()",
+            "  Var value = " + name + ";",
+            "  return value;",
+            "End;",
+            ""
+        ].join("\n");
     const index = new WorkspaceIndex();
 
     index.registerWorkspaceFiles([URI]);
 
     const module = index.updateOpenModule(URI, source, 1);
-    const resolver = new RslScopeResolver(index, getDefaults());
+    const resolver = new RslScopeResolver(index, getDefaults(), known);
     const resolved = resolver.resolveAt(
         URI,
         module.symbolTree,
-        source.indexOf(name)
+        source.indexOf(name + ";")
     );
+    const found = buildRslPlatformModuleDiagnostics(module, resolver, {
+        platformModules: known,
+        visibleModules: imports,
+        limit: 10
+    });
 
     return {
         resolved: Boolean(resolved),
@@ -96,7 +114,8 @@ function ownerOf(name) {
                 undefined,
                 resolved.platformModuleName
             ).value
-            : ""
+            : "",
+        messages: found.map(item => item.message)
     };
 }
 
@@ -126,71 +145,116 @@ test("кириллические модули известны под своим
     );
 });
 
-test("встроенные модули без разобранного состава всё равно известны",
-    async () => {
-    /*
-     * У rsexts, rsd и CFormInter состав в каталоге пустой, и причина у каждого
-     * записана в самой записи (emptyBecause). Пустой состав ничего не решает:
-     * вопрос «это модуль платформы?» отвечается по списку модулей.
-     */
+test("состав перенесённых модулей на месте", async () => {
     const known = await platform();
 
-    for (const name of ["rsexts", "rsd", "CFormInter"]) {
+    for (const name of MOVED) {
         assert.ok(
             known.knowsModule(name),
             "каталог обязан знать модуль «" + name + "»"
         );
     }
 
-    /* Файл проекта платформенным модулем при этом не становится. */
+    /* Файл проекта прикладным модулем при этом не становится. */
     assert.ok(
         !known.knowsModule("oratools"),
         "модуль проекта каталогу платформы неизвестен"
     );
-});
 
-test("владелец назван у тех имён, о которых так говорит справка", () => {
-    /*
-     * «Чтобы эта процедура была доступна в макропрограмме пользователя,
-     * следует явно импортировать модуль rsexts» — так сказано о шести
-     * процедурах раздела «Управление файлами и каталогами», о CallRemoteRsl
-     * и о классе TDirList.
-     */
-    for (const name of [
-        "RenameFile",
-        "RemoveFile",
-        "ExistDir",
-        "MakeDir",
-        "RemoveDir",
-        "GetCurDir",
-        "CallRemoteRsl",
-        "TDirList"
+    /* Справка: «Модуль rsexts содержит … и класс TDirList». */
+    for (const [name, module] of [
+        ["CopyFile", "rsexts"],
+        ["GetCurDir", "rsexts"],
+        ["TDirList", "rsexts"],
+        ["RsdCommand", "rsd"],
+        ["RsdRecordset", "rsd"],
+        ["getCaption", "CFormInter"],
+        ["setFieldValue", "CFormInter"]
     ]) {
-        const answer = ownerOf(name);
-
-        assert.strictEqual(
-            answer.owner,
-            "rsexts",
-            name + ": владельцем обязан быть rsexts, а назван «" +
-                answer.owner + "»"
-        );
-        assert.ok(
-            answer.hover.includes("**Модуль:** rsexts"),
-            name + ": Hover обязан называть модуль, а показал:\n" +
-                answer.hover
+        assert.deepStrictEqual(
+            known.modulesDeclaring(name),
+            [module],
+            name + " обязан числиться за " + module
         );
     }
 });
 
-test("соседним процедурам того же раздела владелец не приписан", () => {
+test("имя перенесённого модуля доступно по Import", async () => {
+    for (const [name, module] of [
+        ["CopyFile", "rsexts"],
+        ["RenameFile", "rsexts"],
+        ["GetCurDir", "rsexts"],
+        ["CallRemoteRsl", "rsexts"],
+        ["TDirList", "rsexts"],
+        ["RsdConnection", "rsd"],
+        ["RsdRecordset", "rsd"],
+        ["getCaption", "CFormInter"],
+        ["setStatus", "CFormInter"]
+    ]) {
+        const answer = await ask(name, [module]);
+
+        assert.ok(
+            answer.resolved,
+            name + " обязан разрешаться при Import " + module
+        );
+        assert.strictEqual(
+            answer.owner,
+            module,
+            name + ": владельцем обязан быть " + module + ", а назван «" +
+                answer.owner + "»"
+        );
+        assert.ok(
+            answer.hover.includes("**Модуль:** " + module),
+            name + ": Hover обязан называть модуль, а показал:\n" +
+                answer.hover
+        );
+        assert.deepStrictEqual(
+            answer.messages,
+            [],
+            name + ": при подключённом модуле сказать нечего"
+        );
+    }
+});
+
+test("без Import проверка называет недостающий модуль", async () => {
     /*
-     * Справка называет rsexts у большей части раздела, но не у всей: про
-     * CopyFile, SplitFile, MergeFile, FindPath, GetSysDir, GetIniFileValue и
-     * GetFileInfo не сказано ничего. Приписать модуль и им значило бы выдать
-     * догадку за то, что написано.
+     * Это и есть цена переноса, и она названа прямо: пока имена лежали в
+     * стандартной библиотеке, они разрешались всегда. Справка говорит иначе,
+     * и теперь про нехватку Import сказано вслух — с готовым исправлением.
+     */
+    for (const [name, module] of [
+        ["CopyFile", "rsexts"],
+        ["TDirList", "rsexts"],
+        ["RsdCommand", "rsd"],
+        ["setCaption", "CFormInter"]
+    ]) {
+        const answer = await ask(name);
+
+        assert.ok(
+            !answer.resolved,
+            name + " без Import " + module + " разрешаться не должен"
+        );
+        assert.strictEqual(
+            answer.messages.length,
+            1,
+            name + ": ожидалось одно сообщение, получено " +
+                JSON.stringify(answer.messages)
+        );
+        assert.ok(
+            answer.messages[0].includes(module),
+            name + ": сообщение обязано назвать модуль, а сказано «" +
+                answer.messages[0] + "»"
+        );
+    }
+});
+
+test("соседние процедуры раздела остались частью языка", async () => {
+    /*
+     * Справка перечисляет состав rsexts поимённо, и эти в список не входят:
+     * они доступны без Import, и переносить их значило бы требовать Import
+     * там, где справка его не требует.
      */
     for (const name of [
-        "CopyFile",
         "SplitFile",
         "MergeFile",
         "FindPath",
@@ -198,28 +262,17 @@ test("соседним процедурам того же раздела вла�
         "GetIniFileValue",
         "GetFileInfo"
     ]) {
-        const answer = ownerOf(name);
+        const answer = await ask(name);
 
+        assert.ok(
+            answer.resolved,
+            name + " обязан разрешаться без всякого Import"
+        );
         assert.strictEqual(
             answer.owner,
             "",
             name + ": владельца справка не называет, а назван «" +
                 answer.owner + "»"
-        );
-    }
-});
-
-test("владелец не ограничивает доступность имени", () => {
-    /*
-     * Существенное: модуль показан как владелец, а не как условие. На
-     * настоящем проекте rsexts подключают 821 файл, но из пользующихся
-     * GetCurDir — 324 из 505; объявить остальные 181 ошибкой измерения не
-     * позволяют.
-     */
-    for (const name of ["RenameFile", "GetCurDir", "TDirList"]) {
-        assert.ok(
-            ownerOf(name).resolved,
-            name + " обязан разрешаться и без Import rsexts"
         );
     }
 });

@@ -199,18 +199,18 @@ test("Тип объекта выводится из отдельного при�
  * Тип переменной берётся из объявленного типа результата процедуры.
  *
  * Раньше разбор присваивания считал типом само имя вызванного — верно для
- * конструктора класса и неверно для процедуры: у Macro Get():RsdRecordset
+ * конструктора класса и неверно для процедуры: у Macro Get():TStream
  * типом становилось имя Get, класса с таким именем нет, и подсказка по
  * переменной пропадала полностью.
  */
 test("тип переменной выводится из типа результата Macro", () => {
     const source = [
-        "Macro execSQLselect(sqltext:string, params:TArray, " +
-            "throw:bool):RsdRecordset",
+        "Macro openStream(name:string, params:TArray, " +
+            "throw:bool):TStream",
         "End;",
         "Macro Test()",
-        "    Var rs = execSQLselect(sql, MakeArray(), true);",
-        "    rs.MoveNext();",
+        "    Var rs = openStream(name, MakeArray(), true);",
+        "    rs.Flush();",
         "End;"
     ].join("\n");
     const index = new WorkspaceIndex();
@@ -219,14 +219,14 @@ test("тип переменной выводится из типа резуль�
     const resolved = resolver.resolveAt(
         "file:///main.mac",
         tree,
-        offsetInside(source, "MoveNext", 0)
+        offsetInside(source, "Flush", 0)
     );
 
     assert.ok(
         resolved,
-        "Член RsdRecordset не разрешён: тип результата Macro не учтён"
+        "Член TStream не разрешён: тип результата Macro не учтён"
     );
-    assert.strictEqual(resolved.symbol.name, "MoveNext");
+    assert.strictEqual(resolved.symbol.name, "Flush");
 });
 
 /*
@@ -235,11 +235,11 @@ test("тип переменной выводится из типа резуль�
  */
 test("Completion работает по переменной без объявления Var", () => {
     const source = [
-        "Macro execSQLselect(sqltext:string):RsdRecordset",
+        "Macro openForm(name:string):TRepForm",
         "End;",
         "Macro Test()",
-        "    rs = execSQLselect(sql);",
-        "    while ( rs.movenext () )",
+        "    rs = openForm(name);",
+        "    while ( rs.newline () )",
         "    End;",
         "End;"
     ].join("\n");
@@ -251,13 +251,13 @@ test("Completion работает по переменной без объявл�
         .getCompletions(
             "file:///main.mac",
             tree,
-            source.indexOf("rs.movenext") + 3
+            source.indexOf("rs.newline") + 3
         )
         .map(item => item.label);
 
     assert.ok(
-        names.some(name => /^movenext$/i.test(name)),
-        "Члены RsdRecordset обязаны предлагаться и без Var; " +
+        names.some(name => /^newline$/i.test(name)),
+        "Члены TRepForm обязаны предлагаться и без Var; " +
             `предложено: ${names.slice(0, 10).join(", ")}`
     );
 });
@@ -272,9 +272,9 @@ test("Completion работает по переменной без объявл�
 test("тип переменной выводится из результата метода класса", () => {
     const source = [
         "Macro Test()",
-        "    Var cmd = RsdCommand();",
-        "    Var rs = cmd.Execute();",
-        "    rs.MoveNext();",
+        "    Var form = TRepForm();",
+        "    Var fld = form.Field(1);",
+        "    fld.Name();",
         "End;"
     ].join("\n");
     const index = new WorkspaceIndex();
@@ -284,25 +284,25 @@ test("тип переменной выводится из результата �
     const resolved = resolver.resolveAt(
         "file:///main.mac",
         tree,
-        offsetInside(source, "MoveNext", 0)
+        offsetInside(source, "Name", 0)
     );
 
     assert.ok(
         resolved,
-        "Член RsdRecordset не разрешён: тип результата Execute не учтён"
+        "Член TPattFieldR не разрешён: тип результата Field не учтён"
     );
-    assert.strictEqual(resolved.symbol.name, "MoveNext");
+    assert.strictEqual(resolved.symbol.name, "Name");
 
     const names = resolver
         .getCompletions(
             "file:///main.mac",
             tree,
-            source.indexOf("rs.MoveNext") + 3
+            source.indexOf("fld.Name") + 4
         )
         .map(item => item.label);
     assert.ok(
-        names.some(name => /^movenext$/i.test(name)),
-        `Члены RsdRecordset обязаны предлагаться: ${names.slice(0, 8).join(", ")}`
+        names.some(name => /^name$/i.test(name)),
+        `Члены TPattFieldR обязаны предлагаться: ${names.slice(0, 8).join(", ")}`
     );
 });
 
@@ -310,9 +310,9 @@ test("тип переменной выводится из результата �
 test("цепочка присваивания через метод не зацикливается", () => {
     const source = [
         "Macro Test()",
-        "    Var rs = RsdRecordset();",
-        "    rs = rs.Clone();",
-        "    rs.MoveNext();",
+        "    Var rs = TStream();",
+        "    rs = rs.Copy();",
+        "    rs.Flush();",
         "End;"
     ].join("\n");
     const index = new WorkspaceIndex();
@@ -323,7 +323,7 @@ test("цепочка присваивания через метод не зац�
     const resolved = resolver.resolveAt(
         "file:///main.mac",
         tree,
-        offsetInside(source, "MoveNext", 0)
+        offsetInside(source, "Flush", 0)
     );
     assert.ok(
         resolved === undefined || typeof resolved.symbol.name === "string",

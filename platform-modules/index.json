@@ -50,9 +50,8 @@
     "CFormInter": {
       "file": "cforminter.json",
       "classes": 0,
-      "procedures": 0,
-      "constants": 0,
-      "emptyBecause": "Весь модуль описан одной страницей прозой (mzp_cforminter.htm), а не страницами на процедуру."
+      "procedures": 12,
+      "constants": 0
     },
     "CommonInter": {
       "file": "commoninter.json",
@@ -327,17 +326,15 @@
     },
     "rsd": {
       "file": "rsd.json",
-      "classes": 0,
+      "classes": 7,
       "procedures": 0,
-      "constants": 0,
-      "emptyBecause": "Справка описывает библиотеку прозой, отдельными страницами состав не разложен — загрузчик справки взять его пока не может."
+      "constants": 0
     },
     "rsexts": {
       "file": "rsexts.json",
-      "classes": 0,
-      "procedures": 0,
-      "constants": 0,
-      "emptyBecause": "Члены лежат в стандартной библиотеке и записаны за модулем там (moduleName в standardLibraryData): имя разрешается и без Import."
+      "classes": 1,
+      "procedures": 8,
+      "constants": 0
     },
     "RslCellObjects": {
       "file": "rslcellobjects.json",

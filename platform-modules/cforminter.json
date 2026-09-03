@@ -1,6 +1,67 @@
 {
   "version": 3,
   "classes": [],
-  "procedures": [],
+  "procedures": [
+    {
+      "name": "getCaption",
+      "signature": "getCaption():String",
+      "description": "Определяет заголовок формы."
+    },
+    {
+      "name": "setCaption",
+      "signature": "setCaption(newCaption:String)",
+      "description": "Устанавливает заголовок формы."
+    },
+    {
+      "name": "getCurFieldNumber",
+      "signature": "getCurFieldNumber():Integer",
+      "description": "Возвращает номер поля панели (строки скроллинга), на котором установлен фокус ввода."
+    },
+    {
+      "name": "disableField",
+      "signature": "disableField([fldNo:Integer])",
+      "description": "Устанавливает запрет на редактирование указанного поля; без параметра — всех полей формы."
+    },
+    {
+      "name": "enableField",
+      "signature": "enableField([fldNo:Integer])",
+      "description": "Отменяет запрет на редактирование указанного поля; без параметра — всех полей формы."
+    },
+    {
+      "name": "fieldEditable",
+      "signature": "fieldEditable(fldNo:Integer [, editable:Bool])",
+      "description": "Изменяет тип поля: editable = true — поле доступно для редактирования, false — недоступно для корректировки."
+    },
+    {
+      "name": "putField",
+      "signature": "putField([fldNo:Integer])",
+      "description": "Обновляет значение указанного поля; без параметра — всех полей формы."
+    },
+    {
+      "name": "SetCurField",
+      "signature": "SetCurField(fldNo:Integer)",
+      "description": "Устанавливает фокус в указанное поле."
+    },
+    {
+      "name": "getFieldValue",
+      "signature": "getFieldValue(fieldNO:Integer):Variant",
+      "description": "Возвращает значение поля панели (строки скроллинга)."
+    },
+    {
+      "name": "setFieldValue",
+      "signature": "setFieldValue(fieldNO:Integer, newValue:Variant):Bool",
+      "description": "Устанавливает значение поля панели (строки скроллинга). Тип нового значения должен совпадать с типом поля; иначе FALSE."
+    },
+    {
+      "name": "getStatus",
+      "signature": "getStatus():String",
+      "description": "Определяет статус-строку формы."
+    },
+    {
+      "name": "setStatus",
+      "signature": "setStatus(newStatus:String)",
+      "description": "Устанавливает статус-строку формы."
+    }
+  ],
   "constants": []
 }

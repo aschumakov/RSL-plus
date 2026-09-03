@@ -917,6 +917,9 @@
   "call_source_scrol": [
    "PaymInter"
   ],
+  "callremotersl": [
+   "rsexts"
+  ],
   "canonization2": [
    "MesInter"
   ],
@@ -2305,6 +2308,9 @@
   "convsumrate": [
    "FIInter"
   ],
+  "copyfile": [
+   "rsexts"
+  ],
   "corr": [
    "SbCrdInter"
   ],
@@ -3166,6 +3172,9 @@
   ],
   "direct_any": [
    "BankInter"
+  ],
+  "disablefield": [
+   "CFormInter"
   ],
   "discrep_step_action_accept": [
    "LCInter"
@@ -4804,6 +4813,9 @@
   "edrefwrite": [
    "DeposInter"
   ],
+  "enablefield": [
+   "CFormInter"
+  ],
   "endkeycashing": [
    "BankInter"
   ],
@@ -4827,6 +4839,9 @@
   ],
   "executesystemoperation": [
    "ReptCBInter"
+  ],
+  "existdir": [
+   "rsexts"
   ],
   "existsoperation": [
    "SbCrdInter"
@@ -4989,6 +5004,9 @@
   ],
   "fick_usercode": [
    "FIInter"
+  ],
+  "fieldeditable": [
+   "CFormInter"
   ],
   "fikind_allavoiriss": [
    "FIInter"
@@ -5446,6 +5464,9 @@
   "getcapital": [
    "PTInter"
   ],
+  "getcaption": [
+   "CFormInter"
+  ],
   "getcardenddate": [
    "SbCrdInter"
   ],
@@ -5515,6 +5536,12 @@
   ],
   "getcurdate": [
    "CommonInter"
+  ],
+  "getcurdir": [
+   "rsexts"
+  ],
+  "getcurfieldnumber": [
+   "CFormInter"
   ],
   "getcurrentmode": [
    "CommonInter"
@@ -5599,6 +5626,9 @@
   ],
   "getfactreclenforfile": [
    "CommonInter"
+  ],
+  "getfieldvalue": [
+   "CFormInter"
   ],
   "getfilialname": [
    "CommonInter"
@@ -6001,6 +6031,7 @@
    "PsInter"
   ],
   "getstatus": [
+   "CFormInter",
    "WIdInter"
   ],
   "getstringm": [
@@ -8152,6 +8183,9 @@
   ],
   "makecodecurr": [
    "ExchangeInter"
+  ],
+  "makedir": [
+   "rsexts"
   ],
   "makedocbypayment": [
    "PaymInter"
@@ -14221,6 +14255,9 @@
   "put_dep": [
    "BankInter"
   ],
+  "putfield": [
+   "CFormInter"
+  ],
   "putpersdata": [
    "PsInter"
   ],
@@ -14605,14 +14642,23 @@
   "removechangeaccountclaim": [
    "BankInter"
   ],
+  "removedir": [
+   "rsexts"
+  ],
   "removedocfromgddlist": [
    "CommonInter"
   ],
   "removeexchdocingddlist": [
    "CommonInter"
   ],
+  "removefile": [
+   "rsexts"
+  ],
   "removenoteforobject": [
    "BankInter"
+  ],
+  "renamefile": [
+   "rsexts"
   ],
   "rep_aid_send_to_email": [
    "Reporting"
@@ -15541,6 +15587,27 @@
   "rscryptoapi": [
    "cryptdlm"
   ],
+  "rsdcommand": [
+   "rsd"
+  ],
+  "rsdconnection": [
+   "rsd"
+  ],
+  "rsdenvironment": [
+   "rsd"
+  ],
+  "rsderror": [
+   "rsd"
+  ],
+  "rsdfield": [
+   "rsd"
+  ],
+  "rsdparameter": [
+   "rsd"
+  ],
+  "rsdrecordset": [
+   "rsd"
+  ],
   "rsendaction": [
    "BankInter"
   ],
@@ -15917,11 +15984,17 @@
   "setcapital": [
    "PTInter"
   ],
+  "setcaption": [
+   "CFormInter"
+  ],
   "setcounter": [
    "CommonInter"
   ],
   "setcurdate": [
    "CommonInter"
+  ],
+  "setcurfield": [
+   "CFormInter"
   ],
   "setdefaultregistryvalue": [
    "BankInter"
@@ -15937,6 +16010,9 @@
   ],
   "setdprtregistryvalue": [
    "BankInter"
+  ],
+  "setfieldvalue": [
+   "CFormInter"
   ],
   "setflagcur": [
    "CommonInter"
@@ -16025,6 +16101,9 @@
   ],
   "setscroll": [
    "RslScr"
+  ],
+  "setstatus": [
+   "CFormInter"
   ],
   "settransactionnumber": [
    "CommonInter"
@@ -17687,6 +17766,9 @@
   ],
   "tdepcontractrsl": [
    "CommonInter"
+  ],
+  "tdirlist": [
+   "rsexts"
   ],
   "tdpdeplist": [
    "CommonInter"

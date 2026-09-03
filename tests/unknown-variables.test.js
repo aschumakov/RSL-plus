@@ -1521,8 +1521,19 @@ async function main() {
      * документации `cmd.AddParam("p", RSDBP_OUT, V_INTEGER)` строгий
      * режим считал обращением к неопределённому идентификатору.
      */
-    await test("константы Rsd из справки известны строгому режиму", () => {
+    await test("константы Rsd из справки известны строгому режиму",
+        async () => {
+        /*
+         * Модуль подключён: классы Rsd* лежат в составе rsd, и справка
+         * требует Import — без него строгий режим справедливо считает
+         * их неопределёнными.
+         */
+        const rsd = new PlatformModuleCatalog({ log: () => undefined });
+
+        await rsd.ensureModules(["rsd"]);
+
         const context = open([
+            "Import rsd;",
             "Macro Test()",
             "  Var con = RsdConnection();",
             "  Var cmd = RsdCommand(con, 'call p(?)', RsdCmdStoreProc);",
@@ -1535,7 +1546,7 @@ async function main() {
             "  rs.Move(1, RELATIVE);",
             "  return rs;",
             "End;"
-        ].join(String.fromCharCode(10)));
+        ].join(String.fromCharCode(10)), [MAIN], rsd);
 
         assert.deepStrictEqual(
             collectUnknownVariables(

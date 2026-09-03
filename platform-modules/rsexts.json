@@ -1,6 +1,132 @@
 {
   "version": 3,
-  "classes": [],
-  "procedures": [],
+  "classes": [
+    {
+      "name": "TDirList",
+      "summary": "Список файлов и каталогов, отобранных по маске.",
+      "members": [
+        {
+          "name": "Count",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Количество элементов в списке."
+        },
+        {
+          "name": "Name",
+          "isMethod": true,
+          "signature": "Name(index: Integer): String",
+          "description": "Имя файла или каталога."
+        },
+        {
+          "name": "Size",
+          "isMethod": true,
+          "signature": "Size(index: Integer): Integer",
+          "description": "Размер файла."
+        },
+        {
+          "name": "SizeEx",
+          "isMethod": true,
+          "signature": "SizeEx(index: Integer): Integer",
+          "description": "Размер файла без ограничения 2 ГБ."
+        },
+        {
+          "name": "FDate",
+          "isMethod": true,
+          "signature": "FDate(index: Integer): Date",
+          "description": "Дата последней модификации."
+        },
+        {
+          "name": "FTime",
+          "isMethod": true,
+          "signature": "FTime(index: Integer): Time",
+          "description": "Время последней модификации."
+        },
+        {
+          "name": "IsDir",
+          "isMethod": true,
+          "signature": "IsDir(index: Integer): Bool",
+          "description": "Элемент является каталогом."
+        },
+        {
+          "name": "IsCopy",
+          "isMethod": true,
+          "signature": "IsCopy(index: Integer): Bool",
+          "description": "Файл был успешно скопирован."
+        },
+        {
+          "name": "IsDel",
+          "isMethod": true,
+          "signature": "IsDel(index: Integer): Bool",
+          "description": "Файл был успешно удалён."
+        },
+        {
+          "name": "Copy",
+          "isMethod": true,
+          "signature": "Copy(srcMask: String, attr: String, dstDir: String, [move: Bool], [indic: Bool], [header: String]): Bool",
+          "description": "Копирует отобранные по маске файлы в каталог."
+        },
+        {
+          "name": "List",
+          "isMethod": true,
+          "signature": "List(mask: String, [attr: String], [newSizeMode: Bool]): Bool",
+          "description": "Наполняет список файлами по маске."
+        },
+        {
+          "name": "Remove",
+          "isMethod": true,
+          "signature": "Remove(mask: String, [attr: String]): Bool",
+          "description": "Удаляет отобранные по маске файлы."
+        },
+        {
+          "name": "Sort",
+          "isMethod": true,
+          "signature": "Sort([sortBy: Integer], [dirFirst: Bool]): Bool",
+          "description": "Сортирует список по имени, размеру или дате."
+        }
+      ]
+    }
+  ],
+  "procedures": [
+    {
+      "name": "CopyFile",
+      "signature": "CopyFile (src:String, dst:String [, ind:Bool [, indHeading:String]]) : Bool",
+      "description": "Копирует файл."
+    },
+    {
+      "name": "RenameFile",
+      "signature": "RenameFile (src:String, dst:String) : Bool",
+      "description": "Переименовывает файл."
+    },
+    {
+      "name": "RemoveFile",
+      "signature": "RemoveFile (src:String) : Bool",
+      "description": "Удаляет файл."
+    },
+    {
+      "name": "ExistDir",
+      "signature": "ExistDir(name:String):Integer",
+      "description": "Проверяет существование и доступность каталога."
+    },
+    {
+      "name": "MakeDir",
+      "signature": "MakeDir (name:String) : Bool",
+      "description": "Создаёт каталог."
+    },
+    {
+      "name": "RemoveDir",
+      "signature": "RemoveDir (name:String) : Bool",
+      "description": "Удаляет пустой каталог."
+    },
+    {
+      "name": "GetCurDir",
+      "signature": "GetCurDir ([isRemote:Bool]) : String",
+      "description": "Возвращает текущий каталог."
+    },
+    {
+      "name": "CallRemoteRsl",
+      "signature": "CallRemoteRsl (fileName [, procName [, parm1, parm2, ...]])",
+      "description": "Выполняет макрофайл на терминале."
+    }
+  ],
   "constants": []
 }

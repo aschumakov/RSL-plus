@@ -1,13 +1,5 @@
 import { CompletionItemKind } from "vscode-languageserver";
 
-/**
- * Модуль управления файлами и каталогами.
- *
- * Одной строкой, потому что имён за ним числится восемь, и разъезжаться
- * их написанию незачем.
- */
-const RSEXTS = "rsexts";
-
 export interface IRslBuiltinDefinition {
     name: string;
     kind: CompletionItemKind;
@@ -33,14 +25,6 @@ export interface IRslBuiltinDefinition {
      */
     base?: string;
     children?: readonly IRslBuiltinDefinition[];
-    /**
-     * Модуль, за которым справка числит это имя.
-     *
-     * Не условие доступности, а владелец: имя разрешается и без
-     * Import, а Hover называет модуль, чтобы не выдавать за
-     * безымянную часть языка то, у чего владелец известен.
-     */
-    moduleName?: string;
 }
 
 /*
@@ -328,12 +312,6 @@ const PROCEDURE_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
         "Run (prog, parm, init, finish:String)",
         "Запускает внешнюю программу."
     ),
-    /* Справка: «необходимо явно импортировать модуль rsexts». */
-    procedure(
-        "CallRemoteRsl (fileName [, procName [, parm1, parm2, ...]])",
-        "Выполняет макрофайл на терминале.",
-        RSEXTS
-    ),
     procedure(
         "Menu (array [, prompt] [, head] [, x] [, y] [, n])",
         "Показывает меню выбора из массива строк."
@@ -569,47 +547,6 @@ const PROCEDURE_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
     procedure(
         "ReadBlob (file, value)",
         "Читает очередное значение поля BLOB."
-    ),
-    procedure(
-        "CopyFile (src:String, dst:String [, ind:Bool [, " +
-            "indHeading:String]]) : Bool",
-        "Копирует файл."
-    ),
-    /*
-     * Дальше — процедуры, которые справка числит за модулем rsexts.
-     * Названы там прямо: «следует явно импортировать модуль rsexts».
-     * Соседние CopyFile, SplitFile и прочие про него не говорят
-     * ничего, и владельца им не приписано.
-     */
-    procedure(
-        "RenameFile (src:String, dst:String) : Bool",
-        "Переименовывает файл.",
-        RSEXTS
-    ),
-    procedure(
-        "RemoveFile (src:String) : Bool",
-        "Удаляет файл.",
-        RSEXTS
-    ),
-    procedure(
-        "ExistDir(name:String):Integer",
-        "Проверяет существование и доступность каталога.",
-        RSEXTS
-    ),
-    procedure(
-        "MakeDir (name:String) : Bool",
-        "Создаёт каталог.",
-        RSEXTS
-    ),
-    procedure(
-        "RemoveDir (name:String) : Bool",
-        "Удаляет пустой каталог.",
-        RSEXTS
-    ),
-    procedure(
-        "GetCurDir ([isRemote:Bool]) : String",
-        "Возвращает текущий каталог.",
-        RSEXTS
     ),
     procedure(
         "SplitFile (pathName: String [, name: String [, " +
@@ -1002,181 +939,6 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
         ],
         "TRecHandler"
     ),
-    classDef(
-        "RsdEnvironment",
-        "Окружение RSD: драйвер, соединения и коллекция ошибок.",
-        [
-            property("Driver", "String", "Имя интерфейса драйвера."),
-            property("Library", "String", "Имя файла драйвера ODBC."),
-            property("ErrorCount", "Integer", "Количество ошибок в коллекции."),
-            property("Error", "RsdError", "Ошибка по индексу."),
-            method(
-                "Open",
-                "([driver: String], [library: String])",
-                "Bool",
-                "Открывает окружение и загружает драйвер."
-            ),
-            method("Close", "()", "Bool", "Закрывает окружение."),
-            method("ClearErrors", "()", "Bool", "Очищает коллекцию ошибок.")
-        ]
-    ),
-    classDef("RsdConnection", "Соединение с источником данных ODBC.", [
-        property("Environment", "RsdEnvironment", "Окружение соединения."),
-        property("ConString", "String", "Строка соединения или имя DSN."),
-        property("User", "String", "Имя пользователя."),
-        property("Password", "String", "Пароль пользователя."),
-        method("Open", "()", "Bool", "Открывает соединение."),
-        method("Close", "()", "Bool", "Закрывает соединение."),
-        method("BeginTrans", "()", "Bool", "Начинает транзакцию."),
-        method("CommitTrans", "()", "Bool", "Фиксирует транзакцию."),
-        method("RollbackTrans", "()", "Bool", "Откатывает транзакцию."),
-        method(
-            "IsInTrans",
-            "()",
-            "Bool",
-            "Проверяет, выполняется ли транзакция."
-        )
-    ]),
-    classDef("RsdCommand", "SQL-запрос к источнику данных.", [
-        property("Connection", "RsdConnection", "Соединение команды."),
-        property("CmdText", "String", "Текст команды."),
-        property(
-            "CursorType",
-            "Integer",
-            "Тип курсора набора данных: RSDVAL_STATIC, RSDVAL_DYNAMIC, " +
-                "RSDVAL_FORVARD_ONLY или RSDVAL_KEYSET_DRIVEN."
-        ),
-        property("BlockSize", "Integer", "Число записей за одно обращение."),
-        property("NullConversion", "Bool", "Преобразовывать спецзначения в NULL."),
-        property("ParamCount", "Integer", "Количество параметров команды."),
-        property("Param", "RsdParameter", "Параметр по индексу или имени."),
-        property("Value", "Variant", "Значение параметра по индексу или имени."),
-        method(
-            "Execute",
-            "([parm1], [parm2], ...)",
-            "RsdRecordset",
-            "Выполняет команду с именованными параметрами."
-        ),
-        method(
-            "AddParam",
-            "(name: String, [dir: Integer], [val], [len: Integer])",
-            "RsdParameter",
-            "Добавляет именованный параметр; направление dir задают " +
-                "константы RSDBP_*."
-        ),
-        method(
-            "DeleteParam",
-            "(indexOrName)",
-            "Bool",
-            "Удаляет параметр по номеру или имени."
-        ),
-        method(
-            "RefreshParams",
-            "()",
-            "Bool",
-            "Заполняет параметры из хранимой процедуры."
-        ),
-        method("Close", "()", "Bool", "Закрывает команду.")
-    ]),
-    classDef("RsdRecordset", "Набор записей результата SQL-запроса.", [
-        property("Command", "RsdCommand", "Команда, породившая набор."),
-        property(
-            "CursorLocation",
-            "Integer",
-            "Местоположение курсора: RSDVAL_SERVER, RSDVAL_CLIENT или " +
-                "RSDVAL_CLIENT_IF_NEEDED."
-        ),
-        property(
-            "CursorType",
-            "Integer",
-            "Тип курсора: RSDVAL_STATIC, RSDVAL_DYNAMIC, " +
-                "RSDVAL_FORVARD_ONLY или RSDVAL_KEYSET_DRIVEN."
-        ),
-        property("BOF", "Bool", "Позиция до первой записи."),
-        property("EOF", "Bool", "Позиция после последней записи."),
-        property("BookMark", "Variant", "Закладка текущей записи."),
-        property("FldCount", "Integer", "Количество полей в наборе."),
-        property("Fld", "RsdField", "Поле по номеру или имени."),
-        property("Value", "Variant", "Значение поля по номеру или имени."),
-        property("RecCount", "Integer", "Количество записей; –1 для динамического курсора."),
-        property("PageSize", "Integer", "Число записей в странице кэша."),
-        property("MaxPages", "Integer", "Предел страниц кэша в памяти."),
-        property("AutoRefresh", "RsdCommand", "Команда автоматического обновления записи."),
-        property("InsertCommand", "RsdCommand", "Пользовательская команда вставки."),
-        property("UpdateCommand", "RsdCommand", "Пользовательская команда изменения."),
-        property("DeleteCommand", "RsdCommand", "Пользовательская команда удаления."),
-        property("InsupdCommand", "RsdCommand", "Команда чтения данных после вставки."),
-        method("Open", "()", "Bool", "Открывает набор данных."),
-        method("Close", "()", "Bool", "Закрывает набор данных."),
-        method("MoveFirst", "()", "Bool", "Переходит к первой записи."),
-        method("MoveLast", "()", "Bool", "Переходит к последней записи."),
-        method("MoveNext", "()", "Bool", "Переходит к следующей записи."),
-        method("MovePrev", "()", "Bool", "Переходит к предыдущей записи."),
-        method(
-            "Move",
-            "(numRec, moveDirect)",
-            "Bool",
-            "Переходит по смещению или закладке: RELATIVE, ABSOLUTE, BOOKMARK."
-        ),
-        method("AddNew", "()", "Bool", "Вставляет новую запись."),
-        method("Edit", "()", "Bool", "Начинает редактирование текущей записи."),
-        method("Update", "()", "Bool", "Сохраняет изменения записи."),
-        method("CancelEdit", "()", "Bool", "Отменяет ввод или редактирование."),
-        method("Delete", "()", "Bool", "Удаляет запись из набора."),
-        method(
-            "AddUserCmdParam",
-            "(nameParm: String, nameField: String, versionValue: Integer)",
-            "Bool",
-            "Добавляет параметр команде набора; версия значения задаётся " +
-                "RSDRVER_*."
-        )
-    ]),
-    classDef("RsdError", "SQL-ошибка при работе с базой данных.", [
-        property("Code", "Integer", "Код ошибки."),
-        property("Descr", "String", "Описание ошибки."),
-        property("Source", "String", "Тип объекта, где произошла ошибка.")
-    ]),
-    classDef("RsdField", "Поле набора записей RSD.", [
-        property("Name", "String", "Имя поля."),
-        property("Value", "Variant", "Значение поля."),
-        property("BlobFilename", "String", "Файл для чтения и записи BLOB."),
-        property("NullVal", "Variant", "Значение вместо NULL из SQL."),
-        method(
-            "Read",
-            "(out, [count: Integer])",
-            "Bool",
-            "Читает поле типа BLOB."
-        ),
-        method(
-            "Write",
-            "(value, [count: Integer])",
-            "Bool",
-            "Записывает поле типа BLOB."
-        )
-    ]),
-    classDef("RsdParameter", "Именованный параметр SQL-запроса.", [
-        property("Name", "String", "Наименование параметра (только чтение)."),
-        property(
-            "Direction",
-            "Integer",
-            "Характеристика параметра: RSDBP_IN, RSDBP_OUT, " +
-                "RSDBP_IN_OUT или RSDBP_RETVAL."
-        ),
-        property("Type", "Integer", "Тип параметра (только чтение)."),
-        property("Value", "Variant", "Значение параметра."),
-        method(
-            "SetSelfAlloc",
-            "([...])",
-            "Variant",
-            "Управляет внутренним буфером."
-        ),
-        method(
-            "SetStatusPtr",
-            "(pStatus)",
-            "Variant",
-            "Управляет внутренним буфером."
-        )
-    ]),
     classDef("TStream", "Двоичный поток файла или RSCOM-объекта.", [
         property("Name", "String", "Имя файла потока либо null."),
         property("Stream", "Object", "RSCOM-объект с интерфейсом IRsStream."),
@@ -1283,75 +1045,6 @@ const CLASS_DEFINITIONS: readonly IRslBuiltinDefinition[] = [
             "Сбрасывает несохранённые изменения на диск."
         )
     ]),
-    /* Класс того же модуля: «В этот модуль также входит TDirList». */
-    classDef(
-        "TDirList",
-        "Список файлов и каталогов, отобранных по маске.",
-        [
-        property("Count", "Integer", "Количество элементов в списке."),
-        method("Name", "(index: Integer)", "String", "Имя файла или каталога."),
-        method("Size", "(index: Integer)", "Integer", "Размер файла."),
-        /* SizeEx в руководстве не описан; оставлен как известное расширение. */
-        method(
-            "SizeEx",
-            "(index: Integer)",
-            "Integer",
-            "Размер файла без ограничения 2 ГБ."
-        ),
-        method(
-            "FDate",
-            "(index: Integer)",
-            "Date",
-            "Дата последней модификации."
-        ),
-        method(
-            "FTime",
-            "(index: Integer)",
-            "Time",
-            "Время последней модификации."
-        ),
-        method(
-            "IsDir",
-            "(index: Integer)",
-            "Bool",
-            "Элемент является каталогом."
-        ),
-        method(
-            "IsCopy",
-            "(index: Integer)",
-            "Bool",
-            "Файл был успешно скопирован."
-        ),
-        method("IsDel", "(index: Integer)", "Bool", "Файл был успешно удалён."),
-        method(
-            "Copy",
-            "(srcMask: String, attr: String, dstDir: String, " +
-                "[move: Bool], [indic: Bool], [header: String])",
-            "Bool",
-            "Копирует отобранные по маске файлы в каталог."
-        ),
-        method(
-            "List",
-            "(mask: String, [attr: String], [newSizeMode: Bool])",
-            "Bool",
-            "Наполняет список файлами по маске."
-        ),
-        method(
-            "Remove",
-            "(mask: String, [attr: String])",
-            "Bool",
-            "Удаляет отобранные по маске файлы."
-        ),
-        method(
-            "Sort",
-            "([sortBy: Integer], [dirFirst: Bool])",
-            "Bool",
-            "Сортирует список по имени, размеру или дате."
-        )
-        ],
-        undefined,
-        RSEXTS
-    ),
     classDef("TRslEvHandler", "Обработчик событий ActiveX-объектов.", [
         property("EvSource", "Object", "Коллекция объектов — источников событий."),
         property("TypeLib", "Object", "Файл библиотеки типов источников."),
@@ -1844,8 +1537,7 @@ function constant(
 
 function procedure(
     signature: string,
-    summary: string,
-    moduleName?: string
+    summary: string
 ): IRslBuiltinDefinition {
     const name = signature.match(/^([^\s(:[]+)/)?.[1] || signature;
     return {
@@ -1855,8 +1547,7 @@ function procedure(
         signature: balancedSignature(signature)
             ? signature
             : `${name}(...)`,
-        summary,
-        moduleName
+        summary
     };
 }
 
@@ -1881,8 +1572,7 @@ function classDef(
     name: string,
     summary: string,
     children: readonly IRslBuiltinDefinition[] = [],
-    base?: string,
-    moduleName?: string
+    base?: string
 ): IRslBuiltinDefinition {
     return {
         name,
@@ -1891,8 +1581,7 @@ function classDef(
         signature: `${name}(...)`,
         summary,
         base,
-        children,
-        moduleName
+        children
     };
 }
 

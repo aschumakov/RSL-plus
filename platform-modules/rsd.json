@@ -1,6 +1,499 @@
 {
   "version": 3,
-  "classes": [],
+  "classes": [
+    {
+      "name": "RsdEnvironment",
+      "summary": "Окружение RSD: драйвер, соединения и коллекция ошибок.",
+      "members": [
+        {
+          "name": "Driver",
+          "isMethod": false,
+          "typeName": "String",
+          "description": "Имя интерфейса драйвера."
+        },
+        {
+          "name": "Library",
+          "isMethod": false,
+          "typeName": "String",
+          "description": "Имя файла драйвера ODBC."
+        },
+        {
+          "name": "ErrorCount",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Количество ошибок в коллекции."
+        },
+        {
+          "name": "Error",
+          "isMethod": false,
+          "typeName": "RsdError",
+          "description": "Ошибка по индексу."
+        },
+        {
+          "name": "Open",
+          "isMethod": true,
+          "signature": "Open([driver: String], [library: String]): Bool",
+          "description": "Открывает окружение и загружает драйвер."
+        },
+        {
+          "name": "Close",
+          "isMethod": true,
+          "signature": "Close(): Bool",
+          "description": "Закрывает окружение."
+        },
+        {
+          "name": "ClearErrors",
+          "isMethod": true,
+          "signature": "ClearErrors(): Bool",
+          "description": "Очищает коллекцию ошибок."
+        }
+      ]
+    },
+    {
+      "name": "RsdConnection",
+      "summary": "Соединение с источником данных ODBC.",
+      "members": [
+        {
+          "name": "Environment",
+          "isMethod": false,
+          "typeName": "RsdEnvironment",
+          "description": "Окружение соединения."
+        },
+        {
+          "name": "ConString",
+          "isMethod": false,
+          "typeName": "String",
+          "description": "Строка соединения или имя DSN."
+        },
+        {
+          "name": "User",
+          "isMethod": false,
+          "typeName": "String",
+          "description": "Имя пользователя."
+        },
+        {
+          "name": "Password",
+          "isMethod": false,
+          "typeName": "String",
+          "description": "Пароль пользователя."
+        },
+        {
+          "name": "Open",
+          "isMethod": true,
+          "signature": "Open(): Bool",
+          "description": "Открывает соединение."
+        },
+        {
+          "name": "Close",
+          "isMethod": true,
+          "signature": "Close(): Bool",
+          "description": "Закрывает соединение."
+        },
+        {
+          "name": "BeginTrans",
+          "isMethod": true,
+          "signature": "BeginTrans(): Bool",
+          "description": "Начинает транзакцию."
+        },
+        {
+          "name": "CommitTrans",
+          "isMethod": true,
+          "signature": "CommitTrans(): Bool",
+          "description": "Фиксирует транзакцию."
+        },
+        {
+          "name": "RollbackTrans",
+          "isMethod": true,
+          "signature": "RollbackTrans(): Bool",
+          "description": "Откатывает транзакцию."
+        },
+        {
+          "name": "IsInTrans",
+          "isMethod": true,
+          "signature": "IsInTrans(): Bool",
+          "description": "Проверяет, выполняется ли транзакция."
+        }
+      ]
+    },
+    {
+      "name": "RsdCommand",
+      "summary": "SQL-запрос к источнику данных.",
+      "members": [
+        {
+          "name": "Connection",
+          "isMethod": false,
+          "typeName": "RsdConnection",
+          "description": "Соединение команды."
+        },
+        {
+          "name": "CmdText",
+          "isMethod": false,
+          "typeName": "String",
+          "description": "Текст команды."
+        },
+        {
+          "name": "CursorType",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Тип курсора набора данных: RSDVAL_STATIC, RSDVAL_DYNAMIC, RSDVAL_FORVARD_ONLY или RSDVAL_KEYSET_DRIVEN."
+        },
+        {
+          "name": "BlockSize",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Число записей за одно обращение."
+        },
+        {
+          "name": "NullConversion",
+          "isMethod": false,
+          "typeName": "Bool",
+          "description": "Преобразовывать спецзначения в NULL."
+        },
+        {
+          "name": "ParamCount",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Количество параметров команды."
+        },
+        {
+          "name": "Param",
+          "isMethod": false,
+          "typeName": "RsdParameter",
+          "description": "Параметр по индексу или имени."
+        },
+        {
+          "name": "Value",
+          "isMethod": false,
+          "typeName": "Variant",
+          "description": "Значение параметра по индексу или имени."
+        },
+        {
+          "name": "Execute",
+          "isMethod": true,
+          "signature": "Execute([parm1], [parm2], ...): RsdRecordset",
+          "description": "Выполняет команду с именованными параметрами."
+        },
+        {
+          "name": "AddParam",
+          "isMethod": true,
+          "signature": "AddParam(name: String, [dir: Integer], [val], [len: Integer]): RsdParameter",
+          "description": "Добавляет именованный параметр; направление dir задают константы RSDBP_*."
+        },
+        {
+          "name": "DeleteParam",
+          "isMethod": true,
+          "signature": "DeleteParam(indexOrName): Bool",
+          "description": "Удаляет параметр по номеру или имени."
+        },
+        {
+          "name": "RefreshParams",
+          "isMethod": true,
+          "signature": "RefreshParams(): Bool",
+          "description": "Заполняет параметры из хранимой процедуры."
+        },
+        {
+          "name": "Close",
+          "isMethod": true,
+          "signature": "Close(): Bool",
+          "description": "Закрывает команду."
+        }
+      ]
+    },
+    {
+      "name": "RsdRecordset",
+      "summary": "Набор записей результата SQL-запроса.",
+      "members": [
+        {
+          "name": "Command",
+          "isMethod": false,
+          "typeName": "RsdCommand",
+          "description": "Команда, породившая набор."
+        },
+        {
+          "name": "CursorLocation",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Местоположение курсора: RSDVAL_SERVER, RSDVAL_CLIENT или RSDVAL_CLIENT_IF_NEEDED."
+        },
+        {
+          "name": "CursorType",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Тип курсора: RSDVAL_STATIC, RSDVAL_DYNAMIC, RSDVAL_FORVARD_ONLY или RSDVAL_KEYSET_DRIVEN."
+        },
+        {
+          "name": "BOF",
+          "isMethod": false,
+          "typeName": "Bool",
+          "description": "Позиция до первой записи."
+        },
+        {
+          "name": "EOF",
+          "isMethod": false,
+          "typeName": "Bool",
+          "description": "Позиция после последней записи."
+        },
+        {
+          "name": "BookMark",
+          "isMethod": false,
+          "typeName": "Variant",
+          "description": "Закладка текущей записи."
+        },
+        {
+          "name": "FldCount",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Количество полей в наборе."
+        },
+        {
+          "name": "Fld",
+          "isMethod": false,
+          "typeName": "RsdField",
+          "description": "Поле по номеру или имени."
+        },
+        {
+          "name": "Value",
+          "isMethod": false,
+          "typeName": "Variant",
+          "description": "Значение поля по номеру или имени."
+        },
+        {
+          "name": "RecCount",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Количество записей; –1 для динамического курсора."
+        },
+        {
+          "name": "PageSize",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Число записей в странице кэша."
+        },
+        {
+          "name": "MaxPages",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Предел страниц кэша в памяти."
+        },
+        {
+          "name": "AutoRefresh",
+          "isMethod": false,
+          "typeName": "RsdCommand",
+          "description": "Команда автоматического обновления записи."
+        },
+        {
+          "name": "InsertCommand",
+          "isMethod": false,
+          "typeName": "RsdCommand",
+          "description": "Пользовательская команда вставки."
+        },
+        {
+          "name": "UpdateCommand",
+          "isMethod": false,
+          "typeName": "RsdCommand",
+          "description": "Пользовательская команда изменения."
+        },
+        {
+          "name": "DeleteCommand",
+          "isMethod": false,
+          "typeName": "RsdCommand",
+          "description": "Пользовательская команда удаления."
+        },
+        {
+          "name": "InsupdCommand",
+          "isMethod": false,
+          "typeName": "RsdCommand",
+          "description": "Команда чтения данных после вставки."
+        },
+        {
+          "name": "Open",
+          "isMethod": true,
+          "signature": "Open(): Bool",
+          "description": "Открывает набор данных."
+        },
+        {
+          "name": "Close",
+          "isMethod": true,
+          "signature": "Close(): Bool",
+          "description": "Закрывает набор данных."
+        },
+        {
+          "name": "MoveFirst",
+          "isMethod": true,
+          "signature": "MoveFirst(): Bool",
+          "description": "Переходит к первой записи."
+        },
+        {
+          "name": "MoveLast",
+          "isMethod": true,
+          "signature": "MoveLast(): Bool",
+          "description": "Переходит к последней записи."
+        },
+        {
+          "name": "MoveNext",
+          "isMethod": true,
+          "signature": "MoveNext(): Bool",
+          "description": "Переходит к следующей записи."
+        },
+        {
+          "name": "MovePrev",
+          "isMethod": true,
+          "signature": "MovePrev(): Bool",
+          "description": "Переходит к предыдущей записи."
+        },
+        {
+          "name": "Move",
+          "isMethod": true,
+          "signature": "Move(numRec, moveDirect): Bool",
+          "description": "Переходит по смещению или закладке: RELATIVE, ABSOLUTE, BOOKMARK."
+        },
+        {
+          "name": "AddNew",
+          "isMethod": true,
+          "signature": "AddNew(): Bool",
+          "description": "Вставляет новую запись."
+        },
+        {
+          "name": "Edit",
+          "isMethod": true,
+          "signature": "Edit(): Bool",
+          "description": "Начинает редактирование текущей записи."
+        },
+        {
+          "name": "Update",
+          "isMethod": true,
+          "signature": "Update(): Bool",
+          "description": "Сохраняет изменения записи."
+        },
+        {
+          "name": "CancelEdit",
+          "isMethod": true,
+          "signature": "CancelEdit(): Bool",
+          "description": "Отменяет ввод или редактирование."
+        },
+        {
+          "name": "Delete",
+          "isMethod": true,
+          "signature": "Delete(): Bool",
+          "description": "Удаляет запись из набора."
+        },
+        {
+          "name": "AddUserCmdParam",
+          "isMethod": true,
+          "signature": "AddUserCmdParam(nameParm: String, nameField: String, versionValue: Integer): Bool",
+          "description": "Добавляет параметр команде набора; версия значения задаётся RSDRVER_*."
+        }
+      ]
+    },
+    {
+      "name": "RsdError",
+      "summary": "SQL-ошибка при работе с базой данных.",
+      "members": [
+        {
+          "name": "Code",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Код ошибки."
+        },
+        {
+          "name": "Descr",
+          "isMethod": false,
+          "typeName": "String",
+          "description": "Описание ошибки."
+        },
+        {
+          "name": "Source",
+          "isMethod": false,
+          "typeName": "String",
+          "description": "Тип объекта, где произошла ошибка."
+        }
+      ]
+    },
+    {
+      "name": "RsdField",
+      "summary": "Поле набора записей RSD.",
+      "members": [
+        {
+          "name": "Name",
+          "isMethod": false,
+          "typeName": "String",
+          "description": "Имя поля."
+        },
+        {
+          "name": "Value",
+          "isMethod": false,
+          "typeName": "Variant",
+          "description": "Значение поля."
+        },
+        {
+          "name": "BlobFilename",
+          "isMethod": false,
+          "typeName": "String",
+          "description": "Файл для чтения и записи BLOB."
+        },
+        {
+          "name": "NullVal",
+          "isMethod": false,
+          "typeName": "Variant",
+          "description": "Значение вместо NULL из SQL."
+        },
+        {
+          "name": "Read",
+          "isMethod": true,
+          "signature": "Read(out, [count: Integer]): Bool",
+          "description": "Читает поле типа BLOB."
+        },
+        {
+          "name": "Write",
+          "isMethod": true,
+          "signature": "Write(value, [count: Integer]): Bool",
+          "description": "Записывает поле типа BLOB."
+        }
+      ]
+    },
+    {
+      "name": "RsdParameter",
+      "summary": "Именованный параметр SQL-запроса.",
+      "members": [
+        {
+          "name": "Name",
+          "isMethod": false,
+          "typeName": "String",
+          "description": "Наименование параметра (только чтение)."
+        },
+        {
+          "name": "Direction",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Характеристика параметра: RSDBP_IN, RSDBP_OUT, RSDBP_IN_OUT или RSDBP_RETVAL."
+        },
+        {
+          "name": "Type",
+          "isMethod": false,
+          "typeName": "Integer",
+          "description": "Тип параметра (только чтение)."
+        },
+        {
+          "name": "Value",
+          "isMethod": false,
+          "typeName": "Variant",
+          "description": "Значение параметра."
+        },
+        {
+          "name": "SetSelfAlloc",
+          "isMethod": true,
+          "signature": "SetSelfAlloc([...])",
+          "description": "Управляет внутренним буфером."
+        },
+        {
+          "name": "SetStatusPtr",
+          "isMethod": true,
+          "signature": "SetStatusPtr(pStatus)",
+          "description": "Управляет внутренним буфером."
+        }
+      ]
+    }
+  ],
   "procedures": [],
   "constants": []
 }

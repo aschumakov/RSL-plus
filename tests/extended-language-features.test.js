@@ -69,9 +69,10 @@ function codes(items) {
         /* Тип спецпеременной пишется как в RSL: раньше здесь было «integer». */
         assert.strictEqual(catalog.find("{oper}").typeName, "Integer");
         assert.ok(catalog.find("Version").signature.startsWith("Version"));
-        const command = catalog.findClass("RsdCommand");
-        assert.ok(command);
-        assert.ok(command.children.some(child => child.name === "Execute"));
+        /* Класс языка, а не модуля: Rsd* уехали в состав rsd. */
+        const stream = catalog.findClass("TStream");
+        assert.ok(stream);
+        assert.ok(stream.children.some(child => child.name === "Flush"));
         assert.ok(!/https?:\/\//i.test(JSON.stringify(catalog.completionItems)));
 
         const hover = buildRslHoverContent(
@@ -104,15 +105,20 @@ function codes(items) {
          * 239 процедур, из которых 13 принадлежат макромодулям RslScr и rslx:
          * руководство выделяет их в подразделы «Макропроцедуры модуля …» и
          * требует подключить модуль командой IMPORT. Эти 13 описаны в
-         * platform-modules/rslscr.json и platform-modules/rslx.json, поэтому
-         * встроенными остаются 226.
+         * platform-modules/rslscr.json и platform-modules/rslx.json.
+         *
+         * Ещё 8 принадлежат модулю rsexts: «Модуль rsexts содержит
+         * процедуры CopyFile, RenameFile, RemoveFile, ExistDir, MakeDir,
+         * RemoveDir, GetCurDir» плюс CallRemoteRsl из раздела про
+         * удалённый запуск. Они описаны в platform-modules/rsexts.json,
+         * поэтому встроенными остаются 218.
          *
          * Число закреплено, чтобы пропажа или дубль в каталоге были видны
          * сразу, а не проявлялись отсутствующим Completion.
          */
         assert.strictEqual(
             procedures.length,
-            239 - 13,
+            239 - 13 - 8,
             "Состав каталога расошёлся с разделом руководства"
         );
 
@@ -121,7 +127,9 @@ function codes(items) {
             "SetScroll", "FindRow", "FindCol", "FillDown", "FillUp",
             "SetDlgFields", "ScrollMes", "UserFill",
             "AddMultiAction", "GetMultiCount", "GoToScroll", "RunScroll",
-            "UpdateScroll"
+            "UpdateScroll",
+            "CopyFile", "RenameFile", "RemoveFile", "ExistDir",
+            "MakeDir", "RemoveDir", "GetCurDir", "CallRemoteRsl"
         ];
         assert.deepStrictEqual(
             procedures
@@ -247,8 +255,14 @@ function codes(items) {
                 .filter(child => child.signature)
                 .map(child => ({ owner: entry.name, child })));
 
+        /*
+         * Порог опущен с сотни: классы TDirList и Rsd* уехали в состав
+         * своих модулей и забрали с собой 88 членов. Проверка здесь
+         * дымовая — что обход детей вообще что-то находит, — а полноту
+         * состава сверяет проверка выше.
+         */
         assert.ok(
-            methods.length > 100,
+            methods.length > 75,
             `Методов подозрительно мало: ${methods.length}`
         );
 
@@ -1147,9 +1161,9 @@ function codes(items) {
         const source = [
             "Macro Test()",
             " Var cmd;",
-            " cmd = RsdCommand();",
+            " cmd = TStream();",
             " value = StrLen(\"abc\");",
-            " cmd.Execute();",
+            " cmd.Stream();",
             "End;"
         ].join("\n");
         const { module, resolver } = moduleFor(source);
@@ -1160,13 +1174,13 @@ function codes(items) {
         );
         assert.ok(strLen?.symbol.isBuiltin);
         assert.strictEqual(strLen.symbol.typeName, "Integer");
-        const execute = resolver.resolveAt(
+        const member = resolver.resolveAt(
             module.uri,
             module.symbolTree,
-            source.indexOf("Execute")
+            source.indexOf("Stream();")
         );
-        assert.ok(execute?.symbol.isBuiltin);
-        assert.strictEqual(execute.symbol.typeName, "RsdRecordset");
+        assert.ok(member?.symbol.isBuiltin);
+        assert.strictEqual(member.symbol.typeName, "TStream");
     });
 
     await test("SPNAME из Macro виден во всём unit", () => {
@@ -1202,7 +1216,8 @@ function codes(items) {
             typeSource.length,
             typeContext.resolver
         );
-        assert.ok(types.some(item => item.label === "RsdCommand"));
+        /* Класс языка: Rsd* доступны только через Import rsd. */
+        assert.ok(types.some(item => item.label === "TStream"));
         assert.ok(
             types.some(item => item.label === "Integer"),
             "Примитивный тип обязан предлагаться в позиции типа"
