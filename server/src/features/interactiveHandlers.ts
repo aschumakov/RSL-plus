@@ -551,7 +551,9 @@ function modelHover(
                 model.symbolTree,
                 resolved.symbol,
                 offset
-            )
+            ),
+            /* Прикладной модуль-владелец, если символ оттуда. */
+            resolved.platformModuleName
         ),
         range: {
             start: document.positionAt(resolved.token.start),

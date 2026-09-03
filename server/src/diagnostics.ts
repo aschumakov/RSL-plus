@@ -121,6 +121,12 @@ import {
     runDiagnosticPlanChunked
 } from "./diagnostics/stages";
 import { addOverrideDiagnostics } from "./diagnostics/overrideChecks";
+import {
+    buildRslPlatformModuleDiagnostics
+} from "./diagnostics/platformModuleDiagnostics";
+import {
+    buildRslStringQuoteDiagnostics
+} from "./diagnostics/stringQuoteDiagnostics";
 import { createShadowingStage } from "./diagnostics/shadowingChecks";
 import {
     addCoreDialectDiagnostics,
@@ -470,6 +476,23 @@ function planLocalRslDiagnostics(
      */
     const stages: readonly IRslDiagnosticStageEntry[] = [
         ["parser", true, () => addSyntaxParserDiagnostics(module, result)],
+        /*
+         * Строки в апострофах: RSL их не принимает.
+         *
+         * Проверка текстовая и дешёвая — проход по готовым токенам, — и
+         * стоит рядом с разбором: ошибка эта синтаксическая, и знать о
+         * ней надо сразу, а не после чтения импортов.
+         */
+        [
+            "stringQuotes",
+            true,
+            () => {
+                result.push(...buildRslStringQuoteDiagnostics(
+                    module,
+                    Math.max(0, options.maxProblems - result.length)
+                ));
+            }
+        ],
         /*
          * Проверки, идущие по всему потоку токенов, объявлены возобновляемыми:
          * их порция ограничена временем, а не числом токенов. Состояние живёт в
@@ -980,6 +1003,34 @@ function planWorkspaceRslDiagnostics(
                     module,
                     index,
                     resolver
+                ));
+            }
+        ],
+        /*
+         * Имя из справки платформы, чей модуль не подключён.
+         *
+         * Отвечает про доступность имени, то есть про то же, что и
+         * прочие проверки этой фазы. Цена ограничена обратным
+         * указателем каталога: разрешаются только те имена, которые
+         * справка знает, а в обычном файле их нет вовсе.
+         */
+        [
+            "platformModules",
+            options.unknownVariables !== "off",
+            () => {
+                result.push(...buildRslPlatformModuleDiagnostics(
+                    module,
+                    resolver,
+                    {
+                        platformModules: resolver.platformModuleCatalog,
+                        visibleModules: resolver.visiblePlatformModules(
+                            module.uri
+                        ),
+                        limit: Math.max(
+                            0,
+                            options.maxProblems - result.length
+                        )
+                    }
                 ));
             }
         ],

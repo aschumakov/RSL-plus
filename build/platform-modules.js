@@ -24,6 +24,15 @@ const path = require("path");
 
 const DIRECTORY = path.join(__dirname, "..", "platform-modules");
 const INDEX_FILE = path.join(DIRECTORY, "index.json");
+const SYMBOLS_FILE = path.join(DIRECTORY, "symbols.json");
+
+/*
+ * Версия обратного указателя.
+ *
+ * Своя, не общая с индексом: указатель — производное от тел модулей, и
+ * пересобирается он отдельно. Несовпадение версии выключает только его.
+ */
+const SYMBOLS_VERSION = 1;
 
 /*
  * Типы, которые не обязаны быть классом каталога: примитивы языка и типы,
@@ -420,6 +429,75 @@ function fixDependencies(index, modules, owners) {
     return changed;
 }
 
+/**
+ * Обратный указатель: нормализованное имя -> модули, где оно объявлено.
+ *
+ * Пишутся все объявления модуля — классы, процедуры и константы: искать
+ * будут по любому из них. Имя нормализуется так же, как в языке: RSL
+ * сравнивает имена без учёта регистра.
+ */
+function buildSymbolOwners(modules) {
+    const owners = new Map();
+    const add = (name, moduleName) => {
+        const key = lower(String(name || ""));
+
+        if (!key) {
+            return;
+        }
+
+        const list = owners.get(key) || new Set();
+
+        list.add(moduleName);
+        owners.set(key, list);
+    };
+
+    for (const module of modules.values()) {
+        for (const item of module.classes) {
+            add(item.name, module.name);
+        }
+
+        for (const item of module.procedures) {
+            add(item.name, module.name);
+        }
+
+        for (const item of module.constants) {
+            add(item.name, module.name);
+        }
+    }
+
+    return owners;
+}
+
+/** Записать обратный указатель; true, если файл изменился. */
+function writeSymbolOwners(modules) {
+    const owners = buildSymbolOwners(modules);
+    const symbols = {};
+
+    for (const key of [...owners.keys()].sort()) {
+        symbols[key] = [...owners.get(key)]
+            .sort((left, right) => left.localeCompare(right));
+    }
+
+    const payload = `${JSON.stringify(
+        { version: SYMBOLS_VERSION, symbols },
+        null,
+        1
+    )}\n`;
+    let previous = "";
+
+    try {
+        previous = fs.readFileSync(SYMBOLS_FILE, "utf8");
+    } catch (_error) { /* файла ещё нет: это обычное состояние */ }
+
+    if (previous === payload) {
+        return false;
+    }
+
+    fs.writeFileSync(SYMBOLS_FILE, payload, "utf8");
+
+    return true;
+}
+
 function main() {
     const fix = process.argv.includes("--fix");
     const { index, modules } = readCatalog();
@@ -430,6 +508,9 @@ function main() {
         console.log(changed
             ? "index.json: зависимости досчитаны"
             : "index.json: зависимости уже полны");
+        console.log(writeSymbolOwners(modules)
+            ? "symbols.json: обратный указатель записан"
+            : "symbols.json: обратный указатель уже актуален");
     }
 
     const standard = standardLibraryClasses();

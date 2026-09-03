@@ -21,7 +21,15 @@ export function buildRslHoverContent(
      * Без этого подсказка писала `variant` у переменной, по которой при этом
      * предлагались методы класса, — то есть противоречила самой себе.
      */
-    effectiveTypeName?: string
+    effectiveTypeName?: string,
+    /**
+     * Имя прикладного модуля-владельца, если символ оттуда.
+     *
+     * Показывается вместо имени файла: файла у такого символа нет, а
+     * подключается он по имени модуля. Строка объявления для него не
+     * показывается — в справке платформы её нет.
+     */
+    moduleName?: string
 ): MarkupContent {
     const module = index.getModule(uri);
     const parent = module ? findParent(module.symbolTree, symbol) : undefined;
@@ -46,9 +54,25 @@ export function buildRslHoverContent(
         }
     }
 
-    if (!symbol.isBuiltin) {
-        lines.push("", `**Файл:** ${escapeMarkdown(displayFile(uri))}`);
+    /*
+     * Модуль, а не файл.
+     *
+     * По смыслу RSL и файл проекта, и прикладной модуль платформы —
+     * это модуль: первый подключают по имени файла, второй по имени
+     * модуля. Внутреннее различие пользователю не нужно, а слово
+     * «Файл» для прикладного символа было бы неверным: файла у него
+     * нет вовсе.
+     */
+    if (moduleName) {
+        lines.push("", `**Модуль:** ${escapeMarkdown(moduleName)}`);
+    } else if (!symbol.isBuiltin) {
+        lines.push(
+            "",
+            `**Модуль:** ${escapeMarkdown(displayFile(uri))}`
+        );
+
         const line = declarationLine(index, module, uri, symbol);
+
         if (line !== undefined) {
             lines.push(`**Строка:** ${line + 1}`);
         }

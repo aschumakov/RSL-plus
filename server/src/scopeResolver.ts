@@ -98,6 +98,14 @@ export interface IResolvedSymbol {
     uri: string;
     symbol: RslSymbol;
     token: IRslToken;
+    /**
+     * Имя прикладного модуля-владельца, если символ оттуда.
+     *
+     * У символа платформы файла нет вовсе: его uri — общий
+     * `rsl-builtin:`, и по нему модуль не назвать. А назвать надо:
+     * подключается такой символ по имени модуля.
+     */
+    platformModuleName?: string;
 }
 
 interface IResolutionCache {
@@ -324,6 +332,16 @@ export class RslScopeResolver {
      * расходились: один признавал свой кэш устаревшим, другой нет, и
      * подсветка расходилась с переходом.
      */
+    /**
+     * Каталог прикладных модулей, если он есть.
+     *
+     * Нужен проверке «модуль не подключён»: обратный указатель имён лежит в
+     * каталоге, а второй его копии заводить незачем.
+     */
+    get platformModuleCatalog(): PlatformModuleCatalog | undefined {
+        return this.platformModules;
+    }
+
     get semanticState(): RslSemanticState {
         return this.state;
     }
@@ -589,9 +607,20 @@ export class RslScopeResolver {
 
         const resolved = this.resolveName(uri, tree, referenceName, offset);
 
-        return resolved
-            ? { uri: resolved.uri, symbol: resolved.symbol, token }
-            : undefined;
+        if (!resolved) {
+            return undefined;
+        }
+
+        return {
+            uri: resolved.uri,
+            symbol: resolved.symbol,
+            token,
+            platformModuleName: resolved.platformModule
+                ? this.platformModules?.moduleDisplayName(
+                    resolved.platformModule
+                ) || resolved.platformModule
+                : undefined
+        };
     }
 
     /**

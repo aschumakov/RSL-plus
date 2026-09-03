@@ -283,7 +283,26 @@ export function buildImportEdit(
     index: WorkspaceIndex,
     targetUri: string
 ): TextEdit | undefined {
-    const name = importName(module, index, targetUri);
+    return buildRslImportEditForName(
+        module,
+        importName(module, index, targetUri)
+    );
+}
+
+/**
+ * Вставка `Import <имя>;` в правильное место файла.
+ *
+ * По имени, а не по файлу: у прикладного модуля платформы файла в
+ * проекте нет вовсе, а вставка нужна та же — то же место после последней
+ * директивы, тот же перевод строки, тот же учёт BOM и та же проверка
+ * «уже подключён».
+ *
+ * Пусто означает «вставлять нечего»: имени нет или модуль уже подключён.
+ */
+export function buildRslImportEditForName(
+    module: IIndexedModule,
+    name: string
+): TextEdit | undefined {
     if (!name || module.imports.some(item =>
         normalizeImportName(item) === normalizeImportName(name)
     )) {

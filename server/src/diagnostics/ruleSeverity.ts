@@ -72,6 +72,8 @@ export const RSL_KNOWN_DIAGNOSTIC_CODES: readonly string[] = [
     "self-import",
     "string-literal-too-long",
     "unclosed-comment",
+    "platform-module-not-imported",
+    "single-quoted-string",
     "unclosed-square-block",
     "unclosed-string",
     "undeclared-variable",

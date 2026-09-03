@@ -110,6 +110,22 @@ export const RSL_DIAGNOSTIC_RULES: readonly IRslDiagnosticRule[] = [
         produces: true
     },
     {
+        /*
+         * Строки в апострофах: RSL их не принимает.
+         *
+         * Сразу после разбора: ошибка синтаксическая, и знать о ней надо
+         * не позже прочих ошибок разбора. Зависит только от текста.
+         */
+        id: "stringQuotes",
+        phase: "local",
+        settings: [],
+        requires: [],
+        depends: TEXT_ONLY,
+        cache: "none",
+        resumable: false,
+        produces: true
+    },
+    {
         id: "limits",
         phase: "local",
         settings: [],
@@ -450,6 +466,16 @@ export const RSL_DIAGNOSTIC_RULES: readonly IRslDiagnosticRule[] = [
         settings: ["redundantImports"],
         requires: [],
         depends: WITH_IMPORTS,
+        cache: "file",
+        resumable: false,
+        produces: true
+    },
+    {
+        id: "platformModules",
+        phase: "workspace",
+        settings: ["unknownVariables"],
+        requires: [],
+        depends: WITH_CATALOG,
         cache: "file",
         resumable: false,
         produces: true

@@ -152,6 +152,14 @@ export interface IPlatformSymbol {
 
 /** Формат данных; несовпадение версии выключает каталог. */
 const SUPPORTED_VERSION = 3;
+/*
+ * Версия обратного указателя: своя, не общая с индексом.
+ *
+ * Указатель производен от тел модулей и пересобирается отдельно
+ * (build/platform-modules.js --fix), поэтому несовпадение версии
+ * выключает только его.
+ */
+const SYMBOL_OWNERS_VERSION = 1;
 const DIRECTORY = "platform-modules";
 
 /**
@@ -171,6 +179,19 @@ export class PlatformModuleCatalog {
     /** Ключ — имя модуля в нижнем регистре. */
     private entries = new Map<string, IPlatformModuleIndexEntry>();
     private displayNames = new Map<string, string>();
+    /**
+     * Обратный указатель: имя объявления -> модули, где оно есть.
+     *
+     * Нужен диагностике «символ описан в модуле, который не подключён».
+     * Без него такой ответ требовал бы прочитать все модули справки — то
+     * есть отменить ленивость каталога ради проверки, которая
+     * срабатывает редко.
+     *
+     * Читается отдельным файлом рядом с индексом. Файла нет или он
+     * другой версии — указателя просто не будет, и проверка не
+     * сработает: 312 КБ данных не повод ломать остальной каталог.
+     */
+    private symbolOwners = new Map<string, readonly string[]>();
     private loaded = new Map<string, ILoadedModule>();
     private failedModules = new Set<string>();
     /** Незавершённые чтения: второй запрос того же модуля их переиспользует. */
@@ -249,6 +270,21 @@ export class PlatformModuleCatalog {
     /** Знает ли каталог такой модуль; состав при этом не читается. */
     knowsModule(moduleName: string): boolean {
         return this.entries.has(normalizeIdentifier(moduleName));
+    }
+
+    /**
+     * Имя модуля в написании справки по его ключу.
+     *
+     * Отдельной таблицы соответствий не заводится: написание уже
+     * лежит в самой записи модуля, а ключ — это оно же в нижнем
+     * регистре. Пусто, если модуль каталогу неизвестен.
+     */
+    moduleDisplayName(moduleKey: string): string {
+        const key = normalizeIdentifier(moduleKey);
+
+        return this.loaded.get(key)?.displayName ||
+            this.displayNames.get(key) ||
+            "";
     }
 
     get ready(): boolean {
@@ -451,6 +487,47 @@ export class PlatformModuleCatalog {
             resolveExtensionFile(DIRECTORY);
     }
 
+    /**
+     * Модули, объявляющие это имя.
+     *
+     * Пустой ответ означает и «такого имени нет», и «указатель ещё не
+     * прочитан»: различать их незачем — проверка, которая на этом
+     * основана, в обоих случаях молчит.
+     */
+    modulesDeclaring(name: string): readonly string[] {
+        return this.symbolOwners.get(normalizeIdentifier(name)) || [];
+    }
+
+    private async loadSymbolOwners(): Promise<void> {
+        const filePath = path.join(this.directory(), "symbols.json");
+
+        try {
+            const parsed = JSON.parse(
+                await fs.promises.readFile(filePath, "utf8")
+            ) as {
+                version?: number;
+                symbols?: Record<string, string[]>;
+            };
+
+            if (parsed.version !== SYMBOL_OWNERS_VERSION) {
+                return;
+            }
+
+            for (const [name, owners] of Object.entries(
+                parsed.symbols || {}
+            )) {
+                if (Array.isArray(owners) && owners.length > 0) {
+                    this.symbolOwners.set(normalizeIdentifier(name), owners);
+                }
+            }
+        } catch (_error) {
+            /*
+             * Указателя нет — это не поломка: он производный, и без него
+             * работает всё, кроме одной проверки.
+             */
+        }
+    }
+
     private async loadIndex(): Promise<void> {
         const filePath = path.join(this.directory(), "index.json");
 
@@ -474,6 +551,7 @@ export class PlatformModuleCatalog {
                 this.displayNames.set(key, name);
             }
             this.indexLoaded = true;
+            await this.loadSymbolOwners();
             this.revisionValue++;
         } catch (error) {
             /*

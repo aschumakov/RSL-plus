@@ -15,6 +15,9 @@ import { DECLARATION_MODIFIERS } from "./language/rslLanguageReference";
 import {
     buildRslUndeclaredVariableFixes
 } from "./features/undeclaredVariableFixes";
+import {
+    buildRslImportEditForName
+} from "./features/autoImportProvider";
 import { IIndexedModule } from "./workspaceIndex";
 import {
     offsetInModule
@@ -42,6 +45,8 @@ interface IDiagnosticData {
     name?: string;
     parameter?: boolean;
     moduleName?: string;
+    /** Готовая замена: её считает та проверка, которая видит текст. */
+    replacement?: string;
 }
 
 /**
@@ -78,6 +83,34 @@ export function buildRslCodeActions(
                     module,
                     diagnostic,
                     "Удалить DEBUGBREAK"
+                );
+                break;
+
+            case "platform-module-not-imported":
+                /*
+                 * Модуль называет сама проверка: только она знает,
+                 * что имя объявлено ровно в одном модуле. При
+                 * нескольких равноправных сообщения нет вовсе, и
+                 * исправления тоже.
+                 */
+                action = createAddPlatformImportAction(
+                    module,
+                    diagnostic
+                );
+                break;
+
+            case "single-quoted-string":
+                /*
+                 * Замену считает сама проверка: только она видит
+                 * содержимое литерала, а от него зависит, однозначно ли
+                 * преобразование. Двойная кавычка или обратная косая
+                 * внутри — и замены нет вовсе, потому что менять
+                 * содержимое строки молча нельзя.
+                 */
+                action = createReplacementAction(
+                    module.uri,
+                    diagnostic,
+                    "Заключить в двойные кавычки"
                 );
                 break;
 
@@ -539,3 +572,57 @@ function offsetRange(
 }
 
 
+
+/**
+ * Правка по готовой замене из данных сообщения.
+ *
+ * Диапазон берётся у самого сообщения: он указывает ровно на то, что
+ * заменяется. Пустая замена означает «преобразование не однозначно», и
+ * исправление не предлагается.
+ */
+function createReplacementAction(
+    uri: string,
+    diagnostic: Diagnostic,
+    title: string
+): CodeAction | undefined {
+    const data = diagnostic.data as IDiagnosticData | undefined;
+    const replacement = data?.replacement;
+
+    if (!replacement) {
+        return undefined;
+    }
+
+    return createAction(uri, diagnostic, title, {
+        range: diagnostic.range,
+        newText: replacement
+    });
+}
+
+/**
+ * Вставить Import прикладного модуля, названного в сообщении.
+ *
+ * Вставка — общая с Auto Import: то же место после последней директивы,
+ * тот же перевод строки, тот же учёт BOM. Второй реализации ей не нужно.
+ */
+function createAddPlatformImportAction(
+    module: IIndexedModule,
+    diagnostic: Diagnostic
+): CodeAction | undefined {
+    const data = diagnostic.data as IDiagnosticData | undefined;
+    const moduleName = data?.moduleName;
+
+    if (!moduleName) {
+        return undefined;
+    }
+
+    const edit = buildRslImportEditForName(module, moduleName);
+
+    return edit
+        ? createAction(
+            module.uri,
+            diagnostic,
+            "Подключить модуль " + moduleName,
+            edit
+        )
+        : undefined;
+}
