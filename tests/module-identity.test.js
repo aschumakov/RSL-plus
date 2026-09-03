@@ -38,6 +38,10 @@ const {
     uriKey
 } = require("../server/out/core/identity/uriKey");
 const { ReferenceIndex } = require("../server/out/analysis/referenceIndex");
+const {
+    computeRslModuleInterface
+} = require("../server/out/indexing/moduleInterface");
+const { createOpenModuleModel } = require("../server/out/moduleModel");
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
 
 let passed = 0;
@@ -228,6 +232,99 @@ test("запись хранит написание URI, а не ключ сра�
             );
         }
     });
+});
+
+test("написание расширения не меняет отпечаток интерфейса", () => {
+    /*
+     * Последний слой той же оптимизации.
+     *
+     * Набор Import уже считал `lib` и `lib.mac` одной зависимостью, а
+     * отпечаток интерфейса — нет: он приводил написания простым
+     * toLowerCase. Получалось, что рёбра Import-графа не трогаются, а
+     * зависимые всё равно пересчитываются — половины оптимизации
+     * противоречили друг другу.
+     */
+    const plain = computeRslModuleInterface(
+        createOpenModuleModel("Import lib;\n\nMacro Run()\nEnd;\n")
+    ).fingerprint;
+    const dotted = computeRslModuleInterface(
+        createOpenModuleModel("Import lib.mac;\n\nMacro Run()\nEnd;\n")
+    ).fingerprint;
+    const slashed = computeRslModuleInterface(
+        createOpenModuleModel(
+            "Import \"sub\\lib\";\n\nMacro Run()\nEnd;\n"
+        )
+    ).fingerprint;
+    const other = computeRslModuleInterface(
+        createOpenModuleModel(
+            "Import \"sub/lib.mac\";\n\nMacro Run()\nEnd;\n"
+        )
+    ).fingerprint;
+
+    assert.strictEqual(plain, dotted, "`lib` и `lib.mac` — одна ссылка");
+    assert.strictEqual(slashed, other, "разделитель пути не значим");
+    assert.notStrictEqual(
+        plain,
+        slashed,
+        "путь в ссылке написан затем, чтобы различать одноимённые"
+    );
+});
+
+test("переписывание ссылки не сбрасывает зависимых", () => {
+    /*
+     * То же самое сквозь весь индекс: и рёбра графа, и отпечаток, и
+     * ревизия окружения зависимого файла.
+     */
+    const index = new WorkspaceIndex();
+    const user = "file:///d:/identity/consumer.mac";
+
+    index.registerWorkspaceFiles([LIB, USER, user]);
+    index.updateExternalModule(LIB, "Macro Alpha()\nEnd;\n", 1);
+    index.updateExternalModule(
+        USER,
+        "Import lib;\n\nMacro Run()\n    Alpha();\nEnd;\n",
+        1
+    );
+    index.updateOpenModule(user, "Import user;\n\nMacro Go()\nEnd;\n", 1);
+
+    /* Ревизии назначаются лениво: спросить их — значит завести. */
+    index.getSemanticRevision(user);
+
+    const before = {
+        counters: index.interfaceCounters,
+        revision: index.getSemanticRevision(user),
+        interfaceRevision: index.getInterfaceRevision(USER)
+    };
+
+    /* В зависимости переписали ссылку: смысл тот же. */
+    index.updateExternalModule(
+        USER,
+        "Import lib.mac;\n\nMacro Run()\n    Alpha();\nEnd;\n",
+        2
+    );
+
+    const after = index.interfaceCounters;
+
+    assert.strictEqual(
+        index.getInterfaceRevision(USER),
+        before.interfaceRevision,
+        "интерфейс не изменился"
+    );
+    assert.strictEqual(
+        after.interfaceChanges - before.counters.interfaceChanges,
+        0,
+        "и не должен был засчитаться как изменившийся"
+    );
+    assert.strictEqual(
+        after.dependentInvalidations - before.counters.dependentInvalidations,
+        0,
+        "зависимых сбрасывать незачем"
+    );
+    assert.strictEqual(
+        index.getSemanticRevision(user),
+        before.revision,
+        "и окружение зависимого документа то же"
+    );
 });
 
 console.log(

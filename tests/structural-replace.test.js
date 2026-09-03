@@ -43,6 +43,7 @@ const {
     applyRslStructuralReplace,
     parseRslReplacementTemplate,
     prepareRslStructuralReplace,
+    RslStructuralReplaceSession,
     withoutOverlaps
 } = require("../server/out/features/structuralReplace");
 const { WorkspaceIndex } = require("../server/out/workspaceIndex");
@@ -469,6 +470,143 @@ test("многострочный аргумент переносится вме�
         answer.previews[0].after,
         "Bar(2, 1)",
         "перенесено дословно то, что стояло в аргументах"
+    );
+});
+
+/* ─── Подмена подготовленной замены ──────────────────────────────────── */
+
+test("применяется ровно то, что показали", async () => {
+    /*
+     * Тот самый случай, который сверка отпечатков поймать не может.
+     *
+     * Пользователь запускает замену A и читает предпросмотр. Пока он читает,
+     * запускается замена B и вытесняет подготовленное A. Пользователь
+     * нажимает «Применить» в окне A — и без номера применилась бы B: её
+     * файлы не менялись, отпечатки верны, диапазоны верны. Неверно то, что
+     * подтверждали не это.
+     */
+    const board = stand({
+        [MAIN]: "Foo(1);\n",
+        [OTHER]: "Old(2);\n"
+    });
+    const session = new RslStructuralReplaceSession();
+
+    const first = await prepareRslStructuralReplace(board.environment, {
+        pattern: "Foo($a)",
+        replacement: "Bar($a)"
+    });
+    const firstId = session.remember(first.sources);
+
+    const second = await prepareRslStructuralReplace(board.environment, {
+        pattern: "Old($a)",
+        replacement: "New($a)"
+    });
+    const secondId = session.remember(second.sources);
+
+    assert.notStrictEqual(firstId, secondId, "номера обязаны различаться");
+    assert.strictEqual(
+        session.take(firstId),
+        undefined,
+        "первая подготовка вытеснена — применять её нечем"
+    );
+
+    const taken = session.take(secondId);
+
+    assert.ok(taken, "вторая применяется");
+
+    const applied = await applyRslStructuralReplace(
+        board.environment,
+        taken
+    );
+
+    assert.strictEqual(applied.files, 1);
+    assert.strictEqual(
+        applied.edit.documentChanges[0].textDocument.uri,
+        OTHER,
+        "правится файл ВТОРОЙ замены, и подтверждали именно её"
+    );
+    assert.strictEqual(
+        applied.edit.documentChanges[0].edits[0].newText,
+        "New(2)"
+    );
+});
+
+test("порядок завершения подготовок ничего не подменяет", async () => {
+    /*
+     * A начинается, B начинается, B заканчивается первой, A — второй.
+     * Побеждает та, что запомнилась последней, но применить чужую нельзя ни
+     * в одну сторону.
+     */
+    const board = stand({
+        [MAIN]: "Foo(1);\n",
+        [OTHER]: "Old(2);\n"
+    });
+    const session = new RslStructuralReplaceSession();
+
+    const slow = prepareRslStructuralReplace(board.environment, {
+        pattern: "Foo($a)",
+        replacement: "Bar($a)"
+    });
+    const quick = prepareRslStructuralReplace(board.environment, {
+        pattern: "Old($a)",
+        replacement: "New($a)"
+    });
+
+    const quickId = session.remember((await quick).sources);
+    const slowId = session.remember((await slow).sources);
+
+    assert.strictEqual(
+        session.take(quickId),
+        undefined,
+        "закончившаяся раньше вытеснена и применению недоступна"
+    );
+
+    const taken = session.take(slowId);
+
+    assert.ok(taken, "а последняя запомненная — доступна");
+
+    const applied = await applyRslStructuralReplace(
+        board.environment,
+        taken
+    );
+
+    assert.strictEqual(
+        applied.edit.documentChanges[0].textDocument.uri,
+        MAIN
+    );
+});
+
+test("подготовленное применяется один раз", async () => {
+    /* Второе применение того же номера — повторная правка правленых файлов. */
+    const board = stand({ [MAIN]: "Foo(1);\n" });
+    const session = new RslStructuralReplaceSession();
+    const prepared = await prepareRslStructuralReplace(board.environment, {
+        pattern: "Foo($a)",
+        replacement: "Bar($a)"
+    });
+    const id = session.remember(prepared.sources);
+
+    assert.ok(session.take(id));
+    assert.strictEqual(session.take(id), undefined);
+    assert.strictEqual(session.hasPending, false);
+});
+
+test("пустой и чужой номер не принимаются", async () => {
+    const board = stand({ [MAIN]: "Foo(1);\n" });
+    const session = new RslStructuralReplaceSession();
+    const prepared = await prepareRslStructuralReplace(board.environment, {
+        pattern: "Foo($a)",
+        replacement: "Bar($a)"
+    });
+
+    session.remember(prepared.sources);
+
+    assert.strictEqual(session.take(""), undefined);
+    assert.strictEqual(session.take("replace-999"), undefined);
+    assert.strictEqual(
+        session.hasPending,
+        true,
+        "чужой номер подготовленное не съедает"
     );
 });
 

@@ -1,5 +1,6 @@
 import { CompletionItemKind } from "vscode-languageserver";
 
+import { moduleIdOf } from "../core/identity/uriKey";
 import type { IRslModuleModel } from "../moduleModel";
 import type { RslSymbol } from "../symbols/rslSymbol";
 
@@ -100,11 +101,18 @@ export function computeRslModuleInterface(
     };
 
     /*
-     * Import — множество, а не последовательность: порядок в тексте на то, что
-     * видит соседний файл, не влияет.
+     * Import — множество, а не последовательность: порядок в тексте на то,
+     * что видит соседний файл, не влияет.
+     *
+     * Написание приводится к КАНОНИЧЕСКОМУ виду — тому же, по которому
+     * разрешаются ссылки и сравнивается набор Import. Простого toLowerCase
+     * мало: `Import lib` и `Import lib.mac` — одна и та же зависимость, и
+     * набор Import это уже знал. Отпечаток — нет, и переписывание ссылки
+     * без изменения смысла объявлялось изменением интерфейса: рёбра графа
+     * не трогались, а зависимые всё равно пересчитывались.
      */
     const imports = model.imports
-        .map(name => name.toLowerCase())
+        .map(name => moduleIdOf(name) as string)
         .sort();
 
     for (const name of imports) {

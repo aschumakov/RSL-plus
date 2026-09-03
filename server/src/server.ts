@@ -27,7 +27,7 @@ import {
 import {
     applyRslStructuralReplace,
     prepareRslStructuralReplace,
-    type IRslStructuralReplaceAnswer,
+    RslStructuralReplaceSession,
     type IRslStructuralReplaceRequest
 } from "./features/structuralReplace";
 import { decodeRslSourceText } from "./core/textDecoding";
@@ -963,12 +963,11 @@ connection.onInitialized(() => {
      * уже не туда, — поэтому применение сверяет содержимое каждого файла
      * заново: у открытого документа по версии, у закрытого по отпечатку.
      *
-     * Подготовленное держится ОДНОЙ записью: следующая подготовка её
-     * заменяет, применение забирает и обнуляет. Копить их незачем —
-     * пользователь работает с одной заменой за раз, а устаревшее
-     * подготовленное всё равно не применилось бы.
+     * И применение обязано назвать НОМЕР подготовленного. Без номера
+     * вторая подготовка, запущенная пока читают первый предпросмотр,
+     * подменяла бы то, что применится: см. RslStructuralReplaceSession.
      */
-    let pendingReplace: IRslStructuralReplaceAnswer | undefined;
+    const replaceSession = new RslStructuralReplaceSession();
 
     connection.onRequest(
         "rsl/structuralReplace",
@@ -978,33 +977,32 @@ connection.onInitialized(() => {
                 request,
                 () => token.isCancellationRequested
             );
-
-            pendingReplace = answer.problem ? undefined : answer;
+            const replaceId = answer.problem || !answer.replacements
+                ? undefined
+                : replaceSession.remember(answer.sources);
 
             /* Состояние файлов наружу не отдаётся: оно нужно применению. */
-            return { ...answer, sources: undefined };
+            return { ...answer, sources: undefined, replaceId };
         }
     );
 
     connection.onRequest(
         "rsl/structuralReplaceApply",
-        async (_request: unknown, token) => {
-            const prepared = pendingReplace;
+        async (request: { replaceId?: string }, token) => {
+            const sources = replaceSession.take(request?.replaceId || "");
 
-            pendingReplace = undefined;
-
-            if (!prepared) {
+            if (!sources) {
                 return {
                     files: 0,
                     replacements: 0,
                     staleFiles: [],
-                    problem: "Нечего применять: замена не подготовлена"
+                    problem: "Предпросмотр устарел: подготовьте замену заново"
                 };
             }
 
             return applyRslStructuralReplace(
                 structuralEnvironment(),
-                prepared.sources,
+                sources,
                 () => token.isCancellationRequested
             );
         }

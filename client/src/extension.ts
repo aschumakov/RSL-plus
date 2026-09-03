@@ -748,6 +748,8 @@ export function activate(context: ExtensionContext): void {
                     problem?: string;
                     cancelled?: boolean;
                     truncated?: boolean;
+                    /* Номер подготовленного: его называет применение. */
+                    replaceId?: string;
                 }>(
                     "rsl/structuralReplace",
                     { pattern, replacement },
@@ -786,6 +788,14 @@ export function activate(context: ExtensionContext): void {
                 return;
             }
 
+            if (!prepared.replaceId) {
+                channel.appendLine(
+                    "Применять нечего: сервер не подготовил замену."
+                );
+
+                return;
+            }
+
             const choice = await window.showWarningMessage(
                 "RSL: применить " + prepared.replacements +
                     " замен в " + prepared.files + " файлах?",
@@ -805,7 +815,10 @@ export function activate(context: ExtensionContext): void {
                 replacements?: number;
                 staleFiles?: string[];
                 problem?: string;
-            }>("rsl/structuralReplaceApply", {});
+            }>(
+                "rsl/structuralReplaceApply",
+                { replaceId: prepared.replaceId }
+            );
 
             if (applied?.problem) {
                 channel.appendLine("Не применено: " + applied.problem);

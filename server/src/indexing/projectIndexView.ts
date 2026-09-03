@@ -2,7 +2,7 @@ import type { CompletionItemKind } from "vscode-languageserver";
 
 import { normalizeIdentifier } from "../lexer";
 import { rslModuleBaseName } from "../core/language/moduleName";
-import { sameUri } from "../core/identity/uriKey";
+import { sameUri, uriKey } from "../core/identity/uriKey";
 import { rslSymbolRef, type IRslSymbolRef } from "../symbols/symbolRef";
 import type { RslSymbol } from "../symbols/rslSymbol";
 import type { IRslCatalogSymbol } from "./workspaceCatalog";
@@ -436,7 +436,7 @@ export class RslProjectIndexView {
                 }
 
                 const key = normalizeIdentifier(record.name) +
-                    " " + record.uri;
+                    "\u0000" + uriKey(record.uri);
 
                 if (seen.has(key)) {
                     continue;
@@ -538,8 +538,16 @@ export class RslProjectIndexView {
     }
 }
 
+/**
+ * Тождество объявления одной строкой: файл и номер.
+ *
+ * Файл — через общее правило идентичности, а не через toLowerCase.
+ * На регистрозависимой файловой системе `/p/A.mac` и `/p/a.mac` — два
+ * разных файла, и `Macro Run()` в каждом из них это два разных
+ * объявления с одинаковым номером.
+ */
 function refKey(uri: string, symbolId: string): string {
-    return uri.toLowerCase() + "\u0000" + symbolId;
+    return uriKey(uri) + "\u0000" + symbolId;
 }
 
 function compareUri(left: string, right: string): number {

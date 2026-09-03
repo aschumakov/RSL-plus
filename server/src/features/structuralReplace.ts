@@ -107,6 +107,66 @@ export interface IRslStructuralApplyAnswer {
 const DEFAULT_LIMIT = 500;
 
 /**
+ * Подготовленная замена в ожидании подтверждения.
+ *
+ * Одна: пользователь работает с одной заменой за раз, и копить их
+ * незачем. Но у неё есть НОМЕР, и применение обязано его назвать.
+ *
+ * Без номера получалась подмена. Подготовка `Foo -> Bar` показывает
+ * предпросмотр; пользователь его читает; в это время запускается вторая
+ * подготовка `Old -> New` и вытесняет первую; пользователь нажимает
+ * «Применить» в ПЕРВОМ окне — и применяется вторая замена. Сверка
+ * отпечатков этого не ловит и поймать не может: файлы второй замены не
+ * менялись, отпечатки верны, диапазоны верны. Неверно то, что
+ * пользователь подтверждал не это.
+ */
+export class RslStructuralReplaceSession {
+    private pending: {
+        id: string;
+        sources: readonly IRslStructuralReplaceSource[];
+    } | undefined;
+    private counter = 0;
+
+    /**
+     * Запомнить подготовленное и выдать номер.
+     *
+     * Прежняя подготовка вытесняется — это и раньше было так. Разница в
+     * том, что применить её теперь нельзя: номер у неё был другой.
+     */
+    remember(sources: readonly IRslStructuralReplaceSource[]): string {
+        const id = "replace-" + ++this.counter;
+
+        this.pending = { id, sources };
+
+        return id;
+    }
+
+    /**
+     * Забрать подготовленное по номеру.
+     *
+     * Пусто означает «это не та замена или её уже применили». Забирается
+     * один раз: предпросмотр применяют однажды, а второе применение того
+     * же номера — это повторная правка уже правленых файлов.
+     */
+    take(id: string): readonly IRslStructuralReplaceSource[] | undefined {
+        if (!this.pending || !id || this.pending.id !== id) {
+            return undefined;
+        }
+
+        const sources = this.pending.sources;
+
+        this.pending = undefined;
+
+        return sources;
+    }
+
+    /** Есть ли что применять; для проверок. */
+    get hasPending(): boolean {
+        return this.pending !== undefined;
+    }
+}
+
+/**
  * Разбирает шаблон замены.
  *
  * Лексер здесь не нужен и был бы вреден: шаблон — это текст, а не код. `$$`
