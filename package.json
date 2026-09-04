@@ -4,7 +4,7 @@
    "description": "RSL / Object RSL language support with diagnostics, navigation and Quick Fixes",
    "author": "Veniamin Rakov + AChumakov",
    "license": "SEE LICENSE IN LICENSE.txt",
-   "version": "1.3.1",
+   "version": "1.3.2",
    "icon": "icon.png",
    "bugs": {
       "url": "https://github.com/aschumakov/RSL-plus/issues"
@@ -279,7 +279,9 @@
             "rslPlus.imports.libraryPaths": {
                "scope": "resource",
                "type": "array",
-               "items": { "type": "string" },
+               "items": {
+                  "type": "string"
+               },
                "default": [],
                "description": "Каталоги библиотек модулей вне проекта — базовая поставка и общие макросы. Порядок значим и повторяет USERMACRODIR: сперва проект, затем эти каталоги по очереди; первое совпадение побеждает. Папками проекта они не становятся: состав не обходится, в Ctrl+T и в поиск использований не попадает, а читается только тот модуль, который понадобился, и его Import."
             },
@@ -347,7 +349,12 @@
             "rslPlus.format.keywordCase": {
                "scope": "resource",
                "type": "string",
-               "enum": ["asIs", "lower", "upper", "capitalize"],
+               "enum": [
+                  "asIs",
+                  "lower",
+                  "upper",
+                  "capitalize"
+               ],
                "default": "asIs",
                "description": "Регистр ключевых слов, которые дописывает плагин: end; после заголовка блока, Var из исправления, сниппеты. asIs — как плагин писал их всегда. Уже написанное в файле не меняется ни при каком значении."
             },
@@ -372,7 +379,11 @@
             "rslPlus.format.indentStyle": {
                "scope": "resource",
                "type": "string",
-               "enum": ["editor", "space", "tab"],
+               "enum": [
+                  "editor",
+                  "space",
+                  "tab"
+               ],
                "default": "editor",
                "description": "Символ отступа для проектов без .editorconfig. editor — как настроен редактор."
             },
@@ -401,7 +412,13 @@
                "markdownDescription": "Уровень отдельных правил: код диагностики → `none`, `hint`, `information`, `warning` или `error`. Применяется одинаково в редакторе и в `rsl-plus check`. Прежние галочки продолжают работать: они решают, считать ли проверку, а это — как её показать.",
                "additionalProperties": {
                   "type": "string",
-                  "enum": ["none", "hint", "information", "warning", "error"]
+                  "enum": [
+                     "none",
+                     "hint",
+                     "information",
+                     "warning",
+                     "error"
+                  ]
                }
             },
             "rslPlus.diagnostics.enabled": {
