@@ -1079,8 +1079,19 @@ export class WorkspaceModuleLoader {
             return "fileChanged";
         }
 
+        /*
+         * Файл библиотеки в каталоге проекта не числится намеренно, и
+         * отказывать ему в перечитывании как «не из проекта» неверно: в
+         * замыкании открытого файла он участвует наравне с файлами проекта.
+         *
+         * Отмена срабатывает только на перезагрузке изменившегося файла,
+         * когда его чтение уже шло; сценария, где она бьёт по библиотеке,
+         * воспроизвести не удалось. Условие приведено к инварианту заранее,
+         * а не по следам поломки.
+         */
         return this.index.workspaceFilesReady !== false &&
-            !this.index.hasWorkspaceFile(uri)
+            !this.index.hasWorkspaceFile(uri) &&
+            !this.index.isLibraryFile(uri)
             ? "notInWorkspace"
             : undefined;
     }
