@@ -14,6 +14,23 @@ import {
 } from "./semanticState";
 import type { RslSymbol } from "../symbols/rslSymbol";
 import type { WorkspaceIndex } from "../workspaceIndex";
+import {
+    findRslChainDot,
+    readRslAccessChain,
+    type IRslAccessSegment
+} from "./accessChain";
+import {
+    findRslMemberSetMember,
+    getRslMemberSet,
+    type IRslMemberSet,
+    type IRslMemberSetOptions
+} from "./memberSet";
+import {
+    isRslClassType,
+    rslTypeFromName,
+    rslUnknownType,
+    type IRslResolvedType
+} from "./resolvedType";
 
 /**
  * Семантика выражений: типы отдельно от разрешения имён.
@@ -322,6 +339,223 @@ export class RslTypeEngine {
      * показать первыми. Ничего допустимого это не прячет — совпадение по типу
      * ПОДНИМАЕТ кандидата, а не отбрасывает остальных (см. typeRank).
      */
+    /**
+     * Тип символа в этой позиции — значением, а не строкой.
+     *
+     * Строка несла одно сведение, имя; всё прочее каждый потребитель
+     * добывал сам и приходил к разным выводам. См. IRslResolvedType.
+     */
+    resolveTypeAt(uri: string, offset: number): IRslResolvedType {
+        return this.withSource(
+            uri,
+            this.typed(this.typeOfSymbolAt(uri, offset)),
+            offset
+        );
+    }
+
+    /** Тип выражения в этих границах — значением. */
+    resolveExpressionType(
+        uri: string,
+        start: number,
+        end: number
+    ): IRslResolvedType {
+        return this.typed(this.typeOfExpression(uri, start, end));
+    }
+
+    /**
+     * Тип получателя перед точкой, включая цепочки.
+     *
+     * `command.Execute().MoveNext` разбирается по звеньям слева
+     * направо: тип первого даёт разрешение имени, тип каждого
+     * следующего — член предыдущего класса. Считается по требованию и
+     * только вокруг позиции: полной проверки типов файла здесь нет.
+     */
+    resolveReceiverType(
+        uri: string,
+        offset: number
+    ): IRslResolvedType {
+        return this.cachedType(uri, "receiver:" + offset, () => {
+            const module = this.index.getModule(uri);
+
+            if (!module) {
+                return rslUnknownType();
+            }
+
+            const tokens = module.syntax.tokens;
+            const dot = findRslChainDot(tokens, offset);
+
+            if (dot < 0) {
+                return rslUnknownType();
+            }
+
+            const chain = readRslAccessChain(tokens, dot);
+
+            return chain.length === 0
+                ? rslUnknownType()
+                : this.typeOfChain(uri, chain);
+        });
+    }
+
+    /**
+     * Состав класса вместе с полнотой — один ответ на всех.
+     *
+     * Тот же набор, что видят подсказка, переход, Hover и проверка
+     * «такого члена нет»: разным его видеть нельзя.
+     */
+    getMemberSet(
+        uri: string,
+        className: string,
+        offset: number
+    ): IRslMemberSet {
+        return getRslMemberSet(className, this.memberOptions(uri, offset));
+    }
+
+    /** Класс, который представляет этот тип; пусто у не-классов. */
+    resolveClass(
+        uri: string,
+        value: IRslResolvedType,
+        offset: number
+    ): IRslMemberSet | undefined {
+        return isRslClassType(value)
+            ? this.getMemberSet(uri, value.name, offset)
+            : undefined;
+    }
+
+    /** Настройки обхода состава: собираются здесь, а не у каждого. */
+    memberOptions(uri: string, offset: number): IRslMemberSetOptions {
+        const module = this.index.getModule(uri);
+
+        return {
+            resolver: this.resolver,
+            uri,
+            imports: module?.imports || [],
+            offset,
+            platformMembersComplete: key =>
+                this.resolver.platformModuleCatalog
+                    ?.membersComplete(key) === true,
+            isLibraryUri: item => this.index.isLibraryFile(item),
+            ownClass: className => {
+                if (!module) {
+                    return undefined;
+                }
+
+                const found = this.resolver.resolveTypeName(
+                    uri,
+                    module.symbolTree,
+                    className
+                );
+
+                return found && found.uri === uri
+                    ? { symbol: found.symbol, moduleUri: uri }
+                    : undefined;
+            }
+        };
+    }
+
+    /**
+     * Тип цепочки: звено за звеном слева направо.
+     *
+     * Первое звено разрешается как обычное имя, каждое следующее — как
+     * член класса предыдущего. Как только тип перестал быть классом,
+     * дальше идти некуда: у примитива и у variant членов нет.
+     */
+    private typeOfChain(
+        uri: string,
+        chain: readonly IRslAccessSegment[]
+    ): IRslResolvedType {
+        let current = chain[0].call
+            ? this.typed(this.returnTypeOfCall(
+                uri,
+                chain[0].insideCall ?? chain[0].start
+            ))
+            : this.resolveTypeAt(uri, chain[0].start);
+
+        for (let at = 1; at < chain.length; at++) {
+            if (!isRslClassType(current)) {
+                return current.kind === "unknown"
+                    ? rslUnknownType()
+                    : current;
+            }
+
+            const segment = chain[at];
+            const options = this.memberOptions(uri, segment.start);
+            const set = getRslMemberSet(current.name, options);
+            const member = findRslMemberSetMember(
+                set,
+                segment.name,
+                options
+            );
+
+            if (!member) {
+                return rslUnknownType();
+            }
+
+            current = this.typed(member.typeName);
+        }
+
+        return this.withSource(
+            uri,
+            current,
+            chain[chain.length - 1].start
+        );
+    }
+
+    /**
+     * Проставить источник класса.
+     *
+     * Имя типа источника не несёт: одно и то же `TStream` бывает и
+     * встроенным, и объявленным рядом. Отвечает на это состав — он же
+     * отвечает и всем остальным, так что второго мнения не возникает.
+     */
+    private withSource(
+        uri: string,
+        value: IRslResolvedType,
+        offset: number
+    ): IRslResolvedType {
+        if (!isRslClassType(value)) {
+            return value;
+        }
+
+        const set = this.getMemberSet(uri, value.name, offset);
+
+        return set.resolved
+            ? { ...value, source: set.source }
+            : value;
+    }
+
+    /** Строка типа — в значение; единственное место такого перевода. */
+    private typed(name: string): IRslResolvedType {
+        return rslTypeFromName(canonicalTypeName(name) || name);
+    }
+
+    /**
+     * Тот же кэш, что и у остальных ответов: по семантическому состоянию.
+     *
+     * Хранится строкой «вид|имя|источник» — общая запись документа держит
+     * строки, и заводить рядом вторую с теми же правилами сброса значило бы
+     * получить два кэша, устаревающих порознь.
+     */
+    private cachedType(
+        uri: string,
+        key: string,
+        build: () => IRslResolvedType
+    ): IRslResolvedType {
+        const packed = this.cached(uri, key, () => {
+            const value = build();
+
+            return value.kind + "|" + value.name + "|" + value.source;
+        });
+        const parts = packed.split("|");
+
+        return parts.length === 3 && parts[0]
+            ? {
+                kind: parts[0] as IRslResolvedType["kind"],
+                name: parts[1],
+                source: parts[2] as IRslResolvedType["source"]
+            }
+            : rslUnknownType();
+    }
+
     private assignmentTargetType(
         module: IIndexedModule,
         offset: number
