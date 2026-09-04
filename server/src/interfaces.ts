@@ -149,6 +149,14 @@ export interface IRslSettings {
     };
     imports: {
         enabled: boolean;
+        /**
+         * Каталоги библиотек модулей вне проекта, по порядку.
+         *
+         * Порядок повторяет USERMACRODIR: проект, затем эти каталоги
+         * по очереди. Папками проекта они не становятся — см.
+         * RslLibraryModuleIndex.
+         */
+        libraryPaths: readonly string[];
     };
     autoImport: {
         enabled: boolean;

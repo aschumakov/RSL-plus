@@ -2,7 +2,11 @@ import { Uri, workspace } from "vscode";
 
 export interface IRslClientSettings {
     language: { dialect: "rsBank" | "coreRsl" };
-    imports: { enabled: boolean };
+    imports: {
+        enabled: boolean;
+        /** Каталоги библиотек модулей вне проекта, по порядку. */
+        libraryPaths: string[];
+    };
     autoImport: { enabled: boolean };
     analysis: {
         workspaceIndexing: "activeImports" | "workspaceIdle" | "full";
@@ -75,7 +79,14 @@ export function readRslSettings(resource?: Uri): IRslClientSettings {
                 resource
             )
         },
-        imports: { enabled: readSetting("imports.enabled", true, resource) },
+        imports: {
+            enabled: readSetting("imports.enabled", true, resource),
+            libraryPaths: readSetting(
+                "imports.libraryPaths",
+                [] as string[],
+                resource
+            )
+        },
         autoImport: {
             enabled: readSetting("autoImport.enabled", true, resource)
         },

@@ -20,6 +20,9 @@ import {
     type IRslSymbolRef
 } from "./symbols/symbolRef";
 import { FileCatalog } from "./indexing/fileCatalog";
+import {
+    RslLibraryModuleIndex
+} from "./indexing/libraryModuleIndex";
 import { WorkspaceCatalog } from "./indexing/workspaceCatalog";
 import { ImportGraph } from "./indexing/importGraph";
 import { computeRslModuleInterface } from "./indexing/moduleInterface";
@@ -502,12 +505,85 @@ export class WorkspaceIndex {
     }
     getWorkspaceFileUris(): string[] { return this.files.values(); }
     hasWorkspaceFile(uri: string): boolean { return this.files.has(uri); }
+    /**
+     * Файл по имени модуля: сперва проект, затем библиотеки.
+     *
+     * Порядок повторяет USERMACRODIR платформы. Проект сильнее: пока
+     * он отвечает хоть что-нибудь — найденное или неоднозначность, —
+     * библиотеки не спрашиваются вовсе. Неоднозначности между
+     * библиотеками не бывает: следующая спрашивается только тогда,
+     * когда в предыдущей ничего не нашлось.
+     */
+    private libraryPathList: readonly string[] = [];
+    private temporaryLibraryRoot: string | undefined;
+    private libraries = new RslLibraryModuleIndex({
+        paths: () => this.libraryPathList,
+        temporaryRoot: () => this.temporaryLibraryRoot
+    });
+
     resolveWorkspaceFile(name: string): ModuleResolution<string> {
-        return this.files.resolve(name);
+        const own = this.files.resolve(name);
+
+        if (own.kind !== "missing") {
+            return own;
+        }
+
+        const library = this.libraries.resolve(name);
+
+        return library
+            ? { kind: "resolved", value: library }
+            : own;
     }
     findWorkspaceFileUri(name: string): string | undefined {
-        const result = this.files.resolve(name);
+        const result = this.resolveWorkspaceFile(name);
         return result.kind === "resolved" ? result.value : undefined;
+    }
+
+    /**
+     * Библиотеки модулей: путь и порядок задаёт настройка.
+     *
+     * Папками проекта они не становятся: их состав не обходится, в
+     * каталог и в индекс ссылок не попадает, и читается из них
+     * только то, что кто-то попросил по имени.
+     */
+    setLibraryPaths(paths: readonly string[]): void {
+        const next = paths.filter(item => item.trim().length > 0);
+
+        if (
+            next.length === this.libraryPathList.length &&
+            next.every((item, at) => item === this.libraryPathList[at])
+        ) {
+            return;
+        }
+
+        this.libraryPathList = next;
+        this.libraries.invalidate();
+    }
+
+    /**
+     * Каталог открытого вне проекта файла — временный первый корень.
+     *
+     * У такого файла соседи по каталогу и есть его библиотека; так же
+     * разрешает имена и платформа. Настройкой это не становится:
+     * корень живёт, пока файл открыт.
+     */
+    setTemporaryLibraryRoot(directory: string | undefined): void {
+        if (this.temporaryLibraryRoot === directory) {
+            return;
+        }
+
+        this.temporaryLibraryRoot = directory;
+        this.libraries.invalidate();
+    }
+
+    /** Библиотечный ли это файл: в состав проекта он не входит. */
+    isLibraryFile(uri: string): boolean {
+        return !this.files.has(uri) && this.modules.get(uri) !== undefined;
+    }
+
+    /** Сколько библиотек прочитано и сколько имён: см. тесты. */
+    get libraryCounters(): RslLibraryModuleIndex["counters"] {
+        return this.libraries.counters;
     }
 
     getModule(uri: string): IIndexedModule | undefined {

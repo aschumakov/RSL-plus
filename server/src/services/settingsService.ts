@@ -107,7 +107,11 @@ function mergeSettings(
         imports: {
             enabled: typeof imports.enabled === "boolean"
                 ? imports.enabled
-                : defaults.imports.enabled
+                : defaults.imports.enabled,
+            libraryPaths: readPathList(
+                imports.libraryPaths,
+                defaults.imports.libraryPaths
+            )
         },
         autoImport: {
             enabled: typeof autoImport.enabled === "boolean"
@@ -213,6 +217,10 @@ function settingsEqual(
     right: IRslSettings
 ): boolean {
     return left.imports.enabled === right.imports.enabled &&
+        samePathList(
+            left.imports.libraryPaths,
+            right.imports.libraryPaths
+        ) &&
         left.language.dialect === right.language.dialect &&
         left.autoImport.enabled === right.autoImport.enabled &&
         left.analysis.workspaceIndexing === right.analysis.workspaceIndexing &&
@@ -244,4 +252,43 @@ function isWorkspaceIndexingMode(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null;
+}
+
+/**
+ * Список каталогов из настройки.
+ *
+ * Настройку пишут руками, поэтому проверяется каждый элемент, а не
+ * только сам массив: одна строка вместо списка, число среди строк и
+ * пустая строка — обычные опечатки. Порядок значим и сохраняется.
+ */
+function readPathList(
+    value: unknown,
+    fallback: readonly string[] | undefined
+): string[] {
+    if (!Array.isArray(value)) {
+        /* Умолчание бывает и неполным: снимок настроек собирают и тесты. */
+        return Array.isArray(fallback) ? [...fallback] : [];
+    }
+
+    return value
+        .filter((item): item is string => typeof item === "string")
+        .map(item => item.trim())
+        .filter(item => item.length > 0);
+}
+
+/**
+ * Совпадают ли списки путей.
+ *
+ * Списка может не быть вовсе: снимок настроек собирают и снаружи — тесты,
+ * старые сохранённые значения, — и падать на этом сравнение не должно.
+ */
+function samePathList(
+    left: readonly string[] | undefined,
+    right: readonly string[] | undefined
+): boolean {
+    const first = left || [];
+    const second = right || [];
+
+    return first.length === second.length &&
+        first.every((item, at) => item === second[at]);
 }

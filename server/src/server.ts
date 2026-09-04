@@ -9,6 +9,7 @@ import {
 } from "vscode-languageserver/node";
 
 import * as fs from "fs";
+import * as nodePath from "path";
 import { fileURLToPath } from "url";
 
 import { TextDocument } from "vscode-languageserver-textdocument";
@@ -123,7 +124,7 @@ const inspectorTypes = new RslTypeEngine(workspaceIndex, scopeResolver);
 
 const defaultSettings: IRslSettings = {
     language: { dialect: "rsBank" },
-    imports: { enabled: true },
+    imports: { enabled: true, libraryPaths: [] },
     autoImport: { enabled: true },
     analysis: { workspaceIndexing: "activeImports" },
     semanticHighlighting: { maxFileSizeKb: 512 },
@@ -527,6 +528,7 @@ settingsService.onDidResolve((uri, settings) => {
     const document = documents.get(uri);
 
     workspaceIndex.setImportsEnabled(settings.imports.enabled);
+    workspaceIndex.setLibraryPaths(settings.imports.libraryPaths);
     moduleLoader.setIndexingMode(settings.analysis.workspaceIndexing);
 
     const module = document &&
@@ -574,12 +576,17 @@ connection.onNotification(
             ? settingsService.getAvailable(uri)
             : settingsService.getWorkspaceSnapshot();
         workspaceIndex.setImportsEnabled(settings.imports.enabled);
+        workspaceIndex.setLibraryPaths(settings.imports.libraryPaths);
+    workspaceIndex.setLibraryPaths(settings.imports.libraryPaths);
         moduleLoader.setIndexingMode(settings.analysis.workspaceIndexing);
         moduleLoader.beginForegroundGeneration();
         moduleLoader.noteInteractiveActivity();
         workspaceDiscovery.noteInteractiveActivity();
         documentAnalysis.setActiveDocument(uri);
         diagnosticsCoordinator.setActiveDocument(uri);
+        workspaceIndex.setTemporaryLibraryRoot(
+            uri ? directoryOutsideWorkspace(uri) : undefined
+        );
 
         const module = uri ? workspaceIndex.getModule(uri) : undefined;
         if (module && settings.imports.enabled) {
@@ -771,6 +778,9 @@ connection.onInitialize((params: InitializeParams) => {
     });
     const initialSettings = settingsService.getWorkspaceSnapshot();
     workspaceIndex.setImportsEnabled(initialSettings.imports.enabled);
+    workspaceIndex.setLibraryPaths(
+        initialSettings.imports.libraryPaths
+    );
     moduleLoader.setIndexingMode(
         initialSettings.analysis.workspaceIndexing
     );
@@ -1401,3 +1411,36 @@ documents.listen(connectionWithChangeLog(
     documentChangeLog
 ));
 connection.listen();
+
+/**
+ * Каталог файла, открытого вне проекта; пусто для файла проекта.
+ *
+ * У такого файла соседи по каталогу и есть его библиотека — так же
+ * разрешает имена платформа, — и разумнее спросить их раньше настроенных
+ * библиотек. Файл проекта своего корня не добавляет: состав проекта уже
+ * обойдён, и второй путь к тем же файлам только создал бы неоднозначность.
+ */
+function directoryOutsideWorkspace(uri: string): string | undefined {
+    let filePath: string;
+
+    try {
+        filePath = fileURLToPath(uri);
+    } catch (_error) {
+        return undefined;
+    }
+
+    const roots = workspaceDiscovery.rootPaths();
+
+    for (const root of roots) {
+        const relative = nodePath.relative(root, filePath);
+
+        if (
+            !relative.startsWith("..") &&
+            !nodePath.isAbsolute(relative)
+        ) {
+            return undefined;
+        }
+    }
+
+    return nodePath.dirname(filePath);
+}

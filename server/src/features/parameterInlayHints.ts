@@ -87,6 +87,13 @@ interface IRslCallSite {
     open: number;
     /** Индексы первых токенов аргументов. */
     arguments: number[];
+    /**
+     * Индексы ПОСЛЕДНИХ токенов аргументов, по одному на аргумент.
+     *
+     * Нужны, чтобы отличить аргумент в одну строку от аргумента в
+     * несколько: у второго подсказка стоит в конце, а не в начале.
+     */
+    ends: number[];
     /** Есть ли аргумент без закрывающей скобки: такой вызов пропускается. */
     closed: boolean;
 }
@@ -109,7 +116,15 @@ function readCall(
     }
 
     const starts: number[] = [];
+    const ends: number[] = [];
     let depth = 0;
+
+    /* Аргумент закрывается тем, что стоит перед разделителем. */
+    const closeArgument = (cursor: number): void => {
+        if (starts.length > ends.length) {
+            ends.push(cursor - 1);
+        }
+    };
 
     for (let cursor = index + 1; cursor < tokens.length; cursor++) {
         const token = tokens[cursor];
@@ -128,10 +143,13 @@ function readCall(
             depth--;
 
             if (depth === 0) {
+                closeArgument(cursor);
+
                 return {
                     callee,
                     open: index + 1,
                     arguments: starts,
+                    ends,
                     closed: token.raw === ")"
                 };
             }
@@ -140,6 +158,8 @@ function readCall(
         }
 
         if (depth === 1 && token.kind === "symbol" && token.raw === ",") {
+            closeArgument(cursor);
+
             if (isArgumentStart(tokens, cursor + 1)) {
                 starts.push(cursor + 1);
             }
@@ -213,11 +233,26 @@ function appendCallHints(
             continue;
         }
 
+        const last = tokens[call.ends[index]] || argument;
+        const starts = module.lex.lineStarts;
+        const opening = positionAtOffset(starts, argument.start);
+        const closing = positionAtOffset(starts, last.end);
+
+        /*
+         * Аргумент в одну строку: подсказка перед ним, как и была.
+         * Аргумент в несколько: после последнего его токена — иначе она
+         * сдвинула бы вправо весь код, который под ней, и выравнивание
+         * перестало бы читаться. Текст файла при этом не меняется:
+         * подсказка живёт поверх него.
+         */
+        const trailing = closing.line > opening.line;
+
         result.push({
-            position: positionAtOffset(module.lex.lineStarts, argument.start),
-            label: name + ":",
+            position: trailing ? closing : opening,
+            label: trailing ? "\u2190 " + name : name + ":",
             kind: InlayHintKind.Parameter,
-            paddingRight: true,
+            paddingLeft: trailing,
+            paddingRight: !trailing,
             tooltip: "Имя параметра из объявления " + resolved.symbol.name
         });
     }
