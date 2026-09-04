@@ -1,3 +1,4 @@
+import { findRslChainDot } from "../analysis/accessChain";
 import {
     RSL_NOT_MEMBER_ACCESS,
     RSL_UNRESOLVED_MEMBER_ACCESS,
@@ -64,7 +65,15 @@ export function buildRslFastMemberCompletions(
     const receiver = findReceiverBeforeDot(snapshot.lex.tokens, offset);
 
     if (!receiver) {
-        return RSL_NOT_MEMBER_ACCESS;
+        /*
+         * Простого получателя нет — но точка могла быть: слева цепочка вроде
+         * `GetRecordset().`. Тип результата вызова быстрый путь определить не
+         * может, зато обязан не выдать после точки общий список. Поэтому
+         * здесь честное «пока не знаю», а не «обращения к члену нет».
+         */
+        return findRslChainDot(snapshot.lex.tokens, offset) >= 0
+            ? RSL_UNRESOLVED_MEMBER_ACCESS
+            : RSL_NOT_MEMBER_ACCESS;
     }
 
     const index = known || getFastCompletionIndex(snapshot);

@@ -25,6 +25,7 @@ import {
     type IRslMemberSet,
     type IRslMemberSetOptions
 } from "./memberSet";
+import { countRslOwnClasses } from "./ownClasses";
 import {
     isRslClassType,
     rslTypeFromName,
@@ -278,7 +279,20 @@ export class RslTypeEngine {
         return call ? this.typeOfSymbol(call.symbol) : "";
     }
 
-    /** Член получателя: делегируется resolver, где живёт наследование. */
+    /**
+     * Член получателя — общим путём: тип, состав, член.
+     *
+     * Прежде это была передача вызова resolver, и цепочка обращений для
+     * неё не существовала: `command.Execute().MoveNext` не разрешался
+     * вовсе. Теперь тип получателя даёт resolveReceiverType — он умеет
+     * и вызовы, и поля полей, — а член ищется в том же составе, что
+     * видят подсказка, переход и Hover.
+     *
+     * Простой случай по-прежнему уходит к resolver: он знает больше —
+     * `this`, свойство по умолчанию, правила видимости внутри класса, —
+     * и терять это ради единообразия было бы обменом хорошего на
+     * ровное.
+     */
     resolveMember(
         uri: string,
         receiverOffset: number,
@@ -290,12 +304,38 @@ export class RslTypeEngine {
             return undefined;
         }
 
-        return this.resolver.resolveMemberReference(
+        const direct = this.resolver.resolveMemberReference(
             uri,
             module.symbolTree,
             receiverOffset,
             memberName
         );
+
+        if (direct) {
+            return direct;
+        }
+
+        /* Не простой получатель — значит, возможно, цепочка. */
+        const type = this.resolveReceiverType(uri, receiverOffset);
+
+        if (!isRslClassType(type)) {
+            return undefined;
+        }
+
+        const options = this.memberOptions(uri, receiverOffset);
+        const member = findRslMemberSetMember(
+            getRslMemberSet(type.name, options),
+            memberName,
+            options
+        );
+
+        return member?.symbol
+            ? {
+                uri: member.moduleUri || uri,
+                symbolId: member.symbol.id,
+                symbol: member.symbol
+            }
+            : undefined;
     }
 
     /**
@@ -434,6 +474,15 @@ export class RslTypeEngine {
                 this.resolver.platformModuleCatalog
                     ?.membersComplete(key) === true,
             isLibraryUri: item => this.index.isLibraryFile(item),
+            /*
+             * Одноимённые классы в одном файле: о каком из них речь,
+             * неизвестно, и состав такого имени недоказуем. Считается
+             * это здесь, а не у каждого спрашивающего: прежде защита
+             * была только у проверки состава, и остальные судили о
+             * составе одного класса по объявлению другого.
+             */
+            classAmbiguous: className =>
+                countRslOwnClasses(module, className) > 1,
             ownClass: className => {
                 if (!module) {
                     return undefined;

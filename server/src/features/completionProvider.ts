@@ -1,3 +1,8 @@
+import { findRslChainDot } from "../analysis/accessChain";
+import {
+    getRslMemberSet,
+    rslMemberSetCompletions
+} from "../analysis/memberSet";
 import {
     RSL_NOT_MEMBER_ACCESS,
     RSL_UNRESOLVED_MEMBER_ACCESS,
@@ -297,6 +302,37 @@ export class RslCompletionProvider {
      * растут по мере фонового чтения, и пока они те же — новых сведений нет, а
      * значит и пересобирать открытый список не из чего.
      */
+    /**
+     * Состав класса, к которому привела цепочка обращений.
+     *
+     * Своего разбора звеньев здесь нет: тип получателя даёт слой типов, а
+     * состав — тот же общий набор, которым отвечают Hover, переход и
+     * проверка состава. Пусто — значит тип пока неизвестен, и после точки
+     * не показывается ничего.
+     */
+    private chainMembers(
+        uri: string,
+        offset: number
+    ): CompletionItem[] | undefined {
+        const engine = this.typeEngine();
+        const type = engine.resolveReceiverType(uri, offset);
+
+        if (type.kind !== "class") {
+            return undefined;
+        }
+
+        const options = engine.memberOptions(uri, offset);
+        const set = getRslMemberSet(type.name, options);
+
+        if (!set.resolved) {
+            return undefined;
+        }
+
+        const members = rslMemberSetCompletions(set, options);
+
+        return members.length > 0 ? members : undefined;
+    }
+
     private typeEngine(): RslTypeEngine {
         if (!this.typeEngineValue) {
             this.typeEngineValue = new RslTypeEngine(
@@ -531,14 +567,27 @@ export class RslCompletionProvider {
              * появляется ни в том, ни в другом случае.
              */
             memberCandidates: (): IRslMemberCompletionState => {
-                if (!receiver) {
+                const dot = findRslChainDot(module.syntax.tokens, offset);
+
+                if (!receiver && dot < 0) {
                     return RSL_NOT_MEMBER_ACCESS;
                 }
 
                 const items = names();
 
-                return items.length > 0
-                    ? { kind: "resolved-members", items }
+                if (items.length > 0) {
+                    return { kind: "resolved-members", items };
+                }
+
+                /*
+                 * Резолвер простого получателя не нашёл — значит слева
+                 * цепочка. Её тип знает слой типов, а состав по типу даёт
+                 * тот же общий набор, что видят Hover и переход.
+                 */
+                const chained = this.chainMembers(document.uri, offset);
+
+                return chained
+                    ? { kind: "resolved-members", items: chained }
                     : RSL_UNRESOLVED_MEMBER_ACCESS;
             },
             visibleCandidates: names,

@@ -57,6 +57,15 @@ export interface IRslMemberCheckerOptions {
     platformMembersComplete?(moduleKey: string): boolean;
     /** Файл библиотеки, а не проекта: нужен для источника класса. */
     isLibraryUri?(uri: string): boolean;
+    /**
+     * Тип получателя цепочки — общим разбором.
+     *
+     * Простой получатель проверка типизирует сама, а вот
+     * `command.Execute()` перед точкой ей не по силам: там нужен
+     * разбор звеньев. Спрашивается он у того же слоя, что отвечает
+     * подсказке и Hover, — своего разбора цепочек здесь нет.
+     */
+    receiverTypeAt?(memberOffset: number): string;
 }
 
 export interface IRslMemberChecker {
@@ -122,9 +131,18 @@ export function createRslMemberChecker(
     return {
         check(tokens, index, receiver) {
             const token = tokens[index];
-            const typeName = receiverTypeName(module, resolver, receiver);
+            /*
+             * Простой получатель — своим разбором, цепочка — общим.
+             * Порядок такой, потому что простой случай знает больше:
+             * у него есть правила видимости и вывод из присваивания.
+             */
+            const typeName = (receiver.kind === "identifier"
+                ? receiverTypeName(module, resolver, receiver)
+                : "") ||
+                options.receiverTypeAt?.(token.start) ||
+                "";
 
-            if (!typeName) {
+            if (!typeName || normalizeIdentifier(typeName) === "variant") {
                 return undefined;
             }
 

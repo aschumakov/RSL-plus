@@ -1,3 +1,9 @@
+import {
+    getRslMemberSet,
+    isProvenRslMemberSet,
+    type IRslMemberSetOptions
+} from "../analysis/memberSet";
+import { countRslOwnClasses } from "../analysis/ownClasses";
 import { CompletionItemKind } from "vscode-languageserver";
 
 import { normalizeIdentifier, type IRslToken } from "../lexer";
@@ -10,12 +16,10 @@ import {
     findFastClass,
     lookupFastName,
     scopeChainAt,
-    type IFastCompletionIndex,
     type IFastSignature
 } from "./fastCompletionIndex";
 import {
     findRslClassMember,
-    walkRslClassChain,
     type IRslClassMember
 } from "./fastClassChain";
 import type { IRslInteractiveContext } from "./interactiveContext";
@@ -160,10 +164,13 @@ function resolveMember(
     }
 
     /*
-     * Члена нет. Это окончательный ответ только тогда, когда класс известен
-     * целиком: иначе он мог прийти из модуля, который сервер ещё не прочитал.
+     * Члена нет. Это окончательный ответ только тогда, когда состав
+     * класса доказуем: вся цепочка разрешена И у каждого её уровня
+     * состав известен целиком. Второе своя проверка не учитывала — про
+     * заявленную полноту прикладного модуля она не знала, — и класс из
+     * неполно описанной справки давал окончательное «члена нет».
      */
-    return classChainIsKnown(typeName, options)
+    return isProvenRslMemberSet(getRslMemberSet(typeName, options))
         ? { kind: "not-found" }
         : { kind: "needs-model" };
 }
@@ -317,49 +324,35 @@ function lastMatching(
     return undefined;
 }
 
-/** Известна ли иерархия класса целиком: только тогда «члена нет» доказуемо. */
-function classChainIsKnown(
-    className: string,
-    options: ReturnType<typeof chainOptions>
-): boolean {
-    let levels = 0;
-    let pending = "";
-
-    for (const level of walkRslClassChain(className, options)) {
-        levels++;
-        pending = level.kind === "own"
-            ? level.info.baseName
-            : level.value.symbol.baseClassName || "";
-    }
-
-    /*
-     * Цепочка оборвалась на классе, база которого не найдена: состав класса
-     * неполон, и отсутствие члена ничего не доказывает.
-     */
-    return levels > 0 && !pending;
-}
 
 function isCallableSymbolKind(kind: CompletionItemKind | undefined): boolean {
     return kind === CompletionItemKind.Function ||
         kind === CompletionItemKind.Method;
 }
 
+/**
+ * Настройки обхода состава для быстрого пути.
+ *
+ * Те же, что у полного: полнота прикладного состава и неоднозначность
+ * имени входят сюда обязательно — без них ответ «члена нет» получается
+ * окончательным там, где доказательства нет.
+ */
 export function chainOptions(
     context: IRslInteractiveContext,
     resolver: RslScopeResolver
-): {
-    resolver: RslScopeResolver;
-    uri: string;
-    imports: readonly string[];
-    fastIndex: IFastCompletionIndex;
-    offset: number;
-} {
+): IRslMemberSetOptions {
     return {
         resolver,
         uri: context.uri,
         imports: context.imports,
         fastIndex: context.fastIndex,
-        offset: context.offset
+        offset: context.offset,
+        platformMembersComplete: key =>
+            resolver.platformModuleCatalog?.membersComplete(key) === true,
+        classAmbiguous: className => countRslOwnClasses(
+            context.module,
+            className
+        ) > 1
     };
 }
 

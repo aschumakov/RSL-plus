@@ -1,3 +1,4 @@
+import { RslTypeEngine } from "../analysis/typeEngine";
 import {
     Diagnostic,
     DiagnosticSeverity
@@ -211,7 +212,17 @@ function* unknownVariableSteps(
              * прозой, и отсутствие члена там ничего не доказывает.
              */
             platformMembersComplete: key =>
-                resolver.platformModuleCatalog?.membersComplete(key) === true
+                resolver.platformModuleCatalog?.membersComplete(key) === true,
+            /*
+             * Тип получателя-цепочки — общим слоем. Своего разбора звеньев
+             * у проверки нет и быть не должно: он один на всех.
+             */
+            receiverTypeAt: offset => {
+                const type = memberTypes(resolver)
+                    .resolveReceiverType(module.uri, offset);
+
+                return type.kind === "class" ? type.name : "";
+            }
         })
         : undefined;
 
@@ -428,6 +439,15 @@ function receiverBeforeDot(
     }
 
     /*
+     * Перед точкой бывает не только имя.
+     *
+     * `command.Execute().MoooveNext()` — получатель здесь целая
+     * цепочка, и кончается она закрывающей скобкой. Прежде поиск
+     * получателя на этом останавливался, и такие обращения не
+     * проверялись вовсе. Разбирать цепочку здесь незачем — это
+     * сделает общий слой, — но признать её получателем надо.
+     */
+    /*
      * Точка и имя обязаны стоять в одной строке.
      *
      * Незаконченное `obj.` в конце строки — обычное состояние текста при
@@ -444,8 +464,17 @@ function receiverBeforeDot(
         ? tokens[receiverIndex]
         : undefined;
 
-    return receiver?.kind === "identifier" &&
-        receiver.endLine === dot.line
+    if (!receiver || receiver.endLine !== dot.line) {
+        return undefined;
+    }
+
+    /*
+     * Имя — простой получатель; закрывающая скобка — конец цепочки вида
+     * `command.Execute()`. Что там за цепочка, здесь не разбирается: тип
+     * такого получателя спросит общий слой.
+     */
+    return receiver.kind === "identifier" ||
+        (receiver.kind === "symbol" && receiver.raw === ")")
         ? receiver
         : undefined;
 }
@@ -469,4 +498,22 @@ function memberFinding(
         importContext: state.completeness,
         reason: "no-declaration"
     };
+}
+
+/**
+ * Слой типов для проверки состава.
+ *
+ * Один на пересчёт: у движка свои кэши, и создавать его на каждое
+ * обращение через точку значило бы каждый раз начинать с холодного.
+ */
+let typesResolver: RslScopeResolver | undefined;
+let typesEngine: RslTypeEngine | undefined;
+
+function memberTypes(resolver: RslScopeResolver): RslTypeEngine {
+    if (!typesEngine || typesResolver !== resolver) {
+        typesResolver = resolver;
+        typesEngine = new RslTypeEngine(resolver.workspaceIndex, resolver);
+    }
+
+    return typesEngine;
 }
