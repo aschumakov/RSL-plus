@@ -1,3 +1,11 @@
+import { moduleIdOf } from "../core/identity/uriKey";
+import type {
+    PlatformModuleCatalog
+} from "../builtins/platformModuleCatalog";
+import {
+    isRslDirectImportComplete,
+    resolveRslImportContext
+} from "../analysis/resolvedImportContext";
 import {
     GetDynamicMacroReferencesFromTokens,
     GetImportDefinitionTargetsFromTokens,
@@ -138,6 +146,13 @@ export interface IUnusedImportContext {
         reference: IImportDefinitionTarget;
         closureUris: Set<string>;
         publicNames: Set<string>;
+        /**
+         * Полон ли контекст ЭТОГО Import.
+         *
+         * Пока нет — вывод «не используется» делать нельзя: имя, которым
+         * Import оправдан, может лежать в непрочитанной части его цепочки.
+         */
+        complete: boolean;
     }>;
     allPublicNames: Set<string>;
     usedImportedUris: Set<string>;
@@ -210,24 +225,52 @@ export function createUnusedImportStage(
 /** Что импортировано и какие имена оттуда видны: считается один раз. */
 export function prepareUnusedImports(
     module: IIndexedModule,
-    index: WorkspaceIndex
+    index: WorkspaceIndex,
+    platformModules?: PlatformModuleCatalog
 ): IUnusedImportContext {
     const references = GetImportDefinitionTargetsFromTokens(module.lex.tokens);
     const dynamicMacroNames = GetDynamicMacroReferencesFromTokens(module.lex.tokens);
     const importInfos: IUnusedImportContext["importInfos"] = [];
 
+    /*
+     * Полнота считается отдельно для каждого прямого Import: см.
+     * resolveRslImportContext. Соседний непрозрачный Import на вывод про
+     * этот влиять не должен.
+     */
+    const context = resolveRslImportContext(index, module.uri, {
+        platformModules
+    });
+    /*
+     * Ключ — каноническая идентичность модуля, а не написание: ссылка даёт
+     * `beta.mac`, директива `beta`, и это один и тот же модуль.
+     */
+    const byName = new Map(context.directImports.map(item =>
+        [moduleIdOf(item.name) as string, item]));
+
     for (const reference of references) {
-        const imported = index.findModuleByName(reference.moduleName);
+        const direct = byName.get(
+            moduleIdOf(reference.moduleName) as string
+        );
+
+        /*
+         * Имя разрешает общий resolver — он один знает порядок «проект,
+         * потом библиотеки». Поиск среди загруженных по базовому имени
+         * этого порядка не знает.
+         */
+        if (!direct || direct.kind !== "workspace" || !direct.uri) {
+            continue;
+        }
+
+        const imported = index.getModule(direct.uri);
 
         /* Проверяем только модули, известные текущему проекту. */
         if (!imported || imported.uri === module.uri) {
             continue;
         }
 
-        const closure = [
-            imported,
-            ...index.getImportedModules(imported.uri)
-        ];
+        const closure = [...direct.closureUris]
+            .map(item => index.getModule(item))
+            .filter((item): item is IIndexedModule => item !== undefined);
         const closureUris = new Set(closure.map(item => item.uri));
         const publicNames = new Set<string>();
 
@@ -248,7 +291,8 @@ export function prepareUnusedImports(
         importInfos.push({
             reference,
             closureUris,
-            publicNames
+            publicNames,
+            complete: isRslDirectImportComplete(direct)
         });
     }
 
@@ -309,6 +353,17 @@ export function reportUnusedImports(
     const { importInfos, usedImportedUris } = context;
 
     importInfos.forEach(info => {
+        /*
+         * Контекст этого Import неполон: часть его цепочки ещё не
+         * прочитана, неоднозначна или непрозрачна. Имя, которым он
+         * оправдан, может лежать именно там — и «не используется» тогда
+         * неправда. Сосед с таким же изъяном проверку не выключает: у
+         * каждого Import полнота своя.
+         */
+        if (!info.complete) {
+            return;
+        }
+
         /* Модуль без публичных объявлений может импортироваться ради side effects. */
         if (info.publicNames.size === 0) {
             return;
