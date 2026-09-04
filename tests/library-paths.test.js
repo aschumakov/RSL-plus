@@ -522,7 +522,8 @@ test("незавершённый обход проекта не отдаёт п�
     );
 });
 
-test("библиотека внутри проекта отдельным указателем не становится", () => {
+test("библиотека внутри проекта отдельным указателем не становится",
+    async () => {
     /*
      * Настройку держат постоянной: в ней и репозиторий, и базовая поставка.
      * Открыт репозиторий — его файлы уже в составе проекта, и второй
@@ -546,7 +547,7 @@ test("библиотека внутри проекта отдельным ука
         "отвечает состав проекта"
     );
     assert.strictEqual(
-        inside.prewarmLibraries(),
+        await inside.prewarmLibraries(),
         1,
         "прогревается только поставка: репозиторий и так обойдён"
     );
@@ -563,7 +564,7 @@ test("библиотека внутри проекта отдельным ука
     );
 });
 
-test("прогрев строит указатели заранее и один раз", () => {
+test("прогрев строит указатели заранее и один раз", async () => {
     const library = makeTree("rsl-warm-", {
         "one.mac": macro("One"),
         "deep/two.mac": macro("Two")
@@ -575,14 +576,14 @@ test("прогрев строит указатели заранее и один 
         0,
         "до прогрева ничего не прочитано"
     );
-    assert.strictEqual(index.prewarmLibraries(), 1);
+    assert.strictEqual(await index.prewarmLibraries(), 1);
     assert.strictEqual(
         index.libraryCounters.scannedRoots,
         1,
         "указатель построен"
     );
     assert.strictEqual(
-        index.prewarmLibraries(),
+        await index.prewarmLibraries(),
         0,
         "повторный прогрев работы не делает"
     );
@@ -592,6 +593,97 @@ test("прогрев строит указатели заранее и один 
 
     assert.ok(index.resolveWorkspaceFile("two").kind === "resolved");
     assert.strictEqual(index.libraryCounters.scans, before);
+});
+test("прогрев дробится на порции и уступает поток", async () => {
+    /*
+     * Общее время прогрева про отзывчивость ничего не говорит: 68 мс одним
+     * куском и столько же десятью порциями — разные вещи. Прежний обход был
+     * синхронной рекурсией и занимал поток целиком.
+     */
+    const files = {};
+
+    for (let at = 0; at < 40; at++) {
+        files["dir" + (at % 8) + "/m" + at + ".mac"] = macro("M" + at);
+    }
+
+    const library = makeTree("rsl-chunk-", files);
+    const index = stand([], [library]);
+
+    assert.strictEqual(await index.prewarmLibraries(), 1);
+    assert.strictEqual(
+        index.libraryCounters.files,
+        40,
+        "все имена обязаны быть прочитаны"
+    );
+    assert.ok(
+        index.isLibraryPrewarmed(library),
+        "указатель корня обязан быть опубликован"
+    );
+});
+
+test("прогрев уступает работе пользователя", async () => {
+    /*
+     * Пока идёт окно тишины после действия человека, обход не продвигается:
+     * прогрев про будущее удобство, а человек работает сейчас.
+     */
+    const library = makeTree("rsl-quiet-", {
+        "a.mac": macro("A"),
+        "b/c.mac": macro("C")
+    });
+    const index = stand([], [library]);
+    let busy = true;
+
+    index.setInteractiveProbe(() => busy);
+
+    const running = index.prewarmLibraries();
+
+    await new Promise(resolve => setTimeout(resolve, 60));
+
+    assert.strictEqual(
+        index.libraryCounters.files,
+        0,
+        "пока пользователь работает, имена не читаются"
+    );
+
+    busy = false;
+
+    assert.strictEqual(await running, 1);
+    assert.strictEqual(
+        index.libraryCounters.files,
+        2,
+        "после окна тишины обход доходит до конца"
+    );
+});
+
+test("недостроенный указатель не отвечает половиной", async () => {
+    /*
+     * Указатель корня публикуется целиком: половина ответа хуже, чем
+     * синхронный обход по требованию, который остался запасным путём.
+     */
+    const library = makeTree("rsl-atomic-", { "solo.mac": macro("Solo") });
+    const index = stand([], [library]);
+    let busy = true;
+
+    index.setInteractiveProbe(() => busy);
+
+    const running = index.prewarmLibraries();
+
+    await new Promise(resolve => setTimeout(resolve, 40));
+
+    assert.ok(
+        !index.isLibraryPrewarmed(library),
+        "пока обход не кончился, указателя нет"
+    );
+
+    /* И запасной путь всё равно отвечает: синхронный обход по требованию. */
+    assert.strictEqual(
+        index.resolveWorkspaceFile("solo").kind,
+        "resolved",
+        "ответ обязан быть и до конца прогрева"
+    );
+
+    busy = false;
+    await running;
 });
 (async () => {
     for (const item of tests) {

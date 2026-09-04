@@ -5,6 +5,7 @@ import { pathToFileURL } from "url";
 import { isExcludedRslDirectory } from "./workspaceModuleResolver";
 import { uriKey, type UriKey } from "../core/identity/uriKey";
 import { normalizeModuleName } from "./moduleNames";
+import { createWorkSlice } from "../core/timeSlice";
 
 /**
  * Библиотеки модулей за пределами проекта.
@@ -44,6 +45,15 @@ export interface IRslLibraryModuleIndexOptions {
      * при переключении сценария.
      */
     workspaceRoots?(): readonly string[];
+    /**
+     * Идёт ли сейчас окно тишины после действия пользователя.
+     *
+     * Прогрев обязан уступать: он про будущее удобство, а человек
+     * работает сейчас. Общее окно живёт в InteractiveActivityGate.
+     */
+    isInteractive?(): boolean;
+    /** Бюджет одной порции обхода; по умолчанию общий 8 мс. */
+    sliceMs?: number;
     log?(message: string): void;
 }
 
@@ -58,7 +68,7 @@ interface IRslLibraryRoot {
 export class RslLibraryModuleIndex {
     private roots = new Map<string, IRslLibraryRoot>();
     private answers = new Map<string, string | undefined>();
-    private stats = { scans: 0, files: 0, hits: 0, misses: 0 };
+    private stats = { scans: 0, files: 0, hits: 0, misses: 0, yields: 0 };
     /** Файлы, пришедшие из библиотек: см. remember. */
     private fromLibrary = new Set<UriKey>();
 
@@ -156,6 +166,7 @@ export class RslLibraryModuleIndex {
         files: number;
         hits: number;
         misses: number;
+        yields: number;
         scannedRoots: number;
     } {
         return {
@@ -203,28 +214,127 @@ export class RslLibraryModuleIndex {
     }
 
     /**
-     * Построить указатели имён заранее, вне пути запроса.
+     * Построить указатели имён заранее, порциями и уступая поток.
      *
      * Первый вопрос о модуле иначе платит за обход имён библиотеки: на
-     * поставке из 9457 файлов это 41-57 мс синхронной паузы, а на сетевом
-     * диске больше. Исходники при этом не читаются — только оглавления.
+     * поставке из 9457 файлов это 41-57 мс, а на сетевом диске больше.
+     * Но платить за это непрерывным занятием потока нельзя: 68 мс без
+     * ответа заметны так же, как и 68 мс ожидания в самом запросе.
      *
-     * Возвращает число прочитанных корней: по нему видно, была ли работа.
+     * Поэтому обход возобновляемый. Порция ограничена бюджетом, между
+     * порциями управление уходит в event loop, а перед каждой новой
+     * спрашивается окно тишины: пока пользователь работает, прогрев
+     * ждёт. Указатель корня публикуется атомарно — недостроенного его
+     * не видно никому, и синхронный ответ остаётся прежним.
+     *
+     * Исходники не читаются: только имена файлов.
      */
-    prewarm(): number {
+    async prewarm(): Promise<number> {
         let scanned = 0;
 
         for (const directory of this.searchOrder()) {
-            const before = this.stats.scans;
+            const key = path.resolve(directory).toLowerCase();
+            const known = this.roots.get(key);
 
-            this.rootOf(directory);
-
-            if (this.stats.scans > before) {
-                scanned++;
+            if (known?.byName) {
+                continue;
             }
+
+            const built = await this.collectNamesAsync(directory);
+
+            /*
+             * Пока шёл обход, настройку могли сменить: тогда его
+             * находки уже не про этот состав, и публиковать их нельзя.
+             */
+            if (!this.searchOrder().some(item =>
+                path.resolve(item).toLowerCase() === key)) {
+                continue;
+            }
+
+            this.publishRoot(directory, built);
+            scanned++;
         }
 
         return scanned;
+    }
+
+    /** Готов ли указатель этого корня: см. prewarm. */
+    isPrewarmed(directory: string): boolean {
+        return this.roots.get(
+            path.resolve(directory).toLowerCase()
+        )?.byName !== undefined;
+    }
+
+    /**
+     * Обход имён порциями.
+     *
+     * Список каталогов держится явной очередью, а не рекурсией: у
+     * возобновляемого обхода состояние обязано быть снаружи стека,
+     * иначе уступить поток посреди дерева нельзя.
+     */
+    private async collectNamesAsync(
+        directory: string
+    ): Promise<Map<string, string[]>> {
+        const byName = new Map<string, string[]>();
+        const queue: string[] = [directory];
+        const slice = createWorkSlice(this.options.sliceMs ?? 8);
+
+        while (queue.length > 0) {
+            /* Пользователь работает — прогрев не начинает новую порцию. */
+            while (this.options.isInteractive?.() === true) {
+                await new Promise(resolve => setImmediate(resolve));
+            }
+
+            const current = queue.pop() as string;
+            let entries: fs.Dirent[];
+
+            try {
+                entries = await fs.promises.readdir(current, {
+                    withFileTypes: true
+                });
+            } catch (_error) {
+                continue;
+            }
+
+            entries.sort((left, right) =>
+                left.name.localeCompare(right.name));
+
+            for (const entry of entries) {
+                if (entry.isFile()) {
+                    if (/\.mac$/iu.test(entry.name)) {
+                        addName(byName, current, entry.name);
+                    }
+                } else if (
+                    entry.isDirectory() &&
+                    !isExcludedRslDirectory(entry.name)
+                ) {
+                    queue.push(path.join(current, entry.name));
+                }
+            }
+
+            await slice.yieldIfNeeded();
+        }
+
+        this.stats.yields += slice.yieldCount;
+
+        return byName;
+    }
+
+    /** Опубликовать готовый указатель корня целиком. */
+    private publishRoot(
+        directory: string,
+        byName: Map<string, string[]>
+    ): void {
+        const key = path.resolve(directory).toLowerCase();
+        const files = [...byName.values()]
+            .reduce((total, item) => total + item.length, 0);
+
+        this.roots.set(key, { directory, byName, files });
+        this.stats.scans++;
+        this.stats.files += files;
+        this.options.log?.(
+            "Библиотека " + directory + ": имён " + files
+        );
     }
 
     private findInRoot(directory: string, target: string): string | undefined {
@@ -346,6 +456,23 @@ function collectNames(
         ) {
             collectNames(path.join(directory, entry.name), byName);
         }
+    }
+}
+
+/** Положить имя файла в указатель корня. */
+function addName(
+    byName: Map<string, string[]>,
+    directory: string,
+    name: string
+): void {
+    const key = name.toLowerCase();
+    const list = byName.get(key);
+    const full = path.join(directory, name);
+
+    if (list) {
+        list.push(full);
+    } else {
+        byName.set(key, [full]);
     }
 }
 

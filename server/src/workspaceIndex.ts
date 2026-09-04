@@ -517,10 +517,12 @@ export class WorkspaceIndex {
     private libraryPathList: readonly string[] = [];
     private temporaryLibraryRoot: string | undefined;
     private workspaceRootList: readonly string[] = [];
+    private interactiveBusy: (() => boolean) | undefined;
     private libraries = new RslLibraryModuleIndex({
         paths: () => this.libraryPathList,
         temporaryRoot: () => this.temporaryLibraryRoot,
-        workspaceRoots: () => this.workspaceRootList
+        workspaceRoots: () => this.workspaceRootList,
+        isInteractive: () => this.interactiveBusy?.() === true
     });
 
     resolveWorkspaceFile(name: string): ModuleResolution<string> {
@@ -629,9 +631,29 @@ export class WorkspaceIndex {
         this.libraries.invalidate();
     }
 
-    /** Построить указатели имён библиотек заранее: см. prewarm. */
-    prewarmLibraries(): number {
+    /**
+     * Построить указатели имён библиотек заранее: см. prewarm.
+     *
+     * Асинхронный намеренно: обход уступает поток порциями, и ждать его
+     * синхронно значило бы вернуть ту самую непрерывную паузу.
+     */
+    prewarmLibraries(): Promise<number> {
         return this.libraries.prewarm();
+    }
+
+    /**
+     * Окно тишины: его спрашивает прогрев указателей.
+     *
+     * Ставит его сервер — у индекса своего счётчика нет, и заводить второй
+     * значило бы уступать врозь.
+     */
+    setInteractiveProbe(probe: () => boolean): void {
+        this.interactiveBusy = probe;
+    }
+
+    /** Готов ли указатель этого каталога библиотеки. */
+    isLibraryPrewarmed(directory: string): boolean {
+        return this.libraries.isPrewarmed(directory);
     }
 
     /** Библиотечный ли это файл: в состав проекта он не входит. */

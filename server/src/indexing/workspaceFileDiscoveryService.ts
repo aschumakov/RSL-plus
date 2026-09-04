@@ -183,6 +183,16 @@ export class WorkspaceFileDiscoveryService {
         }, Math.max(0, delayMs));
     }
 
+    /**
+     * Идёт ли окно тишины после действия пользователя.
+     *
+     * Окно одно на все фоновые работы, и спрашивать его должны все — иначе
+     * они уступают порознь и всё равно наступают друг другу на пятки.
+     */
+    get interactiveBusy(): boolean {
+        return this.interactive.isBusy();
+    }
+
     noteInteractiveActivity(): void {
         this.interactive.note();
     }

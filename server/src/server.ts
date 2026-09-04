@@ -785,6 +785,10 @@ connection.onInitialize((params: InitializeParams) => {
     });
     const initialSettings = settingsService.getWorkspaceSnapshot();
     workspaceIndex.setImportsEnabled(initialSettings.imports.enabled);
+    /* Прогрев указателей уступает тому же окну тишины, что и обход. */
+    workspaceIndex.setInteractiveProbe(
+        () => workspaceDiscovery.interactiveBusy
+    );
     workspaceIndex.setWorkspaceRoots(workspaceDiscovery.rootPaths());
     workspaceIndex.setLibraryPaths(
         initialSettings.imports.libraryPaths
@@ -1473,13 +1477,21 @@ function schedulePrewarmLibraries(): void {
         prewarmTimer = undefined;
 
         const started = Date.now();
-        const scanned = workspaceIndex.prewarmLibraries();
 
-        if (scanned > 0) {
-            logMessage(
-                "Библиотеки прогреты: каталогов " + scanned + ", " +
-                (Date.now() - started) + " мс"
-            );
-        }
+        /*
+         * Обход уступает поток сам: ждать его здесь нечем и незачем.
+         * Ошибку глотать нельзя — недоступный каталог библиотеки стоит
+         * увидеть в журнале, а не по отсутствию подсказок.
+         */
+        void workspaceIndex.prewarmLibraries().then(scanned => {
+            if (scanned > 0) {
+                logMessage(
+                    "Библиотеки прогреты: каталогов " + scanned + ", " +
+                    (Date.now() - started) + " мс"
+                );
+            }
+        }).catch(error => logMessage(
+            "Прогрев библиотек не удался: " + errorToString(error)
+        ));
     }, 1500);
 }
