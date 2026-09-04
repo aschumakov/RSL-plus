@@ -459,16 +459,25 @@ export class WorkspaceModuleLoader {
     }
 
     async ensureLoadedByName(name: string): Promise<IIndexedModule | undefined> {
-        const loaded = this.index.findModuleByName(name);
+        /*
+         * Сперва имя -> URI, и только потом модель этого URI.
+         *
+         * Прежде здесь спрашивали загруженные модели по базовому
+         * имени, а они порядка поиска не знают: однажды прочитанный
+         * `helper.mac` из прежней папки продолжал отвечать и после
+         * того, как выигрывать должен был другой.
+         */
+        const resolution = this.index.resolveWorkspaceFile(name);
 
-        if (loaded) {
-            return loaded;
+        if (resolution.kind === "resolved") {
+            return this.index.getModule(resolution.value) ||
+                this.ensureLoadedUri(resolution.value);
         }
 
-        const resolution = this.index.resolveWorkspaceFile(name);
-        return resolution.kind === "resolved"
-            ? this.ensureLoadedUri(resolution.value)
-            : undefined;
+        /* Файла нет нигде: отвечают заглушки и ещё не сохранённое. */
+        return resolution.kind === "ambiguous"
+            ? undefined
+            : this.index.findModuleByName(name);
     }
 
     async ensureLoadedUri(uri: string): Promise<IIndexedModule | undefined> {

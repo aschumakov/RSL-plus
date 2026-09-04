@@ -141,6 +141,16 @@ export interface IWorkspaceModuleResolverOptions {
      * каталога.
      */
     isExcluded?(fullPath: string): boolean;
+    /**
+     * Библиотеки модулей — после прохода по корням проекта.
+     *
+     * Порядок тот же, что и у готового каталога: проект сильнее. Здесь он
+     * важен особо — каталог ещё строится, и «нет в каталоге» пока не
+     * значит «нет в проекте». Спросить библиотеку раньше собственного
+     * обхода значит дать одноимённому файлу поставки выиграть просто
+     * потому, что обход не успел.
+     */
+    library?(moduleName: string): string | undefined;
     log?(message: string): void;
 }
 
@@ -283,6 +293,13 @@ export class WorkspaceModuleResolver {
         }
 
         if (found.length === 0) {
+            const library = this.options.library?.(moduleName);
+
+            if (library) {
+                /* В проекте нет, в библиотеке есть: порядок соблюдён. */
+                return { kind: "resolved", value: library };
+            }
+
             this.misses.add(target);
 
             return { kind: "missing" };

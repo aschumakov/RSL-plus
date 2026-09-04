@@ -370,7 +370,7 @@ export class WorkspaceIndex {
             }
 
             for (const name of current.imports) {
-                const imported = this.findModuleByName(name);
+                const imported = this.importedModule(name);
 
                 if (!imported) {
                     /*
@@ -528,11 +528,41 @@ export class WorkspaceIndex {
             return own;
         }
 
-        const library = this.libraries.resolve(name);
+        /*
+         * Пока состав проекта не обойдён, «нет в каталоге» ещё не
+         * значит «нет в проекте»: адресный поиск по диску проекта
+         * не отработал. Ответить в этот момент библиотекой значит
+         * дать одноимённому файлу поставки выиграть у проекта
+         * просто потому, что обход не успел. Библиотеку в этом
+         * случае спросит сам адресный поиск — после своего
+         * прохода по корням проекта, см. resolveLibraryFile.
+         */
+        if (!this.files.ready) {
+            return own;
+        }
+
+        const library = this.resolveLibraryFile(name);
 
         return library
             ? { kind: "resolved", value: library }
             : own;
+    }
+
+    /**
+     * Файл библиотеки по имени, без оглядки на готовность проекта.
+     *
+     * Зовётся адресным поиском, когда он уже прошёл по корням
+     * проекта и ничего не нашёл: порядок «проект, потом библиотеки»
+     * соблюдён, а ждать конца обхода в этот момент незачем.
+     */
+    resolveLibraryFile(name: string): string | undefined {
+        const found = this.libraries.resolve(name);
+
+        if (found) {
+            this.libraries.remember(found);
+        }
+
+        return found;
     }
     findWorkspaceFileUri(name: string): string | undefined {
         const result = this.resolveWorkspaceFile(name);
@@ -578,7 +608,7 @@ export class WorkspaceIndex {
 
     /** Библиотечный ли это файл: в состав проекта он не входит. */
     isLibraryFile(uri: string): boolean {
-        return !this.files.has(uri) && this.modules.get(uri) !== undefined;
+        return this.libraries.owns(uri);
     }
 
     /** Сколько библиотек прочитано и сколько имён: см. тесты. */
@@ -721,6 +751,33 @@ export class WorkspaceIndex {
     findModuleByName(name: string): IIndexedModule | undefined {
         const result = this.modules.resolve(name);
         return result.kind === "resolved" ? result.value : undefined;
+    }
+
+    /**
+     * Модель модуля по имени из Import — в порядке поиска.
+     *
+     * Сперва имя превращается в точный URI общим resolver'ом, и
+     * только потом берётся модель этого URI. Прежде здесь спрашивали
+     * загруженные модели по базовому имени, а они порядка поиска не
+     * знают: кто прочитан первым, тот и отвечал. Переключение на
+     * другую папку после этого ничего не меняло — старая модель
+     * оставалась в памяти и продолжала выигрывать.
+     *
+     * Когда файла нет нигде, последнее слово остаётся за
+     * загруженными моделями: так отвечают заглушки и модули,
+     * которых на диске ещё нет.
+     */
+    importedModule(name: string): IIndexedModule | undefined {
+        const resolution = this.resolveWorkspaceFile(name);
+
+        if (resolution.kind === "resolved") {
+            return this.modules.get(resolution.value);
+        }
+
+        /* Неоднозначность выбором по базовому имени не решается. */
+        return resolution.kind === "ambiguous"
+            ? undefined
+            : this.findModuleByName(name);
     }
 
     findSymbols(name: string): IIndexedSymbol[] { return this.symbols.find(name); }
@@ -1043,8 +1100,20 @@ export class WorkspaceIndex {
                 : previous!.interfaceRevision
         };
         this.modules.set(module);
-        this.catalogValue.record(module);
-        this.files.register(uri);
+
+        /*
+         * Загруженный модуль — не модуль проекта.
+         *
+         * Библиотечный файл читается по имени из Import, но частью
+         * проекта от этого не становится: ни в Ctrl+T, ни в поиске
+         * использований, ни в разрешении одноимённых его быть не
+         * должно. Иначе однажды прочитанный `base/utils.mac`
+         * начинает перекрывать `utils.mac` проекта.
+         */
+        if (!this.libraries.owns(uri)) {
+            this.catalogValue.record(module);
+            this.files.register(uri);
+        }
         /*
          * Символы обновляются всегда: индекс держит сами объекты, а их
          * диапазоны от правки тела съезжают.
@@ -1235,7 +1304,7 @@ export class WorkspaceIndex {
             const current = this.modules.get(queue[position]);
             if (!current) continue;
             for (const name of current.imports) {
-                const imported = this.findModuleByName(name);
+                const imported = this.importedModule(name);
                 if (!imported || visited.has(imported.uri)) continue;
                 visited.add(imported.uri);
                 modules.push(imported);

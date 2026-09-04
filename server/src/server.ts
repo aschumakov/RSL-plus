@@ -577,7 +577,6 @@ connection.onNotification(
             : settingsService.getWorkspaceSnapshot();
         workspaceIndex.setImportsEnabled(settings.imports.enabled);
         workspaceIndex.setLibraryPaths(settings.imports.libraryPaths);
-    workspaceIndex.setLibraryPaths(settings.imports.libraryPaths);
         moduleLoader.setIndexingMode(settings.analysis.workspaceIndexing);
         moduleLoader.beginForegroundGeneration();
         moduleLoader.noteInteractiveActivity();
@@ -663,6 +662,8 @@ const moduleFileResolver = new WorkspaceModuleResolver({
      * тот же Import разрешался бы по-разному до и после построения каталога.
      */
     isExcluded: full => workspaceDiscovery.searchPolicy().isExcluded(full),
+    /* После прохода по корням проекта — и только после него. */
+    library: name => workspaceIndex.resolveLibraryFile(name),
     log: logMessage
 });
 

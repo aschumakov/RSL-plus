@@ -366,6 +366,162 @@ test("указатель библиотеки отвечает и без инд�
     assert.strictEqual(catalog.counters.misses, 1);
 });
 
+test("загруженный библиотечный модуль не становится модулем проекта",
+    () => {
+    /*
+     * Разрешение имени состав проекта не меняло и раньше, а вот загрузка
+     * — меняла: модель любого прочитанного файла записывалась и в каталог
+     * проекта, и в состав файлов. Однажды прочитанный `base/utils.mac`
+     * после этого начинал перекрывать `utils.mac` проекта.
+     */
+    const library = makeTree("rsl-load-", {
+        "utils.mac": macro("FromLibrary")
+    });
+    const index = stand([], [library]);
+    const resolved = index.resolveWorkspaceFile("utils");
+
+    assert.strictEqual(resolved.kind, "resolved");
+
+    /* Именно загрузка: модель строится так же, как её строит загрузчик. */
+    index.updateExternalModule(
+        resolved.value,
+        fs.readFileSync(
+            path.join(library, "utils.mac"), "utf8"
+        ),
+        1
+    );
+
+    assert.ok(
+        index.getModule(resolved.value),
+        "модуль обязан быть загружен"
+    );
+    assert.ok(
+        !index.hasWorkspaceFile(resolved.value),
+        "и при этом не числиться файлом проекта"
+    );
+    assert.deepStrictEqual(
+        index.getWorkspaceFileUris(),
+        [],
+        "состав проекта пуст: " + index.getWorkspaceFileUris().join(", ")
+    );
+    assert.ok(
+        index.isLibraryFile(resolved.value),
+        "файл обязан числиться библиотечным"
+    );
+
+    /* И в каталоге объявлений проекта его тоже нет. */
+    const declared = index.catalog.find
+        ? index.catalog.find("FromLibrary")
+        : [];
+
+    assert.deepStrictEqual(
+        (declared || []).map(item => item.name),
+        [],
+        "объявления библиотеки в каталоге проекта не место"
+    );
+});
+
+test("после смены папки отвечает новая, а не загруженная прежде", () => {
+    /*
+     * Отладка идёт из папки A, потом из папки B. Прежде `helper.mac` из A
+     * оставался в памяти, а имя искали среди ЗАГРУЖЕННЫХ моделей по
+     * базовому имени — порядка поиска они не знают, и A продолжал
+     * выигрывать.
+     */
+    const first = makeTree("rsl-dbg-a-", {
+        "helper.mac": macro("FromA")
+    });
+    const second = makeTree("rsl-dbg-b-", {
+        "helper.mac": macro("FromB")
+    });
+    const index = stand([], []);
+
+    index.setTemporaryLibraryRoot(first);
+
+    const fromA = index.resolveWorkspaceFile("helper");
+
+    assert.strictEqual(
+        fromA.value,
+        pathToFileURL(path.join(first, "helper.mac")).toString()
+    );
+
+    /* Модель A прочитана и лежит в памяти. */
+    index.updateExternalModule(
+        fromA.value,
+        fs.readFileSync(path.join(first, "helper.mac"), "utf8"),
+        1
+    );
+
+    index.setTemporaryLibraryRoot(second);
+
+    assert.strictEqual(
+        index.resolveWorkspaceFile("helper").value,
+        pathToFileURL(path.join(second, "helper.mac")).toString(),
+        "после переключения обязана побеждать вторая папка"
+    );
+
+    /*
+     * И тот, кто спрашивает модель по имени, обязан получить её же — а не
+     * прочитанную раньше модель из первой папки.
+     */
+    const model = index.importedModule("helper");
+
+    assert.ok(
+        model === undefined ||
+            model.uri ===
+                pathToFileURL(path.join(second, "helper.mac")).toString(),
+        "модель обязана быть из второй папки, а пришла из " +
+            (model && model.uri)
+    );
+});
+
+test("незавершённый обход проекта не отдаёт победу библиотеке", () => {
+    /*
+     * Состав проекта ещё обходится, и «нет в каталоге» пока не значит
+     * «нет в проекте»: адресный поиск по диску проекта не отработал.
+     * Ответить библиотекой в этот момент значит дать одноимённому файлу
+     * поставки выиграть просто потому, что обход не успел.
+     */
+    const library = makeTree("rsl-race-lib-", {
+        "helper.mac": macro("FromLibrary")
+    });
+    const project = makeTree("rsl-race-prj-", {
+        "helper.mac": macro("FromProject")
+    });
+    const own = pathToFileURL(path.join(project, "helper.mac")).toString();
+    const index = new WorkspaceIndex();
+
+    index.setLibraryPaths([library]);
+
+    /* Обход ещё идёт: состав не объявлен готовым. */
+    assert.strictEqual(
+        index.workspaceFilesReady,
+        false,
+        "стенд обязан начинаться с незавершённого обхода"
+    );
+    assert.strictEqual(
+        index.resolveWorkspaceFile("helper").kind,
+        "missing",
+        "до конца обхода библиотека отвечать не должна"
+    );
+
+    /* Библиотеку спросит адресный поиск — после своего прохода. */
+    assert.strictEqual(
+        index.resolveLibraryFile("helper"),
+        pathToFileURL(path.join(library, "helper.mac")).toString(),
+        "но по прямому вопросу она отвечает"
+    );
+
+    /* Обход дошёл до файла проекта — и он побеждает. */
+    index.registerWorkspaceFiles([own]);
+
+    assert.strictEqual(
+        index.resolveWorkspaceFile("helper").value,
+        own,
+        "файл проекта сильнее одноимённого файла библиотеки"
+    );
+});
+
 (async () => {
     for (const item of tests) {
         try {

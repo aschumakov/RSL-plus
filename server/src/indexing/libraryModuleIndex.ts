@@ -3,6 +3,7 @@ import * as path from "path";
 import { pathToFileURL } from "url";
 
 import { isExcludedRslDirectory } from "./workspaceModuleResolver";
+import { uriKey, type UriKey } from "../core/identity/uriKey";
 import { normalizeModuleName } from "./moduleNames";
 
 /**
@@ -48,6 +49,8 @@ export class RslLibraryModuleIndex {
     private roots = new Map<string, IRslLibraryRoot>();
     private answers = new Map<string, string | undefined>();
     private stats = { scans: 0, files: 0, hits: 0, misses: 0 };
+    /** Файлы, пришедшие из библиотек: см. remember. */
+    private fromLibrary = new Set<UriKey>();
 
     constructor(private options: IRslLibraryModuleIndexOptions) {}
 
@@ -95,6 +98,10 @@ export class RslLibraryModuleIndex {
 
         const answer = found ? pathToFileURL(found).toString() : undefined;
 
+        if (answer) {
+            this.remember(answer);
+        }
+
         this.answers.set(key, answer);
         this.stats[answer ? "hits" : "misses"]++;
 
@@ -102,10 +109,31 @@ export class RslLibraryModuleIndex {
     }
 
     /**
+     * Запомнить, что этот файл пришёл из библиотеки.
+     *
+     * По этому признаку решается, записывать ли модуль в состав проекта:
+     * загруженный модуль — не модуль проекта. Признак ставится в момент
+     * разрешения имени, а не гадается по пути: путь бывает и общим, когда
+     * библиотека лежит внутри проекта.
+     */
+    remember(uri: string): void {
+        this.fromLibrary.add(uriKey(uri));
+    }
+
+    /** Пришёл ли этот файл из библиотеки. */
+    owns(uri: string): boolean {
+        return this.fromLibrary.has(uriKey(uri));
+    }
+
+    /**
      * Забыть найденное и ненайденное.
      *
      * Зовётся на смену настройки и на события файлового наблюдателя: и
      * положительный, и отрицательный ответ после этого недействительны.
+     *
+     * Список библиотечных файлов при этом СОХРАНЯЕТСЯ: их модели уже
+     * загружены, и забыть, откуда они взялись, значит начать записывать их
+     * в состав проекта при следующей же правке.
      */
     invalidate(): void {
         this.roots.clear();
