@@ -405,7 +405,10 @@
       "file": "total.json",
       "classes": 0,
       "procedures": 28,
-      "constants": 0
+      "constants": 0,
+      "imports": [
+        "rsd"
+      ]
     },
     "TSInter": {
       "file": "tsinter.json",

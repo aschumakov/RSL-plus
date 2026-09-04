@@ -126,6 +126,23 @@ export const RSL_DIAGNOSTIC_RULES: readonly IRslDiagnosticRule[] = [
         produces: true
     },
     {
+        /*
+         * Присваивание в условии: описка `if (i = 0)`.
+         *
+         * Зависит только от текста и стоит рядом с разбором: ошибка
+         * эта синтаксическая по своей природе, хотя язык её и
+         * допускает — потому предупреждение, а не ошибка.
+         */
+        id: "conditionAssignment",
+        phase: "local",
+        settings: [],
+        requires: [],
+        depends: TEXT_ONLY,
+        cache: "none",
+        resumable: false,
+        produces: true
+    },
+    {
         id: "limits",
         phase: "local",
         settings: [],

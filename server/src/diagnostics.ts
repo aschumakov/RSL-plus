@@ -127,6 +127,9 @@ import {
 import {
     buildRslStringQuoteDiagnostics
 } from "./diagnostics/stringQuoteDiagnostics";
+import {
+    buildRslConditionAssignmentDiagnostics
+} from "./diagnostics/conditionAssignmentDiagnostics";
 import { createShadowingStage } from "./diagnostics/shadowingChecks";
 import {
     addCoreDialectDiagnostics,
@@ -491,6 +494,25 @@ function planLocalRslDiagnostics(
                     module,
                     Math.max(0, options.maxProblems - result.length)
                 ));
+            }
+        ],
+        /*
+         * Присваивание в условии: `if (i = 0)` вместо `if (i == 0)`.
+         *
+         * Рядом с разбором и по тем же токенам: дерево выражения на
+         * рабочем пути не строится, а лексер уже различает `=` и
+         * `==` отдельными токенами.
+         */
+        [
+            "conditionAssignment",
+            true,
+            () => {
+                result.push(
+                    ...buildRslConditionAssignmentDiagnostics(
+                        module,
+                        Math.max(0, options.maxProblems - result.length)
+                    )
+                );
             }
         ],
         /*

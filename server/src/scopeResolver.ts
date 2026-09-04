@@ -1307,6 +1307,29 @@ export class RslScopeResolver {
          * платформы преимущество перед файлом проекта с тем же именем, и внутрь
          * такого имени обход не заходит — состав модуля знает каталог.
          */
+        /*
+         * Модуль открывает и то, что подключает сам.
+         *
+         * `total` у себя пишет `Import rsd`, и файл, подключивший
+         * total, видит имена rsd — так же, как если бы подключил
+         * файл проекта, который пишет тот же Import. Обход по
+         * подключённому идёт вглубь: цепочка бывает длиннее одного
+         * шага, а повторов не будет — их отсекает сам Set.
+         */
+        const addModule = (moduleName: string): void => {
+            if (found.has(moduleName)) {
+                return;
+            }
+
+            found.add(moduleName);
+
+            for (const next of catalog.importsOfModule(moduleName)) {
+                if (catalog.knowsModule(next)) {
+                    addModule(next);
+                }
+            }
+        };
+
         collectRslImportClosure(this.index, uri, {
             seedImports,
             skipName: importName => {
@@ -1314,7 +1337,7 @@ export class RslScopeResolver {
                     return false;
                 }
 
-                found.add(importName);
+                addModule(importName);
 
                 return true;
             }

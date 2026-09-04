@@ -99,6 +99,19 @@ export interface IPlatformModuleIndexEntry {
      * становятся видимыми: назвать `RsbPayment` без `Import PaymInter` нельзя.
      */
     dependencies?: readonly string[];
+    /**
+     * Модули, которые подключает сам этот модуль.
+     *
+     * От dependencies отличается тем, что имена ОТКРЫВАЮТСЯ: модуль
+     * написал `Import rsd` у себя, и `Import total` в файле делает
+     * имена rsd видимыми — ровно так же, как это делает Import файла
+     * проекта, который подключает rsd.
+     *
+     * Пусто у подавляющего большинства: справка состав Import
+     * модуля не печатает, и записывается он по исходнику поставки,
+     * когда тот есть и когда модуль с ним отождествлён.
+     */
+    imports?: readonly string[];
     classes?: number;
     procedures?: number;
     constants?: number;
@@ -270,6 +283,16 @@ export class PlatformModuleCatalog {
     /** Знает ли каталог такой модуль; состав при этом не читается. */
     knowsModule(moduleName: string): boolean {
         return this.entries.has(normalizeIdentifier(moduleName));
+    }
+
+    /**
+     * Что подключает сам этот модуль; состав при этом не читается.
+     *
+     * Имена этих модулей видны вместе с ним — см. поле imports.
+     */
+    importsOfModule(moduleName: string): readonly string[] {
+        return this.entries.get(normalizeIdentifier(moduleName))
+            ?.imports || [];
     }
 
     /**

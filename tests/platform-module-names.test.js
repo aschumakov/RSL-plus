@@ -119,6 +119,105 @@ async function ask(name, imports = []) {
     };
 }
 
+test("модуль платформы открывает то, что подключает сам", async () => {
+    /*
+     * `total` из поставки пишет у себя `Import … rsd …`, и файл,
+     * подключивший total, видит имена rsd — так же, как если бы подключил
+     * файл проекта с тем же Import. Без этого отношения обход
+     * останавливался на самом total: у модуля платформы преимущество
+     * перед файлом, и внутрь него он не заходит.
+     *
+     * От dependencies это отличается тем, что имена ОТКРЫВАЮТСЯ:
+     * dependencies дочитывают состав ради унаследованных членов и
+     * назвать `RsbPayment` без `Import PaymInter` по-прежнему нельзя.
+     */
+    const known = await platform();
+
+    assert.deepStrictEqual(
+        known.importsOfModule("total"),
+        ["rsd"],
+        "total обязан числиться подключающим rsd"
+    );
+
+    const uri = "file:///d:/names/uses-total.mac";
+    const source = [
+        "Import total;",
+        "Macro Run()",
+        "  Var cmd = RsdCommand(\"select 1\");",
+        "  return cmd;",
+        "End;",
+        ""
+    ].join("\n");
+    const index = new WorkspaceIndex();
+
+    index.registerWorkspaceFiles([uri]);
+
+    const module = index.updateOpenModule(uri, source, 1);
+    const resolver = new RslScopeResolver(index, getDefaults(), known);
+    const visible = resolver.visiblePlatformModules(uri);
+
+    assert.ok(
+        visible.some(name => /^rsd$/iu.test(name)),
+        "rsd обязан быть виден через total, а видно: " + visible.join(", ")
+    );
+
+    /* И имя из rsd после этого разрешается, а проверка молчит. */
+    const resolved = resolver.resolveAt(
+        uri,
+        module.symbolTree,
+        source.indexOf("RsdCommand")
+    );
+
+    assert.ok(resolved, "RsdCommand обязан разрешиться при Import total");
+
+    const found = buildRslPlatformModuleDiagnostics(module, resolver, {
+        platformModules: known,
+        visibleModules: visible,
+        limit: 5
+    });
+
+    assert.deepStrictEqual(
+        found.map(item => item.message),
+        [],
+        "при видимом модуле сказать нечего"
+    );
+});
+
+test("dependencies имён по-прежнему не открывают", async () => {
+    /*
+     * Обратная сторона: BankInter дочитывает PaymInter ради
+     * унаследованных членов, но назвать `RsbPayment` без
+     * `Import PaymInter` нельзя. Новое отношение это правило не трогает.
+     */
+    const known = await platform();
+
+    await known.ensureModules(["BankInter"]);
+
+    const uri = "file:///d:/names/uses-bank.mac";
+    const source = [
+        "Import BankInter;",
+        "Macro Run()",
+        "  Var p = RsbPayment;",
+        "  return p;",
+        "End;",
+        ""
+    ].join("\n");
+    const index = new WorkspaceIndex();
+
+    index.registerWorkspaceFiles([uri]);
+
+    const module = index.updateOpenModule(uri, source, 1);
+    const resolver = new RslScopeResolver(index, getDefaults(), known);
+    const visible = resolver.visiblePlatformModules(uri);
+
+    assert.ok(
+        !visible.some(name => /^payminter$/iu.test(name)),
+        "PaymInter не открывается через BankInter: " + visible.join(", ")
+    );
+
+    void module;
+});
+
 test("кириллические модули известны под своим именем", async () => {
     const known = await platform();
 
