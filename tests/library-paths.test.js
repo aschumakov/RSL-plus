@@ -522,6 +522,77 @@ test("незавершённый обход проекта не отдаёт п�
     );
 });
 
+test("библиотека внутри проекта отдельным указателем не становится", () => {
+    /*
+     * Настройку держат постоянной: в ней и репозиторий, и базовая поставка.
+     * Открыт репозиторий — его файлы уже в составе проекта, и второй
+     * указатель по ним не нужен. Открыта отдельная папка задачи — тот же
+     * репозиторий работает библиотекой, и настройку менять не приходится.
+     */
+    const repository = makeTree("rsl-repo-", {
+        "shared.mac": macro("FromRepo")
+    });
+    const base = makeTree("rsl-base2-", { "other.mac": macro("FromBase") });
+    const own = pathToFileURL(path.join(repository, "shared.mac")).toString();
+
+    /* Сценарий первый: открыт сам репозиторий. */
+    const inside = stand([own], [repository, base]);
+
+    inside.setWorkspaceRoots([repository]);
+
+    assert.strictEqual(
+        inside.resolveWorkspaceFile("shared").value,
+        own,
+        "отвечает состав проекта"
+    );
+    assert.strictEqual(
+        inside.prewarmLibraries(),
+        1,
+        "прогревается только поставка: репозиторий и так обойдён"
+    );
+
+    /* Сценарий второй: открыта папка задачи, репозиторий стал библиотекой. */
+    const outside = stand([], [repository, base]);
+
+    outside.setWorkspaceRoots([makeTree("rsl-task-", {})]);
+
+    assert.strictEqual(
+        outside.resolveWorkspaceFile("shared").value,
+        own,
+        "тот же файл находится через библиотеку, настройку менять не надо"
+    );
+});
+
+test("прогрев строит указатели заранее и один раз", () => {
+    const library = makeTree("rsl-warm-", {
+        "one.mac": macro("One"),
+        "deep/two.mac": macro("Two")
+    });
+    const index = stand([], [library]);
+
+    assert.strictEqual(
+        index.libraryCounters.scannedRoots,
+        0,
+        "до прогрева ничего не прочитано"
+    );
+    assert.strictEqual(index.prewarmLibraries(), 1);
+    assert.strictEqual(
+        index.libraryCounters.scannedRoots,
+        1,
+        "указатель построен"
+    );
+    assert.strictEqual(
+        index.prewarmLibraries(),
+        0,
+        "повторный прогрев работы не делает"
+    );
+
+    /* И первый вопрос после прогрева уже не читает каталогов. */
+    const before = index.libraryCounters.scans;
+
+    assert.ok(index.resolveWorkspaceFile("two").kind === "resolved");
+    assert.strictEqual(index.libraryCounters.scans, before);
+});
 (async () => {
     for (const item of tests) {
         try {

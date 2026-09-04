@@ -516,9 +516,11 @@ export class WorkspaceIndex {
      */
     private libraryPathList: readonly string[] = [];
     private temporaryLibraryRoot: string | undefined;
+    private workspaceRootList: readonly string[] = [];
     private libraries = new RslLibraryModuleIndex({
         paths: () => this.libraryPathList,
-        temporaryRoot: () => this.temporaryLibraryRoot
+        temporaryRoot: () => this.temporaryLibraryRoot,
+        workspaceRoots: () => this.workspaceRootList
     });
 
     resolveWorkspaceFile(name: string): ModuleResolution<string> {
@@ -604,6 +606,32 @@ export class WorkspaceIndex {
 
         this.temporaryLibraryRoot = directory;
         this.libraries.invalidate();
+    }
+
+    /**
+     * Корни проекта: библиотека внутри них отдельным указателем не станет.
+     *
+     * Настройку держат постоянной, а открывают то репозиторий, то отдельную
+     * папку задачи. Когда открыт сам репозиторий, второй указатель по нему
+     * не нужен — его файлы уже в составе проекта.
+     */
+    setWorkspaceRoots(roots: readonly string[]): void {
+        const next = [...roots];
+
+        if (
+            next.length === this.workspaceRootList.length &&
+            next.every((item, at) => item === this.workspaceRootList[at])
+        ) {
+            return;
+        }
+
+        this.workspaceRootList = next;
+        this.libraries.invalidate();
+    }
+
+    /** Построить указатели имён библиотек заранее: см. prewarm. */
+    prewarmLibraries(): number {
+        return this.libraries.prewarm();
     }
 
     /** Библиотечный ли это файл: в состав проекта он не входит. */

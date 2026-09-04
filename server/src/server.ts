@@ -433,6 +433,12 @@ const workspaceDiscovery = new WorkspaceFileDiscoveryService({
     onFiles: uris => {
         moduleLoader.registerWorkspaceFiles(uris);
         /*
+         * Корни известны — значит известно и то, какая библиотека лежит
+         * внутри проекта: по такой отдельный указатель не строится.
+         */
+        workspaceIndex.setWorkspaceRoots(workspaceDiscovery.rootPaths());
+        schedulePrewarmLibraries();
+        /*
          * Сначала сохранённый состав, потом обход. Порядок важен: иначе обход
          * начнёт читать файлы, состав которых уже известен.
          */
@@ -779,6 +785,7 @@ connection.onInitialize((params: InitializeParams) => {
     });
     const initialSettings = settingsService.getWorkspaceSnapshot();
     workspaceIndex.setImportsEnabled(initialSettings.imports.enabled);
+    workspaceIndex.setWorkspaceRoots(workspaceDiscovery.rootPaths());
     workspaceIndex.setLibraryPaths(
         initialSettings.imports.libraryPaths
     );
@@ -1444,4 +1451,35 @@ function directoryOutsideWorkspace(uri: string): string | undefined {
     }
 
     return nodePath.dirname(filePath);
+}
+
+/**
+ * Прогрев указателей библиотек — вне пути запроса.
+ *
+ * Первый Import иначе платит за обход имён: на поставке из 9457 файлов это
+ * 41-57 мс синхронной паузы, а на сетевом диске больше. Прогрев читает
+ * только оглавления, идёт после обхода состава проекта и уступает ему
+ * очередь: старт он не задерживает, потому что и сам запускается уже после
+ * него.
+ */
+let prewarmTimer: ReturnType<typeof setTimeout> | undefined;
+
+function schedulePrewarmLibraries(): void {
+    if (prewarmTimer) {
+        clearTimeout(prewarmTimer);
+    }
+
+    prewarmTimer = setTimeout(() => {
+        prewarmTimer = undefined;
+
+        const started = Date.now();
+        const scanned = workspaceIndex.prewarmLibraries();
+
+        if (scanned > 0) {
+            logMessage(
+                "Библиотеки прогреты: каталогов " + scanned + ", " +
+                (Date.now() - started) + " мс"
+            );
+        }
+    }, 1500);
 }
