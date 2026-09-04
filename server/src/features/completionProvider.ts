@@ -1,4 +1,9 @@
 import {
+    RSL_NOT_MEMBER_ACCESS,
+    RSL_UNRESOLVED_MEMBER_ACCESS,
+    type IRslMemberCompletionState
+} from "./completionCandidates";
+import {
     collectRslImportClosure
 } from "../indexing/importClosure";
 import {
@@ -518,10 +523,24 @@ export class RslCompletionProvider {
             ),
             /*
              * Модель разрешает получателя сама: в позиции после точки её
-             * getCompletions возвращает именно члены. Признак обращения нужен,
-             * чтобы к ним не добавились общие имена.
+             * getCompletions возвращает именно члены и ничего кроме них.
+             *
+             * Пустой ответ при найденном получателе — это «тип пока не
+             * определён», а не «членов нет»: замыкание Import ещё
+             * дочитывается, и спросить стоит заново. Общих имён здесь не
+             * появляется ни в том, ни в другом случае.
              */
-            memberCandidates: () => receiver ? names() : undefined,
+            memberCandidates: (): IRslMemberCompletionState => {
+                if (!receiver) {
+                    return RSL_NOT_MEMBER_ACCESS;
+                }
+
+                const items = names();
+
+                return items.length > 0
+                    ? { kind: "resolved-members", items }
+                    : RSL_UNRESOLVED_MEMBER_ACCESS;
+            },
             visibleCandidates: names,
             /*
              * Только встроенные значения: импортированные приходят из resolver.

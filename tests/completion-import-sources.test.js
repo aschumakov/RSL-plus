@@ -86,7 +86,7 @@ function modelCandidates(source, library = {}, builtins = [], offset) {
             at,
             resolver
         ),
-        memberCandidates: () => undefined,
+        memberCandidates: () => ({ kind: "not-member-access" }),
         visibleCandidates: names,
         ambientCandidates: () => builtins,
         searchCandidates: () => ({ items: [], truncated: false })
@@ -220,8 +220,11 @@ test("после точки предлагаются только члены", (
         name: "model",
         blockedPosition: () => false,
         contextCandidates: () => [],
-        /* Признак обращения: после точки предлагаются члены. */
-        memberCandidates: () => names(),
+        /* Признак обращения: после точки предлагаются только члены. */
+        memberCandidates: () => ({
+            kind: "resolved-members",
+            items: names()
+        }),
         visibleCandidates: names,
         ambientCandidates: () => [{ label: "ВстроенноеЗначение", kind: 21 }],
         searchCandidates: () => ({ items: [], truncated: false })

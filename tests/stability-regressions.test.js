@@ -156,15 +156,32 @@ test("подсказка членов не переходит через пер�
     };
     const head = "Macro T()\n  Var Field7: TRsbLabel;\n  Field7.";
 
+    /*
+     * Ответ — состояние, а не список: «здесь нет обращения к члену» и
+     * «оно есть, но тип неизвестен» различаются, иначе после точки
+     * появляются общие имена.
+     */
+    const memberLabels = text => {
+        const state = ask(text);
+
+        assert.strictEqual(
+            state.kind,
+            "resolved-members",
+            "ожидались члены, получено: " + state.kind
+        );
+
+        return state.items;
+    };
+
     /* Курсор сразу за точкой — обращение к члену. */
-    assert.strictEqual(ask(head).length, 2);
-    assert.strictEqual(ask(head + " ").length, 2);
+    assert.strictEqual(memberLabels(head).length, 2);
+    assert.strictEqual(memberLabels(head + " ").length, 2);
 
     /*
      * С набранной частью имени состав тот же: список отдаётся полным, а
      * набранное задаёт только порядок — отбор делает редактор.
      */
-    const typed = ask(head + "set");
+    const typed = memberLabels(head + "set");
     assert.strictEqual(typed.length, 2);
     assert.strictEqual(
         [...typed]
@@ -174,9 +191,13 @@ test("подсказка членов не переходит через пер�
         "setText"
     );
     /* После перевода строки точка относится к прошлой строке. */
-    assert.strictEqual(ask(head + "\n"), undefined);
-    assert.strictEqual(ask(head + "\n  "), undefined);
-    assert.strictEqual(ask(head + "\r\n"), undefined);
+    for (const tail of ["\n", "\n  ", "\r\n"]) {
+        assert.strictEqual(
+            ask(head + tail).kind,
+            "not-member-access",
+            "перевод строки заканчивает обращение к члену"
+        );
+    }
 });
 
 test("проверки выражения не меняют характер роста разбора", () => {

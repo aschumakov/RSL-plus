@@ -40,13 +40,14 @@ export interface IRslCompletionFacts {
     blockedPosition(): boolean;
 
     /**
-     * Члены получателя перед точкой.
+     * Что известно про обращение к члену в этой точке.
      *
-     * undefined — либо обращения к члену здесь нет, либо тип получателя
-     * неизвестен. Второе не то же самое, что «членов нет»: показать вместо них
-     * общие имена значило бы предложить то, чего после точки не бывает.
+     * Три состояния, а не два. «Обращения к члену здесь нет» и «оно есть,
+     * но тип получателя пока не определён» — разные ответы, и путать их
+     * нельзя: во втором случае общие имена после точки показывать
+     * запрещено, а в первом они и есть весь ответ.
      */
-    memberCandidates(): readonly CompletionItem[] | undefined;
+    memberCandidates(): IRslMemberCompletionState;
 
     /** Имена, видимые в этой точке: переменные, параметры, процедуры, классы. */
     visibleCandidates(): readonly CompletionItem[];
@@ -72,6 +73,27 @@ export interface IRslCompletionFacts {
      */
     readonly blockedNeedsModel?: boolean;
 }
+
+/**
+ * Обращение к члену: есть ли оно и что о нём известно.
+ *
+ *   not-member-access        — точки перед позицией нет, вопрос обычный;
+ *   resolved-members         — класс получателя известен, вот его состав;
+ *   unresolved-member-access — точка есть, а тип получателя пока нет.
+ *
+ * Последнее состояние обязано давать пустой ответ, а не общий список:
+ * лучше не показать ничего, чем показать заведомо неуместное.
+ */
+export type IRslMemberCompletionState =
+    | { kind: "not-member-access" }
+    | { kind: "resolved-members"; items: readonly CompletionItem[] }
+    | { kind: "unresolved-member-access" };
+
+/** Готовые состояния: узнаются по ссылке и не плодят объектов. */
+export const RSL_NOT_MEMBER_ACCESS: IRslMemberCompletionState =
+    Object.freeze({ kind: "not-member-access" as const });
+export const RSL_UNRESOLVED_MEMBER_ACCESS: IRslMemberCompletionState =
+    Object.freeze({ kind: "unresolved-member-access" as const });
 
 export interface IRslCompletionCandidates {
     /** Что именно ответило: обычный список, члены, контекст. */
@@ -130,12 +152,28 @@ export function collectRslCompletionCandidates(
 
     const members = facts.memberCandidates();
 
-    if (members !== undefined) {
+    if (members.kind === "resolved-members") {
         return {
             source: facts.name + ":members",
-            candidates: deduplicateCompletionItems(members),
+            candidates: deduplicateCompletionItems(members.items),
             incomplete: false,
             provisional: false
+        };
+    }
+
+    /*
+     * Тип получателя пока неизвестен.
+     *
+     * Ответ пустой и приблизительный: общие имена после точки не
+     * предлагаются никогда, а как только тип станет известен, спросят
+     * заново — приблизительный ответ сеанс не запоминает.
+     */
+    if (members.kind === "unresolved-member-access") {
+        return {
+            source: facts.name + ":members-pending",
+            candidates: [],
+            incomplete: false,
+            provisional: true
         };
     }
 

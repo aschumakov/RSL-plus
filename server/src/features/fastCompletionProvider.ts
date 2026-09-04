@@ -1,3 +1,8 @@
+import {
+    RSL_NOT_MEMBER_ACCESS,
+    RSL_UNRESOLVED_MEMBER_ACCESS,
+    type IRslMemberCompletionState
+} from "./completionCandidates";
 import { CompletionItem, CompletionItemKind } from "vscode-languageserver";
 
 import {
@@ -44,38 +49,48 @@ export function buildRslFastCompletions(
  * подсказка не выдаётся вовсе: внешнее одноимённое имя в этой точке затенено, и
  * его члены здесь не при чём.
  *
- * Возвращает undefined, если это не обращение к члену или тип не опознан: тогда
- * вызывающий отдаёт обычный приблизительный список, а не пустой.
+ * Отвечает состоянием, а не списком. «Здесь нет обращения к члену» и «оно
+ * есть, но тип получателя пока не определён» — разные ответы: в первом
+ * случае вызывающий отдаёт обычный список, во втором не отдаёт ничего.
+ * Общих имён после точки не бывает, и приблизительность тут лучше
+ * неправды.
  */
 export function buildRslFastMemberCompletions(
     snapshot: IFastDocumentSnapshot,
     offset: number,
     findClassMembers: (className: string) => CompletionItem[] | undefined,
     known?: IFastCompletionIndex
-): CompletionItem[] | undefined {
+): IRslMemberCompletionState {
     const receiver = findReceiverBeforeDot(snapshot.lex.tokens, offset);
 
     if (!receiver) {
-        return undefined;
+        return RSL_NOT_MEMBER_ACCESS;
     }
 
     const index = known || getFastCompletionIndex(snapshot);
     const found = lookupFastName(index, receiver.name, offset);
 
     if (!found.typeName) {
-        return undefined;
+        return RSL_UNRESOLVED_MEMBER_ACCESS;
     }
 
     const members = findClassMembers(found.typeName);
+
+    if (!members) {
+        return RSL_UNRESOLVED_MEMBER_ACCESS;
+    }
 
     /*
      * Порядок — по набранной части имени, но состав полный: список отдаётся
      * клиенту как полный, и дальше фильтрует он. Отбрось здесь лишнее — и
      * после Backspace редактор отфильтрует уже урезанный набор.
      */
-    return members && receiver.prefix
-        ? rankCompletionItemsForPrefix(members, receiver.prefix)
-        : members;
+    return {
+        kind: "resolved-members",
+        items: receiver.prefix
+            ? rankCompletionItemsForPrefix(members, receiver.prefix)
+            : members
+    };
 }
 
 /** Члены класса, объявленного в этом же файле; undefined, если его здесь нет. */
