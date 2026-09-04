@@ -45,6 +45,14 @@ export interface IRslClassChainOptions {
     fastIndex?: IFastCompletionIndex;
     /** Позиция запроса: ею разрешается неоднозначность одноимённых классов. */
     offset?: number;
+    /**
+     * Класс, объявленный в этом же файле, — по полной модели.
+     *
+     * Быстрый путь берёт свои классы из индекса версии, а у полного
+     * его нет. Без этого обход не видел классов текущего файла вовсе:
+     * findFastClass отвечает только про внешние.
+     */
+    ownClass?(className: string): IRslFastClass | undefined;
 }
 
 /**
@@ -112,11 +120,16 @@ export function* walkRslClassChain(
      * наследовать класс своего модуля, класс его Import, встроенный или
      * прикладной, а класс прикладного модуля — только через своего владельца.
      */
-    let current = options.resolver.findFastClass(
-        options.uri,
-        wanted,
-        options.imports
-    );
+    /*
+     * Класс своего файла спрашивается первым: он ближе всех и
+     * перекрывает одноимённый из подключённого модуля — как и в языке.
+     */
+    let current = options.ownClass?.(wanted) ||
+        options.resolver.findFastClass(
+            options.uri,
+            wanted,
+            options.imports
+        );
 
     while (current) {
         const level: IRslClassLevel = { kind: "external", value: current };
@@ -129,11 +142,25 @@ export function* walkRslClassChain(
         visited.add(key);
         yield level;
 
-        current = options.resolver.findFastBaseClass(
-            current,
-            current.symbol.baseClassName || "",
-            options.imports
-        );
+        const base = current.symbol.baseClassName || "";
+
+        if (!base) {
+            return;
+        }
+
+        /*
+         * База класса своего файла тоже чаще всего своя. У класса
+         * чужого модуля она разрешается в контексте владельца — иначе
+         * одноимённый класс текущего файла подменил бы чужую базу.
+         */
+        current = (current.moduleUri === options.uri
+            ? options.ownClass?.(base)
+            : undefined) ||
+            options.resolver.findFastBaseClass(
+                current,
+                base,
+                options.imports
+            );
     }
 }
 

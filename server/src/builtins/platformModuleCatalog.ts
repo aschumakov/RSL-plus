@@ -112,6 +112,15 @@ export interface IPlatformModuleIndexEntry {
      * когда тот есть и когда модуль с ним отождествлён.
      */
     imports?: readonly string[];
+    /**
+     * Заявлено ли, что состав классов модуля описан целиком.
+     *
+     * Справка описывает часть модулей прозой, и отсутствие члена там ничего
+     * не доказывает. Проверка «такого члена нет» опирается только на
+     * заявленную полноту: молчать там, где сказать нечего, дешевле, чем
+     * ругаться на верный код.
+     */
+    membersComplete?: boolean;
     classes?: number;
     procedures?: number;
     constants?: number;
@@ -293,6 +302,17 @@ export class PlatformModuleCatalog {
     importsOfModule(moduleName: string): readonly string[] {
         return this.entries.get(normalizeIdentifier(moduleName))
             ?.imports || [];
+    }
+
+    /**
+     * Заявлена ли полнота состава классов модуля.
+     *
+     * По умолчанию нет: неизвестная полнота и неполнота для проверки
+     * означают одно и то же — доказать отсутствие члена нельзя.
+     */
+    membersComplete(moduleName: string): boolean {
+        return this.entries.get(normalizeIdentifier(moduleName))
+            ?.membersComplete === true;
     }
 
     /**

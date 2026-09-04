@@ -1,9 +1,13 @@
-import { CompletionItemKind } from "vscode-languageserver";
-
 import { normalizeIdentifier, type IRslToken } from "../lexer";
-import type { RslSymbol } from "../symbols/rslSymbol";
 import type { RslScopeResolver } from "../scopeResolver";
 import type { IIndexedModule } from "../workspaceIndex";
+import {
+    findRslMemberSetMember,
+    getRslMemberSet,
+    isProvenRslMemberSet,
+    type IRslMemberSet,
+    type IRslMemberSetOptions
+} from "../analysis/memberSet";
 
 /**
  * Проверка состава класса: поля и метода, которого у него нет.
@@ -14,14 +18,22 @@ import type { IIndexedModule } from "../workspaceIndex";
  * доказательств и отказывается работать без них:
  *
  * 1. Тип получателя известен — объявлен или выведен моделью.
- * 2. Класс этого типа прочитан из исходного файла: у него есть moduleUri.
- * 3. Вся цепочка базовых классов прочитана до конца: незагруженная база
- *    означает, что часть состава сервер просто не видел.
- * 4. Ни класс, ни его базы не одноимённы: при неоднозначности состав неизвестен.
+ * 2. Состав класса доказуем: см. isProvenRslMemberSet. Это значит, что вся
+ *    цепочка наследования разрешена и у каждого её уровня состав известен
+ *    целиком — у класса файла и встроенного он таков по построению, у
+ *    прикладного только там, где полнота заявлена в каталоге.
+ *
+ * Ни того, ни другого проверка не выясняет сама: и тип, и состав она
+ * спрашивает у того же слоя, что отвечает подсказке, переходу и Hover.
+ * Иначе получается худшее из возможного — подсказка показывает член,
+ * которого, по мнению проверки, не существует.
  *
  * Если хоть одно условие не выполнено, проверка молчит — «не нашли» и «нет» это
  * разные утверждения, и вторым пугать пользователя нельзя.
  */
+/** CompletionItemKind.Class: вид объявления класса в дереве символов. */
+const CLASS_KIND = 7;
+
 export interface IRslMemberFinding {
     name: string;
     className: string;
@@ -36,6 +48,15 @@ export interface IRslMemberCheckerOptions {
     resolver: RslScopeResolver;
     /** Позиция запроса нужна для правил видимости приватных членов. */
     imports: readonly string[];
+    /**
+     * Заявлена ли полнота состава у класса прикладного модуля.
+     *
+     * Без этого отсутствие члена у класса из справки ничего не доказывает:
+     * часть модулей описана прозой, и состав там заведомо неполон.
+     */
+    platformMembersComplete?(moduleKey: string): boolean;
+    /** Файл библиотеки, а не проекта: нужен для источника класса. */
+    isLibraryUri?(uri: string): boolean;
 }
 
 export interface IRslMemberChecker {
@@ -52,25 +73,50 @@ export function createRslMemberChecker(
 ): IRslMemberChecker {
     const { module, resolver } = options;
     /* Состав класса считается один раз на файл: имён после точки много. */
-    const membersByClass = new Map<string, Set<string> | undefined>();
+    const setByClass = new Map<string, IRslMemberSet>();
 
-    const membersOf = (className: string): Set<string> | undefined => {
+    const chainOptions = (offset: number): IRslMemberSetOptions => ({
+        resolver,
+        uri: module.uri,
+        imports: options.imports,
+        offset,
+        platformMembersComplete: options.platformMembersComplete,
+        isLibraryUri: options.isLibraryUri,
+        /*
+         * Класс своего файла — по модели: индекса версии у диагностик нет,
+         * а findFastClass отвечает только про внешние классы.
+         */
+        /*
+         * Одноимённые классы в одном файле: о каком из них речь, неизвестно.
+         * Состав такого имени недоказуем, и проверка обязана молчать.
+         */
+        classAmbiguous: className => countOwnClasses(module, className) > 1,
+        ownClass: className => {
+            const found = resolver.resolveTypeName(
+                module.uri,
+                module.symbolTree,
+                className
+            );
+
+            return found && found.uri === module.uri
+                ? { symbol: found.symbol, moduleUri: module.uri }
+                : undefined;
+        }
+    });
+
+    const setOf = (className: string, offset: number): IRslMemberSet => {
         const key = normalizeIdentifier(className);
-        const known = membersByClass.get(key);
+        const known = setByClass.get(key);
 
-        if (known !== undefined || membersByClass.has(key)) {
+        if (known) {
             return known;
         }
 
-        const collected = collectKnownMembers(
-            module,
-            resolver,
-            className,
-            options.imports
-        );
-        membersByClass.set(key, collected);
+        const built = getRslMemberSet(className, chainOptions(offset));
 
-        return collected;
+        setByClass.set(key, built);
+
+        return built;
     };
 
     return {
@@ -82,9 +128,22 @@ export function createRslMemberChecker(
                 return undefined;
             }
 
-            const members = membersOf(typeName);
+            const set = setOf(typeName, receiver.start);
 
-            if (!members || members.has(normalizeIdentifier(token.value))) {
+            /*
+             * Состав недоказуем — молчим. Это не «член есть», а «сказать
+             * нечего»: цепочка наследования известна не до конца, класс
+             * пришёл из неполной документации или разрешается неоднозначно.
+             */
+            if (!isProvenRslMemberSet(set)) {
+                return undefined;
+            }
+
+            if (findRslMemberSetMember(
+                set,
+                token.value,
+                chainOptions(receiver.start)
+            )) {
                 return undefined;
             }
 
@@ -132,78 +191,30 @@ function receiverTypeName(
         : typeName;
 }
 
-/**
- * Полный состав класса — или undefined, если он известен не целиком.
- *
- * undefined значит «проверять нельзя»: класса нет, он пришёл из
- * документации, его имя неоднозначно или база не прочитана.
- */
-function collectKnownMembers(
+/** Сколько классов с таким именем объявлено в файле. */
+function countOwnClasses(
     module: IIndexedModule,
-    resolver: RslScopeResolver,
-    className: string,
-    imports: readonly string[]
-): Set<string> | undefined {
-    const result = new Set<string>();
-    const visited = new Set<string>();
-    let wanted = className;
-
-    while (wanted) {
-        const level = findClassLevel(module, resolver, wanted, imports);
-
-        if (!level) {
-            /* Класса нет, он неоднозначен или описан только в справочнике. */
-            return undefined;
-        }
-
-        const key = level.moduleUri + "#" + level.symbol.id;
-
-        if (visited.has(key)) {
-            break;
-        }
-
-        visited.add(key);
-
-        for (const child of level.symbol.children) {
-            result.add(normalizeIdentifier(child.name));
-        }
-
-        wanted = level.symbol.baseClassName || "";
-    }
-
-    return result;
-}
-
-/**
- * Класс по имени: сначала свой файл, затем подключённые модули.
- *
- * undefined — состав недоказуем: класса нет, одноимённых несколько либо он
- * известен только из документации прикладного модуля.
- */
-function findClassLevel(
-    module: IIndexedModule,
-    resolver: RslScopeResolver,
-    className: string,
-    imports: readonly string[]
-): { moduleUri: string; symbol: RslSymbol } | undefined {
+    className: string
+): number {
     const wanted = normalizeIdentifier(className);
-    const own = module.symbolTree.children.filter(child =>
-        child.kind === CompletionItemKind.Class &&
-        normalizeIdentifier(child.name) === wanted
-    );
+    let count = 0;
 
-    if (own.length > 1) {
-        /* Два одноимённых класса в файле: какой из них — неизвестно. */
-        return undefined;
-    }
+    const visit = (symbol: { name: string; kind: number;
+        children: readonly { name: string; kind: number;
+            children: readonly unknown[] }[] }): void => {
+        if (
+            symbol.kind === CLASS_KIND &&
+            normalizeIdentifier(symbol.name) === wanted
+        ) {
+            count++;
+        }
 
-    if (own.length === 1) {
-        return { moduleUri: module.uri, symbol: own[0] };
-    }
+        for (const child of symbol.children) {
+            visit(child as never);
+        }
+    };
 
-    const external = resolver.findFastClass(module.uri, className, imports);
+    visit(module.symbolTree as never);
 
-    return external?.moduleUri
-        ? { moduleUri: external.moduleUri, symbol: external.symbol }
-        : undefined;
+    return count;
 }

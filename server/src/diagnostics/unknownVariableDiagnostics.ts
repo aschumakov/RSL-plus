@@ -204,7 +204,14 @@ function* unknownVariableSteps(
         ? createRslMemberChecker({
             module,
             resolver,
-            imports: module.imports
+            imports: module.imports,
+            /*
+             * Полноту состава прикладного класса заявляет каталог, а не
+             * догадка по наличию файла: часть модулей описана в справке
+             * прозой, и отсутствие члена там ничего не доказывает.
+             */
+            platformMembersComplete: key =>
+                resolver.platformModuleCatalog?.membersComplete(key) === true
         })
         : undefined;
 
@@ -386,7 +393,7 @@ export function buildUnknownVariableDiagnostics(
          * идентификатор».
          */
         message: finding.kind === "member"
-            ? `У класса ${finding.className} нет члена ${finding.name}`
+            ? `У ${finding.className} нет члена ${finding.name}`
             : `Идентификатор ${finding.name} не определён`,
         source: "RSL parser",
         code: finding.kind === "member"

@@ -81,6 +81,14 @@ export interface IRslMemberSetOptions extends IRslClassChainOptions {
      * заявлена явно — см. membersComplete в каталоге.
      */
     platformMembersComplete?(moduleKey: string): boolean;
+    /**
+     * Разрешается ли имя класса в несколько разных объявлений.
+     *
+     * При неоднозначности состав неизвестен: непонятно даже, о каком классе
+     * речь. Молчать здесь обязательно — иначе проверка судит о составе
+     * одного класса по объявлению другого.
+     */
+    classAmbiguous?(className: string): boolean;
     /** Файл библиотеки, а не проекта: см. RslTypeSource. */
     isLibraryUri?(uri: string): boolean;
 }
@@ -112,8 +120,18 @@ export function getRslMemberSet(
         }
     };
 
+    if (options.classAmbiguous?.(className)) {
+        weaken("ambiguous", "имя «" + className + "» неоднозначно");
+    }
+
     for (const level of walkRslClassChain(className, options)) {
         levels.push(level);
+
+        const base = baseNameOf(level);
+
+        if (base && options.classAmbiguous?.(base)) {
+            weaken("ambiguous", "имя базы «" + base + "» неоднозначно");
+        }
         visited.add(rslClassLevelKey(level));
 
         if (levels.length === 1) {

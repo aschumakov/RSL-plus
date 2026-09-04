@@ -51,7 +51,8 @@
       "file": "cforminter.json",
       "classes": 0,
       "procedures": 12,
-      "constants": 0
+      "constants": 0,
+      "membersComplete": true
     },
     "CommonInter": {
       "file": "commoninter.json",
@@ -328,13 +329,15 @@
       "file": "rsd.json",
       "classes": 7,
       "procedures": 0,
-      "constants": 0
+      "constants": 0,
+      "membersComplete": true
     },
     "rsexts": {
       "file": "rsexts.json",
       "classes": 1,
       "procedures": 8,
-      "constants": 0
+      "constants": 0,
+      "membersComplete": true
     },
     "RslCellObjects": {
       "file": "rslcellobjects.json",

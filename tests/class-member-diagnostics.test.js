@@ -83,7 +83,7 @@ const WITH_CLASS = [
 test("отсутствующий член полностью известного класса находится", () => {
     const found = codes(diagnose(WITH_CLASS).diagnostics, "unknown-member");
 
-    assert.deepStrictEqual(found, ["У класса TLocal нет члена Missing"]);
+    assert.deepStrictEqual(found, ["У TLocal нет члена Missing"]);
 });
 
 test("существующий, унаследованный и метод не считаются ошибкой", () => {
